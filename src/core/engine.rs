@@ -4,23 +4,35 @@ use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::utils::config::{Config, EngineConfig, SamplingParams};
 use crate::utils::{hub_load_local_safetensors, new_device};
-use candle_core::{DType, Device, Result};
+use candle_core::{DType, Result};
 use std::collections::HashMap;
+use std::path::Path;
 use tokenizers::Tokenizer;
 
 pub struct LLMEngine {
     model_runner: ModelRunner,
     scheduler: Scheduler,
     tokenizer: Tokenizer,
-    device: Device,
     econfig: EngineConfig,
 }
 
 impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Self> {
         let device = new_device(econfig.device_id.unwrap_or(0))?;
-        let weight_files =
-            hub_load_local_safetensors(&econfig.model_path, "model.safetensors.index.json")?;
+        let weight_files = if Path::new(&econfig.model_path)
+            .join("model.safetensors.index.json")
+            .exists()
+        {
+            hub_load_local_safetensors(&econfig.model_path, "model.safetensors.index.json")?
+        } else if Path::new(&econfig.model_path)
+            .join("model.safetensors")
+            .exists()
+        {
+            vec![Path::new(&econfig.model_path).join("model.safetensors")]
+        } else {
+            candle_core::bail!("Safetensors files not found in path {}", econfig.model_path);
+        };
+
         let vb = unsafe {
             candle_nn::var_builder::ShardedSafeTensors::var_builder(&weight_files, dtype, &device)
                 .unwrap()
@@ -48,13 +60,12 @@ impl LLMEngine {
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
 
         let model_runner = ModelRunner::new(vb, &econfig, &config, dtype, device.clone())?;
-        let scheduler = Scheduler::new(&econfig);
+        let scheduler = Scheduler::new(&econfig, &config);
 
         Ok(Self {
             model_runner,
             scheduler,
             tokenizer,
-            device,
             econfig,
         })
     }
@@ -67,7 +78,7 @@ impl LLMEngine {
         Ok(())
     }
 
-    pub fn step(&mut self) -> Result<Vec<(usize, Vec<u32>)>> {
+    pub fn step(&mut self, log: bool) -> Result<Vec<(usize, Vec<u32>)>> {
         // Get scheduled sequence indexes and prefill flag
         let (scheduled_ids, is_prefill) = self.scheduler.schedule();
         if scheduled_ids.is_empty() {
@@ -89,16 +100,17 @@ impl LLMEngine {
             .filter_map(|&idx| match self.scheduler.get_running(idx) {
                 Some(s) => {
                     if s.is_finished() {
-                        println!("seq {} finished", s.id);
                         Some((s.id, s.output_ids.clone()))
                     } else {
-                        // let output = self
-                        //     .tokenizer
-                        //     .decode(&[s.last_token], true)
-                        //     .expect("unable to decode!");
-                        // print!("{}", output);
-                        // use std::io::{self, Write};
-                        // std::io::stdout().flush();
+                        if log {
+                            let output = self
+                                .tokenizer
+                                .decode(&[s.last_token], true)
+                                .expect("unable to decode!");
+                            print!("{}", output);
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }
                         None
                     }
                 }
@@ -109,7 +121,11 @@ impl LLMEngine {
         Ok(outputs)
     }
 
-    pub fn generate(&mut self, prompts: &[&str], params: &SamplingParams) -> Result<Vec<String>> {
+    pub fn generate(
+        &mut self,
+        prompts: &Vec<String>,
+        params: &SamplingParams,
+    ) -> Result<Vec<String>> {
         for prompt in prompts {
             let prompt = format!(
                 "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
@@ -120,7 +136,7 @@ impl LLMEngine {
 
         let mut outputs = HashMap::new();
         while !self.scheduler.is_finished() {
-            let step_output = self.step()?;
+            let step_output = self.step(prompts.len() == 1)?;
             for (seq_id, token_ids) in step_output {
                 outputs.insert(seq_id, token_ids);
             }

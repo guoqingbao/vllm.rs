@@ -24,7 +24,6 @@ pub struct Qwen3Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    cfg: Config,
     attn: PagedAttention,
     rotary_emb: Arc<RotaryEmbedding>,
 }
@@ -103,7 +102,6 @@ impl Qwen3Attention {
             num_kv_heads,
             head_dim,
             rotary_emb,
-            cfg: config.clone(),
             attn: PagedAttention::new(
                 num_heads,
                 head_dim,
@@ -304,12 +302,12 @@ impl Qwen3ForCausalLM {
             vb.pp("model.embed_tokens"),
         )?;
 
-        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, config, &vb.device())?);
+        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, config, vb.device())?);
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
             let layer = Qwen3DecoderLayer::new(
-                vb.pp(&format!("model.layers.{}", i)),
+                vb.pp(format!("model.layers.{}", i)),
                 rotary_emb.clone(),
                 config,
                 dtype,
@@ -359,7 +357,7 @@ impl Qwen3ForCausalLM {
             )?;
             Some(mask)
         };
-        let mut xs = self.embed_tokens.forward(&input_ids)?;
+        let mut xs = self.embed_tokens.forward(input_ids)?;
 
         if let Some(kv_caches) = kv_caches {
             for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
@@ -368,7 +366,7 @@ impl Qwen3ForCausalLM {
                     attention_mask.as_ref(),
                     positions,
                     Some((k_cache, v_cache)),
-                    &input_metadata,
+                    input_metadata,
                 )?;
             }
         } else {
@@ -378,7 +376,7 @@ impl Qwen3ForCausalLM {
                     attention_mask.as_ref(),
                     positions,
                     None,
-                    &input_metadata,
+                    input_metadata,
                 )?
             }
         }
@@ -391,7 +389,7 @@ impl Qwen3ForCausalLM {
                 .to_vec1::<u32>()?[1..];
             let indices: Vec<_> = indices.iter().map(|x| x - 1).collect();
             let length = indices.len();
-            xs = xs.index_select(&Tensor::from_vec(indices, (length,), &xs.device())?, 0)?;
+            xs = xs.index_select(&Tensor::from_vec(indices, (length,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
         self.lm_head.forward(&xs)

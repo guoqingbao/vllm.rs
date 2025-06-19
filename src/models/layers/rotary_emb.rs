@@ -36,10 +36,10 @@ impl RotaryEmbedding {
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         // let input_positions: Vec<i64> = positions.to_vec1::<i64>()?;
-        let cos = self.cos.index_select(&positions, 0)?;
-        let sin = self.sin.index_select(&positions, 0)?;
-        let q_embed = candle_nn::rotary_emb::rope(&q, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(&k, &cos, &sin)?;
+        let cos = self.cos.index_select(positions, 0)?;
+        let sin = self.sin.index_select(positions, 0)?;
+        let q_embed = candle_nn::rotary_emb::rope(q, &cos, &sin)?;
+        let k_embed = candle_nn::rotary_emb::rope(k, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }

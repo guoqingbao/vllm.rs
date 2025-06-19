@@ -3,7 +3,7 @@ use super::{
     block_manager::BlockManager,
     sequence::{Sequence, SequenceStatus},
 };
-use crate::utils::config::EngineConfig;
+use crate::utils::config::{Config, EngineConfig};
 use std::collections::VecDeque;
 
 pub struct Scheduler {
@@ -16,14 +16,14 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    pub fn new(config: &EngineConfig) -> Self {
+    pub fn new(econfig: &EngineConfig, config: &Config) -> Self {
         Self {
             waiting: VecDeque::new(),
             running: Vec::new(),
-            block_manager: BlockManager::new(config.num_blocks, config.block_size),
+            block_manager: BlockManager::new(econfig.num_blocks, econfig.block_size),
             next_seq_id: 0,
-            eos_token_id: 2, // Default EOS token ID
-            cfg: config.clone(),
+            eos_token_id: config.eos_token_id.unwrap_or(2) as u32, // Default EOS token ID
+            cfg: econfig.clone(),
         }
     }
 
@@ -63,25 +63,6 @@ impl Scheduler {
         if !scheduled_ids.is_empty() {
             return (scheduled_ids, true);
         }
-
-        //         # decode
-        // while self.running and num_seqs < self.max_num_seqs:
-        //     seq = self.running.popleft()
-        //     while not self.block_manager.can_append(seq):
-        //         if self.running:
-        //             self.preempt(self.running.pop())
-        //         else:
-        //             self.preempt(seq)
-        //             break
-        //     else:
-        //         num_seqs += 1
-        //         self.block_manager.may_append(seq)
-        //         scheduled_seqs.append(seq)
-        // running = deque(scheduled_seqs)
-        // running.extend(self.running)
-        // self.running = running
-        // assert scheduled_seqs
-        // return scheduled_seqs, False
 
         // Decode phase: pick sequences from running for decoding (up to max_num_seqs)
         let mut decode_ids = Vec::new();
