@@ -43,6 +43,7 @@ pub struct EngineConfig {
     pub quant: Option<String>,
     pub num_shards: Option<usize>,
     pub kvcache_mem_gpu: Option<usize>,
+    pub device_id: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

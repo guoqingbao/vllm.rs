@@ -30,4 +30,3 @@ attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version=
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "attention-rs/cuda"]
-default = ["cuda"]

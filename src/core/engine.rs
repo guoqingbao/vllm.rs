@@ -18,7 +18,7 @@ pub struct LLMEngine {
 
 impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Self> {
-        let device = new_device(1)?;
+        let device = new_device(econfig.device_id.unwrap_or(0))?;
         let weight_files =
             hub_load_local_safetensors(&econfig.model_path, "model.safetensors.index.json")?;
         let vb = unsafe {

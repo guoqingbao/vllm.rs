@@ -4,7 +4,7 @@
 Install Rust compiler and execute demo
 
 ```
-cargo run
+cargo run --features cuda
 ```
 
 Change model_path in `EngineConfig` (qwen3 models)

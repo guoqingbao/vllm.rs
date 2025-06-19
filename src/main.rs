@@ -16,6 +16,7 @@ fn main() -> Result<()> {
         quant: None,
         kvcache_mem_gpu: Some(4096),
         num_shards: Some(1),
+        device_id: None,
     };
 
     let mut engine = LLMEngine::new(&econfig, DType::BF16)?;
