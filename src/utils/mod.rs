@@ -39,7 +39,7 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
     } else {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            warn!(
+            tracing::warn!(
                 "Running on CPU, to run on GPU(metal), build this example with `--features metal`"
             );
         }
