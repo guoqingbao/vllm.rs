@@ -5,13 +5,28 @@ Install Rust compiler and execute the following demo
 
 **CUDA Device:**
 ```
-cargo run --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
+cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
+```
+
+**CUDA Device (with Flash Attention):**
+```
+cargo run --release --features cuda,flash-attn -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
 ```
 
 **Metal (Mac)**
 ```
-cargo run --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
+cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
 ```
+
+**In-situ quantization**
+```
+#Mac (load model into quantized gguf (q4k) format)
+cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+
+#CUDA
+cargo run --release --features cuda,flash-attn -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+```
+
 
 Sample result (Qwen3-0.6B BF16)
 

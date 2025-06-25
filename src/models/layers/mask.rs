@@ -1,4 +1,4 @@
-use candle_core::{D, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 pub fn get_attention_casual_mask(
     device: &Device,
     dtype: DType,

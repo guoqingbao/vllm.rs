@@ -2,8 +2,8 @@
 use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
-use crate::utils::config::{Config, EngineConfig, SamplingParams};
-use crate::utils::{hub_load_local_safetensors, new_device};
+use crate::utils::config::{Config, EngineConfig, ModelType, SamplingParams, TokenizerConfig};
+use crate::utils::{chat_template::ChatTemplate, hub_load_local_safetensors, new_device};
 use candle_core::{DType, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -14,6 +14,7 @@ pub struct LLMEngine {
     scheduler: Scheduler,
     tokenizer: Tokenizer,
     econfig: EngineConfig,
+    config_tokenizer: TokenizerConfig,
 }
 
 impl LLMEngine {
@@ -43,12 +44,20 @@ impl LLMEngine {
                 .map_err(candle_core::Error::wrap)?;
         config.quant = econfig.quant.clone();
 
+        let config_path = format!("{}/tokenizer_config.json", econfig.model_path);
+        let config_tokenizer: TokenizerConfig =
+            serde_json::from_slice(&std::fs::read(config_path).map_err(candle_core::Error::wrap)?)
+                .map_err(candle_core::Error::wrap)?;
+
+        println!("Tokenizer config: {:?}", config_tokenizer);
         let mut econfig = econfig.clone();
         econfig.max_model_len = std::cmp::min(
             econfig.max_model_len,
-            config
-                .max_model_len
-                .unwrap_or(config.max_position_embeddings),
+            config.max_model_len.unwrap_or(
+                config_tokenizer
+                    .model_max_length
+                    .unwrap_or(config.max_position_embeddings as f64) as usize,
+            ),
         );
 
         let tokenizer_file = if econfig.tokenizer.is_some() {
@@ -59,7 +68,20 @@ impl LLMEngine {
 
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
 
-        let model_runner = ModelRunner::new(vb, &econfig, &config, dtype, device.clone())?;
+        assert!(
+            config.architectures.len() == 1,
+            "Only one architecture is supported at the moment!"
+        );
+
+        let model_type = match config.architectures[0].as_str() {
+            "Qwen2ForCausalLM" | "Qwen2ForConditionalGeneration" => ModelType::Qwen3,
+            "Qwen3ForCausalLM" | "Qwen3ForConditionalGeneration" => ModelType::Qwen3,
+            "LlamaForCausalLM" | "LlamaForConditionalGeneration" => ModelType::LLaMa,
+            _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
+        };
+
+        let model_runner =
+            ModelRunner::new(model_type, vb, &econfig, &config, dtype, device.clone())?;
         let scheduler = Scheduler::new(&econfig, &config);
 
         Ok(Self {
@@ -67,6 +89,7 @@ impl LLMEngine {
             scheduler,
             tokenizer,
             econfig,
+            config_tokenizer,
         })
     }
 
@@ -127,10 +150,19 @@ impl LLMEngine {
         params: &SamplingParams,
     ) -> Result<Vec<String>> {
         for prompt in prompts {
-            let prompt = format!(
-                "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
-                prompt
+            let prompt = ChatTemplate::new(
+                None,
+                self.config_tokenizer.chat_template.clone(),
+                self.config_tokenizer.bos_token.clone(),
+                self.config_tokenizer.eos_token.clone(),
+                Some(prompt.clone()),
+                false,
+                false,
             );
+            let prompt = prompt
+                .apply_chat_template()
+                .map_err(candle_core::Error::wrap)?;
+            println!("Prompt: {}", prompt);
             self.add_request(&prompt.as_str(), params.clone())?;
         }
 

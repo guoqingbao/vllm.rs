@@ -1,12 +1,19 @@
 // src/utils/config.rs
+use either::Either;
 use serde::Deserialize;
 
 //   "hidden_act": "silu",
 //   "max_window_layers": 36,
 //   "rope_scaling": null,
 
+#[derive(Deserialize, Debug, Clone)]
+pub struct EosToken(
+    #[serde(with = "either::serde_untagged")] pub Either<Option<u32>, Option<Vec<u32>>>,
+);
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    pub architectures: Vec<String>,
     pub head_dim: Option<usize>,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
@@ -21,7 +28,7 @@ pub struct Config {
     pub attention_bias: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: Option<usize>,
+    pub eos_token_id: EosToken,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
@@ -44,6 +51,16 @@ pub struct EngineConfig {
     pub num_shards: Option<usize>,
     pub kvcache_mem_gpu: Option<usize>,
     pub device_id: Option<usize>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct TokenizerConfig {
+    pub model_max_length: Option<f64>,
+    pub add_bos_token: Option<bool>,
+    pub add_eos_token: Option<bool>,
+    pub chat_template: Option<String>,
+    pub bos_token: Option<String>,
+    pub eos_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,4 +100,17 @@ impl Default for SamplingParams {
             top_p: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum ModelType {
+    Qwen3,
+    LLaMa,
+    Gemma,
+    Phi,
+    Mistral,
+    GLM4,
+    Yi,
+    StableLM,
+    DeepSeek,
 }

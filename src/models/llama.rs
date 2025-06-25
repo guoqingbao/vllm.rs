@@ -1,4 +1,4 @@
-// src/models/qwen3.rs
+// src/models/llama.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::linear::{
     linear_b_x as linear_b, linear_no_bias_x as linear_no_bias, LinearX as Linear,
@@ -16,14 +16,14 @@ use candle_nn::{Module, RmsNorm};
 use std::iter::zip;
 use std::sync::Arc;
 
-pub struct Qwen3DecoderLayer {
+pub struct LLaMaDecoderLayer {
     self_attn: Attention,
     mlp: MLP,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
 }
 
-impl Qwen3DecoderLayer {
+impl LLaMaDecoderLayer {
     pub fn new(
         vb: VarBuilder,
         rotary_emb: Arc<RotaryEmbedding>,
@@ -75,9 +75,9 @@ impl Qwen3DecoderLayer {
     }
 }
 
-pub struct Qwen3ForCausalLM {
+pub struct LLaMaForCausalLM {
     embed_tokens: candle_nn::Embedding,
-    layers: Vec<Qwen3DecoderLayer>,
+    layers: Vec<LLaMaDecoderLayer>,
     norm: RmsNorm,
     lm_head: Linear,
     device: Device,
@@ -85,7 +85,7 @@ pub struct Qwen3ForCausalLM {
     dtype: DType,
 }
 
-impl Qwen3ForCausalLM {
+impl LLaMaForCausalLM {
     pub fn new(vb: VarBuilder, config: &Config, dtype: DType, device: &Device) -> Result<Self> {
         let embed_tokens = embedding(
             config.vocab_size,
@@ -97,7 +97,7 @@ impl Qwen3ForCausalLM {
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
-            let layer = Qwen3DecoderLayer::new(
+            let layer = LLaMaDecoderLayer::new(
                 vb.pp(format!("model.layers.{}", i)),
                 rotary_emb.clone(),
                 config,

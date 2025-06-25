@@ -3,15 +3,15 @@ use super::{
     block_manager::BlockManager,
     sequence::{Sequence, SequenceStatus},
 };
-use crate::utils::config::{Config, EngineConfig};
+use crate::utils::config::{Config, EngineConfig, EosToken};
+use either::Either;
 use std::collections::VecDeque;
-
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
     block_manager: BlockManager,
     next_seq_id: usize,
-    eos_token_id: u32,
+    eos_token_id: Vec<u32>,
     cfg: EngineConfig,
 }
 
@@ -22,7 +22,11 @@ impl Scheduler {
             running: Vec::new(),
             block_manager: BlockManager::new(econfig.num_blocks, econfig.block_size),
             next_seq_id: 0,
-            eos_token_id: config.eos_token_id.unwrap_or(2) as u32, // Default EOS token ID
+            eos_token_id: match &config.eos_token_id {
+                EosToken(Either::Left(Some(eos))) => vec![*eos],
+                EosToken(Either::Right(Some(eos))) => eos.into_iter().map(|x| *x).collect(),
+                _ => vec![],
+            },
             cfg: econfig.clone(),
         }
     }
@@ -110,7 +114,8 @@ impl Scheduler {
             let token = output_ids[i];
             seq.append_token(token);
 
-            if token == self.eos_token_id || seq.output_ids.len() >= seq.sampling_params.max_tokens
+            if self.eos_token_id.contains(&token)
+                || seq.output_ids.len() >= seq.sampling_params.max_tokens
             {
                 seq.status = SequenceStatus::Finished;
                 self.block_manager.deallocate(seq);

@@ -1,9 +1,9 @@
 //! Linear layer (GGUF and unquantized safetensors)
-use candle_core::Module;
 use candle_core::quantized;
+use candle_core::Module;
 use candle_core::{
+    quantized::{gguf_file, QMatMul, QTensor},
     DType, Device, Result, Tensor,
-    quantized::{QMatMul, QTensor, gguf_file},
 };
 use candle_nn::var_builder::Shard;
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;

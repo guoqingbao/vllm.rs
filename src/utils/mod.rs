@@ -1,3 +1,4 @@
+pub mod chat_template;
 pub mod config;
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{Device, Result};

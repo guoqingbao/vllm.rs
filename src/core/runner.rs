@@ -1,16 +1,29 @@
 // src/core/runner.rs
 use crate::{
     core::sequence::Sequence,
+    models::llama::LLaMaForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
-    utils::config::{Config, EngineConfig},
+    utils::config::{Config, EngineConfig, ModelType},
 };
 use attention_rs::InputMetadata;
-use candle_core::{D, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub enum Model {
+    Qwen3(Qwen3ForCausalLM),
+    LLaMa(LLaMaForCausalLM),
+    // Gemma(GemmaForCausalLM),
+    // Phi(PhiForCausalLM),
+    // Mistral(MistralForCausalLM),
+    // GLM4(GLM4ForCausalLM),
+    // Yi(YiForCausalLM),
+    // StableLM(StableLMForCausalLM),
+    // DeepSeek(DeepSeekForCausalLM),
+}
+
 pub struct ModelRunner {
-    model: Qwen3ForCausalLM,
+    model: Model,
     kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
     device: Device,
     config: EngineConfig,
@@ -18,13 +31,28 @@ pub struct ModelRunner {
 
 impl ModelRunner {
     pub fn new(
+        model_type: ModelType,
         vb: VarBuilder,
         econfig: &EngineConfig,
         config: &Config,
         dtype: DType,
         device: Device,
     ) -> Result<Self> {
-        let model = Qwen3ForCausalLM::new(vb, config, dtype, &device)?;
+        let model = match model_type {
+            ModelType::Qwen3 => Model::Qwen3(Qwen3ForCausalLM::new(vb, config, dtype, &device)?),
+            ModelType::LLaMa => Model::LLaMa(LLaMaForCausalLM::new(vb, config, dtype, &device)?),
+            // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::GLM4 => GLM4ForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::Yi => YiForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::StableLM => StableLMForCausalLM::new(vb, config, dtype, &device)?,
+            // ModelType::DeepSeek => DeepSeekForCausalLM::new(vb, config, dtype, &device)?,
+            _ => {
+                candle_core::bail!("Unsupported model type: {:?}", model_type);
+            }
+        };
+
         let kv_cache = Self::init_kv_cache(&econfig, config, dtype, &device)?;
 
         Ok(Self {
@@ -154,12 +182,23 @@ impl ModelRunner {
             self.prepare_decode(seqs)
         }?;
 
-        let logits = self.model.forward(
-            &input_ids,
-            &positions,
-            Some(&self.get_kv_cache()),
-            &input_metadata,
-        )?;
+        let logits = match &self.model {
+            Model::Qwen3(model) => model.forward(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+            )?,
+            Model::LLaMa(model) => model.forward(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+            )?,
+            _ => {
+                candle_core::bail!("Unsupported model type for forward pass");
+            }
+        };
         let output_ids = self.sample(&logits)?;
         Ok(output_ids)
     }

@@ -49,6 +49,11 @@ struct Args {
 
     #[arg(long, value_delimiter = '|')]
     prompts: Option<Vec<String>>,
+
+    // in-site quantization, e.g. q4_k, q2_k, q8_0, etc.
+    // if not provided, it will not perform in-situ quantization for the original model
+    #[arg(long, default_value = None)]
+    quant: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -76,7 +81,7 @@ fn main() -> Result<()> {
         max_num_batched_tokens: 32768,
         temperature: 0.7,
         max_model_len: 32768,
-        quant: None,
+        quant: args.quant.clone(),
         kvcache_mem_gpu: Some(args.kvcache_mem_gpu),
         num_shards: Some(1),
         device_id: None,
