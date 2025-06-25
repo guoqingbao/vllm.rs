@@ -62,6 +62,7 @@ impl ChatTemplate {
         self.messages.push(Message { role, content });
     }
 
+    #[allow(dead_code)]
     fn clear_message(&mut self) {
         self.messages.clear()
     }

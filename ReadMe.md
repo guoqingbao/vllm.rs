@@ -8,7 +8,7 @@ Install Rust compiler and execute the following demo
 cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
 ```
 
-**CUDA Device (with Flash Attention):**
+**CUDA Device (with Flash Attention, not stable, longer time to build):**
 ```
 cargo run --release --features cuda,flash-attn -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
 ```
@@ -24,7 +24,7 @@ cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3
 cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
 
 #CUDA
-cargo run --release --features cuda,flash-attn -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
 ```
 
 
@@ -45,6 +45,9 @@ I should keep the tone positive and approachable. Avoid any negative language. M
 
 Hi there! How are you today? I'm here to help you with anything! �� Let me know if there's anything you need!%                                                                                
 ```
+## Supported Model Arch
+1) LLaMa (LLaMa2/LLaMa3)
+2) Qwen (Qwen2/Qwen3)
 
 ## Note
 **This project is under the initial stage.**

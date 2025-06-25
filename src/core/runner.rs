@@ -195,9 +195,9 @@ impl ModelRunner {
                 Some(&self.get_kv_cache()),
                 &input_metadata,
             )?,
-            _ => {
-                candle_core::bail!("Unsupported model type for forward pass");
-            }
+            // _ => {
+            //     candle_core::bail!("Unsupported model type for forward pass");
+            // }
         };
         let output_ids = self.sample(&logits)?;
         Ok(output_ids)

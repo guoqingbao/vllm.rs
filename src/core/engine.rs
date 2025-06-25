@@ -7,6 +7,7 @@ use crate::utils::{chat_template::ChatTemplate, hub_load_local_safetensors, new_
 use candle_core::{DType, Result};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
 
 pub struct LLMEngine {
@@ -20,6 +21,7 @@ pub struct LLMEngine {
 impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Self> {
         let device = new_device(econfig.device_id.unwrap_or(0))?;
+        println!("Loading model...");
         let weight_files = if Path::new(&econfig.model_path)
             .join("model.safetensors.index.json")
             .exists()
@@ -49,7 +51,10 @@ impl LLMEngine {
             serde_json::from_slice(&std::fs::read(config_path).map_err(candle_core::Error::wrap)?)
                 .map_err(candle_core::Error::wrap)?;
 
-        println!("Tokenizer config: {:?}", config_tokenizer);
+        println!("{:?}\n", config_tokenizer);
+
+        println!("Model loaded.\n");
+
         let mut econfig = econfig.clone();
         econfig.max_model_len = std::cmp::min(
             econfig.max_model_len,
@@ -148,7 +153,7 @@ impl LLMEngine {
         &mut self,
         prompts: &Vec<String>,
         params: &SamplingParams,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<(usize, usize, usize, String)>> {
         for prompt in prompts {
             let prompt = ChatTemplate::new(
                 None,
@@ -162,13 +167,20 @@ impl LLMEngine {
             let prompt = prompt
                 .apply_chat_template()
                 .map_err(candle_core::Error::wrap)?;
-            println!("Prompt: {}", prompt);
+            println!("Prompt after applying Chat Template: {}", prompt);
             self.add_request(&prompt.as_str(), params.clone())?;
         }
 
+        let mut decode_start_time = 0;
         let mut outputs = HashMap::new();
         while !self.scheduler.is_finished() {
             let step_output = self.step(prompts.len() == 1)?;
+            if decode_start_time == 0 {
+                decode_start_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis() as usize;
+            }
             for (seq_id, token_ids) in step_output {
                 outputs.insert(seq_id, token_ids);
             }
@@ -178,12 +190,12 @@ impl LLMEngine {
         sorted_outputs.sort_by_key(|(seq_id, _)| *seq_id);
 
         let mut results = vec![];
-        for (_, token_ids) in sorted_outputs {
+        for (seq_id, token_ids) in sorted_outputs {
             let output = self
                 .tokenizer
                 .decode(&token_ids, true)
                 .expect("unable to decode!");
-            results.push(output);
+            results.push((seq_id, decode_start_time, token_ids.len(), output));
         }
 
         Ok(results)

@@ -1,8 +1,6 @@
 // src/models/llama.rs
 use crate::models::layers::attention::Attention;
-use crate::models::layers::linear::{
-    linear_b_x as linear_b, linear_no_bias_x as linear_no_bias, LinearX as Linear,
-};
+use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm};

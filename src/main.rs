@@ -1,5 +1,6 @@
 use candle_core::{DType, Result};
 use clap::Parser;
+use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::LLMEngine;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 
@@ -61,8 +62,12 @@ fn main() -> Result<()> {
     if args.weight_path.is_none() {
         candle_core::bail!("Must provide weight-path (folder of qwen3 safetensors)!");
     }
-    if args.device_ids.is_some() && args.device_ids.unwrap().len() > 1 {
+    if args.device_ids.is_some() && args.device_ids.as_ref().unwrap().len() > 1 {
         candle_core::bail!("Multi-rank inference is under development!");
+    }
+    let mut device_ids = args.device_ids.unwrap_or_default();
+    if device_ids.is_empty() {
+        device_ids.push(0);
     }
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
@@ -84,7 +89,7 @@ fn main() -> Result<()> {
         quant: args.quant.clone(),
         kvcache_mem_gpu: Some(args.kvcache_mem_gpu),
         num_shards: Some(1),
-        device_id: None,
+        device_id: Some(device_ids[0]),
     };
 
     let mut engine = LLMEngine::new(&econfig, dtype)?;
@@ -95,19 +100,45 @@ fn main() -> Result<()> {
 
     let params = SamplingParams {
         temperature: 0.6,
-        max_tokens: 512,
+        max_tokens: 2048,
         ignore_eos: false,
         top_k: None,
         top_p: None,
     };
 
-    let outputs = engine.generate(&prompts, &params)?;
+    println!("{:?}\n", params);
 
     if prompts.len() > 1 {
-        for (i, output) in outputs.iter().enumerate() {
-            println!("Prompt {}: {}", i + 1, prompts[i]);
-            println!("Response: {}\n", output);
+        println!("Live output muted for more than one prompt!\n");
+    }
+
+    let outputs = engine.generate(&prompts, &params)?;
+
+    let mut decode_time_taken = 0f32;
+    let mut total_decoded_tokens = 0;
+    for (i, (seq_id, decode_starting_time, length, output)) in outputs.iter().enumerate() {
+        if prompts.len() > 1 {
+            println!("[{}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
+            println!("[{}] Response: {}\n", seq_id, output);
+        }
+        total_decoded_tokens += length;
+        let duration = (SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize
+            - decode_starting_time) as f32
+            / 1000.0; //maximum time costs for decoding
+        if duration > decode_time_taken {
+            decode_time_taken = duration;
         }
     }
+
+    println!(
+        "\n\n{} tokens generated in {:.2} s (decoding thourghput {:.2} tokens/s)",
+        total_decoded_tokens,
+        decode_time_taken,
+        total_decoded_tokens as f32 / decode_time_taken
+    );
+
     Ok(())
 }
