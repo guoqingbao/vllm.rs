@@ -53,6 +53,40 @@ pub struct EngineConfig {
     pub device_id: Option<usize>,
 }
 
+impl EngineConfig {
+    pub fn new(
+        model_path: String,
+        block_size: usize,
+        max_num_seqs: usize,
+        max_num_batched_tokens: usize,
+        temperature: f32,
+        quant: Option<String>,
+        num_shards: Option<usize>,
+        kvcache_mem_gpu: Option<usize>,
+        device_ids: Option<Vec<usize>>,
+    ) -> Self {
+        let mut device_ids = device_ids.unwrap_or_default();
+        if device_ids.is_empty() {
+            device_ids.push(0);
+        }
+        Self {
+            model_path,
+            tokenizer: None,
+            tokenizer_config: None,
+            num_blocks: 128, //placeholder
+            block_size,
+            max_num_seqs,
+            max_num_batched_tokens,
+            temperature,
+            max_model_len: 32768, //placeholder
+            quant,
+            num_shards,
+            kvcache_mem_gpu,
+            device_id: Some(device_ids[0]),
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct TokenizerConfig {
     pub model_max_length: Option<f64>,

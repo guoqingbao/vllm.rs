@@ -3,7 +3,9 @@ use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::utils::config::{Config, EngineConfig, ModelType, SamplingParams, TokenizerConfig};
-use crate::utils::{chat_template::ChatTemplate, hub_load_local_safetensors, new_device};
+use crate::utils::{
+    chat_template::ChatTemplate, get_kvcache_blocks, hub_load_local_safetensors, new_device,
+};
 use candle_core::{DType, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -85,6 +87,21 @@ impl LLMEngine {
             _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
         };
 
+        let num_blocks = get_kvcache_blocks(
+            econfig.kvcache_mem_gpu.unwrap_or(4096),
+            econfig.block_size,
+            &config,
+            econfig.num_shards.unwrap_or(1),
+            dtype,
+        );
+
+        econfig.num_blocks = num_blocks;
+        econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
+        println!(
+            "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",
+            econfig.max_num_batched_tokens, num_blocks, econfig.block_size
+        );
+
         let model_runner =
             ModelRunner::new(model_type, vb, &econfig, &config, dtype, device.clone())?;
         let scheduler = Scheduler::new(&econfig, &config);
@@ -154,6 +171,11 @@ impl LLMEngine {
         prompts: &Vec<String>,
         params: &SamplingParams,
     ) -> Result<Vec<(usize, usize, usize, String)>> {
+        let mut params = params.clone();
+        if prompts.len() * params.max_tokens > self.econfig.max_num_batched_tokens {
+            params.max_tokens = self.econfig.max_num_batched_tokens / prompts.len();
+            println!("Adjusted max_tokens to {}", params.max_tokens);
+        }
         for prompt in prompts {
             let prompt = ChatTemplate::new(
                 None,

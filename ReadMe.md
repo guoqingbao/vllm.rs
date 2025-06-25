@@ -3,19 +3,19 @@
 ## Usage
 Install Rust compiler and execute the following demo
 
-**CUDA Device:**
+**CUDA (it takes some time for the first run, for building CUDA kernels):**
 ```
-cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
-```
-
-**CUDA Device (with Flash Attention, not stable, longer time to build):**
-```
-cargo run --release --features cuda,flash-attn -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
+cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-8B/ --prompts "How are you today?"
 ```
 
 **Metal (Mac)**
 ```
 cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
+```
+
+**Batched request (CUDA only, prompts separated by "|")**
+```
+cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-8B/ --prompts "Please talk about China. | Please talk about America."
 ```
 
 **In-situ quantization**
@@ -24,11 +24,11 @@ cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3
 cargo run --release --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
 
 #CUDA
-cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features cuda -- --weight-path /Users/bob/Downloads/Qwen3-8B/ --quant q4k --prompts "How are you today?"
 ```
 
 
-Sample result (Qwen3-0.6B BF16)
+Sample result (Qwen3-0.6B BF16, 1 requests)
 
 ```
 bob@Mac4 vllm.rs % cargo run --features metal -- --weight-path /Users/bob/Downloads/Qwen3-0.6B/ --prompts "How are you today?"
@@ -45,6 +45,12 @@ I should keep the tone positive and approachable. Avoid any negative language. M
 
 Hi there! How are you today? I'm here to help you with anything! �� Let me know if there's anything you need!%                                                                                
 ```
+
+Sample batched result (**LLaMa3.1-8B** BF16, **16** requests, on A100)
+```shell
+8450 tokens generated in 14.28 s (decoding thourghput 591.82 tokens/s)
+```
+
 ## Supported Model Arch
 1) LLaMa (LLaMa2/LLaMa3)
 2) Qwen (Qwen2/Qwen3)
@@ -54,12 +60,12 @@ Hi there! How are you today? I'm here to help you with anything! �� Let me k
 
 ## TODO
 
-1. Fix bugs for batched inference
+1. Fix bugs for batched inference on `Metal`
 2. Support Multi-rank inference
 3. Add more model support
 4. Add GGUF support
 5. Add an OpenAI API server (support streaming)
-6. Flash attention integration
+6. _Flash attention integration (finished for CUDA)_
 7. Continuous batching
 
 ## Reference

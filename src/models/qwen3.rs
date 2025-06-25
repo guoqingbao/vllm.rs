@@ -138,18 +138,13 @@ impl Qwen3ForCausalLM {
         input_metadata: &InputMetadata,
     ) -> Result<Tensor> {
         let seq_len = input_ids.dims1()?;
-        let attention_mask = if seq_len <= 1 {
-            None
-        } else {
-            let mask = get_attention_casual_mask(
-                &self.device,
-                self.dtype,
-                seq_len,
-                positions,
-                self.config.sliding_window,
-            )?;
-            Some(mask)
-        };
+        let attention_mask = get_attention_casual_mask(
+            &self.device,
+            self.dtype,
+            seq_len,
+            positions,
+            self.config.sliding_window,
+        );
         let mut xs = self.embed_tokens.forward(input_ids)?;
 
         if let Some(kv_caches) = kv_caches {

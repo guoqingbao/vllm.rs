@@ -65,10 +65,7 @@ fn main() -> Result<()> {
     if args.device_ids.is_some() && args.device_ids.as_ref().unwrap().len() > 1 {
         candle_core::bail!("Multi-rank inference is under development!");
     }
-    let mut device_ids = args.device_ids.unwrap_or_default();
-    if device_ids.is_empty() {
-        device_ids.push(0);
-    }
+
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,
         Some("bf16") => DType::BF16,
@@ -76,21 +73,18 @@ fn main() -> Result<()> {
         Some(dtype) => panic!("Unsupported dtype {dtype}"),
         None => DType::BF16,
     };
-    let econfig = EngineConfig {
-        model_path: args.weight_path.unwrap(),
-        tokenizer: None,
-        tokenizer_config: None,
-        num_blocks: 128,
-        block_size: args.block_size,
-        max_num_seqs: args.max_num_seqs,
-        max_num_batched_tokens: 32768,
-        temperature: 0.7,
-        max_model_len: 32768,
-        quant: args.quant.clone(),
-        kvcache_mem_gpu: Some(args.kvcache_mem_gpu),
-        num_shards: Some(1),
-        device_id: Some(device_ids[0]),
-    };
+
+    let econfig = EngineConfig::new(
+        args.weight_path.unwrap(),
+        args.block_size,
+        args.max_num_seqs,
+        32768,
+        0.7,
+        args.quant.clone(),
+        Some(1),
+        Some(args.kvcache_mem_gpu),
+        args.device_ids.clone(),
+    );
 
     let mut engine = LLMEngine::new(&econfig, dtype)?;
     let prompts = match args.prompts {

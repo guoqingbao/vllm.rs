@@ -63,29 +63,6 @@ impl ModelRunner {
         })
     }
 
-    fn get_kvcache_blocks(
-        kvcache_mem_gpu: usize,
-        block_size: usize,
-        config: &Config,
-        num_shards: usize,
-        dtype: DType,
-    ) -> usize {
-        const SIZE_IN_MB: usize = 1024 * 1024;
-        let dsize = dtype.size_in_bytes();
-        let head_dim = config
-            .head_dim
-            .unwrap_or(config.hidden_size / config.num_attention_heads);
-
-        let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
-            / dsize
-            / block_size
-            / (config.num_key_value_heads / num_shards)
-            / head_dim
-            / config.num_hidden_layers
-            / 2;
-        num_gpu_blocks
-    }
-
     fn calculate_key_block_shape(
         cfg: &Config,
         dtype: DType,
@@ -125,13 +102,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         // Simplified KV cache initialization
-        let num_gpu_blocks = Self::get_kvcache_blocks(
-            econfig.kvcache_mem_gpu.unwrap_or(4096),
-            econfig.block_size,
-            config,
-            econfig.num_shards.unwrap_or(1),
-            dtype,
-        );
+        let num_gpu_blocks = econfig.num_blocks;
         // let shape = [
         //     config.num_blocks,
         //     2, // key and value

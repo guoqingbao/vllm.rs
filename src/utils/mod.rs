@@ -1,7 +1,7 @@
 pub mod chat_template;
 pub mod config;
 use candle_core::utils::{cuda_is_available, metal_is_available};
-use candle_core::{Device, Result};
+use candle_core::{DType, Device, Result};
 use std::path::Path;
 
 pub fn hub_load_local_safetensors(
@@ -52,4 +52,27 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
         }
         Ok(Device::Cpu)
     }
+}
+
+pub fn get_kvcache_blocks(
+    kvcache_mem_gpu: usize,
+    block_size: usize,
+    config: &config::Config,
+    num_shards: usize,
+    dtype: DType,
+) -> usize {
+    const SIZE_IN_MB: usize = 1024 * 1024;
+    let dsize = dtype.size_in_bytes();
+    let head_dim = config
+        .head_dim
+        .unwrap_or(config.hidden_size / config.num_attention_heads);
+
+    let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
+        / dsize
+        / block_size
+        / (config.num_key_value_heads / num_shards)
+        / head_dim
+        / config.num_hidden_layers
+        / 2;
+    num_gpu_blocks
 }
