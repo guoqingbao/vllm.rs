@@ -43,7 +43,8 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
 
-        let (model_type, default_chat_template) = match config.architectures[0].as_str() {
+        let (model_type, default_chat_template, is_rope_i) = match config.architectures[0].as_str()
+        {
             "Qwen2ForCausalLM"
             | "Qwen2ForConditionalGeneration"
             | "Qwen3ForCausalLM"
@@ -52,6 +53,7 @@ impl LLMEngine {
             | "qwen3" => (
                 ModelType::Qwen3,
                 "<|im_start|>user\n {} <|im_end|>".to_string(),
+                false,
             ),
             "LlamaForCausalLM"
             | "LlamaForConditionalGeneration"
@@ -67,10 +69,11 @@ impl LLMEngine {
                     (
                         ModelType::LLaMa,
                         "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+                        false,
                     )
                 } else {
                     //llama2
-                    (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
+                    (ModelType::LLaMa, "[INST] {} [/INST]".to_string(), true)
                 }
             }
             _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
@@ -86,6 +89,8 @@ impl LLMEngine {
 
         econfig.num_blocks = num_blocks;
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
+        tracing::info!("{:?}", econfig);
+
         tracing::info!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",
             econfig.max_num_batched_tokens,
@@ -93,8 +98,15 @@ impl LLMEngine {
             econfig.block_size
         );
 
-        let model_runner =
-            ModelRunner::new(model_type, &vb, &econfig, &config, dtype, device.clone())?;
+        let model_runner = ModelRunner::new(
+            model_type,
+            &vb,
+            &econfig,
+            &config,
+            dtype,
+            is_rope_i,
+            device.clone(),
+        )?;
         let scheduler = Scheduler::new(&econfig, &config);
         tracing::info!("Model loaded.\n");
 
@@ -197,7 +209,7 @@ impl LLMEngine {
         let mut decode_time_taken = 0f32;
 
         let tokenizer = self.tokenizer.clone();
-        let mut stream_decoder = tokenizer.decode_stream(false);
+        let mut stream_decoder = tokenizer.decode_stream(true);
         while !self.scheduler.is_finished() {
             let step_output = self.step()?;
             if decode_start_time == 0 {

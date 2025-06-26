@@ -164,7 +164,7 @@ impl QLinear {
     pub fn new(
         in_dim: usize,
         out_dim: usize,
-        vb: candle_transformers::quantized_var_builder::VarBuilder,
+        vb: crate::utils::gguf_varbuilder::VarBuilder,
     ) -> Result<Self> {
         let ws = vb.get((out_dim, in_dim), "weight")?;
         let inner = candle_core::quantized::QMatMul::from_arc(ws)?;

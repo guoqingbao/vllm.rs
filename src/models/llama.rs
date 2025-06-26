@@ -5,16 +5,18 @@ use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm};
 use crate::models::layers::rotary_emb::RotaryEmbedding;
+use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
+use crate::utils::progress::ProgressLike;
+use crate::utils::progress::ProgressReporter;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::var_builder::Shard;
-// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
-use crate::models::layers::VarBuilderX;
 use candle_nn::{Module, RmsNorm};
 use std::collections::HashMap;
 use std::iter::zip;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 pub struct LLaMaDecoderLayer {
     self_attn: Attention,
@@ -120,7 +122,14 @@ pub struct LLaMaForCausalLM {
 }
 
 impl LLaMaForCausalLM {
-    pub fn new(vb: &VarBuilderX, config: &Config, dtype: DType, device: &Device) -> Result<Self> {
+    pub fn new(
+        vb: &VarBuilderX,
+        config: &Config,
+        dtype: DType,
+        is_rope_i: bool,
+        device: &Device,
+        progress_reporter: Arc<RwLock<ProgressReporter>>,
+    ) -> Result<Self> {
         let key_map: HashMap<&str, &str> = [
             ("model.embed_tokens", "token_embd"),
             ("lm_head", "output"),
@@ -130,6 +139,8 @@ impl LLaMaForCausalLM {
         .iter()
         .cloned()
         .collect();
+        let reporter = progress_reporter.clone();
+
         let is_qvar_builder = vb.is_qvar_builder();
 
         let (embed_tokens, vocab_size) = embedding(
@@ -142,7 +153,12 @@ impl LLaMaForCausalLM {
             },
         )?;
 
-        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, config, &vb.device(), true)?);
+        let rotary_emb = Arc::new(RotaryEmbedding::new(
+            dtype,
+            config,
+            &vb.device(),
+            is_rope_i,
+        )?);
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
@@ -163,6 +179,7 @@ impl LLaMaForCausalLM {
                 dtype,
             )?;
             layers.push(layer);
+            reporter.write().unwrap().set_progress(i + 1);
         }
 
         let norm = rms_norm(

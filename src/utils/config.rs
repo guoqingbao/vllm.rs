@@ -35,7 +35,7 @@ pub struct Config {
     pub quant: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub model_path: String,
     pub tokenizer: Option<String>,
@@ -44,7 +44,6 @@ pub struct EngineConfig {
     pub block_size: usize,
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
-    pub temperature: f32,
     pub max_model_len: usize,
     pub quant: Option<String>,
     pub num_shards: Option<usize>,
@@ -57,8 +56,6 @@ impl EngineConfig {
         model_path: String,
         block_size: usize,
         max_num_seqs: usize,
-        max_num_batched_tokens: usize,
-        temperature: f32,
         quant: Option<String>,
         num_shards: Option<usize>,
         kvcache_mem_gpu: Option<usize>,
@@ -75,9 +72,8 @@ impl EngineConfig {
             num_blocks: 128, //placeholder
             block_size,
             max_num_seqs,
-            max_num_batched_tokens,
-            temperature,
-            max_model_len: 32768, //placeholder
+            max_num_batched_tokens: 32768, //placeholder
+            max_model_len: 32768,          //placeholder
             quant,
             num_shards,
             kvcache_mem_gpu,

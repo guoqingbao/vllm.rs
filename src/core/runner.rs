@@ -1,4 +1,6 @@
 // src/core/runner.rs
+use crate::models::layers::VarBuilderX;
+use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::{
     core::sequence::Sequence,
     models::llama::LLaMaForCausalLM,
@@ -7,8 +9,7 @@ use crate::{
 };
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
-use crate::models::layers::VarBuilderX;
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub enum Model {
@@ -37,11 +38,28 @@ impl ModelRunner {
         econfig: &EngineConfig,
         config: &Config,
         dtype: DType,
+        is_rope_i: bool,
         device: Device,
     ) -> Result<Self> {
+        let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
+        progress_worker(Some(1), config.num_hidden_layers, Arc::clone(&reporter));
         let model = match model_type {
-            ModelType::Qwen3 => Model::Qwen3(Qwen3ForCausalLM::new(vb, config, dtype, &device)?),
-            ModelType::LLaMa => Model::LLaMa(LLaMaForCausalLM::new(vb, config, dtype, &device)?),
+            ModelType::Qwen3 => Model::Qwen3(Qwen3ForCausalLM::new(
+                vb,
+                config,
+                dtype,
+                is_rope_i,
+                &device,
+                Arc::clone(&reporter),
+            )?),
+            ModelType::LLaMa => Model::LLaMa(LLaMaForCausalLM::new(
+                vb,
+                config,
+                dtype,
+                is_rope_i,
+                &device,
+                Arc::clone(&reporter),
+            )?),
             // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,

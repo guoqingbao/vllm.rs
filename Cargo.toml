@@ -13,6 +13,7 @@ hf-hub = "0.4.1"
 anyhow = "1.0.75"
 itertools = "0.13.0"
 akin = "0.4.0"
+indicatif = "0.17.11"
 serde_json = "1.0.108"
 #cudarc = {version = "0.13.9", features = ["f16", "cuda-version-from-build-system"], optional = true }
 half = { version = "2.5.0", features = ["num-traits", "use-intrinsics", "rand_distr"] }

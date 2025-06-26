@@ -1,6 +1,8 @@
 pub mod chat_template;
 pub mod config;
 pub mod gguf_helper;
+pub mod gguf_varbuilder;
+pub mod progress;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};

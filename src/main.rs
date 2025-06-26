@@ -7,8 +7,8 @@ use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Maximum number of sequences to allow
-    #[arg(long, default_value_t = 256)]
+    /// Maximum number of concurrent sequences to allow
+    #[arg(long, default_value_t = 64)]
     max_num_seqs: usize,
 
     /// Size of a block
@@ -20,13 +20,10 @@ struct Args {
     model_id: Option<String>,
 
     /// The folder name that contains safetensor weights and json files
-    /// (same structure as huggingface online), path must include last "/"
-    #[arg(long)]
+    /// (same structure as huggingface online)
+    /// or the path to a gguf file
+    #[arg(long = "w")]
     weight_path: Option<String>,
-
-    /// The quantized weight file name (for gguf/ggml file)
-    #[arg(long)]
-    weight_file: Option<String>,
 
     #[arg(long)]
     dtype: Option<String>,
@@ -35,10 +32,10 @@ struct Args {
     cpu: bool,
 
     /// Available GPU memory for kvcache (MB)
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long = "kvmem", default_value_t = 4096)]
     kvcache_mem_gpu: usize,
 
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long = "d", value_delimiter = ',')]
     device_ids: Option<Vec<usize>>,
 
     //Whether the program running in multiprocess or multithread model for parallel inference
@@ -53,6 +50,7 @@ struct Args {
 
     // in-site quantization, e.g. q4_k, q2_k, q8_0, etc.
     // if not provided, it will not perform in-situ quantization for the original model
+    // do not use this option if you are using a gguf file
     #[arg(long, default_value = None)]
     quant: Option<String>,
 }
@@ -63,7 +61,9 @@ fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     if args.weight_path.is_none() {
-        candle_core::bail!("Must provide weight-path (folder of qwen3 safetensors)!");
+        candle_core::bail!(
+            "Must provide weight-path (folder of safetensors or path of gguf file)!"
+        );
     }
     if args.device_ids.is_some() && args.device_ids.as_ref().unwrap().len() > 1 {
         candle_core::bail!("Multi-rank inference is under development!");
@@ -81,8 +81,6 @@ fn main() -> Result<()> {
         args.weight_path.unwrap(),
         args.block_size,
         args.max_num_seqs,
-        32768,
-        0.7,
         args.quant.clone(),
         Some(1),
         Some(args.kvcache_mem_gpu),

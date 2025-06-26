@@ -4,10 +4,10 @@ pub mod mask;
 pub mod mlp;
 pub mod others;
 pub mod rotary_emb;
+use crate::utils::gguf_varbuilder::VarBuilder as QVarBuilder;
 use candle_core::DType;
 use candle_core::{Device, Result};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
-use candle_transformers::quantized_var_builder::VarBuilder as QVarBuilder;
 use either::Either;
 use std::path::Path;
 #[derive(Clone)]
@@ -33,7 +33,7 @@ impl VarBuilderX<'_> {
         };
 
         if is_gguf {
-            let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf(
+            let vb = crate::utils::gguf_varbuilder::VarBuilder::from_gguf(
                 weight_files[0].clone(),
                 device,
             )?;
