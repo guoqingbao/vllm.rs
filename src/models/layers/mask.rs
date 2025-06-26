@@ -5,26 +5,23 @@ use candle_core::{DType, Device, Tensor};
 pub fn get_attention_casual_mask(
     _: &Device,
     _: DType,
-    _: usize,
     _: &Tensor,
+    _: Vec<u32>,
     _: Option<usize>,
-) -> Option<Tensor> {
+    _: bool,
+) -> Option<Vec<Tensor>> {
     None
 }
 
 #[cfg(not(feature = "cuda"))]
-pub fn get_attention_casual_mask(
+fn get_casual_mask_internal(
     device: &Device,
     dtype: DType,
     tgt_len: usize,
-    positions: &Tensor,
+    seqlen_offset: usize,
     sliding_window: Option<usize>,
-) -> Option<Tensor> {
-    if tgt_len <= 1 {
-        return None;
-    }
-    let vec_positions = positions.to_vec1::<i64>().unwrap();
-    let seqlen_offset = vec_positions[0] as usize;
+) -> candle_core::Result<Tensor> {
+    use candle_core::D;
     let mask: Vec<_> = if let Some(sliding_window) = sliding_window {
         (0..tgt_len)
             .flat_map(|i| {
@@ -42,23 +39,46 @@ pub fn get_attention_casual_mask(
             .flat_map(|i| (0..tgt_len).map(move |j| if i < j { f32::NEG_INFINITY } else { 0f32 }))
             .collect()
     };
-    let mask = Tensor::from_slice(&mask, (tgt_len, tgt_len), device).ok();
-    let mask = if seqlen_offset > 0 && mask.is_some() {
-        match Tensor::zeros((tgt_len, seqlen_offset), DType::F32, device) {
-            Ok(mask0) => Tensor::cat(&[&mask0, &mask.unwrap()], candle_core::D::Minus1).ok(),
-            Err(_) => {
-                return None;
-            }
-        }
+    let mask = Tensor::from_slice(&mask, (tgt_len, tgt_len), device)?;
+    let mask = if seqlen_offset > 0 {
+        let mask0 = Tensor::zeros((tgt_len, seqlen_offset), DType::F32, device)?;
+        Tensor::cat(&[&mask0, &mask], D::Minus1)?
     } else {
         mask
     };
-    match mask {
-        Some(m) => m
-            .expand((1, 1, tgt_len, tgt_len + seqlen_offset))
-            .unwrap()
-            .to_dtype(dtype)
-            .ok(),
-        _ => None,
+    mask.expand((1, 1, tgt_len, tgt_len + seqlen_offset))?
+        .to_dtype(dtype)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn get_attention_casual_mask(
+    device: &Device,
+    dtype: DType,
+    positions: &Tensor,
+    seqlens: Vec<u32>,
+    sliding_window: Option<usize>,
+    is_prefill: bool,
+) -> Option<Vec<Tensor>> {
+    if !is_prefill {
+        return None;
     }
+    let vec_positions = positions.to_vec1::<i64>().unwrap();
+    let mut offsets = vec![0u32];
+    offsets.extend(seqlens.clone());
+    let mut vec_mask = Vec::new();
+    let mut start = 0;
+    for (i, seq_len) in seqlens.iter().enumerate() {
+        let seq_len = seq_len - start;
+        let mask = get_casual_mask_internal(
+            device,
+            dtype,
+            seq_len as usize,
+            vec_positions[offsets[i] as usize] as usize,
+            sliding_window,
+        )
+        .unwrap();
+        vec_mask.push(mask);
+        start += seq_len;
+    }
+    Some(vec_mask)
 }

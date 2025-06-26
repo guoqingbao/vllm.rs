@@ -94,7 +94,7 @@ impl Qwen3DecoderLayer {
     pub fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: Option<&Vec<Tensor>>,
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
@@ -231,13 +231,24 @@ impl Qwen3ForCausalLM {
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
     ) -> Result<Tensor> {
-        let seq_len = input_ids.dims1()?;
+        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
+            input_metadata
+                .cu_seqlens_q
+                .as_ref()
+                .unwrap()
+                .to_vec1::<u32>()?[1..]
+                .into()
+        } else {
+            Vec::new()
+        };
+
         let attention_mask = get_attention_casual_mask(
             &self.device,
             self.dtype,
-            seq_len,
             positions,
+            seqlens.clone(),
             self.config.sliding_window,
+            input_metadata.is_prefill,
         );
         let mut xs = self.embed_tokens.forward(input_ids)?;
 
@@ -263,15 +274,10 @@ impl Qwen3ForCausalLM {
             }
         }
 
-        if input_metadata.cu_seqlens_q.is_some() {
-            let indices = &input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..];
-            let indices: Vec<_> = indices.iter().map(|x| x - 1).collect();
-            let length = indices.len();
-            xs = xs.index_select(&Tensor::from_vec(indices, (length,), xs.device())?, 0)?;
+        if !seqlens.is_empty() {
+            let indices: Vec<_> = seqlens.iter().map(|x| x - 1).collect();
+            let batch = indices.len();
+            xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
         self.lm_head.forward(&xs)

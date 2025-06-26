@@ -54,7 +54,7 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are
 
 ---
 
-### 📚 Batched Requests (CUDA only)
+### 📚 Batched Requests
 
 Prompts are separated by `|`
 
@@ -63,7 +63,7 @@ Prompts are separated by `|`
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Please talk about China. | Please talk about America."
 
 # Safetensor model
-cargo run --release --features cuda -- --w /path/Qwen3-8B/ --prompts "Please talk about China. | Please talk about America."
+cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Please talk about China. | Please talk about America."
 ```
 
 ---
@@ -145,7 +145,7 @@ Supports both **Safetensor** and **GGUF** formats.
 
 ## 🛠️ TODO
 
-* [ ] 🧪 Fix batched inference on `Metal`
+* [x] 🧪 Fix batched inference on `Metal`
 * [ ] 🧠 Multi-rank inference
 * [ ] 🧬 More model support
 * [x] 🧾 GGUF support

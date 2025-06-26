@@ -163,7 +163,7 @@ impl Attention {
     pub fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: Option<&Vec<Tensor>>,
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
