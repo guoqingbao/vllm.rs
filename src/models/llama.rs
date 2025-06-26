@@ -9,8 +9,10 @@ use crate::utils::config::Config;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::var_builder::Shard;
-use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::models::layers::VarBuilderX;
 use candle_nn::{Module, RmsNorm};
+use std::collections::HashMap;
 use std::iter::zip;
 use std::sync::Arc;
 
@@ -23,24 +25,58 @@ pub struct LLaMaDecoderLayer {
 
 impl LLaMaDecoderLayer {
     pub fn new(
-        vb: VarBuilder,
+        vb: VarBuilderX,
         rotary_emb: Arc<RotaryEmbedding>,
         config: &Config,
         dtype: DType,
     ) -> Result<Self> {
-        let self_attn = Attention::new(vb.pp("self_attn"), rotary_emb, config, dtype)?;
-        let mlp = MLP::new(vb.pp("mlp"), config, dtype)?;
+        let is_qvar_builder = vb.is_qvar_builder();
+        let self_attn = Attention::new(
+            if is_qvar_builder {
+                vb.clone()
+            } else {
+                vb.pp("self_attn").clone()
+            },
+            rotary_emb,
+            config,
+            dtype,
+        )?;
+        let mlp = MLP::new(
+            if is_qvar_builder {
+                vb.clone()
+            } else {
+                vb.pp("mlp").clone()
+            },
+            config,
+            dtype,
+        )?;
+
+        let key_map: HashMap<&str, &str> = [
+            ("input_layernorm", "attn_norm"),
+            ("post_attention_layernorm", "ffn_norm"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
 
         let input_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
-            vb.pp("input_layernorm"),
+            if is_qvar_builder {
+                vb.pp(key_map["input_layernorm"]).clone()
+            } else {
+                vb.pp("input_layernorm").clone()
+            },
         )?;
 
         let post_attention_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
-            vb.pp("post_attention_layernorm"),
+            if is_qvar_builder {
+                vb.pp(key_map["post_attention_layernorm"]).clone()
+            } else {
+                vb.pp("post_attention_layernorm").clone()
+            },
         )?;
 
         Ok(Self {
@@ -84,19 +120,44 @@ pub struct LLaMaForCausalLM {
 }
 
 impl LLaMaForCausalLM {
-    pub fn new(vb: VarBuilder, config: &Config, dtype: DType, device: &Device) -> Result<Self> {
-        let embed_tokens = embedding(
+    pub fn new(vb: &VarBuilderX, config: &Config, dtype: DType, device: &Device) -> Result<Self> {
+        let key_map: HashMap<&str, &str> = [
+            ("model.embed_tokens", "token_embd"),
+            ("lm_head", "output"),
+            ("model.norm", "output_norm"),
+            ("model.layers", "blk"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+        let is_qvar_builder = vb.is_qvar_builder();
+
+        let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
-            vb.pp("model.embed_tokens"),
+            if is_qvar_builder {
+                vb.pp(key_map["model.embed_tokens"]).clone()
+            } else {
+                vb.pp("model.embed_tokens").clone()
+            },
         )?;
 
-        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, config, vb.device())?);
+        let rotary_emb = Arc::new(RotaryEmbedding::new(dtype, config, &vb.device(), true)?);
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
             let layer = LLaMaDecoderLayer::new(
-                vb.pp(format!("model.layers.{}", i)),
+                vb.pp(format!(
+                    "{}.{}",
+                    if is_qvar_builder {
+                        key_map["model.layers"]
+                    } else {
+                        "model.layers"
+                    },
+                    i
+                )
+                .as_str())
+                    .clone(),
                 rotary_emb.clone(),
                 config,
                 dtype,
@@ -104,15 +165,31 @@ impl LLaMaForCausalLM {
             layers.push(layer);
         }
 
-        let norm = rms_norm(config.hidden_size, config.rms_norm_eps, vb.pp("model.norm"))?;
+        let norm = rms_norm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            if is_qvar_builder {
+                vb.pp(key_map["model.norm"]).clone()
+            } else {
+                vb.pp("model.norm").clone()
+            },
+        )?;
 
         let lm_head = linear_no_bias(
             config.hidden_size,
-            config.vocab_size,
+            vocab_size,
             if config.tie_word_embeddings.is_some_and(|x| x) {
-                vb.pp("model.embed_tokens")
+                if is_qvar_builder {
+                    vb.pp(key_map["model.embed_tokens"]).clone()
+                } else {
+                    vb.pp("model.embed_tokens").clone()
+                }
             } else {
-                vb.pp("lm_head")
+                if is_qvar_builder {
+                    vb.pp(key_map["lm_head"]).clone()
+                } else {
+                    vb.pp("lm_head").clone()
+                }
             },
             Shard::default(),
             &None,

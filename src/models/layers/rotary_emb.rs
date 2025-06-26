@@ -5,10 +5,11 @@ use candle_core::{DType, Device, Result, Tensor};
 pub struct RotaryEmbedding {
     sin: Tensor,
     cos: Tensor,
+    is_rope_i: bool,
 }
 
 impl RotaryEmbedding {
-    pub fn new(dtype: DType, cfg: &Config, dev: &Device) -> Result<Self> {
+    pub fn new(dtype: DType, cfg: &Config, dev: &Device, is_rope_i: bool) -> Result<Self> {
         let dim = cfg
             .head_dim
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
@@ -26,6 +27,7 @@ impl RotaryEmbedding {
         Ok(Self {
             sin: freqs.sin()?.to_dtype(dtype)?,
             cos: freqs.cos()?.to_dtype(dtype)?,
+            is_rope_i,
         })
     }
 
@@ -38,8 +40,13 @@ impl RotaryEmbedding {
         // let input_positions: Vec<i64> = positions.to_vec1::<i64>()?;
         let cos = self.cos.index_select(positions, 0)?;
         let sin = self.sin.index_select(positions, 0)?;
-        let q_embed = candle_nn::rotary_emb::rope(q, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(k, &cos, &sin)?;
+        let func = if self.is_rope_i {
+            candle_nn::rotary_emb::rope_i
+        } else {
+            candle_nn::rotary_emb::rope
+        };
+        let q_embed = func(q, &cos, &sin)?;
+        let k_embed = func(k, &cos, &sin)?;
         Ok((q_embed, k_embed))
     }
 }

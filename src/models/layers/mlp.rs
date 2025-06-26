@@ -2,8 +2,9 @@ use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX 
 use crate::utils::config::Config;
 use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::var_builder::Shard;
-use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
-
+// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::models::layers::VarBuilderX;
+use std::collections::HashMap;
 pub struct MLP {
     gate_proj: Linear,
     up_proj: Linear,
@@ -11,14 +12,28 @@ pub struct MLP {
 }
 
 impl MLP {
-    pub fn new(vb: VarBuilder, config: &Config, dtype: DType) -> Result<Self> {
+    pub fn new(vb: VarBuilderX, config: &Config, dtype: DType) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let intermediate_size = config.intermediate_size;
         let sd = Shard::default();
+        let key_map: HashMap<&str, &str> = [
+            ("gate_proj", "ffn_gate"),
+            ("up_proj", "ffn_up"),
+            ("down_proj", "ffn_down"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+        let is_qvar_builder = vb.is_qvar_builder();
+
         let gate_proj = linear_no_bias(
             hidden_size,
             intermediate_size,
-            vb.pp("gate_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["gate_proj"])
+            } else {
+                vb.pp("gate_proj")
+            },
             sd,
             &config.quant,
             dtype,
@@ -26,7 +41,11 @@ impl MLP {
         let up_proj = linear_no_bias(
             hidden_size,
             intermediate_size,
-            vb.pp("up_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["up_proj"])
+            } else {
+                vb.pp("up_proj")
+            },
             sd,
             &config.quant,
             dtype,
@@ -34,7 +53,11 @@ impl MLP {
         let down_proj = linear_no_bias(
             intermediate_size,
             hidden_size,
-            vb.pp("down_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["down_proj"])
+            } else {
+                vb.pp("down_proj")
+            },
             sd,
             &config.quant,
             dtype,

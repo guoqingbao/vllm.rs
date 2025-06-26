@@ -45,7 +45,7 @@ impl Sequence {
     }
 
     pub fn num_blocks(&self) -> usize {
-        (self.len() + self.block_size - 1) / self.block_size
+        self.len().div_ceil(self.block_size)
     }
 
     pub fn last_block_num_tokens(&self) -> usize {

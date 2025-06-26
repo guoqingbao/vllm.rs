@@ -1,13 +1,15 @@
 pub mod chat_template;
 pub mod config;
+pub mod gguf_helper;
+use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use std::path::Path;
+use config::{Config, EngineConfig, EosToken, TokenizerConfig};
+use either::Either;
+use std::path::{Path, PathBuf};
+use tokenizers::Tokenizer;
 
-pub fn hub_load_local_safetensors(
-    path: &String,
-    json_file: &str,
-) -> Result<Vec<std::path::PathBuf>> {
+pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
     tracing::info!("{:}", Path::new(path).join(json_file).display());
     let jsfile = std::fs::File::open(Path::new(path).join(json_file))?;
     let json: serde_json::Value =
@@ -75,4 +77,161 @@ pub fn get_kvcache_blocks(
         / config.num_hidden_layers
         / 2;
     num_gpu_blocks
+}
+
+pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
+    ct: &candle_core::quantized::gguf_file::Content,
+    reader: &mut R,
+) -> Result<Config> {
+    let md_get = |s: &str| match ct.metadata.get(s) {
+        None => candle_core::bail!("cannot find {s} in metadata"),
+        Some(v) => Ok(v),
+    };
+    let architecture = md_get("general.architecture")?.to_string()?;
+
+    let head_count =
+        md_get(format!("{}.attention.head_count", architecture).as_str())?.to_u32()? as usize;
+    let head_count_kv =
+        md_get(format!("{}.attention.head_count_kv", architecture).as_str())?.to_u32()? as usize;
+
+    let head_dim = md_get(format!("{}.attention.key_length", architecture).as_str());
+    let head_dim = if head_dim.is_ok() {
+        Some(head_dim.unwrap().to_u32()? as usize)
+    } else {
+        None
+    };
+    let embedding_length =
+        md_get(format!("{}.embedding_length", architecture).as_str())?.to_u32()? as usize;
+    let feed_forward_length =
+        md_get(format!("{}.feed_forward_length", architecture).as_str())?.to_u32()? as usize;
+    let context_length =
+        md_get(format!("{}.context_length", architecture).as_str())?.to_u32()? as usize;
+    let block_count = md_get(format!("{}.block_count", architecture).as_str())?.to_u32()? as usize;
+    let rms_norm_eps =
+        md_get(format!("{}.attention.layer_norm_rms_epsilon", architecture).as_str())?.to_f32()?
+            as f64;
+    let rope_freq_base = md_get(format!("{}.rope.freq_base", architecture).as_str())
+        .and_then(|m| m.to_f32())
+        .unwrap_or(10000f32);
+    let vocab_size = md_get(format!("{}.vocab_size", architecture).as_str());
+
+    let vocab_size = if vocab_size.is_ok() {
+        Some(vocab_size.unwrap().to_u32()? as usize)
+    } else {
+        let vocab_size = md_get("tokenizer.ggml.tokens");
+        if vocab_size.is_ok() {
+            let size = vocab_size.unwrap().to_vec()?.len();
+            tracing::warn!(
+                "No vocab_size in metadata, using tokenizer.ggml.tokens with size {}",
+                size
+            );
+            Some(size)
+        } else {
+            None
+        }
+    };
+
+    let bos_token_id = md_get("tokenizer.ggml.bos_token_id");
+
+    let bos_token_id = if bos_token_id.is_ok() {
+        Some(bos_token_id.unwrap().to_u32()? as usize)
+    } else {
+        None
+    };
+
+    let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
+
+    let eos_token_id = if eos_token_id.is_ok() {
+        EosToken(Either::Left(Some(eos_token_id.unwrap().to_u32()?)))
+    } else {
+        EosToken(Either::Left(None))
+    };
+
+    let head_dim = head_dim.unwrap_or(embedding_length / head_count);
+
+    let has_output_weight = ct.tensor(reader, "output.weight", &Device::Cpu).is_ok();
+
+    let cfg = Config {
+        architectures: vec![architecture.clone()],
+        head_dim: Some(head_dim),
+        num_attention_heads: head_count,
+        num_key_value_heads: head_count_kv,
+        max_position_embeddings: context_length,
+        hidden_size: embedding_length,
+        num_hidden_layers: block_count,
+        max_model_len: Some(context_length),
+        intermediate_size: feed_forward_length,
+        rms_norm_eps,
+        vocab_size,
+        rope_theta: rope_freq_base as f64,
+        attention_bias: None,
+        tie_word_embeddings: Some(!has_output_weight),
+        bos_token_id,
+        eos_token_id,
+        use_sliding_window: None,
+        sliding_window: None,
+        max_window_layers: None,
+        hidden_act: candle_nn::Activation::Silu,
+        quant: None,
+    };
+
+    Ok(cfg)
+}
+
+pub fn init_config_tokenizer(
+    econfig: &EngineConfig,
+) -> Result<(Config, TokenizerConfig, Tokenizer)> {
+    let config_path = format!("{}/config.json", econfig.model_path);
+    if Path::new(&config_path).exists() {
+        let mut config: Config =
+            serde_json::from_slice(&std::fs::read(config_path).map_err(candle_core::Error::wrap)?)
+                .map_err(candle_core::Error::wrap)?;
+        config.quant = econfig.quant.clone();
+        let tokenizer_config_path = format!("{}/tokenizer_config.json", econfig.model_path);
+        let config_tokenizer: TokenizerConfig = serde_json::from_slice(
+            &std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap)?,
+        )
+        .map_err(candle_core::Error::wrap)?;
+        let tokenizer_file = if econfig.tokenizer.is_some() {
+            econfig.tokenizer.clone().unwrap()
+        } else {
+            econfig.model_path.clone() + "/tokenizer.json"
+        };
+
+        let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+        Ok((config, config_tokenizer, tokenizer))
+    } else if Path::new(&econfig.model_path).exists() {
+        let GGUFInfo {
+            tokenizer,
+            bos,
+            eos,
+            unk: _,
+            context_length,
+            chat_template,
+        } = {
+            let file = std::fs::File::open(&econfig.model_path.clone()).unwrap();
+            let mut readers = vec![file];
+            let mut readers = readers.iter_mut().collect::<Vec<_>>();
+            let content = crate::utils::gguf_helper::Content::from_readers(&mut readers).unwrap();
+            get_gguf_info(&content).map_err(candle_core::Error::wrap)?
+        };
+
+        let config = {
+            let mut file = std::fs::File::open(econfig.model_path.clone()).unwrap();
+            let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
+            config_from_gguf(&content, &mut file)?
+        };
+        let config_tokenizer = TokenizerConfig {
+            model_max_length: Some(context_length.unwrap_or(config.max_position_embeddings) as f64),
+            add_bos_token: Some(bos.is_some()),
+            add_eos_token: Some(eos.is_some()),
+            chat_template: chat_template.clone(),
+            bos_token: bos,
+            eos_token: eos,
+        };
+
+        Ok((config, config_tokenizer, tokenizer))
+    } else {
+        candle_core::bail!("No valid config found");
+    }
 }

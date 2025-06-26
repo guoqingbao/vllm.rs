@@ -5,7 +5,6 @@ use serde::Deserialize;
 //   "hidden_act": "silu",
 //   "max_window_layers": 36,
 //   "rope_scaling": null,
-
 #[derive(Deserialize, Debug, Clone)]
 pub struct EosToken(
     #[serde(with = "either::serde_untagged")] pub Either<Option<u32>, Option<Vec<u32>>>,
@@ -23,7 +22,7 @@ pub struct Config {
     pub max_model_len: Option<usize>,
     pub intermediate_size: usize,
     pub rms_norm_eps: f64,
-    pub vocab_size: usize,
+    pub vocab_size: Option<usize>,
     pub rope_theta: f64,
     pub attention_bias: Option<bool>,
     pub tie_word_embeddings: Option<bool>,

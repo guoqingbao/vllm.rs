@@ -9,11 +9,11 @@ pub struct Message {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ApplyChatTemplateError {
-    #[error("failed to add template")]
+    #[error("failed to add chat template")]
     AddTemplateError(#[source] minijinja::Error),
-    #[error("failed to get template")]
+    #[error("failed to get chat template")]
     GetTemplateError(#[source] minijinja::Error),
-    #[error("failed to render")]
+    #[error("failed to render chat template")]
     RenderTemplateError(#[source] minijinja::Error),
 }
 
@@ -88,7 +88,7 @@ impl ChatTemplate {
         let template = env
             .get_template("vllm.rs")
             .map_err(ApplyChatTemplateError::GetTemplateError)?;
-        println!("messages {:?}", self.messages);
+        tracing::info!("messages {:?}", self.messages);
         template
             .render(context! {
               messages => self.messages,

@@ -110,14 +110,12 @@ impl BlockManager {
                     .pop_front()
                     .expect("No free blocks available");
                 self.allocate_block(block_id)
+            } else if self.used_block_ids.contains(&block_id) {
+                let b = &mut self.blocks[block_id];
+                b.ref_count += 1;
+                b
             } else {
-                if self.used_block_ids.contains(&block_id) {
-                    let b = &mut self.blocks[block_id];
-                    b.ref_count += 1;
-                    b
-                } else {
-                    self.allocate_block(block_id)
-                }
+                self.allocate_block(block_id)
             };
 
             if block_hash != -1 {

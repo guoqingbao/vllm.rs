@@ -7,7 +7,8 @@ use crate::{
 };
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::models::layers::VarBuilderX;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub enum Model {
@@ -32,7 +33,7 @@ pub struct ModelRunner {
 impl ModelRunner {
     pub fn new(
         model_type: ModelType,
-        vb: VarBuilder,
+        vb: &VarBuilderX,
         econfig: &EngineConfig,
         config: &Config,
         dtype: DType,
@@ -53,7 +54,7 @@ impl ModelRunner {
             }
         };
 
-        let kv_cache = Self::init_kv_cache(&econfig, config, dtype, &device)?;
+        let kv_cache = Self::init_kv_cache(econfig, config, dtype, &device)?;
 
         Ok(Self {
             model,

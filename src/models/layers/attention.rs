@@ -7,8 +7,10 @@ use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
 use candle_core::{DType, Module, Result, Tensor};
 use candle_nn::var_builder::Shard;
-use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::models::layers::VarBuilderX;
 use candle_nn::RmsNorm;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub struct Attention {
@@ -23,11 +25,12 @@ pub struct Attention {
     head_dim: usize,
     attn: PagedAttention,
     rotary_emb: Arc<RotaryEmbedding>,
+    dtype: DType,
 }
 
 impl Attention {
     pub fn new(
-        vb: VarBuilder,
+        vb: VarBuilderX,
         rotary_emb: Arc<RotaryEmbedding>,
         config: &Config,
         dtype: DType,
@@ -38,11 +41,28 @@ impl Attention {
         let head_dim = config.head_dim.unwrap_or(hidden_size / num_heads);
         let sd = Shard::default();
         let attention_bias = config.attention_bias.unwrap_or(true);
+        let key_map: HashMap<&str, &str> = [
+            ("q_proj", "attn_q"),
+            ("k_proj", "attn_k"),
+            ("v_proj", "attn_v"),
+            ("o_proj", "attn_output"),
+            ("q_norm", "attn_q_norm"),
+            ("k_norm", "attn_k_norm"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+        let is_qvar_builder = vb.is_qvar_builder();
+
         let q_proj = linear_b(
             hidden_size,
             num_heads * head_dim,
             attention_bias,
-            vb.pp("q_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["q_proj"])
+            } else {
+                vb.pp("q_proj")
+            },
             sd,
             &config.quant,
             dtype,
@@ -51,7 +71,11 @@ impl Attention {
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
-            vb.pp("k_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["k_proj"])
+            } else {
+                vb.pp("k_proj")
+            },
             sd,
             &config.quant,
             dtype,
@@ -60,7 +84,11 @@ impl Attention {
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
-            vb.pp("v_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["v_proj"])
+            } else {
+                vb.pp("v_proj")
+            },
             sd,
             &config.quant,
             dtype,
@@ -68,20 +96,40 @@ impl Attention {
         let o_proj = linear_no_bias(
             num_heads * head_dim,
             hidden_size,
-            vb.pp("o_proj"),
+            if is_qvar_builder {
+                vb.pp(key_map["o_proj"])
+            } else {
+                vb.pp("o_proj")
+            },
             sd,
             &config.quant,
             dtype,
         )?;
 
-        let q_norm = rms_norm(head_dim, config.rms_norm_eps, vb.pp("q_norm"));
+        let q_norm = rms_norm(
+            head_dim,
+            config.rms_norm_eps,
+            if is_qvar_builder {
+                vb.pp(key_map["q_norm"])
+            } else {
+                vb.pp("q_norm")
+            },
+        );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
         } else {
             None
         };
 
-        let k_norm = rms_norm(head_dim, config.rms_norm_eps, vb.pp("k_norm"));
+        let k_norm = rms_norm(
+            head_dim,
+            config.rms_norm_eps,
+            if is_qvar_builder {
+                vb.pp(key_map["k_norm"])
+            } else {
+                vb.pp("k_norm")
+            },
+        );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
         } else {
@@ -108,6 +156,7 @@ impl Attention {
                 vb.device().clone(),
                 None,
             )?,
+            dtype,
         })
     }
 
@@ -151,6 +200,14 @@ impl Attention {
             (q, k)
         };
 
+        let (q, k, v) = if q.dtype() != self.dtype {
+            let q = q.to_dtype(self.dtype)?;
+            let k = k.to_dtype(self.dtype)?;
+            let v = v.to_dtype(self.dtype)?;
+            (q, k, v)
+        } else {
+            (q, k, v)
+        };
         // Apply rotary embeddings
         let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
 
@@ -168,6 +225,6 @@ impl Attention {
             )?
             .reshape((seq_len, ()))?;
 
-        self.o_proj.forward(&y)
+        self.o_proj.forward(&y.to_dtype(xs.dtype())?)
     }
 }

@@ -59,8 +59,6 @@ pub fn get_attention_casual_mask(
             .unwrap()
             .to_dtype(dtype)
             .ok(),
-        _ => {
-            return None;
-        }
+        _ => None,
     }
 }

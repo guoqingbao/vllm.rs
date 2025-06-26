@@ -58,6 +58,9 @@ struct Args {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
     let args = Args::parse();
     if args.weight_path.is_none() {
         candle_core::bail!("Must provide weight-path (folder of qwen3 safetensors)!");
@@ -100,10 +103,10 @@ fn main() -> Result<()> {
         top_p: None,
     };
 
-    println!("{:?}\n", params);
+    tracing::info!("{:?}\n", params);
 
     if prompts.len() > 1 {
-        println!("Live output muted for more than one prompt!\n");
+        tracing::info!("Live output muted for more than one prompt!\n");
     }
 
     let outputs = engine.generate(&prompts, &params)?;
@@ -112,8 +115,8 @@ fn main() -> Result<()> {
     let mut total_decoded_tokens = 0;
     for (i, (seq_id, decode_starting_time, length, output)) in outputs.iter().enumerate() {
         if prompts.len() > 1 {
-            println!("[{}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
-            println!("[{}] Response: {}\n", seq_id, output);
+            tracing::info!("[seq_id {}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
+            tracing::info!("[seq_id {}] Response: {}\n", seq_id, output);
         }
         total_decoded_tokens += length;
         let duration = (SystemTime::now()
@@ -127,8 +130,10 @@ fn main() -> Result<()> {
         }
     }
 
-    println!(
-        "\n\n{} tokens generated in {:.2} s (decoding thourghput {:.2} tokens/s)",
+    tracing::info!("Generation completed!");
+
+    tracing::warn!(
+        "{} tokens generated in {:.2} s (decoding throughput {:.2} tokens/s)",
         total_decoded_tokens,
         decode_time_taken,
         total_decoded_tokens as f32 / decode_time_taken
