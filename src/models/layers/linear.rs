@@ -118,23 +118,28 @@ pub fn linear(
     } else {
         ws
     };
-    let bs = vb.get((out_dim,), "bias")?;
-    let bs = if shard.world_size > 1 {
-        let dim_size = bs.dim(0)?;
-        let start = shard.rank * (dim_size / shard.world_size);
-        bs.narrow(0, start, dim_size / shard.world_size)?
-            .contiguous()?
+    let bs = vb.get((out_dim,), "bias");
+    let bs = if bs.is_ok() {
+        let bs = bs.unwrap();
+        let bs = if shard.world_size > 1 {
+            let dim_size = bs.dim(0)?;
+            let start = shard.rank * (dim_size / shard.world_size);
+            bs.narrow(0, start, dim_size / shard.world_size)?
+                .contiguous()?
+        } else {
+            bs
+        };
+        let bs = if bs.dtype() != dtype {
+            bs.to_dtype(dtype)?
+        } else {
+            bs
+        };
+        Some(bs)
     } else {
-        bs
+        None
     };
 
-    let bs = if bs.dtype() != dtype {
-        bs.to_dtype(dtype)?
-    } else {
-        bs
-    };
-
-    Ok(Linear::new(ws, Some(bs)))
+    Ok(Linear::new(ws, bs))
 }
 
 pub fn linear_b(

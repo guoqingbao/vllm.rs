@@ -145,6 +145,7 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 
 * ✅ LLaMa (LLaMa2, LLaMa3)
 * ✅ Qwen (Qwen2, Qwen3)
+* ✅ Mistral
 
 Supports both **Safetensor** and **GGUF** formats.
 

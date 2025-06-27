@@ -46,8 +46,22 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
 
-        let (model_type, default_chat_template, is_rope_i) = match config.architectures[0].as_str()
-        {
+        let rope_key_map: HashMap<&str, bool> = [
+            ("Qwen2ForCausalLM", false),
+            ("Qwen3ForCausalLM", false),
+            ("MistralForCausalLM", false),
+            ("LlamaForCausalLM", false),
+            ("qwen2", false),
+            ("qwen3", false),
+            ("llama", true),
+            ("mistral", true),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        let arch = config.architectures[0].as_str();
+        let (model_type, default_chat_template) = match arch {
             "Qwen2ForCausalLM"
             | "Qwen2ForConditionalGeneration"
             | "Qwen3ForCausalLM"
@@ -56,11 +70,12 @@ impl LLMEngine {
             | "qwen3" => (
                 ModelType::Qwen3,
                 "<|im_start|>user\n {} <|im_end|>".to_string(),
-                false,
             ),
             "LlamaForCausalLM"
+            | "MistralForCausalLM"
             | "LlamaForConditionalGeneration"
             | "llama"
+            | "mistral"
             | "llama2"
             | "llama3" => {
                 if let Some(_) = tokenizer
@@ -72,19 +87,22 @@ impl LLMEngine {
                     (
                         ModelType::LLaMa,
                         "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
-                        if config.architectures[0].as_str() == "llama" {
-                            true
-                        } else {
-                            false
-                        },
                     )
                 } else {
                     //llama2
-                    (ModelType::LLaMa, "[INST] {} [/INST]".to_string(), true)
+                    (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
                 }
             }
             _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
         };
+
+        let is_rope_i = if rope_key_map.contains_key(arch) {
+            rope_key_map[arch]
+        } else {
+            false
+        };
+
+        tracing::info!("Use ROPE interleaved {is_rope_i}");
 
         let num_blocks = get_kvcache_blocks(
             econfig.kvcache_mem_gpu.unwrap_or(4096),
@@ -231,7 +249,7 @@ impl LLMEngine {
         let mut decode_time_taken = 0f32;
 
         let tokenizer = self.tokenizer.clone();
-        let mut stream_decoder = tokenizer.decode_stream(true);
+        let mut stream_decoder = tokenizer.decode_stream(false);
         while !self.scheduler.is_finished() {
             let step_output = self.step()?;
             if decode_start_time == 0 {

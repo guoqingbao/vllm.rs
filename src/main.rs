@@ -159,7 +159,7 @@ fn main() -> Result<()> {
                     }
                 }
                 Err(ReadlineError::Eof) => {
-                    std::process::exit(0); // CTRL-D to force exist
+                    std::process::exit(0); // CTRL-D to force exit
                 }
                 Err(e) => {
                     tracing::error!("Error reading input: {e:?}");
