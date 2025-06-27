@@ -19,6 +19,8 @@ A blazing-fast, lightweight, and **pure Rust** implementation of vLLM – no PyT
 
 Make sure you have the [Rust toolchain](https://www.rust-lang.org/tools/install) installed.
 
+Mac OS Platform (Metal) requires installation of [XCode command line tools](https://mac.install.guide/commandlinetools/).
+
 ---
 
 ### 🔥 CUDA (Linux/Windows)
