@@ -40,6 +40,14 @@ cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-
 
 ```
 
+
+## 📽️ Demo Video
+
+Watch a quick demo of how it works! 🎉
+
+<video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
+
+
 ### 🧾✨ Completion Mode
 
 #### GGUF model:
