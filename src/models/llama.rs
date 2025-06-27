@@ -142,7 +142,12 @@ impl LLaMaForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-
+        if is_qvar_builder {
+            reporter
+                .write()
+                .unwrap()
+                .set_progress(config.num_hidden_layers);
+        }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -179,7 +184,9 @@ impl LLaMaForCausalLM {
                 dtype,
             )?;
             layers.push(layer);
-            reporter.write().unwrap().set_progress(i + 1);
+            if !is_qvar_builder {
+                reporter.write().unwrap().set_progress(i + 1);
+            }
         }
 
         let norm = rms_norm(

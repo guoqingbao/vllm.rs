@@ -190,10 +190,24 @@ pub fn init_config_tokenizer(
                 .map_err(candle_core::Error::wrap)?;
         config.quant = econfig.quant.clone();
         let tokenizer_config_path = format!("{}/tokenizer_config.json", econfig.model_path);
-        let config_tokenizer: TokenizerConfig = serde_json::from_slice(
-            &std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap)?,
-        )
-        .map_err(candle_core::Error::wrap)?;
+        let config_tokenizer: TokenizerConfig = {
+            match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
+                Ok(f) => serde_json::from_slice(&f).map_err(candle_core::Error::wrap)?,
+                _ => {
+                    tracing::error!(
+                        "Missing tokenizer_config.json file, chat template may not correct!"
+                    );
+                    TokenizerConfig {
+                        model_max_length: None,
+                        add_bos_token: None,
+                        add_eos_token: None,
+                        chat_template: None,
+                        bos_token: None,
+                        eos_token: None,
+                    }
+                }
+            }
+        };
         let tokenizer_file = if econfig.tokenizer.is_some() {
             econfig.tokenizer.clone().unwrap()
         } else {

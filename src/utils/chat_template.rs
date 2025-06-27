@@ -1,7 +1,7 @@
 use minijinja::{context, Environment};
 use serde::Serialize;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
     pub content: String,
@@ -17,6 +17,7 @@ pub enum ApplyChatTemplateError {
     RenderTemplateError(#[source] minijinja::Error),
 }
 
+#[derive(Clone, Debug)]
 pub struct ChatTemplate {
     system_message: Option<String>,
     chat_template: Option<String>,
@@ -58,8 +59,13 @@ impl ChatTemplate {
         template
     }
 
-    fn append_message(&mut self, role: String, content: String) {
+    pub fn append_message(&mut self, role: String, content: String) {
         self.messages.push(Message { role, content });
+    }
+
+    pub fn set_messages(&mut self, messages: &Vec<Message>) {
+        self.messages.clear();
+        self.messages.extend(messages.clone());
     }
 
     #[allow(dead_code)]
@@ -67,7 +73,7 @@ impl ChatTemplate {
         self.messages.clear()
     }
 
-    pub fn apply_chat_template(&self) -> Result<String, ApplyChatTemplateError> {
+    pub fn apply_chat_template(&self, log: bool) -> Result<String, ApplyChatTemplateError> {
         if self.chat_template.is_none() {
             return Err(ApplyChatTemplateError::GetTemplateError(
                 minijinja::Error::new(minijinja::ErrorKind::CannotDeserialize, "Not found!"),
@@ -88,7 +94,10 @@ impl ChatTemplate {
         let template = env
             .get_template("vllm.rs")
             .map_err(ApplyChatTemplateError::GetTemplateError)?;
-        tracing::info!("messages {:?}", self.messages);
+
+        if log {
+            tracing::info!("messages {:?}", self.messages);
+        }
         template
             .render(context! {
               messages => self.messages,

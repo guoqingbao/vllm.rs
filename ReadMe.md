@@ -54,6 +54,16 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are
 
 ---
 
+### 🤖✨ Interactive Mode
+
+Simply run the program with `--i` parameter:
+
+```bash
+cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+```
+
+---
+
 ### 📚 Batched Requests
 
 Prompts are separated by `|`

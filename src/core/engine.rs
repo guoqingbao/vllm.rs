@@ -3,7 +3,8 @@ use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::models::layers::VarBuilderX;
-use crate::utils::config::{EngineConfig, ModelType, SamplingParams, TokenizerConfig};
+use crate::utils::chat_template::Message;
+use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
 use crate::utils::init_config_tokenizer;
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks, new_device};
 use candle_core::{DType, Result};
@@ -16,8 +17,8 @@ pub struct LLMEngine {
     scheduler: Scheduler,
     tokenizer: Tokenizer,
     econfig: EngineConfig,
-    config_tokenizer: TokenizerConfig,
     default_chat_template: String,
+    template: ChatTemplate,
 }
 
 impl LLMEngine {
@@ -26,6 +27,8 @@ impl LLMEngine {
         tracing::info!("Loading model...");
         let (config, config_tokenizer, tokenizer) = init_config_tokenizer(econfig)?;
         let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
+        tracing::info!("{:?}\n", config);
+
         tracing::info!("{:?}\n", config_tokenizer);
 
         let mut econfig = econfig.clone();
@@ -69,7 +72,11 @@ impl LLMEngine {
                     (
                         ModelType::LLaMa,
                         "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
-                        false,
+                        if config.architectures[0].as_str() == "llama" {
+                            true
+                        } else {
+                            false
+                        },
                     )
                 } else {
                     //llama2
@@ -110,13 +117,23 @@ impl LLMEngine {
         let scheduler = Scheduler::new(&econfig, &config);
         tracing::info!("Model loaded.\n");
 
+        let template = ChatTemplate::new(
+            None,
+            config_tokenizer.chat_template.clone(),
+            config_tokenizer.bos_token.clone(),
+            config_tokenizer.eos_token.clone(),
+            None,
+            true,
+            true,
+        );
+
         Ok(Self {
             model_runner,
             scheduler,
             tokenizer,
             econfig,
-            config_tokenizer,
             default_chat_template,
+            template,
         })
     }
 
@@ -162,30 +179,35 @@ impl LLMEngine {
         Ok(outputs)
     }
 
-    fn apply_chat_template(&self, prompt: &String) -> String {
-        let prompt_template = ChatTemplate::new(
-            None,
-            self.config_tokenizer.chat_template.clone(),
-            self.config_tokenizer.bos_token.clone(),
-            self.config_tokenizer.eos_token.clone(),
-            Some(prompt.clone()),
-            false,
-            false,
-        );
+    pub fn apply_chat_template(&self, messages: &Vec<Message>, log: bool) -> String {
+        let mut prompt_template = self.template.clone();
+        prompt_template.set_messages(messages);
         let prompt_processed = prompt_template
-            .apply_chat_template()
+            .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);
         let prompt = if prompt_processed.is_ok() {
             prompt_processed.unwrap()
         } else {
-            tracing::error!(
-                "Applying Chat Template failed: {:?}, use default template!",
-                prompt_processed
-            );
-            self.default_chat_template.replace("{}", &prompt)
+            if log {
+                tracing::error!(
+                    "Applying Chat Template failed: {:?}, use default template!",
+                    prompt_processed
+                );
+            }
+
+            let mut prompt = "".to_string();
+            for message in messages {
+                if message.role == "user" {
+                    prompt += &self.default_chat_template.replace("{}", &message.content);
+                    prompt += "\n";
+                }
+            }
+            prompt
         };
 
-        tracing::info!("Prompt after applying Chat Template: {}", prompt);
+        if log {
+            tracing::info!("Prompt after applying Chat Template: {}", prompt);
+        }
         prompt
     }
 
@@ -197,10 +219,10 @@ impl LLMEngine {
         let mut params = params.clone();
         if prompts.len() * params.max_tokens > self.econfig.max_num_batched_tokens {
             params.max_tokens = self.econfig.max_num_batched_tokens / prompts.len();
-            tracing::info!("Adjusted max_tokens to {}", params.max_tokens);
+            tracing::debug!("Adjusted max_tokens to {}", params.max_tokens);
         }
         for prompt in prompts {
-            self.add_request(self.apply_chat_template(prompt).as_str(), params.clone())?;
+            self.add_request(prompt, params.clone())?;
         }
 
         let mut decode_start_time = 0;
@@ -209,7 +231,7 @@ impl LLMEngine {
         let mut decode_time_taken = 0f32;
 
         let tokenizer = self.tokenizer.clone();
-        let mut stream_decoder = tokenizer.decode_stream(true);
+        let mut stream_decoder = tokenizer.decode_stream(false);
         while !self.scheduler.is_finished() {
             let step_output = self.step()?;
             if decode_start_time == 0 {

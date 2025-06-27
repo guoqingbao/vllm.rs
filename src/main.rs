@@ -1,7 +1,9 @@
 use candle_core::{DType, Result};
 use clap::Parser;
+use rustyline::{error::ReadlineError, DefaultEditor};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::LLMEngine;
+use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 
 #[derive(Parser, Debug)]
@@ -53,6 +55,9 @@ struct Args {
     // do not use this option if you are using a gguf file
     #[arg(long, default_value = None)]
     quant: Option<String>,
+
+    #[arg(long = "i", default_value_t = false)]
+    interactive: bool,
 }
 
 fn main() -> Result<()> {
@@ -88,9 +93,20 @@ fn main() -> Result<()> {
     );
 
     let mut engine = LLMEngine::new(&econfig, dtype)?;
-    let prompts = match args.prompts {
-        Some(prompts) => prompts.clone(),
-        _ => vec!["How are you today?".to_string()],
+    let prompts = match (args.prompts, args.interactive) {
+        (Some(prompts), false) => prompts.clone(),
+        (None, false) => {
+            println!("No prompts provided, using default prompt.");
+            vec!["How are you today?".to_string()]
+        }
+        (Some(_), true) => {
+            tracing::warn!("Interactive mode does not support predefined prompts, these prompts will be ignored.");
+            vec![]
+        }
+        (None, true) => {
+            tracing::warn!("Enter interactive mode.");
+            vec![]
+        }
     };
 
     let params = SamplingParams {
@@ -103,39 +119,106 @@ fn main() -> Result<()> {
 
     tracing::info!("{:?}\n", params);
 
-    if prompts.len() > 1 {
-        tracing::info!("Live output muted for more than one prompt!\n");
-    }
+    let mut prompt_processed = Vec::new();
 
-    let outputs = engine.generate(&prompts, &params)?;
-
-    let mut decode_time_taken = 0f32;
-    let mut total_decoded_tokens = 0;
-    for (i, (seq_id, decode_starting_time, length, output)) in outputs.iter().enumerate() {
+    if !args.interactive && prompts.len() > 0 {
         if prompts.len() > 1 {
-            tracing::info!("[seq_id {}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
-            tracing::info!("[seq_id {}] Response: {}\n", seq_id, output);
+            tracing::info!("Live output muted for more than one prompt!\n");
         }
-        total_decoded_tokens += length;
-        let duration = (SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as usize
-            - decode_starting_time) as f32
-            / 1000.0; //maximum time costs for decoding
-        if duration > decode_time_taken {
-            decode_time_taken = duration;
+        for prompt in prompts.iter() {
+            let msg = Message {
+                role: "user".to_string(),
+                content: prompt.clone(),
+            };
+            let prompt = engine.apply_chat_template(&vec![msg], true);
+            prompt_processed.push(prompt);
         }
     }
 
-    tracing::info!("Generation completed!");
+    let mut chat_history = Vec::<Message>::new();
+    let mut editor = DefaultEditor::new().expect("Failed to open input");
+    loop {
+        if args.interactive {
+            if chat_history.is_empty() {
+                print!("🤖✨ Enter a new prompt (Press Ctrl+C to exit):\n");
+            } else {
+                print!("🤖✨ Enter another prompt to continue current chat (Press Ctrl+C to start a new chat):\n");
+            }
 
-    tracing::warn!(
-        "{} tokens generated in {:.2} s (decoding throughput {:.2} tokens/s)",
-        total_decoded_tokens,
-        decode_time_taken,
-        total_decoded_tokens as f32 / decode_time_taken
-    );
+            let r = editor.readline("> ");
+            match r {
+                Err(ReadlineError::Interrupted) => {
+                    if chat_history.is_empty() {
+                        std::process::exit(0); // Ctrl+C to exit
+                    } else {
+                        chat_history.clear(); //start a new chat
+                        continue;
+                    }
+                }
+                Err(ReadlineError::Eof) => {
+                    std::process::exit(0); // CTRL-D to force exist
+                }
+                Err(e) => {
+                    tracing::error!("Error reading input: {e:?}");
+                    std::process::exit(1);
+                }
+                Ok(prompt) => {
+                    let msg = Message {
+                        role: "user".to_string(),
+                        content: prompt,
+                    };
+                    chat_history.push(msg.clone());
+                    prompt_processed.clear();
+                    prompt_processed.push(engine.apply_chat_template(&chat_history, false));
+                }
+            }
+        }
+
+        let outputs = engine.generate(&prompt_processed, &params)?;
+        let mut decode_time_taken = 0f32;
+        let mut total_decoded_tokens = 0;
+        for (i, (seq_id, decode_starting_time, length, output)) in outputs.iter().enumerate() {
+            if !args.interactive && prompts.len() > 1 {
+                tracing::info!("[seq_id {}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
+                tracing::info!("[seq_id {}] Response: {}\n", seq_id, output);
+            }
+            total_decoded_tokens += length;
+            let duration = (SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis() as usize
+                - decode_starting_time) as f32
+                / 1000.0; //maximum time costs for decoding
+            if duration > decode_time_taken {
+                decode_time_taken = duration;
+            }
+
+            if args.interactive {
+                let msg = Message {
+                    role: "assistant".to_string(),
+                    content: output.to_string(),
+                };
+                chat_history.push(msg.clone());
+            }
+        }
+
+        println!("");
+
+        if !args.interactive {
+            tracing::info!("Generation completed!");
+        }
+
+        tracing::warn!(
+            "{} tokens generated in {:.2} s (decoding throughput {:.2} tokens/s)",
+            total_decoded_tokens,
+            decode_time_taken,
+            total_decoded_tokens as f32 / decode_time_taken
+        );
+
+        if !args.interactive {
+            break;
+        }
+    }
 
     Ok(())
 }
