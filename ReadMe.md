@@ -1,6 +1,6 @@
-# 🚀 **vLLM.rs** – Minimalist vLLM for Rust
+# 🚀 **vLLM.rs** – A Minimalist vLLM in Rust
 
-A blazing-fast, lightweight, and **pure Rust** implementation of vLLM – no PyTorch, no Python, no nonsense. Just performance. 🦀⚡
+A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 ---
 
@@ -23,9 +23,9 @@ Mac OS Platform (Metal) requires installation of [XCode command line tools](http
 
 ---
 
-### 🔥 CUDA (Linux/Windows)
+### 🔥 CUDA (Linux/Windows) and 🍎 Metal (macOS)
 
-⚠️ First run may take a while (compiling CUDA kernels).
+⚠️ First run may take a while on CUDA (compiling CUDA flash attention kernels).
 
 ---
 
@@ -34,7 +34,7 @@ Mac OS Platform (Metal) requires installation of [XCode command line tools](http
 Simply run the program with `--i` parameter:
 
 ```bash
-# CUDA
+# 🔥 CUDA
 cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
 # 🍎 Metal (macOS)
@@ -43,7 +43,7 @@ cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-
 ```
 
 
-## 📽️ Demo Video
+### 📽️ Demo Video
 
 Watch a quick demo of how it works! 🎉
 
@@ -55,7 +55,7 @@ Watch a quick demo of how it works! 🎉
 #### GGUF model:
 
 ```bash
-# CUDA
+# 🔥 CUDA
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # 🍎 Metal (macOS)
@@ -66,7 +66,7 @@ cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "
 
 ```bash
 
-# CUDA
+# 🔥 CUDA
 cargo run --release --features cuda -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
 # 🍎 Metal (macOS)
@@ -90,7 +90,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Please ta
 
 ---
 
-### 🧪 In-situ Quantization (GGUF format conversion)
+### 🗜️ In-situ Quantization (GGUF format conversion)
 
 Takes a few minutes for quantization.
 
@@ -104,7 +104,7 @@ cargo run --release --features cuda -- --w /path/Qwen3-8B/ --quant q4k --prompts
 
 ---
 
-## 🧵 Sample Output
+## 📄 Sample Output
 
 **Single request** with Qwen3-0.6B (BF16) on macOS/Metal:
 
@@ -122,7 +122,7 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 
 ---
 
-### 🧪 Batched Results (Examples)
+### 📊 Batched Results (Examples)
 
 **LLaMa3.1-8B** BF16 (16 requests on A100):
 
@@ -161,7 +161,7 @@ Supports both **Safetensor** and **GGUF** formats.
 
 ---
 
-## 🧪 Status
+## 📌 Status
 
 > **Project is under active development. Expect changes.**
 
@@ -169,11 +169,11 @@ Supports both **Safetensor** and **GGUF** formats.
 
 ## 🛠️ TODO
 
-* [x] 🧪 Fix batched inference on `Metal`
-* [ ] 🧠 Multi-rank inference
-* [ ] 🧬 More model support
+* [x] 🔧 Fix batched inference on `Metal`
+* [ ] 🛰️ Multi-rank inference
+* [ ] 🧠 More model support
 * [x] 🧾 GGUF support
-* [ ] 🔌 OpenAI-compatible API server (w/ streaming)
+* [ ] 🌐 OpenAI-compatible API server (w/ streaming)
 * [x] ⚡ FlashAttention (CUDA)
 * [ ] ♻️ Continuous batching
 

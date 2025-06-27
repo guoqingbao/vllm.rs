@@ -1,6 +1,6 @@
 use candle_core::{DType, Result};
 use clap::Parser;
-use rustyline::{error::ReadlineError, DefaultEditor};
+use reedline::{DefaultPrompt, Reedline, Signal};
 use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::LLMEngine;
 use vllm_rs::utils::chat_template::Message;
@@ -138,8 +138,10 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut line_editor = Reedline::create();
+    let prompt = DefaultPrompt::default();
+
     let mut chat_history = Vec::<Message>::new();
-    let mut editor = DefaultEditor::new().expect("Failed to open input");
     loop {
         if args.interactive {
             if chat_history.is_empty() {
@@ -148,9 +150,21 @@ fn main() -> Result<()> {
                 print!("🤖✨ Enter another prompt to continue current chat (Press Ctrl+C to start a new chat):\n");
             }
 
-            let r = editor.readline("> ");
-            match r {
-                Err(ReadlineError::Interrupted) => {
+            let sig = line_editor.read_line(&prompt);
+            match sig {
+                Ok(Signal::Success(buffer)) => {
+                    let trimmed = buffer.trim();
+                    if !trimmed.is_empty() {
+                        let msg = Message {
+                            role: "user".to_string(),
+                            content: trimmed.to_string(),
+                        };
+                        chat_history.push(msg.clone());
+                        prompt_processed.clear();
+                        prompt_processed.push(engine.apply_chat_template(&chat_history, false));
+                    }
+                }
+                Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
                     if chat_history.is_empty() {
                         std::process::exit(0); // Ctrl+C to exit
                     } else {
@@ -158,22 +172,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                 }
-                Err(ReadlineError::Eof) => {
-                    std::process::exit(0); // CTRL-D to force exit
-                }
-                Err(e) => {
-                    tracing::error!("Error reading input: {e:?}");
-                    std::process::exit(1);
-                }
-                Ok(prompt) => {
-                    let msg = Message {
-                        role: "user".to_string(),
-                        content: prompt,
-                    };
-                    chat_history.push(msg.clone());
-                    prompt_processed.clear();
-                    prompt_processed.push(engine.apply_chat_template(&chat_history, false));
-                }
+                _ => {}
             }
         }
 

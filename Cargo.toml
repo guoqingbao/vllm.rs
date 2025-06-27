@@ -33,7 +33,7 @@ rayon="1.10.0"
 clap = { version = "4.4.7", features = ["derive"] }
 thiserror = "1.0.58"
 ahash = "0.8.11"
-rustyline = { version = "15.0.0", default-features = false }
+reedline = "0.40.0"
 attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "4f411aa" }
 
 [features]
