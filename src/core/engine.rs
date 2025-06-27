@@ -231,7 +231,7 @@ impl LLMEngine {
         let mut decode_time_taken = 0f32;
 
         let tokenizer = self.tokenizer.clone();
-        let mut stream_decoder = tokenizer.decode_stream(false);
+        let mut stream_decoder = tokenizer.decode_stream(true);
         while !self.scheduler.is_finished() {
             let step_output = self.step()?;
             if decode_start_time == 0 {

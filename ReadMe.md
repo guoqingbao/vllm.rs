@@ -10,6 +10,7 @@ A blazing-fast, lightweight, and **pure Rust** implementation of vLLM – no PyT
 * 🚀 **High Performance** – On par with the original vLLM (PyTorch + ATen)
 * 🧠 **Minimalist Core** – Core logic in **< 1000 lines** of clean Rust code
 * 💻 **Cross-Platform** – Works on both **CUDA** (Linux/Windows) and **Metal** (macOS)
+* 🤖 **Built-in Chatbot** – Built-in Rust Chatbot work with **CUDA** and **Metal**
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
@@ -24,34 +25,6 @@ Make sure you have the [Rust toolchain](https://www.rust-lang.org/tools/install)
 
 ⚠️ First run may take a while (compiling CUDA kernels).
 
-#### GGUF model:
-
-```bash
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-```
-
-#### Safetensor model:
-
-```bash
-cargo run --release --features cuda -- --w /path/Qwen3-8B/ --prompts "How are you today?"
-```
-
----
-
-### 🍎 Metal (macOS)
-
-#### GGUF model:
-
-```bash
-cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-```
-
-#### Safetensor model:
-
-```bash
-cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today?"
-```
-
 ---
 
 ### 🤖✨ Interactive Mode
@@ -59,7 +32,36 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are
 Simply run the program with `--i` parameter:
 
 ```bash
+# CUDA
 cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+# 🍎 Metal (macOS)
+cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+```
+
+### 🧾✨ Completion Mode
+
+#### GGUF model:
+
+```bash
+# CUDA
+cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+
+# 🍎 Metal (macOS)
+cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+```
+
+#### Safetensor model:
+
+```bash
+
+# CUDA
+cargo run --release --features cuda -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+
+# 🍎 Metal (macOS)
+cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+
 ```
 
 ---
@@ -132,8 +134,9 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 | ----------- | ------------------------------------------------- | -- |
 | `--w`       | Path to model folder (Safetensor) or file (GGUF)  |    |
 | `--d`       | Device ID (e.g. `--d "0"`)                        |    |
-| `--kvmem`   | KV cache size in MB (default: 4096)               |    |
-| `--prompts` | Input prompts separated by \`                     | \` |
+| `--kvmem`   | KV cache size in MB (default: `4096`)               |    |
+| `--max`   | Maximum number of tokens in each chat response (default: `4096`, up to `max_model_len`) |    |
+| `--prompts` | Input prompts separated by "\|" |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32` |    |
 
 ---

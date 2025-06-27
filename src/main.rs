@@ -58,6 +58,9 @@ struct Args {
 
     #[arg(long = "i", default_value_t = false)]
     interactive: bool,
+
+    #[arg(long = "max", default_value_t = 4096)]
+    max_tokens: usize,
 }
 
 fn main() -> Result<()> {
@@ -111,7 +114,7 @@ fn main() -> Result<()> {
 
     let params = SamplingParams {
         temperature: 0.6,
-        max_tokens: 2048,
+        max_tokens: args.max_tokens,
         ignore_eos: false,
         top_k: None,
         top_p: None,
