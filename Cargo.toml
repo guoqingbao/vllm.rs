@@ -34,7 +34,7 @@ clap = { version = "4.4.7", features = ["derive"] }
 thiserror = "1.0.58"
 ahash = "0.8.11"
 reedline = "0.40.0"
-attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "4f411aa" }
+attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "0cd32ab" }
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "attention-rs/cuda"]
