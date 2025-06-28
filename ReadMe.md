@@ -31,13 +31,13 @@ Mac OS Platform (Metal) requires installation of [XCode command line tools](http
 
 ### 🤖✨ Interactive Mode
 
-Simply run the program with `--i` parameter:
+Simply run the program with `--i` and `--w` parameter:
 
 ```bash
-# 🔥 CUDA
+# 🔥 CUDA (for short context)
 cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
-# 🔥 CUDA with 🚀 Flash Attention (build takes longer time)
+# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
 cargo run --release --features cuda,flash-attn -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
 # 🍎 Metal (macOS)
@@ -58,10 +58,10 @@ Watch a quick demo of how it works! 🎉
 #### GGUF model:
 
 ```bash
-# 🔥 CUDA
+# 🔥 CUDA (for short context)
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
-# 🔥 CUDA with 🚀 Flash Attention (build takes longer time)
+# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
 cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # 🍎 Metal (macOS)
@@ -73,7 +73,7 @@ cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "
 ```bash
 
 # 🔥 CUDA
-cargo run --release --features cuda -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
 # 🍎 Metal (macOS)
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
@@ -88,7 +88,7 @@ Prompts are separated by `|`
 
 ```bash
 # GGUF model
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Please talk about China. | Please talk about America."
+cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Please talk about China. | Please talk about America."
 
 # Safetensor model
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Please talk about China. | Please talk about America."
@@ -105,7 +105,7 @@ Takes a few minutes for quantization.
 cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
 
 # CUDA
-cargo run --release --features cuda -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
 ```
 
 ---
