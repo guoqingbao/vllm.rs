@@ -31,10 +31,12 @@ impl Scheduler {
         }
     }
 
-    pub fn add(&mut self, mut seq: Sequence) {
+    pub fn add(&mut self, mut seq: Sequence) -> usize {
         seq.id = self.next_seq_id;
+        let id = seq.id;
         self.next_seq_id += 1;
         self.waiting.push_back(seq);
+        id
     }
 
     pub fn is_finished(&self) -> bool {

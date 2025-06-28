@@ -25,7 +25,7 @@ Mac OS Platform (Metal) requires installation of [XCode command line tools](http
 
 ### 🔥 CUDA (Linux/Windows) and 🍎 Metal (macOS)
 
-⚠️ First run may take a while on CUDA (compiling CUDA flash attention kernels).
+⚠️ First run may take a while on CUDA (if flash attention enabled).
 
 ---
 
@@ -36,6 +36,9 @@ Simply run the program with `--i` parameter:
 ```bash
 # 🔥 CUDA
 cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+# 🔥 CUDA with 🚀 Flash Attention (build takes longer time)
+cargo run --release --features cuda,flash-attn -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
 # 🍎 Metal (macOS)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -57,6 +60,9 @@ Watch a quick demo of how it works! 🎉
 ```bash
 # 🔥 CUDA
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+
+# 🔥 CUDA with 🚀 Flash Attention (build takes longer time)
+cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # 🍎 Metal (macOS)
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"

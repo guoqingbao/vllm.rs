@@ -2,7 +2,7 @@ use candle_core::{DType, Result};
 use clap::Parser;
 use reedline::{DefaultPrompt, Reedline, Signal};
 use std::time::{SystemTime, UNIX_EPOCH};
-use vllm_rs::core::engine::LLMEngine;
+use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 
@@ -126,7 +126,7 @@ fn main() -> Result<()> {
 
     if !args.interactive && prompts.len() > 0 {
         if prompts.len() > 1 {
-            tracing::info!("Live output muted for more than one prompt!\n");
+            tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
             let msg = Message {
@@ -176,20 +176,43 @@ fn main() -> Result<()> {
             }
         }
 
+        let prompt_start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
         let outputs = engine.generate(&prompt_processed, &params)?;
         let mut decode_time_taken = 0f32;
+        let mut prompt_time_taken = 0f32;
         let mut total_decoded_tokens = 0;
-        for (i, (seq_id, decode_starting_time, length, output)) in outputs.iter().enumerate() {
+        let mut total_prompt_tokens = 0;
+
+        for (
+            i,
+            GenerationOutput {
+                seq_id,
+                prompt_length,
+                decode_start_time,
+                decoded_length,
+                decode_output,
+            },
+        ) in outputs.iter().enumerate()
+        {
             if !args.interactive && prompts.len() > 1 {
-                tracing::info!("[seq_id {}] Prompt {}: {}", seq_id, i + 1, prompts[i]);
-                tracing::info!("[seq_id {}] Response: {}\n", seq_id, output);
+                tracing::info!("[seq_id {}] 📚✨ Prompt {}: {}", seq_id, i + 1, prompts[i]);
+                tracing::info!("[seq_id {}] 📄✨ Response: {}\n", seq_id, decode_output);
             }
-            total_decoded_tokens += length;
+            total_prompt_tokens += prompt_length;
+            total_decoded_tokens += decoded_length;
+            let duration_prompt = (decode_start_time - prompt_start_time) as f32 / 1000.0; //maximum time costs for prompt
+            if duration_prompt > prompt_time_taken {
+                prompt_time_taken = duration_prompt;
+            }
+
             let duration = (SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_millis() as usize
-                - decode_starting_time) as f32
+                - decode_start_time) as f32
                 / 1000.0; //maximum time costs for decoding
             if duration > decode_time_taken {
                 decode_time_taken = duration;
@@ -198,7 +221,7 @@ fn main() -> Result<()> {
             if args.interactive {
                 let msg = Message {
                     role: "assistant".to_string(),
-                    content: output.to_string(),
+                    content: decode_output.to_string(),
                 };
                 chat_history.push(msg.clone());
             }
@@ -209,6 +232,13 @@ fn main() -> Result<()> {
         if !args.interactive {
             tracing::info!("Generation completed!");
         }
+
+        tracing::warn!(
+            "{} prompt tokens processed in {:.2} s (prefill throughput {:.2} tokens/s)",
+            total_prompt_tokens,
+            prompt_time_taken,
+            total_prompt_tokens as f32 / prompt_time_taken
+        );
 
         tracing::warn!(
             "{} tokens generated in {:.2} s (decoding throughput {:.2} tokens/s)",

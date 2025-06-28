@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Tensor};
 
-#[cfg(feature = "cuda")] // If CUDA is enabled, we don't implement this function.
-                         // The actual implementation would be embedded in the flash attention kernel.
+#[cfg(feature = "flash-attn")] // If flash-attn or metal is enabled, we don't implement this function.
+                               // The actual implementation would be embedded in the flash or metal attention kernel.
 pub fn get_attention_casual_mask(
     _: &Device,
     _: DType,
@@ -13,7 +13,7 @@ pub fn get_attention_casual_mask(
     None
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(feature = "flash-attn"))]
 fn get_casual_mask_internal(
     device: &Device,
     dtype: DType,
@@ -50,7 +50,7 @@ fn get_casual_mask_internal(
         .to_dtype(dtype)
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(feature = "flash-attn"))]
 pub fn get_attention_casual_mask(
     device: &Device,
     dtype: DType,

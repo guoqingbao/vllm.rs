@@ -2,6 +2,7 @@
 use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
+use super::GenerationOutput;
 use crate::models::layers::VarBuilderX;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
@@ -155,12 +156,13 @@ impl LLMEngine {
         })
     }
 
-    pub fn add_request(&mut self, prompt: &str, params: SamplingParams) -> Result<()> {
+    pub fn add_request(&mut self, prompt: &str, params: SamplingParams) -> Result<(usize, usize)> {
         let tokens = self.tokenizer.encode(prompt, true).expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
+        let length = token_ids.len();
         let seq = Sequence::new(token_ids, self.econfig.block_size, params);
-        self.scheduler.add(seq);
-        Ok(())
+        let id = self.scheduler.add(seq);
+        Ok((id, length))
     }
 
     pub fn step(&mut self) -> Result<Vec<(usize, Either<u32, Vec<u32>>)>> {
@@ -224,7 +226,10 @@ impl LLMEngine {
         };
 
         if log {
-            tracing::info!("Prompt after applying Chat Template: {}", prompt);
+            tracing::info!(
+                "Prompt after applying Chat Template: {}",
+                prompt.replace("\n", "")
+            );
         }
         prompt
     }
@@ -233,14 +238,16 @@ impl LLMEngine {
         &mut self,
         prompts: &Vec<String>,
         params: &SamplingParams,
-    ) -> Result<Vec<(usize, usize, usize, String)>> {
+    ) -> Result<Vec<GenerationOutput>> {
         let mut params = params.clone();
         if prompts.len() * params.max_tokens > self.econfig.max_num_batched_tokens {
             params.max_tokens = self.econfig.max_num_batched_tokens / prompts.len();
             tracing::debug!("Adjusted max_tokens to {}", params.max_tokens);
         }
+        let mut map_prompt_length = HashMap::<usize, usize>::new();
         for prompt in prompts {
-            self.add_request(prompt, params.clone())?;
+            let (seq_id, length) = self.add_request(prompt, params.clone())?;
+            map_prompt_length.insert(seq_id, length);
         }
 
         let mut decode_start_time = 0;
@@ -258,9 +265,11 @@ impl LLMEngine {
                     .expect("Time went backwards")
                     .as_millis() as usize;
             }
+            let mut vec_ids = Vec::new();
             for (seq_id, token_ids) in step_output {
                 match token_ids {
                     Either::Left(token_id) => {
+                        total_decoded_tokens += 1;
                         if prompts.len() == 1 {
                             if let Ok(Some(output)) = stream_decoder.step(token_id) {
                                 print!("{}", output);
@@ -270,13 +279,20 @@ impl LLMEngine {
                         }
                     }
                     Either::Right(ids) => {
+                        if prompts.len() > 1 {
+                            tracing::info!(
+                                "[seq_id {}] finished ({} tokens generated)",
+                                seq_id,
+                                ids.len()
+                            );
+                        }
                         outputs.insert(seq_id, ids);
                     }
                 }
+                vec_ids.push(seq_id);
             }
 
-            total_decoded_tokens += prompts.len();
-            if prompts.len() > 1 && (total_decoded_tokens / prompts.len()) % 100 == 0 {
+            if prompts.len() > 1 && total_decoded_tokens % 100 == 0 {
                 let duration = (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("Time went backwards")
@@ -288,8 +304,8 @@ impl LLMEngine {
                 }
 
                 tracing::info!(
-                    "[{} requests] {} tokens generated in {:.2} s (avg decoding throughput {:.2} tokens/s)",
-                    prompts.len(),
+                    "[{} request(s)] {} tokens generated in {:.2} s (avg decoding throughput {:.2} tokens/s)",
+                    vec_ids.len(),
                     total_decoded_tokens,
                     decode_time_taken,
                     total_decoded_tokens as f32 / decode_time_taken
@@ -302,11 +318,18 @@ impl LLMEngine {
 
         let mut results = vec![];
         for (seq_id, token_ids) in sorted_outputs {
-            let output = self
+            let decode_output = self
                 .tokenizer
                 .decode(&token_ids, true)
                 .expect("unable to decode!");
-            results.push((seq_id, decode_start_time, token_ids.len(), output));
+            let output = GenerationOutput {
+                seq_id,
+                prompt_length: map_prompt_length[&seq_id],
+                decode_start_time,
+                decoded_length: token_ids.len(),
+                decode_output,
+            };
+            results.push(output);
         }
 
         Ok(results)
