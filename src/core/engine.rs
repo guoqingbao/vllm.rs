@@ -3,6 +3,7 @@ use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use super::GenerationOutput;
+use crate::log_info;
 use crate::models::layers::VarBuilderX;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
@@ -13,6 +14,7 @@ use either::Either;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
+
 pub struct LLMEngine {
     model_runner: ModelRunner,
     scheduler: Scheduler,
@@ -25,12 +27,12 @@ pub struct LLMEngine {
 impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Self> {
         let device = new_device(econfig.device_id.unwrap_or(0))?;
-        tracing::info!("Loading model...");
+        log_info!("Loading model...");
         let (config, config_tokenizer, tokenizer) = init_config_tokenizer(econfig)?;
         let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
-        tracing::info!("{:?}\n", config);
+        log_info!("{:?}\n", config);
 
-        tracing::info!("{:?}\n", config_tokenizer);
+        log_info!("{:?}\n", config_tokenizer);
 
         let mut econfig = econfig.clone();
         econfig.max_model_len = std::cmp::min(
@@ -103,7 +105,7 @@ impl LLMEngine {
             false
         };
 
-        tracing::info!("Use ROPE interleaved {is_rope_i}");
+        log_info!("Use ROPE interleaved {is_rope_i}");
 
         let num_blocks = get_kvcache_blocks(
             econfig.kvcache_mem_gpu.unwrap_or(4096),
@@ -115,9 +117,9 @@ impl LLMEngine {
 
         econfig.num_blocks = num_blocks;
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
-        tracing::info!("{:?}", econfig);
+        log_info!("{:?}", econfig);
 
-        tracing::info!(
+        log_info!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",
             econfig.max_num_batched_tokens,
             num_blocks,
@@ -134,7 +136,7 @@ impl LLMEngine {
             device.clone(),
         )?;
         let scheduler = Scheduler::new(&econfig, &config);
-        tracing::info!("Model loaded.\n");
+        log_info!("Model loaded.\n");
 
         let template = ChatTemplate::new(
             None,
@@ -156,7 +158,7 @@ impl LLMEngine {
         })
     }
 
-    pub fn add_request(&mut self, prompt: &str, params: SamplingParams) -> Result<(usize, usize)> {
+    pub fn add_request(&mut self, params: SamplingParams, prompt: &str) -> Result<(usize, usize)> {
         let tokens = self.tokenizer.encode(prompt, true).expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
@@ -226,7 +228,7 @@ impl LLMEngine {
         };
 
         if log {
-            tracing::info!(
+            log_info!(
                 "Prompt after applying Chat Template: {}",
                 prompt.replace("\n", "")
             );
@@ -236,17 +238,17 @@ impl LLMEngine {
 
     pub fn generate(
         &mut self,
-        prompts: &Vec<String>,
         params: &SamplingParams,
+        prompts: &Vec<String>,
     ) -> Result<Vec<GenerationOutput>> {
         let mut params = params.clone();
         if prompts.len() * params.max_tokens > self.econfig.max_num_batched_tokens {
             params.max_tokens = self.econfig.max_num_batched_tokens / prompts.len();
-            tracing::debug!("Adjusted max_tokens to {}", params.max_tokens);
+            log_info!("Adjusted max_tokens to {}", params.max_tokens);
         }
         let mut map_prompt_length = HashMap::<usize, usize>::new();
         for prompt in prompts {
-            let (seq_id, length) = self.add_request(prompt, params.clone())?;
+            let (seq_id, length) = self.add_request(params.clone(), prompt)?;
             map_prompt_length.insert(seq_id, length);
         }
 
@@ -280,7 +282,7 @@ impl LLMEngine {
                     }
                     Either::Right(ids) => {
                         if prompts.len() > 1 {
-                            tracing::info!(
+                            log_info!(
                                 "[seq_id {}] finished ({} tokens generated)",
                                 seq_id,
                                 ids.len()
@@ -292,7 +294,7 @@ impl LLMEngine {
                 vec_ids.push(seq_id);
             }
 
-            if prompts.len() > 1 && total_decoded_tokens % 100 == 0 {
+            if prompts.len() > 1 && total_decoded_tokens % (prompts.len() * 50) == 0 {
                 let duration = (SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("Time went backwards")
@@ -303,7 +305,7 @@ impl LLMEngine {
                     decode_time_taken = duration;
                 }
 
-                tracing::info!(
+                log_info!(
                     "[{} request(s)] {} tokens generated in {:.2} s (avg decoding throughput {:.2} tokens/s)",
                     vec_ids.len(),
                     total_decoded_tokens,

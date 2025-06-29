@@ -6,11 +6,12 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 ## ✨ Key Features
 
-* 🔧 **Pure Rust** – Absolutely **no** PyTorch or Python required
+* 🔧 **Pure Rust** – Absolutely **no** PyTorch required
 * 🚀 **High Performance** – On par with the original vLLM (PyTorch + ATen)
 * 🧠 **Minimalist Core** – Core logic in **< 1000 lines** of clean Rust code
 * 💻 **Cross-Platform** – Works on both **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot** – Built-in Rust Chatbot work with **CUDA** and **Metal**
+* 🤖 **Python PyO3 interface** – Lightweight Python interface for chat completion
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
@@ -21,6 +22,18 @@ Make sure you have the [Rust toolchain](https://www.rust-lang.org/tools/install)
 
 Mac OS Platform (Metal) requires installation of [XCode command line tools](https://mac.install.guide/commandlinetools/).
 
+Python package build requires [Maturin](https://github.com/PyO3/maturin/).
+
+**Quick Usage:**
+
+```python
+cfg = EngineConfig(model_path = "/path/Qwen3-8B-Q2_K.gguf", ...)
+engine = Engine(cfg, "bf16")
+params = SamplingParams(temperature = 0.6, max_tokens = 256)
+prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+outputs = engine.generate(params, [prompt])
+print(outputs)
+```
 ---
 
 ### 🔥 CUDA (Linux/Windows) and 🍎 Metal (macOS)
@@ -29,7 +42,7 @@ Mac OS Platform (Metal) requires installation of [XCode command line tools](http
 
 ---
 
-### 🤖✨ Interactive Mode
+### 🤖✨ Interactive Mode (Pure Rust)
 
 Simply run the program with `--i` and `--w` parameter:
 
@@ -43,6 +56,31 @@ cargo run --release --features cuda,flash-attn -- --i --w /path/DeepSeek-R1-Dist
 # 🍎 Metal (macOS)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
+```
+
+### 🤖✨ Interactive Mode (Python Interface)
+
+Install Maturin and build Python package
+
+Use `-i` in Maturin build for seleting Python version, e.g., `-i 3.9`
+
+```bash
+# 🔥 CUDA (for short context)
+maturin build --release --features cuda,python
+
+# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
+maturin build --release --features cuda,flash-attn,python
+
+# 🍎 Metal (macOS)
+maturin build --release --features metal,python
+```
+
+Install Python package and run the demo
+
+```bash
+python3 -m pip install target/wheels/vllm_rs-0.1.0*.whl
+python3 example/chat.py --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+python3 example/chat.py --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf --prompts "How are you? | Who are you?"
 ```
 
 

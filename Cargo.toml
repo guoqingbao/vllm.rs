@@ -34,9 +34,16 @@ clap = { version = "4.4.7", features = ["derive"] }
 thiserror = "1.0.58"
 ahash = "0.8.11"
 reedline = "0.40.0"
+pyo3 = { version = "0.25.1", features = ["extension-module"], optional = true }
 attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "0cd32ab" }
+
+[lib]
+name = "vllm_rs"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "attention-rs/cuda"]
 flash-attn = ["attention-rs/flash-attn"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "attention-rs/metal"]
+python = ["pyo3"]

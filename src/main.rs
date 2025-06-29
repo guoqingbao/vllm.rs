@@ -129,10 +129,7 @@ fn main() -> Result<()> {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
-            let msg = Message {
-                role: "user".to_string(),
-                content: prompt.clone(),
-            };
+            let msg = Message::new("user".to_string(), prompt.clone());
             let prompt = engine.apply_chat_template(&vec![msg], true);
             prompt_processed.push(prompt);
         }
@@ -155,10 +152,7 @@ fn main() -> Result<()> {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
                     if !trimmed.is_empty() {
-                        let msg = Message {
-                            role: "user".to_string(),
-                            content: trimmed.to_string(),
-                        };
+                        let msg = Message::new("user".to_string(), trimmed.to_string());
                         chat_history.push(msg.clone());
                         prompt_processed.clear();
                         prompt_processed.push(engine.apply_chat_template(&chat_history, false));
@@ -166,8 +160,10 @@ fn main() -> Result<()> {
                 }
                 Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
                     if chat_history.is_empty() {
+                        print!("\n👋 Exiting.");
                         std::process::exit(0); // Ctrl+C to exit
                     } else {
+                        print!("\n🌀 Chat history cleared. Start a new conversation.");
                         chat_history.clear(); //start a new chat
                         continue;
                     }
@@ -180,7 +176,7 @@ fn main() -> Result<()> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis() as usize;
-        let outputs = engine.generate(&prompt_processed, &params)?;
+        let outputs = engine.generate(&params, &prompt_processed)?;
         let mut decode_time_taken = 0f32;
         let mut prompt_time_taken = 0f32;
         let mut total_decoded_tokens = 0;
@@ -219,10 +215,7 @@ fn main() -> Result<()> {
             }
 
             if args.interactive {
-                let msg = Message {
-                    role: "assistant".to_string(),
-                    content: decode_output.to_string(),
-                };
+                let msg = Message::new("assistant".to_string(), decode_output.to_string());
                 chat_history.push(msg.clone());
             }
         }

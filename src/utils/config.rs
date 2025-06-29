@@ -1,10 +1,8 @@
 // src/utils/config.rs
 use either::Either;
+#[cfg(feature = "python")]
+use pyo3::pyclass;
 use serde::Deserialize;
-
-//   "hidden_act": "silu",
-//   "max_window_layers": 36,
-//   "rope_scaling": null,
 #[derive(Deserialize, Debug, Clone)]
 pub struct EosToken(
     #[serde(with = "either::serde_untagged")] pub Either<Option<u32>, Option<Vec<u32>>>,
@@ -35,6 +33,7 @@ pub struct Config {
     pub quant: Option<String>,
 }
 
+#[cfg_attr(feature = "python", pyclass)]
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub model_path: String,
@@ -51,6 +50,7 @@ pub struct EngineConfig {
     pub device_id: Option<usize>,
 }
 
+#[cfg(not(feature = "python"))]
 impl EngineConfig {
     pub fn new(
         model_path: String,
@@ -92,6 +92,7 @@ pub struct TokenizerConfig {
     pub eos_token: Option<String>,
 }
 
+#[cfg_attr(feature = "python", pyclass)]
 #[derive(Debug, Clone)]
 pub struct SamplingParams {
     pub temperature: f32,
@@ -101,6 +102,7 @@ pub struct SamplingParams {
     pub top_p: Option<f32>,
 }
 
+#[cfg(not(feature = "python"))]
 impl SamplingParams {
     pub fn new(
         temperature: f32,

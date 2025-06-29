@@ -1,10 +1,30 @@
 use minijinja::{context, Environment};
+#[cfg(feature = "python")]
+use pyo3::pyclass;
 use serde::Serialize;
 
+#[cfg(feature = "python")]
+#[pyclass]
+#[derive(Serialize, Clone, Debug)]
+pub struct Message {
+    #[pyo3(get)]
+    pub role: String,
+    #[pyo3(get)]
+    pub content: String,
+}
+
+#[cfg(not(feature = "python"))]
 #[derive(Serialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
     pub content: String,
+}
+
+#[cfg(not(feature = "python"))]
+impl Message {
+    pub fn new(role: String, content: String) -> Self {
+        Message { role, content }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
