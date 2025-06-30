@@ -142,7 +142,7 @@ def main():
         if future is not None:
             future.cancel()
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=False)
         
 if __name__ == "__main__":
     main()

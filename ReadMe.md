@@ -62,6 +62,11 @@ cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-
 
 Install Maturin and build Python package
 
+```bash
+pip install maturin
+pip install maturin[patchelf] #Linux/Windows
+```
+
 Use `-i` in Maturin build for seleting Python version, e.g., `-i 3.9`
 
 ```bash
