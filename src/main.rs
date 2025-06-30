@@ -87,8 +87,8 @@ fn main() -> Result<()> {
 
     let econfig = EngineConfig::new(
         args.weight_path.unwrap(),
-        args.block_size,
-        args.max_num_seqs,
+        Some(args.block_size),
+        Some(args.max_num_seqs),
         args.quant.clone(),
         Some(1),
         Some(args.kvcache_mem_gpu),
@@ -112,13 +112,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let params = SamplingParams {
-        temperature: 0.6,
-        max_tokens: args.max_tokens,
-        ignore_eos: false,
-        top_k: None,
-        top_p: None,
-    };
+    let params = SamplingParams::default();
 
     tracing::info!("{:?}\n", params);
 

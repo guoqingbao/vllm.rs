@@ -1,6 +1,8 @@
 from dataclasses import dataclass
-from typing import Iterator, Literal, Mapping, Optional, Callable
+from typing import Iterator, Tuple, Union, List, Literal, Mapping, Optional, Callable
 from enum import Enum
+from collections.abc import AsyncGenerator
+from typing import Any
 
 @dataclass
 class DType(Enum):
@@ -21,11 +23,11 @@ class EngineConfig:
     model_path: str
     tokenizer: Optional[str]
     tokenizer_config: Optional[str]
-    num_blocks: int
-    block_size: int
-    max_num_seqs: int
-    max_num_batched_tokens: int
-    pumax_model_len: int
+    num_blocks: Optional[int]
+    block_size: Optional[int]
+    max_num_seqs: Optional[int]
+    max_num_batched_tokens: Optional[int]
+    max_model_len: Optional[int]
     quant: Optional[str]
     num_shards: Optional[int]
     kvcache_mem_gpu: Optional[int]
@@ -33,9 +35,9 @@ class EngineConfig:
 
 @dataclass
 class SamplingParams:
-    temperature: float
-    max_tokens: int
-    ignore_eos: bool
+    temperature: Optional[float]
+    max_tokens: Optional[int]
+    ignore_eos: Optional[bool]
     top_k: Optional[int]
     top_p: Optional[float]
 
@@ -47,7 +49,12 @@ class Message:
 @dataclass
 class StepOutput(Enum):
     Token: int
-    Tokens: list[int]
+    Tokens: List[int]
+
+class EngineStream:
+    def cancel(self): ...
+    def __iter__(self) -> Iterator[List[Tuple[int, Union[str, int]]]]: ...
+    def __next__(self) -> List[Tuple[int, Union[str, int]]]: ...
 
 class Engine:
     def __init__(econfig: EngineConfig, dtype: DType) -> Engine:
@@ -55,29 +62,25 @@ class Engine:
         Create a vllm.rs engine with given engine config and dtype ("f16", "bf16", and "f32")
         """
 
-    def add_request(
-        self,
-        params: SamplingParams,
-        prompt: str,
-    ) -> tuple[int, int]:
-        """
-        Add request to the engine, it will return the sequence id and the length of the prompt (number of tokens)
-        """
-
-    def step(self) -> list[tuple[int, StepOutput]]:
-        """
-        After add requests, a generation step will produce a token (sequece_id, token_id) for a request (or all generated tokens (sequence_id, [token_id]) if finished)
-        """
-
-    def apply_chat_template(self, messages: list[Message], log: bool) -> str:
+    def apply_chat_template(self, messages: List[Message], log: bool) -> str:
         """
         Apply chat template to given messages
         """
 
-    def generate(self,
+    def generate_sync(self,
         params: SamplingParams,
-        prompts: list[str],
-    ) -> list[GenerationOutput]:
+        prompts: List[str],
+    ) -> List[GenerationOutput]:
         """
         Chat completion using given prompts and sampling parameters
+        """
+    def generate_stream(
+        self,
+        params: SamplingParams,
+        prompt: str,
+    ) -> EngineStream:
+        """
+        Chat streaming using given prompts and sampling parameters.
+
+        Yields: list of (request_id, token_or_tokens) tuples
         """

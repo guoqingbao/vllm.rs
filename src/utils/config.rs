@@ -54,8 +54,8 @@ pub struct EngineConfig {
 impl EngineConfig {
     pub fn new(
         model_path: String,
-        block_size: usize,
-        max_num_seqs: usize,
+        block_size: Option<usize>,
+        max_num_seqs: Option<usize>,
         quant: Option<String>,
         num_shards: Option<usize>,
         kvcache_mem_gpu: Option<usize>,
@@ -70,8 +70,8 @@ impl EngineConfig {
             tokenizer: None,
             tokenizer_config: None,
             num_blocks: 128, //placeholder
-            block_size,
-            max_num_seqs,
+            block_size: block_size.unwrap_or(32),
+            max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             max_model_len: 32768,          //placeholder
             quant,
@@ -105,16 +105,16 @@ pub struct SamplingParams {
 #[cfg(not(feature = "python"))]
 impl SamplingParams {
     pub fn new(
-        temperature: f32,
-        max_tokens: usize,
-        ignore_eos: bool,
+        temperature: Option<f32>,
+        max_tokens: Option<usize>,
+        ignore_eos: Option<bool>,
         top_k: Option<usize>,
         top_p: Option<f32>,
     ) -> Self {
         Self {
-            temperature,
-            max_tokens,
-            ignore_eos,
+            temperature: temperature.unwrap_or(1.0),
+            max_tokens: max_tokens.unwrap_or(4096),
+            ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
         }
@@ -125,7 +125,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: 1.0,
-            max_tokens: 100,
+            max_tokens: 4096,
             ignore_eos: false,
             top_k: None,
             top_p: None,

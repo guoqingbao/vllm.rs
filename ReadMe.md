@@ -6,11 +6,11 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 ## ✨ Key Features
 
-* 🔧 **Pure Rust** – Absolutely **no** PyTorch required
+* 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
 * 🚀 **High Performance** – On par with the original vLLM (PyTorch + ATen)
 * 🧠 **Minimalist Core** – Core logic in **< 1000 lines** of clean Rust code
 * 💻 **Cross-Platform** – Works on both **CUDA** (Linux/Windows) and **Metal** (macOS)
-* 🤖 **Built-in Chatbot** – Built-in Rust Chatbot work with **CUDA** and **Metal**
+* 🤖 **Built-in Chatbot/API Server** – Built-in Rust Chatbot/API Server on **CUDA** and **Metal**
 * 🤖 **Python PyO3 interface** – Lightweight Python interface for chat completion
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
@@ -31,8 +31,13 @@ cfg = EngineConfig(model_path = "/path/Qwen3-8B-Q2_K.gguf", ...)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature = 0.6, max_tokens = 256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-outputs = engine.generate(params, [prompt])
+# sync
+outputs = engine.generate_sync(params, [prompt])
 print(outputs)
+# streaming
+stream = engine.generate_stream(params, prompt)
+for chunk in stream:
+    print(chunk)
 ```
 ---
 
@@ -47,13 +52,13 @@ print(outputs)
 Simply run the program with `--i` and `--w` parameter:
 
 ```bash
-# 🔥 CUDA (for short context)
+# CUDA (for short context)
 cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
-# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
+# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
 cargo run --release --features cuda,flash-attn -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
-# 🍎 Metal (macOS)
+# Metal (macOS)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
 ```
@@ -70,13 +75,13 @@ pip install maturin[patchelf] #Linux/Windows
 Use `-i` in Maturin build for seleting Python version, e.g., `-i 3.9`
 
 ```bash
-# 🔥 CUDA (for short context)
+# CUDA (for short context)
 maturin build --release --features cuda,python
 
-# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
+# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
 maturin build --release --features cuda,flash-attn,python
 
-# 🍎 Metal (macOS)
+# Metal (macOS)
 maturin build --release --features metal,python
 ```
 
@@ -84,10 +89,21 @@ Install Python package and run the demo
 
 ```bash
 python3 -m pip install target/wheels/vllm_rs-0.1.0*.whl
+# Mini Interactive Chat
 python3 example/chat.py --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-python3 example/chat.py --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf --prompts "How are you? | Who are you?"
 ```
 
+### 🌐✨ API Server Mode (Python Interface)
+Install Python package and run the server
+
+```bash
+# Chat server dependencies
+pip install fastapi uvicorn
+# The vllm.rs python package you built
+python3 -m pip install target/wheels/vllm_rs-0.1.0*.whl
+# Start the OpenAI API server (at http://0.0.0.0:8000) and chat with any compitable clients
+python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+```
 
 ### 📽️ Demo Video
 
@@ -101,24 +117,30 @@ Watch a quick demo of how it works! 🎉
 #### GGUF model:
 
 ```bash
-# 🔥 CUDA (for short context)
+# CUDA (for short context)
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
-# 🔥 CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
+# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
 cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
-# 🍎 Metal (macOS)
+# Metal (macOS)
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+```
+
+If vllm.rs Python package built, simply run the python demo:
+
+```bash
+python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompt "How are you? | How to make money?"
 ```
 
 #### Safetensor model:
 
 ```bash
 
-# 🔥 CUDA
+# CUDA
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
-# 🍎 Metal (macOS)
+# Metal (macOS)
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
 ```
@@ -222,7 +244,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [ ] 🛰️ Multi-rank inference
 * [ ] 🧠 More model support
 * [x] 🧾 GGUF support
-* [ ] 🌐 OpenAI-compatible API server (w/ streaming)
+* [x] 🌐 OpenAI-compatible API server (w/ streaming, `TODO`: fix for batched request)
 * [x] ⚡ FlashAttention (CUDA)
 * [ ] ♻️ Continuous batching
 

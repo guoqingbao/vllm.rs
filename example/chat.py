@@ -25,10 +25,6 @@ def parse_args():
 def build_engine_config(args):
     return EngineConfig(
         model_path = args.weight_path,
-        block_size = 32,
-        max_num_seqs = 64,
-        quant = None,
-        num_shards = 1,
         kvcache_mem_gpu = 4096,
         device_ids = [0],
     )
@@ -48,13 +44,7 @@ def main():
         print("[Warning] Ignoring predefined prompts in interactive mode.")
         prompts = []
 
-    sampling_params = SamplingParams(
-        temperature=0.6,
-        max_tokens=args.max_tokens,
-        ignore_eos=False,
-        top_k=None,
-        top_p=None,
-    )
+    sampling_params = SamplingParams()
 
     prompt_processed = []
 
@@ -97,7 +87,7 @@ def main():
                     break
 
             start_time = current_millis()
-            future = executor.submit(engine.generate, sampling_params, prompt_processed)
+            future = executor.submit(engine.generate_sync, sampling_params, prompt_processed)
             outputs = future.result()  # Waits here until complete
 
             decode_time_taken = 0.0

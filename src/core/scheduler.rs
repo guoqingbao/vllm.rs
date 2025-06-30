@@ -130,4 +130,15 @@ impl Scheduler {
         self.running
             .retain(|seq| seq.status != SequenceStatus::Finished);
     }
+
+    pub fn cancel(&mut self, seq_id: usize) {
+        for i in 0..self.running.len() {
+            let seq = &mut self.running[i];
+            if seq.id == seq_id {
+                seq.status = SequenceStatus::Finished;
+                self.block_manager.deallocate(seq);
+                break;
+            }
+        }
+    }
 }

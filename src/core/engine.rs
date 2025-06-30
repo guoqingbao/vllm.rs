@@ -17,8 +17,8 @@ use tokenizers::Tokenizer;
 
 pub struct LLMEngine {
     model_runner: ModelRunner,
-    scheduler: Scheduler,
-    tokenizer: Tokenizer,
+    pub scheduler: Scheduler,
+    pub tokenizer: Tokenizer,
     econfig: EngineConfig,
     default_chat_template: String,
     template: ChatTemplate,
@@ -199,6 +199,11 @@ impl LLMEngine {
             .collect();
         self.scheduler.clear_finished();
         Ok(outputs)
+    }
+
+    pub fn cancel(&mut self, seq_id: usize) {
+        self.scheduler.cancel(seq_id);
+        self.scheduler.clear_finished();
     }
 
     pub fn apply_chat_template(&self, messages: &Vec<Message>, log: bool) -> String {
