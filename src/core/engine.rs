@@ -2,7 +2,7 @@
 use super::runner::ModelRunner;
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
-use super::GenerationOutput;
+use crate::core::GenerationOutput;
 use crate::log_info;
 use crate::models::layers::VarBuilderX;
 use crate::utils::chat_template::Message;
@@ -10,10 +10,36 @@ use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
 use crate::utils::init_config_tokenizer;
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks, new_device};
 use candle_core::{DType, Result};
-use either::Either;
-use std::collections::HashMap;
+use once_cell::sync::Lazy;
+use parking_lot::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
+use tokio::runtime::Runtime;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
+
+pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build global Tokio runtime")
+});
+
+#[derive(Debug)]
+pub enum StreamItem {
+    Token(String),
+    Completion((usize, usize, String)),
+    Done(String),
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RequestType {
+    Stream,
+    Completion,
+}
 
 pub struct LLMEngine {
     model_runner: ModelRunner,
@@ -22,10 +48,15 @@ pub struct LLMEngine {
     econfig: EngineConfig,
     default_chat_template: String,
     template: ChatTemplate,
+    stream_decoders: HashMap<usize, super::DecodeStreamType>,
+    stream_senders: HashMap<usize, Sender<StreamItem>>,
+    request_types: HashMap<usize, RequestType>,
+    decode_start_times: HashMap<usize, usize>,
+    active_requests: HashSet<usize>,
 }
 
 impl LLMEngine {
-    pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Self> {
+    pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let device = new_device(econfig.device_id.unwrap_or(0))?;
         log_info!("Loading model...");
         let (config, config_tokenizer, tokenizer) = init_config_tokenizer(econfig)?;
@@ -148,30 +179,68 @@ impl LLMEngine {
             true,
         );
 
-        Ok(Self {
+        let engine = Arc::new(RwLock::new(Self {
             model_runner,
             scheduler,
             tokenizer,
             econfig,
             default_chat_template,
             template,
-        })
+            stream_decoders: HashMap::new(),
+            stream_senders: HashMap::new(),
+            request_types: HashMap::new(),
+            decode_start_times: HashMap::new(),
+            active_requests: HashSet::new(),
+        }));
+        Self::start_engine(engine.clone());
+        Ok(engine)
     }
 
-    pub fn add_request(&mut self, params: SamplingParams, prompt: &str) -> Result<(usize, usize)> {
+    fn add_request_(&mut self, params: &SamplingParams, prompt: &str) -> Result<(usize, usize)> {
         let tokens = self.tokenizer.encode(prompt, true).expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
-        let seq = Sequence::new(token_ids, self.econfig.block_size, params);
-        let id = self.scheduler.add(seq);
-        Ok((id, length))
+        let seq = Sequence::new(token_ids, self.econfig.block_size, params.clone());
+        let seq_id = self.scheduler.add(seq);
+
+        let tokenizer = self.tokenizer.clone();
+        let leaked: &'static _ = Box::leak(Box::new(tokenizer));
+        let decoder = leaked.decode_stream(false);
+        let wrapped = super::StreamWithTokenizer {
+            _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
+            stream: decoder,
+        };
+        let boxed_decoder: Box<dyn super::DecodeStreamTrait + Send + Sync> = Box::new(wrapped);
+
+        self.stream_decoders.insert(seq_id, boxed_decoder);
+        self.active_requests.insert(seq_id);
+        Ok((seq_id, length))
     }
 
-    pub fn step(&mut self) -> Result<Vec<(usize, Either<u32, Vec<u32>>)>> {
+    pub fn add_request(
+        &mut self,
+        params: &SamplingParams,
+        prompt: &str,
+        request_type: RequestType,
+    ) -> Result<(usize, usize, Receiver<StreamItem>)> {
+        let (seq_id, prompt_length) = self.add_request_(params, prompt)?;
+        let (tx, rx) = channel(16);
+        self.stream_senders.insert(seq_id, tx);
+        self.request_types.insert(seq_id, request_type.clone());
+        log_info!(
+            "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!",
+            request_type,
+            seq_id,
+            prompt_length
+        );
+        Ok((seq_id, prompt_length, rx))
+    }
+
+    pub fn step(&mut self) -> Result<()> {
         // Get scheduled sequence indexes and prefill flag
         let (scheduled_ids, is_prefill) = self.scheduler.schedule();
         if scheduled_ids.is_empty() {
-            return Ok(vec![]);
+            return Ok(());
         }
 
         // Get immutable references to scheduled sequences for model_runner
@@ -183,22 +252,76 @@ impl LLMEngine {
         // Postprocess sequences by modifying them inside the scheduler
         self.scheduler.postprocess(&scheduled_ids, &output_ids);
 
-        // Collect outputs of finished sequences
-        let outputs: Vec<_> = scheduled_ids
-            .iter()
-            .filter_map(|&idx| match self.scheduler.get_running(idx) {
-                Some(s) => {
-                    if s.is_finished() {
-                        Some((s.id, Either::Right(s.output_ids.clone())))
-                    } else {
-                        Some((s.id, Either::Left(s.last_token)))
+        for &idx in &scheduled_ids {
+            if let Some(s) = self.scheduler.get_running(idx) {
+                let seq_id = s.id;
+                if s.is_finished() {
+                    if let Some(_) = self.stream_decoders.get_mut(&seq_id) {
+                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                            if let Some(request_type) = self.request_types.get(&seq_id) {
+                                if *request_type == RequestType::Stream {
+                                    let _ = sender
+                                        .try_send(StreamItem::Done("data: [DONE]".to_string()));
+                                } else {
+                                    let decode_output = self
+                                        .tokenizer
+                                        .decode(&s.output_ids, true)
+                                        .expect("unable to decode!");
+                                    let decode_start_time = if let Some(decode_start_time) =
+                                        self.decode_start_times.get(&seq_id)
+                                    {
+                                        *decode_start_time
+                                    } else {
+                                        0usize
+                                    };
+                                    let _ = sender.try_send(StreamItem::Completion((
+                                        decode_start_time,
+                                        s.output_ids.len(),
+                                        decode_output,
+                                    )));
+                                }
+                            }
+                            self.stream_senders.remove(&seq_id);
+                        }
+                        self.stream_decoders.remove(&seq_id);
+                    }
+
+                    if let Some(_) = self.active_requests.get(&seq_id) {
+                        self.active_requests.remove(&seq_id);
+                    }
+                } else {
+                    if !self.decode_start_times.contains_key(&seq_id) {
+                        let decode_start_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize;
+                        self.decode_start_times.insert(seq_id, decode_start_time);
+                    }
+
+                    let token_id = s.last_token;
+                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
+                        if let Some(tok) = decoder.step(token_id) {
+                            if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                                if let Some(request_type) = self.request_types.get(&seq_id) {
+                                    let result = sender.try_send(StreamItem::Token(tok.clone()));
+                                    if *request_type == RequestType::Stream {
+                                        if result.is_err() {
+                                            log_info!(
+                                                "[seq_id {}] Error when sending token to client",
+                                                seq_id
+                                            );
+                                            self.scheduler.cancel(seq_id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                _ => None,
-            })
-            .collect();
+            }
+        }
         self.scheduler.clear_finished();
-        Ok(outputs)
+        Ok(())
     }
 
     pub fn cancel(&mut self, seq_id: usize) {
@@ -241,104 +364,154 @@ impl LLMEngine {
         prompt
     }
 
-    pub fn generate(
+    pub fn is_idle(&self) -> bool {
+        self.active_requests.is_empty()
+    }
+
+    pub fn generate_sync(
         &mut self,
         params: &SamplingParams,
-        prompts: &Vec<String>,
-    ) -> Result<Vec<GenerationOutput>> {
-        let mut params = params.clone();
-        if prompts.len() * params.max_tokens > self.econfig.max_num_batched_tokens {
-            params.max_tokens = self.econfig.max_num_batched_tokens / prompts.len();
-            log_info!("Adjusted max_tokens to {}", params.max_tokens);
-        }
-        let mut map_prompt_length = HashMap::<usize, usize>::new();
-        for prompt in prompts {
-            let (seq_id, length) = self.add_request(params.clone(), prompt)?;
-            map_prompt_length.insert(seq_id, length);
-        }
-
-        let mut decode_start_time = 0;
-        let mut outputs = HashMap::new();
-        let mut total_decoded_tokens = 0;
-        let mut decode_time_taken = 0f32;
-
-        let tokenizer = self.tokenizer.clone();
-        let mut stream_decoder = tokenizer.decode_stream(false);
-        while !self.scheduler.is_finished() {
-            let step_output = self.step()?;
-            if decode_start_time == 0 {
-                decode_start_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis() as usize;
+        prompts: Vec<String>,
+    ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
+        let mut receivers = Vec::new();
+        for prompt in &prompts {
+            if let Ok((seq_id, prompt_length, rx)) =
+                self.add_request(params, prompt, RequestType::Completion)
+            {
+                receivers.push((seq_id, prompt_length, rx));
             }
-            let mut vec_ids = Vec::new();
-            for (seq_id, token_ids) in step_output {
-                match token_ids {
-                    Either::Left(token_id) => {
-                        total_decoded_tokens += 1;
-                        if prompts.len() == 1 {
-                            if let Ok(Some(output)) = stream_decoder.step(token_id) {
-                                print!("{}", output);
-                                use std::io::Write;
-                                let _ = std::io::stdout().flush();
-                            }
-                        }
+        }
+
+        Ok(receivers)
+    }
+
+    pub async fn collect_sync_results(
+        mut receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
+    ) -> Result<Vec<GenerationOutput>> {
+        let mut results = Vec::new();
+        let batch_size = receivers.len();
+        let mut decode_start_time = 0;
+        let mut decoded_tokens = 0;
+        let mut map_finished = HashMap::<usize, bool>::new();
+
+        loop {
+            if results.len() >= batch_size || map_finished.len() >= batch_size {
+                println!(
+                    "[{} request(s)] finished with {} tokens!",
+                    batch_size, decoded_tokens
+                );
+                break;
+            }
+
+            for (seq_id, prompt_length, rx) in &mut receivers {
+                if map_finished.contains_key(seq_id) {
+                    continue;
+                }
+                let num_active_requests = batch_size - map_finished.keys().len();
+                match rx.recv().await {
+                    Some(StreamItem::Completion((
+                        decode_start_time,
+                        decoded_length,
+                        decode_output,
+                    ))) => {
+                        println!(
+                            "Sequence [seq_id {}] finished with {} tokens!",
+                            *seq_id, decoded_length
+                        );
+                        results.push(GenerationOutput {
+                            seq_id: *seq_id,
+                            prompt_length: *prompt_length,
+                            decode_start_time,
+                            decoded_length,
+                            decode_output,
+                        });
+                        map_finished.insert(*seq_id, true);
                     }
-                    Either::Right(ids) => {
-                        if prompts.len() > 1 {
-                            log_info!(
-                                "[seq_id {}] finished ({} tokens generated)",
-                                seq_id,
-                                ids.len()
+                    Some(StreamItem::Token(_)) => {
+                        decoded_tokens += 1;
+                        if decode_start_time == 0 {
+                            decode_start_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis()
+                                as usize;
+                        }
+
+                        let decode_time_taken = (SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize
+                            - decode_start_time)
+                            as f32
+                            / 1000.0;
+
+                        if decoded_tokens % (50 * batch_size) == 0 {
+                            println!(
+                                "[{} active request(s)] {} tokens generated in {:.2} s (avg decoding throughput {:.2} tokens/s)",
+                                num_active_requests,
+                                decoded_tokens,
+                                decode_time_taken,
+                                decoded_tokens as f32 / decode_time_taken
                             );
                         }
-                        outputs.insert(seq_id, ids);
+                    }
+                    Some(StreamItem::Done(_)) => {
+                        println!("Sequence [seq_id {}] finished!", *seq_id);
+                    }
+                    Some(StreamItem::Error(e)) => {
+                        eprintln!("Error: {}", e);
+                        break;
+                    }
+                    _ => {
+                        println!(
+                            "Sequence [seq_id {}] error occurred while decoding!",
+                            *seq_id
+                        );
+                        break;
                     }
                 }
-                vec_ids.push(seq_id);
             }
+        }
+        Ok(results)
+    }
 
-            if prompts.len() > 1 && total_decoded_tokens % (prompts.len() * 50) == 0 {
-                let duration = (SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis() as usize
-                    - decode_start_time) as f32
-                    / 1000.0; //maximum time costs for decoding
-                if duration > decode_time_taken {
-                    decode_time_taken = duration;
+    pub fn generate_stream(
+        &mut self,
+        params: &SamplingParams,
+        prompt: String,
+    ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
+        if let Ok((seq_id, prompt_length, rx)) =
+            self.add_request(params, &prompt, RequestType::Stream)
+        {
+            Ok((seq_id, prompt_length, rx))
+        } else {
+            candle_core::bail!("Failed to create stream!")
+        }
+    }
+
+    pub fn start_engine(engine: Arc<RwLock<Self>>) {
+        GLOBAL_RT.spawn(async move {
+            let engine = engine.clone();
+            loop {
+                let idle = {
+                    let guard = engine.read();
+                    guard.is_idle()
+                };
+
+                if idle {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                    continue;
                 }
 
-                log_info!(
-                    "[{} request(s)] {} tokens generated in {:.2} s (avg decoding throughput {:.2} tokens/s)",
-                    vec_ids.len(),
-                    total_decoded_tokens,
-                    decode_time_taken,
-                    total_decoded_tokens as f32 / decode_time_taken
-                );
+                {
+                    let mut guard = engine.write();
+                    if let Err(e) = guard.step() {
+                        eprintln!("[Engine Loop] Step error: {:?}", e);
+                    }
+                }
+
+                tokio::task::yield_now().await;
             }
-        }
-
-        let mut sorted_outputs: Vec<_> = outputs.into_iter().collect();
-        sorted_outputs.sort_by_key(|(seq_id, _)| *seq_id);
-
-        let mut results = vec![];
-        for (seq_id, token_ids) in sorted_outputs {
-            let decode_output = self
-                .tokenizer
-                .decode(&token_ids, true)
-                .expect("unable to decode!");
-            let output = GenerationOutput {
-                seq_id,
-                prompt_length: map_prompt_length[&seq_id],
-                decode_start_time,
-                decoded_length: token_ids.len(),
-                decode_output,
-            };
-            results.push(output);
-        }
-
-        Ok(results)
+        });
     }
 }

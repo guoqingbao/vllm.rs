@@ -2,10 +2,11 @@ use candle_core::{DType, Result};
 use clap::Parser;
 use reedline::{DefaultPrompt, Reedline, Signal};
 use std::time::{SystemTime, UNIX_EPOCH};
+use vllm_rs::core::engine::StreamItem;
+use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -63,7 +64,8 @@ struct Args {
     max_tokens: usize,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -95,11 +97,11 @@ fn main() -> Result<()> {
         args.device_ids.clone(),
     );
 
-    let mut engine = LLMEngine::new(&econfig, dtype)?;
+    let engine = LLMEngine::new(&econfig, dtype)?;
     let prompts = match (args.prompts, args.interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
-            println!("No prompts provided, using default prompt.");
+            println!("⛔️ No prompts provided, using default prompt.");
             vec!["How are you today?".to_string()]
         }
         (Some(_), true) => {
@@ -124,7 +126,8 @@ fn main() -> Result<()> {
         }
         for prompt in prompts.iter() {
             let msg = Message::new("user".to_string(), prompt.clone());
-            let prompt = engine.apply_chat_template(&vec![msg], true);
+            let e = engine.read();
+            let prompt = e.apply_chat_template(&vec![msg], true);
             prompt_processed.push(prompt);
         }
     }
@@ -136,7 +139,7 @@ fn main() -> Result<()> {
     loop {
         if args.interactive {
             if chat_history.is_empty() {
-                print!("🤖✨ Enter a new prompt (Press Ctrl+C to exit):\n");
+                print!("🤖✨ Enter a new prompt (Press Ctrl+C to exit):");
             } else {
                 print!("🤖✨ Enter another prompt to continue current chat (Press Ctrl+C to start a new chat):\n");
             }
@@ -149,7 +152,8 @@ fn main() -> Result<()> {
                         let msg = Message::new("user".to_string(), trimmed.to_string());
                         chat_history.push(msg.clone());
                         prompt_processed.clear();
-                        prompt_processed.push(engine.apply_chat_template(&chat_history, false));
+                        let e = engine.read();
+                        prompt_processed.push(e.apply_chat_template(&chat_history, false));
                     }
                 }
                 Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
@@ -157,7 +161,7 @@ fn main() -> Result<()> {
                         print!("\n👋 Exiting.");
                         std::process::exit(0); // Ctrl+C to exit
                     } else {
-                        print!("\n🌀 Chat history cleared. Start a new conversation.");
+                        print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
                         continue;
                     }
@@ -170,7 +174,59 @@ fn main() -> Result<()> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis() as usize;
-        let outputs = engine.generate(&params, &prompt_processed)?;
+        let outputs = {
+            if args.interactive {
+                let (seq_id, prompt_length, stream) = {
+                    let mut e = engine.write();
+                    e.generate_stream(&params, prompt_processed[0].clone())?
+                };
+                let handle: tokio::task::JoinHandle<(usize, usize, String)> =
+                    GLOBAL_RT.spawn(async move {
+                        let mut length = 0;
+                        let mut decode_start_time = 0;
+                        let mut decode_output = "".to_string();
+                        let mut rx = stream;
+                        while let Some(item) = rx.recv().await {
+                            match item {
+                                StreamItem::Token(t) => {
+                                    if decode_start_time == 0 {
+                                        decode_start_time = SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .expect("Time went backwards")
+                                            .as_millis()
+                                            as usize;
+                                    }
+                                    length += 1;
+                                    decode_output += &t.to_string();
+                                    print!("{}", t);
+                                    use std::io::Write;
+                                    let _ = std::io::stdout().flush();
+                                }
+                                StreamItem::Completion(_) => {}
+                                StreamItem::Done(_) => tracing::info!("Generation completed!"),
+                                StreamItem::Error(e) => eprintln!("Error: {}", e),
+                            }
+                        }
+                        (decode_start_time, length, decode_output)
+                    });
+                let (decode_start_time, decoded_length, decode_output) =
+                    handle.await.map_err(candle_core::Error::wrap)?;
+                vec![GenerationOutput {
+                    seq_id,
+                    prompt_length,
+                    decode_start_time,
+                    decoded_length,
+                    decode_output,
+                }]
+            } else {
+                let receivers = {
+                    let mut e = engine.write();
+                    e.generate_sync(&params, prompt_processed.clone())?
+                };
+                LLMEngine::collect_sync_results(receivers).await?
+            }
+        };
+
         let mut decode_time_taken = 0f32;
         let mut prompt_time_taken = 0f32;
         let mut total_decoded_tokens = 0;
@@ -187,7 +243,7 @@ fn main() -> Result<()> {
             },
         ) in outputs.iter().enumerate()
         {
-            if !args.interactive && prompts.len() > 1 {
+            if !args.interactive {
                 tracing::info!("[seq_id {}] 📚✨ Prompt {}: {}", seq_id, i + 1, prompts[i]);
                 tracing::info!("[seq_id {}] 📄✨ Response: {}\n", seq_id, decode_output);
             }
@@ -214,24 +270,19 @@ fn main() -> Result<()> {
             }
         }
 
-        println!("");
+        tracing::info!("--- Performance Metrics ---");
 
-        if !args.interactive {
-            tracing::info!("Generation completed!");
-        }
-
-        tracing::warn!(
-            "{} prompt tokens processed in {:.2} s (prefill throughput {:.2} tokens/s)",
+        tracing::info!(
+            "⏱️ Prompt tokens: {} in {:.2}s ({:.2} tokens/s)",
             total_prompt_tokens,
             prompt_time_taken,
-            total_prompt_tokens as f32 / prompt_time_taken
+            total_prompt_tokens as f32 / prompt_time_taken,
         );
-
-        tracing::warn!(
-            "{} tokens generated in {:.2} s (decoding throughput {:.2} tokens/s)",
+        tracing::info!(
+            "⏱️ Decoded tokens: {} in {:.2}s ({:.2} tokens/s)",
             total_decoded_tokens,
             decode_time_taken,
-            total_decoded_tokens as f32 / decode_time_taken
+            total_decoded_tokens as f32 / decode_time_taken,
         );
 
         if !args.interactive {

@@ -52,9 +52,13 @@ class StepOutput(Enum):
     Tokens: List[int]
 
 class EngineStream:
+    finished: bool
+    seq_id: int
+    prompt_length: int
+    cancelled: bool
     def cancel(self): ...
-    def __iter__(self) -> Iterator[List[Tuple[int, Union[str, int]]]]: ...
-    def __next__(self) -> List[Tuple[int, Union[str, int]]]: ...
+    def __iter__(self) -> Iterator[str]: ...
+    def __next__(self) -> str: ...
 
 class Engine:
     def __init__(econfig: EngineConfig, dtype: DType) -> Engine:
@@ -78,9 +82,9 @@ class Engine:
         self,
         params: SamplingParams,
         prompt: str,
-    ) -> EngineStream:
+    ) -> Tuple[int, int, EngineStream]:
         """
         Chat streaming using given prompts and sampling parameters.
 
-        Yields: list of (request_id, token_or_tokens) tuples
+        Return: (seq_id, prompt_length, stream) tuples
         """

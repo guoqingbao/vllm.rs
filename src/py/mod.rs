@@ -1,15 +1,16 @@
 use crate::core::engine::LLMEngine;
+use crate::core::engine::StreamItem;
+use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use candle_core::DType;
-use either::Either;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::IntoPyObjectExt;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 /// Python wrapper
 #[pyclass]
 pub struct Engine {
@@ -35,10 +36,7 @@ impl Engine {
         };
 
         match LLMEngine::new(&econfig, dtype_parsed) {
-            Ok(engine) => Ok(Engine {
-                engine: Arc::new(RwLock::new(engine)),
-                econfig,
-            }),
+            Ok(engine) => Ok(Engine { engine, econfig }),
             Err(e) => Err(PyValueError::new_err(format!(
                 "Failed to create engine ({:?})",
                 e
@@ -57,10 +55,24 @@ impl Engine {
         params: SamplingParams,
         prompts: Vec<String>,
     ) -> PyResult<Vec<GenerationOutput>> {
-        self.engine
-            .write()
-            .generate(&params, &prompts)
-            .map_err(|e| PyValueError::new_err(format!("Failed to generate ({:?})", e)))
+        tokio::task::block_in_place(|| {
+            GLOBAL_RT.block_on(async {
+                let receivers = {
+                    let mut engine = self.engine.write();
+                    engine.generate_sync(&params, prompts).map_err(|e| {
+                        PyValueError::new_err(format!("generate_sync failed: {:?}", e))
+                    })?
+                };
+
+                let results = LLMEngine::collect_sync_results(receivers)
+                    .await
+                    .map_err(|e| {
+                        PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
+                    })?;
+
+                Ok(results)
+            })
+        })
     }
 
     #[pyo3(name = "generate_stream", text_signature = "($self)")]
@@ -68,72 +80,40 @@ impl Engine {
         &mut self,
         params: SamplingParams,
         prompt: String,
-    ) -> PyResult<EngineStream> {
-        let (seq_id, _) = {
-            self.engine
-                .write()
-                .add_request(params, &prompt)
-                .map_err(|e| PyValueError::new_err(format!("Failed to add request ({:?})", e)))?
+    ) -> PyResult<(usize, usize, EngineStream)> {
+        let (seq_id, prompt_length, stream) = {
+            let mut engine = self.engine.write();
+            engine
+                .generate_stream(&params, prompt)
+                .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 
-        let tokenizer = self.engine.read().tokenizer.clone();
-
-        let leaked: &'static _ = Box::leak(Box::new(tokenizer));
-        let decoder = leaked.decode_stream(false);
-        let wrapped = StreamWithTokenizer {
-            _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
-            stream: decoder,
-        };
-        let boxed_decoder: Box<dyn DecodeStreamTrait + Send + Sync> = Box::new(wrapped);
-
-        Ok(EngineStream {
-            engine: self.engine.clone(),
-            finished: false,
+        Ok((
             seq_id,
-            stream_decoder: boxed_decoder,
-            cancelled: false,
-        })
+            prompt_length,
+            EngineStream {
+                engine: self.engine.clone(),
+                finished: false,
+                seq_id,
+                prompt_length,
+                cancelled: false,
+                rx: std::sync::Mutex::new(stream),
+            },
+        ))
     }
 }
-
-pub trait DecodeStreamTrait: Send + Sync {
-    fn step(&mut self, id: u32) -> Option<String>;
-}
-
-struct StreamWithTokenizer<M, N, PT, PP, D>
-where
-    M: tokenizers::Model + Send + Sync + 'static,
-    N: tokenizers::Normalizer + Send + Sync + 'static,
-    PT: tokenizers::PreTokenizer + Send + Sync + 'static,
-    PP: tokenizers::PostProcessor + Send + Sync + 'static,
-    D: tokenizers::Decoder + Send + Sync + 'static,
-{
-    _tokenizer: Box<tokenizers::TokenizerImpl<M, N, PT, PP, D>>,
-    stream: tokenizers::DecodeStream<'static, M, N, PT, PP, D>,
-}
-
-impl<M, N, PT, PP, D> DecodeStreamTrait for StreamWithTokenizer<M, N, PT, PP, D>
-where
-    M: tokenizers::Model + Send + Sync + 'static,
-    N: tokenizers::Normalizer + Send + Sync + 'static,
-    PT: tokenizers::PreTokenizer + Send + Sync + 'static,
-    PP: tokenizers::PostProcessor + Send + Sync + 'static,
-    D: tokenizers::Decoder + Send + Sync + 'static,
-{
-    fn step(&mut self, id: u32) -> Option<String> {
-        self.stream.step(id).ok().flatten()
-    }
-}
-
-type DecodeStreamType = Box<dyn DecodeStreamTrait + Send + Sync>;
 
 #[pyclass]
 #[allow(unused_variables)]
 pub struct EngineStream {
     engine: Arc<RwLock<LLMEngine>>,
+    rx: std::sync::Mutex<mpsc::Receiver<StreamItem>>,
+    #[pyo3(get, set)]
     finished: bool,
+    #[pyo3(get, set)]
     seq_id: usize,
-    stream_decoder: DecodeStreamType,
+    #[pyo3(get, set)]
+    prompt_length: usize,
     #[pyo3(get, set)]
     cancelled: bool, // User cancellation flag
 }
@@ -150,46 +130,15 @@ impl EngineStream {
         engine_guard.cancel(slf.seq_id);
     }
 
-    fn __next__(mut slf: PyRefMut<Self>) -> PyResult<PyObject> {
-        if slf.finished {
-            return Err(PyStopIteration::new_err("Finished!"));
+    fn __next__(&self) -> PyResult<String> {
+        let mut rx = self.rx.lock().unwrap();
+
+        match GLOBAL_RT.block_on(rx.recv()) {
+            Some(StreamItem::Token(token)) => Ok(token),
+            Some(StreamItem::Done(_)) | None => Err(PyStopIteration::new_err("[DONE]")),
+            Some(StreamItem::Error(e)) => Err(PyValueError::new_err(e)),
+            Some(_) => self.__next__(), // Skip over Completion/etc
         }
-
-        let step_output = {
-            let mut engine_guard = slf.engine.write();
-            match engine_guard.step() {
-                Ok(output) => output,
-                Err(e) => {
-                    return Err(PyValueError::new_err(format!("step error: {:?}", e)));
-                }
-            }
-        };
-
-        let is_finished = {
-            let engine_guard = slf.engine.read();
-            engine_guard.scheduler.is_finished()
-        };
-        slf.finished = is_finished;
-
-        Python::with_gil(|py| {
-            let py_list: Vec<_> = step_output
-                .into_iter()
-                .map(|(id, tok)| {
-                    let obj = match tok {
-                        Either::Left(token_id) => {
-                            if let Some(output) = slf.stream_decoder.step(token_id) {
-                                output.into_py_any(py).unwrap()
-                            } else {
-                                "".into_py_any(py).unwrap()
-                            }
-                        }
-                        Either::Right(_) => "[DONE]".into_py_any(py).unwrap(),
-                    };
-                    (id, obj)
-                })
-                .collect();
-            py_list.into_py_any(py)
-        })
     }
 }
 

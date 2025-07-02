@@ -4,166 +4,181 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 ---
 
+<p align="center">
+  <a href="./ReadMe.md">English</a> |
+  <a href="./ReadMe-CN.md">简体中文</a> |
+</p>
+
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** – On par with the original vLLM (PyTorch + ATen)
-* 🧠 **Minimalist Core** – Core logic in **< 1000 lines** of clean Rust code
-* 💻 **Cross-Platform** – Works on both **CUDA** (Linux/Windows) and **Metal** (macOS)
-* 🤖 **Built-in Chatbot/API Server** – Built-in Rust Chatbot/API Server on **CUDA** and **Metal**
-* 🤖 **Python PyO3 interface** – Lightweight Python interface for chat completion
+* 🚀 **High Performance** – Comparable to original vLLM (PyTorch + ATen)
+* 🧠 **Minimalist Core** – Core logic written in **< 1000 lines** of clean Rust
+* 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
+* 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
+* 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
 
-## 📦 Usage
+## 📦 Installation & Usage
 
-Make sure you have the [Rust toolchain](https://www.rust-lang.org/tools/install) installed.
+> ⚠️ The first build may take time if Flash Attention is enabled.
 
-Mac OS Platform (Metal) requires installation of [XCode command line tools](https://mac.install.guide/commandlinetools/).
+### 🛠️ Prerequisites
 
-Python package build requires [Maturin](https://github.com/PyO3/maturin/).
+* Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
+* On macOS, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
+* For Python bindings, install [Maturin](https://github.com/PyO3/maturin)
 
-**Quick Usage:**
+---
+
+## 🐍 Quick Python Example
 
 ```python
-cfg = EngineConfig(model_path = "/path/Qwen3-8B-Q2_K.gguf", ...)
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", ...)
 engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature = 0.6, max_tokens = 256)
+params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-# sync
-outputs = engine.generate_sync(params, [prompt])
+
+# Synchronous generation for batched input
+outputs = engine.generate_sync(params, [prompt, prompt])
 print(outputs)
-# streaming
+
+# Streaming generation for single request
 stream = engine.generate_stream(params, prompt)
-for chunk in stream:
-    print(chunk)
+for token in stream:
+    print(token)
 ```
----
-
-### 🔥 CUDA (Linux/Windows) and 🍎 Metal (macOS)
-
-⚠️ First run may take a while on CUDA (if flash attention enabled).
 
 ---
 
-### 🤖✨ Interactive Mode (Pure Rust)
+## 🤖✨ Interactive Mode (Rust CLI)
 
-Simply run the program with `--i` and `--w` parameter:
+Run with `--i` for interactive chat and `--w` to specify model path:
 
 ```bash
-# CUDA (for short context)
-cargo run --release --features cuda -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+# CUDA (short context)
+cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
-cargo run --release --features cuda,flash-attn -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+# CUDA with Flash Attention (long context, e.g., 32k tokens)
+cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# Metal (macOS)
+# macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-
 ```
 
-### 🤖✨ Interactive Mode (Python Interface)
+---
 
-Install Maturin and build Python package
+## 🌐✨ API Server Mode (Python Interface)
+
+1. **Install Maturin**
 
 ```bash
 pip install maturin
-pip install maturin[patchelf] #Linux/Windows
+pip install maturin[patchelf]  # For Linux/Windows
 ```
 
-Use `-i` in Maturin build for seleting Python version, e.g., `-i 3.9`
+2. **Build the Python package**
+
+   💡 Specify Python version with `-i`, e.g., `-i python3.9`
 
 ```bash
-# CUDA (for short context)
+# CUDA (short context)
 maturin build --release --features cuda,python
 
-# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
-maturin build --release --features cuda,flash-attn,python
+# CUDA with Flash Attention
+maturin build --release --features cuda,flash-attn,python -i 3.9
 
-# Metal (macOS)
+# macOS (Metal)
 maturin build --release --features metal,python
 ```
 
-Install Python package and run the demo
+3. **Install and Setup Chat Server**
 
 ```bash
-python3 -m pip install target/wheels/vllm_rs-0.1.0*.whl
-# Mini Interactive Chat
-python3 example/chat.py --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+pip install target/wheels/vllm_rs-0.1.0*.whl
+pip install fastapi uvicorn
 ```
 
-### 🌐✨ API Server Mode (Python Interface)
-Install Python package and run the server
+4. **Start OpenAI API Server**
 
 ```bash
-# Chat server dependencies
-pip install fastapi uvicorn
-# The vllm.rs python package you built
-python3 -m pip install target/wheels/vllm_rs-0.1.0*.whl
-# Start the OpenAI API server (at http://0.0.0.0:8000) and chat with any compitable clients
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 ```
+💡 You can use any client compatible with the OpenAI API.
+
+### Other Examples:
+
+```bash
+# Interactive chat
+python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+
+# Chat completion
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+```
+
+---
 
 ### 📽️ Demo Video
 
-Watch a quick demo of how it works! 🎉
+Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
-<video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
+---
 
+## 🧾 Completion Mode (Rust CLI)
 
-### 🧾✨ Completion Mode
-
-#### GGUF model:
+### GGUF Models
 
 ```bash
-# CUDA (for short context)
+# CUDA
 cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
-# CUDA with ⚡ Flash Attention (for extra-long context, e.g., 32k inputs, but build takes longer time)
+# CUDA + Flash Attention
 cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # Metal (macOS)
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 ```
 
-If vllm.rs Python package built, simply run the python demo:
+### With Python:
 
 ```bash
-python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompt "How are you? | How to make money?"
+python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
 
-#### Safetensor model:
+### Safetensor Models (Unquantized)
 
 ```bash
-
 # CUDA
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
-# Metal (macOS)
+# Metal
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
-
 ```
 
 ---
 
-### 📚 Batched Requests
+## 📚 Batched Requests
 
-Prompts are separated by `|`
+Use `|` to separate prompts:
 
 ```bash
-# GGUF model
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Please talk about China. | Please talk about America."
+# GGUF (Rust)
+cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America."
 
-# Safetensor model
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Please talk about China. | Please talk about America."
+# Safetensor (Rust)
+cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
+
+# GGUF (Python)
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
 
 ---
 
-### 🗜️ In-situ Quantization (GGUF format conversion)
+## 🗜️ In-Situ Quantization (GGUF Conversion)
 
-Takes a few minutes for quantization.
+This may take several minutes:
 
 ```bash
 # macOS
@@ -177,7 +192,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 
 ## 📄 Sample Output
 
-**Single request** with Qwen3-0.6B (BF16) on macOS/Metal:
+**Single request** (Qwen3-0.6B, BF16, macOS Metal):
 
 ```bash
 cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today?"
@@ -193,32 +208,32 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 
 ---
 
-### 📊 Batched Results (Examples)
+## 📊 Batched Output Examples
 
-**LLaMa3.1-8B** BF16 (16 requests on A100):
-
-```bash
-8450 tokens generated in 14.28 s (decoding throughput: 591.82 tokens/s)
-```
-
-**QwQ-32B** GGUF Q4K (4 requests on A100):
+**LLaMa3.1-8B (BF16, A100, 16 requests)**
 
 ```
-4000 tokens in 48.23s (avg throughput: 82.93 tokens/s)
+8450 tokens generated in 14.28s (591.82 tokens/s)
+```
+
+**QwQ-32B GGUF Q4K (A100, 4 requests)**
+
+```
+4000 tokens in 48.23s (82.93 tokens/s)
 ```
 
 ---
 
-## ⚙️ Command-Line Parameters
+## ⚙️ CLI Flags
 
-| Flag        | Description                                       |    |
-| ----------- | ------------------------------------------------- | -- |
-| `--w`       | Path to model folder (Safetensor) or file (GGUF)  |    |
-| `--d`       | Device ID (e.g. `--d "0"`)                        |    |
-| `--kvmem`   | KV cache size in MB (default: `4096`)               |    |
-| `--max`   | Maximum number of tokens in each chat response (default: `4096`, up to `max_model_len`) |    |
-| `--prompts` | Input prompts separated by "\|" |
-| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32` |    |
+| Flag        | Description                                                      |    |
+| ----------- | ---------------------------------------------------------------- | -- |
+| `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
+| `--d`       | Device ID (e.g. `--d 0`)                                         |    |
+| `--kvmem`   | KV cache size in MB (default: `4096`)                            |    |
+| `--max`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
+| `--prompts` | Prompts, separated by \`                                         | \` |
+| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
 
 ---
 
@@ -232,33 +247,31 @@ Supports both **Safetensor** and **GGUF** formats.
 
 ---
 
-## 📌 Status
+## 📌 Project Status
 
-> **Project is under active development. Expect changes.**
-
----
-
-## 🛠️ TODO
-
-* [x] 🔧 Fix batched inference on `Metal`
-* [ ] 🛰️ Multi-rank inference
-* [ ] 🧠 More model support
-* [x] 🧾 GGUF support
-* [x] 🌐 OpenAI-compatible API server (w/ streaming, `TODO`: fix for batched request)
-* [x] ⚡ FlashAttention (CUDA)
-* [ ] ♻️ Continuous batching
+> 🚧 **Under active development – breaking changes may occur!**
 
 ---
 
-## 📚 Reference
+## 🛠️ Roadmap
 
-Core ideas inspired by:
+* [x] Batched inference (Metal)
+* [x] GGUF format support
+* [x] FlashAttention (CUDA)
+* [x] OpenAI-compatible API (streaming support)
+* [x] Continuous batching
+* [ ] Multi-rank inference
+* [ ] Additional model support
+
+---
+
+## 📚 References
+
+Inspired by:
 
 * [Candle-vLLM](https://github.com/EricLBuehler/candle-vllm)
 * Python nano-vllm
 
 ---
 
-💡 **Like the project? Star it ⭐ and contribute!**
-
----
+💡 **Like this project? Give it a ⭐ and contribute!**
