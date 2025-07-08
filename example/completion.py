@@ -34,6 +34,7 @@ def run(args):
     start_time = current_millis()
     print("Start inference with", len(prompts), "prompts")
     outputs: GenerationOutput = engine.generate_sync(sampling_params, prompts)
+    outputs.sort(key=lambda o: o.seq_id)
 
     decode_time_taken = 0.0
     prompt_time_taken = 0.0

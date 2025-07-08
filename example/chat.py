@@ -86,8 +86,8 @@ def main():
                 print("\n👋 Exiting.")
                 break
 
+        start_time = current_millis()
         if interactive:
-            start_time = current_millis()
             seq_id, prompt_length, stream = engine.generate_stream(
                 sampling_params, prompt_processed[0])
             output_text = ""
@@ -117,6 +117,8 @@ def main():
             outputs = [output]
         else:
             outputs = engine.generate_sync(sampling_params, prompt_processed)
+
+        outputs.sort(key=lambda o: o.seq_id)
 
         decode_time_taken = 0.0
         prompt_time_taken = 0.0

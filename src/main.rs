@@ -174,7 +174,7 @@ async fn main() -> Result<()> {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis() as usize;
-        let outputs = {
+        let mut outputs = {
             if args.interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
@@ -226,6 +226,8 @@ async fn main() -> Result<()> {
                 LLMEngine::collect_sync_results(receivers).await?
             }
         };
+
+        outputs.sort_by_key(|o| o.seq_id);
 
         let mut decode_time_taken = 0f32;
         let mut prompt_time_taken = 0f32;
