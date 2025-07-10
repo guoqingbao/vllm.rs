@@ -67,8 +67,8 @@ pub fn get_attention_casual_mask(
     offsets.extend(seqlens.clone());
     let mut vec_mask = Vec::new();
     let mut start = 0;
-    for (i, seq_len) in seqlens.iter().enumerate() {
-        let seq_len = seq_len - start;
+    for (i, seq_offset) in seqlens.iter().enumerate() {
+        let seq_len = seq_offset - start;
         let mask = get_casual_mask_internal(
             device,
             dtype,
@@ -78,7 +78,7 @@ pub fn get_attention_casual_mask(
         )
         .unwrap();
         vec_mask.push(mask);
-        start += seq_len;
+        start = *seq_offset;
     }
     Some(vec_mask)
 }
