@@ -103,12 +103,13 @@ def create_app(cfg, dtype):
                             stream.cancel()
                             return  # Stop streaming
                     yield "data: [DONE]\n\n"
-
+                    decode_finish_time = current_millis()
                     output = type("GenerationOutput", (), {
                         "seq_id": seq_id,
                         "decode_output": output_text,
                         "prompt_length": prompt_length,
                         "decode_start_time": decode_start_time,
+                        "decode_finish_time": decode_finish_time,
                         "decoded_length": decoded_length,
                     })()
                     performance_metric(seq_id, start_time, [output])

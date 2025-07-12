@@ -56,6 +56,7 @@ pub struct LLMEngine {
 }
 
 impl LLMEngine {
+    #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let device = new_device(econfig.device_id.unwrap_or(0))?;
         log_info!("Loading model...");
@@ -157,7 +158,7 @@ impl LLMEngine {
             econfig.block_size
         );
 
-        let model_runner = ModelRunner::new(
+        let mut model_runner = ModelRunner::new(
             model_type,
             &vb,
             &econfig,
@@ -178,6 +179,14 @@ impl LLMEngine {
             true,
             true,
         );
+
+        #[cfg(all(feature = "cuda", feature = "graph"))]
+        match model_runner.warmup_capture() {
+            Ok(_) => {
+                log_info!("Cuda graph captured for performance enhancement!")
+            }
+            Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
+        }
 
         let engine = Arc::new(RwLock::new(Self {
             model_runner,
@@ -227,12 +236,14 @@ impl LLMEngine {
         let (tx, rx) = channel(16);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
-        log_info!(
-            "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!",
-            request_type,
-            seq_id,
-            prompt_length
-        );
+        if request_type != RequestType::Completion {
+            log_info!(
+                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!",
+                request_type,
+                seq_id,
+                prompt_length
+            );
+        }
         Ok((seq_id, prompt_length, rx))
     }
 
@@ -414,14 +425,19 @@ impl LLMEngine {
                         decoded_length,
                         decode_output,
                     ))) => {
-                        println!(
-                            "Sequence [seq_id {}] finished with {} tokens!",
-                            *seq_id, decoded_length
-                        );
+                        // println!(
+                        //     "Sequence [seq_id {}] finished with {} tokens!",
+                        //     *seq_id, decoded_length
+                        // );
+                        let decode_finish_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize;
                         results.push(GenerationOutput {
                             seq_id: *seq_id,
                             prompt_length: *prompt_length,
                             decode_start_time,
+                            decode_finish_time,
                             decoded_length,
                             decode_output,
                         });
@@ -506,7 +522,7 @@ impl LLMEngine {
                 {
                     let mut guard = engine.write();
                     if let Err(e) = guard.step() {
-                        eprintln!("[Engine Loop] Step error: {:?}", e);
+                        panic!("[Engine Loop] Step error: {:?}", e);
                     }
                 }
 

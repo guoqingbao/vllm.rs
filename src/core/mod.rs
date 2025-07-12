@@ -1,5 +1,7 @@
 pub mod block_manager;
 pub mod engine;
+#[cfg(all(feature = "cuda", feature = "graph"))]
+pub mod graph;
 pub mod runner;
 pub mod scheduler;
 pub mod sequence;
@@ -17,6 +19,8 @@ pub struct GenerationOutput {
     #[pyo3(get)]
     pub decode_start_time: usize,
     #[pyo3(get)]
+    pub decode_finish_time: usize,
+    #[pyo3(get)]
     pub decoded_length: usize,
     #[pyo3(get)]
     pub decode_output: String,
@@ -28,6 +32,7 @@ pub struct GenerationOutput {
     pub seq_id: usize,
     pub prompt_length: usize,
     pub decode_start_time: usize,
+    pub decode_finish_time: usize,
     pub decoded_length: usize,
     pub decode_output: String,
 }
@@ -43,6 +48,22 @@ macro_rules! log_info {
             #[cfg(not(feature = "python"))]
             {
                 tracing::info!($($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! log_error {
+    ($($arg:tt)*) => {
+        {
+            #[cfg(feature = "python")]
+            {
+                eprintln!($($arg)*);
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                tracing::error!($($arg)*);
             }
         }
     };

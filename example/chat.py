@@ -104,13 +104,14 @@ def main():
                 stream.cancel()
                 print("\n⛔️ Interrupted by user. Canceling generation...")
             print()  # newline after streaming ends
-
+            decode_finish_time = current_millis()
             # Construct a GenerationOutput-like object manually
             output = type("GenerationOutput", (), {
                 "seq_id": seq_id,
                 "decode_output": output_text,
                 "prompt_length": prompt_length,
                 "decode_start_time": decode_start_time,
+                "decode_finish_time": decode_finish_time,
                 "decoded_length": decoded_length,
             })()
 
@@ -137,7 +138,7 @@ def main():
             prompt_latency = (output.decode_start_time - start_time) / 1000.0
             prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
-            decode_latency = (current_millis() -
+            decode_latency = (output.decode_finish_time -
                               output.decode_start_time) / 1000.0
             decode_time_taken = max(decode_time_taken, decode_latency)
 

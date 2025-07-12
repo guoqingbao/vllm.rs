@@ -52,7 +52,7 @@ def run(args):
         prompt_latency = (output.decode_start_time - start_time) / 1000.0
         prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
-        decode_latency = (current_millis() - output.decode_start_time) / 1000.0
+        decode_latency = (output.decode_finish_time - output.decode_start_time) / 1000.0
         decode_time_taken = max(decode_time_taken, decode_latency)
 
     print("\n--- Performance Metrics ---")

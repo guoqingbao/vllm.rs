@@ -60,8 +60,13 @@ struct Args {
     #[arg(long = "i", default_value_t = false)]
     interactive: bool,
 
+    /// max tokens for each request
     #[arg(long = "max", default_value_t = 4096)]
     max_tokens: usize,
+
+    /// for batch performance tetst
+    #[arg(long, default_value = None)]
+    batch: Option<usize>,
 }
 
 #[tokio::main]
@@ -87,10 +92,20 @@ async fn main() -> Result<()> {
         None => DType::BF16,
     };
 
+    let (max_num_seqs, interactive) = if args.batch.is_some() {
+        tracing::warn!("max_num_seqs is ignored in batch performance test.");
+        if args.interactive {
+            tracing::warn!("interactive mode is ignored in batch performance test.");
+        }
+        (args.batch.unwrap(), false)
+    } else {
+        (args.max_num_seqs, args.interactive)
+    };
+
     let econfig = EngineConfig::new(
         args.weight_path.unwrap(),
         Some(args.block_size),
-        Some(args.max_num_seqs),
+        Some(max_num_seqs),
         args.quant.clone(),
         Some(1),
         Some(args.kvcache_mem_gpu),
@@ -98,7 +113,7 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    let prompts = match (args.prompts, args.interactive) {
+    let prompts = match (args.prompts, interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
             println!("⛔️ No prompts provided, using default prompt.");
@@ -114,20 +129,34 @@ async fn main() -> Result<()> {
         }
     };
 
-    let params = SamplingParams::default();
+    let prompts = if args.batch.is_some() {
+        let prompts = if prompts.len() > 0 {
+            vec![prompts.clone()[0].clone()]
+        } else {
+            vec!["Please talk about China.".to_string()]
+        };
+        let repeated: Vec<String> = (0..args.batch.unwrap())
+            .flat_map(|_| prompts.iter().cloned())
+            .collect();
+        repeated
+    } else {
+        prompts
+    };
+
+    let params = SamplingParams::new_with_max_tokens(args.max_tokens);
 
     tracing::info!("{:?}\n", params);
 
     let mut prompt_processed = Vec::new();
 
-    if !args.interactive && prompts.len() > 0 {
+    if !interactive && prompts.len() > 0 {
         if prompts.len() > 1 {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
             let msg = Message::new("user".to_string(), prompt.clone());
             let e = engine.read();
-            let prompt = e.apply_chat_template(&vec![msg], true);
+            let prompt = e.apply_chat_template(&vec![msg], !args.batch.is_some());
             prompt_processed.push(prompt);
         }
     }
@@ -137,7 +166,7 @@ async fn main() -> Result<()> {
 
     let mut chat_history = Vec::<Message>::new();
     loop {
-        if args.interactive {
+        if interactive {
             if chat_history.is_empty() {
                 print!("🤖✨ Enter a new prompt (Press Ctrl+C to exit):");
             } else {
@@ -175,13 +204,13 @@ async fn main() -> Result<()> {
             .expect("Time went backwards")
             .as_millis() as usize;
         let mut outputs = {
-            if args.interactive {
+            if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
                     e.generate_stream(&params, prompt_processed[0].clone())?
                 };
-                let handle: tokio::task::JoinHandle<(usize, usize, String)> =
-                    GLOBAL_RT.spawn(async move {
+                let handle: tokio::task::JoinHandle<(usize, usize, usize, String)> = GLOBAL_RT
+                    .spawn(async move {
                         let mut length = 0;
                         let mut decode_start_time = 0;
                         let mut decode_output = "".to_string();
@@ -207,18 +236,25 @@ async fn main() -> Result<()> {
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
                             }
                         }
-                        (decode_start_time, length, decode_output)
+                        let decode_finish_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize;
+                        (decode_start_time, decode_finish_time, length, decode_output)
                     });
-                let (decode_start_time, decoded_length, decode_output) =
+                let (decode_start_time, decode_finish_time, decoded_length, decode_output) =
                     handle.await.map_err(candle_core::Error::wrap)?;
                 vec![GenerationOutput {
                     seq_id,
                     prompt_length,
                     decode_start_time,
+                    decode_finish_time,
                     decoded_length,
                     decode_output,
                 }]
             } else {
+                tracing::warn!("Starting the inference...");
+
                 let receivers = {
                     let mut e = engine.write();
                     e.generate_sync(&params, prompt_processed.clone())?
@@ -240,12 +276,13 @@ async fn main() -> Result<()> {
                 seq_id,
                 prompt_length,
                 decode_start_time,
+                decode_finish_time,
                 decoded_length,
                 decode_output,
             },
         ) in outputs.iter().enumerate()
         {
-            if !args.interactive {
+            if !interactive && args.batch.is_none() {
                 tracing::info!("[seq_id {}] 📚✨ Prompt {}: {}", seq_id, i + 1, prompts[i]);
                 tracing::info!("[seq_id {}] 📄✨ Response: {}\n", seq_id, decode_output);
             }
@@ -256,17 +293,12 @@ async fn main() -> Result<()> {
                 prompt_time_taken = duration_prompt;
             }
 
-            let duration = (SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards")
-                .as_millis() as usize
-                - decode_start_time) as f32
-                / 1000.0; //maximum time costs for decoding
+            let duration = (decode_finish_time - decode_start_time) as f32 / 1000.0; //maximum time costs for decoding
             if duration > decode_time_taken {
                 decode_time_taken = duration;
             }
 
-            if args.interactive {
+            if interactive {
                 let msg = Message::new("assistant".to_string(), decode_output.to_string());
                 chat_history.push(msg.clone());
             }
@@ -287,7 +319,7 @@ async fn main() -> Result<()> {
             total_decoded_tokens as f32 / decode_time_taken,
         );
 
-        if !args.interactive {
+        if !interactive {
             break;
         }
     }

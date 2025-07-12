@@ -12,9 +12,12 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(all(feature = "cuda", feature = "graph"))]
+use crate::core::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+
 pub enum Model {
-    Qwen3(Qwen3ForCausalLM),
-    LLaMa(LLaMaForCausalLM),
+    Qwen3(Arc<Qwen3ForCausalLM>),
+    LLaMa(Arc<LLaMaForCausalLM>),
     // Gemma(GemmaForCausalLM),
     // Phi(PhiForCausalLM),
     // Mistral(MistralForCausalLM),
@@ -29,6 +32,8 @@ pub struct ModelRunner {
     kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
     device: Device,
     config: EngineConfig,
+    #[cfg(all(feature = "cuda", feature = "graph"))]
+    pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
 }
 
 impl ModelRunner {
@@ -44,22 +49,22 @@ impl ModelRunner {
         let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
         progress_worker(Some(1), config.num_hidden_layers, Arc::clone(&reporter));
         let model = match model_type {
-            ModelType::Qwen3 => Model::Qwen3(Qwen3ForCausalLM::new(
+            ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
                 vb,
                 config,
                 dtype,
                 is_rope_i,
                 &device,
                 Arc::clone(&reporter),
-            )?),
-            ModelType::LLaMa => Model::LLaMa(LLaMaForCausalLM::new(
+            )?)),
+            ModelType::LLaMa => Model::LLaMa(Arc::new(LLaMaForCausalLM::new(
                 vb,
                 config,
                 dtype,
                 is_rope_i,
                 &device,
                 Arc::clone(&reporter),
-            )?),
+            )?)),
             // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,
@@ -72,6 +77,32 @@ impl ModelRunner {
             }
         };
 
+        #[cfg(all(feature = "cuda", feature = "graph"))]
+        let wrapper = match &model {
+            Model::Qwen3(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+            Model::LLaMa(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+        };
+
         let kv_cache = Self::init_kv_cache(econfig, config, dtype, &device)?;
 
         Ok(Self {
@@ -79,6 +110,14 @@ impl ModelRunner {
             kv_cache: Arc::new(Mutex::new(kv_cache)),
             device,
             config: econfig.clone(),
+            #[cfg(all(feature = "cuda", feature = "graph"))]
+            capturer: GraphCapturer::new(
+                wrapper,
+                econfig.max_num_seqs,
+                econfig.max_model_len,
+                econfig.block_size,
+                config.hidden_size,
+            ),
         })
     }
 
@@ -171,6 +210,15 @@ impl ModelRunner {
         } else {
             self.prepare_decode(seqs)
         }?;
+
+        #[cfg(all(feature = "cuda", feature = "graph"))]
+        if !is_prefill && self.capturer.is_captured(input_ids.dim(0)?) {
+            let logits = self
+                .capturer
+                .replay(&input_ids, &positions, &input_metadata)?;
+            let output_ids = self.sample(&logits)?;
+            return Ok(output_ids);
+        }
 
         let logits = match &self.model {
             Model::Qwen3(model) => model.forward(
@@ -337,5 +385,18 @@ impl ModelRunner {
 
     fn sample(&self, logits: &Tensor) -> Result<Vec<u32>> {
         logits.argmax(D::Minus1)?.to_vec1::<u32>()
+    }
+
+    pub fn get_model_vocab_size(&self) -> usize {
+        match &self.model {
+            Model::Qwen3(model) => model.get_vocab_size(),
+            Model::LLaMa(model) => model.get_vocab_size(),
+        }
+    }
+
+    #[cfg(all(feature = "cuda", feature = "graph"))]
+    pub fn warmup_capture(&mut self) -> Result<()> {
+        let kv_cache_lock = self.kv_cache.lock().unwrap(); // no custom method call on `self`
+        self.capturer.capture(&self.device, Some(&kv_cache_lock))
     }
 }

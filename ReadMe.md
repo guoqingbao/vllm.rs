@@ -12,7 +12,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** – Comparable to original vLLM (PyTorch + ATen)
+* 🚀 **High Performance with CUDA graph** – Comparable to original vLLM (PyTorch + ATen)
 * 🧠 **Minimalist Core** – Core logic written in **< 1000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
@@ -20,6 +20,19 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
+
+### Performance
+
+Model: Qwen3-0.6B (BF16)
+Concurrent Requests: 256
+
+| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
+|------------------|---------------|----------|------------------------|
+| vLLM (RTX 4070)            | 133,966       | 98.37    | 1361.84                |
+| Nano-vLLM (RTX 4070)       | 133,966       | 93.41    | 1434.13                |
+| **vLLM.rs** (**A100**)        | 25,600       | 5.23s    | **5092.50**                |
+| vLLM (A100)            | -       | -    | TODO                |
+| Nano-vLLM (A100)       | -       | -    | TODO                |
 
 ## 📦 Installation & Usage
 
@@ -58,11 +71,14 @@ for token in stream:
 Run with `--i` for interactive chat and `--w` to specify model path:
 
 ```bash
-# CUDA (short context)
+# CUDA (normal context)
 cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with Flash Attention (long context, e.g., 32k tokens)
-cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
+# CUDA (with CUDA Graph)
+cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# CUDA with Flash Attention (extra-long context, e.g., 32k tokens)
+cargo run --release --features cuda,flash-attn,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -84,11 +100,14 @@ pip install maturin[patchelf]  # For Linux/Windows
    💡 Specify Python version with `-i`, e.g., `-i python3.9`
 
 ```bash
-# CUDA (short context)
+# CUDA (normal context)
 maturin build --release --features cuda,python
 
+# CUDA (with CUDA Graph)
+maturin build --release --features cuda,graph,python
+
 # CUDA with Flash Attention
-maturin build --release --features cuda,flash-attn,python -i 3.9
+maturin build --release --features cuda,flash-attn,graph,python -i 3.9
 
 # macOS (Metal)
 maturin build --release --features metal,python
@@ -132,10 +151,10 @@ Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0
 
 ```bash
 # CUDA
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+cargo run --release --features cuda,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # CUDA + Flash Attention
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # Metal (macOS)
 cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
@@ -165,7 +184,7 @@ Use `|` to separate prompts:
 
 ```bash
 # GGUF (Rust)
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America."
+cargo run --release --features cuda,graph,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America."
 
 # Safetensor (Rust)
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
@@ -258,6 +277,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] Batched inference (Metal)
 * [x] GGUF format support
 * [x] FlashAttention (CUDA)
+* [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
 * [ ] Multi-rank inference

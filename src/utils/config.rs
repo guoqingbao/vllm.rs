@@ -119,6 +119,16 @@ impl SamplingParams {
             top_p,
         }
     }
+
+    pub fn new_with_max_tokens(max_tokens: usize) -> Self {
+        Self {
+            temperature: 1.0,
+            max_tokens: max_tokens,
+            ignore_eos: false,
+            top_k: None,
+            top_p: None,
+        }
+    }
 }
 
 impl Default for SamplingParams {
