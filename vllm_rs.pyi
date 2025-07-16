@@ -31,6 +31,7 @@ class EngineConfig:
     quant: Optional[str]
     num_shards: Optional[int]
     device_id: Optional[int]
+    use_flash_attn: Optional[bool]
 
 @dataclass
 class SamplingParams:

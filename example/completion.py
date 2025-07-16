@@ -21,6 +21,7 @@ def run(args):
         model_path=args.w,
         max_num_seqs=max_num_seqs,
         max_model_len=args.max_model_len,
+        use_flash_attn=args.flash,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
@@ -91,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--flash", action="store_true", help="Enable flash attention")
 
     args = parser.parse_args()
     if not os.path.exists(args.w):

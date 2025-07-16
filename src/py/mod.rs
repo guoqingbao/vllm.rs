@@ -168,12 +168,10 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        let mut use_flash_attn = use_flash_attn.clone();
         #[cfg(not(feature = "flash-attn"))]
         if let Some(flash) = use_flash_attn {
             if flash {
-                use_flash_attn = Some(false);
-                crate::log_error!("User set use_flash_attn but this project is not built with flash attention, try rebuilt with 'flash-attn' feature.")
+                panic!("Error: User set `use_flash_attn` but this project is not built with flash attention, try rebuilt with 'flash-attn' feature or remove `--flash` argument.")
             }
         }
 

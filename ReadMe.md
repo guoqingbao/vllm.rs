@@ -35,9 +35,10 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **vLLM.rs** (**A100**)        | 257,792 (prompts not counted)      | **25.21s**    | **10216.44**  (**30%+**)             |
 | Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
 
+#### How to reproduce?
 **vLLM.rs**
 ```shell
-# no cuda graph, flash attention and model warmup (final report)
+# w/o cuda graph, no flash attention and model warmup (final report)
 cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
 # report
 2025-07-16T10:32:32.632729Z  INFO vllm_rs: --- Performance Metrics ---
@@ -47,11 +48,13 @@ cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-to
 # enable cuda graph for higher performance
 cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
 # enable cuda graph and flash attention for even higher performance (take some times to build flash-attn kernels)
-cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024 --flash
 ```
 
 
-**nano-vllm** (to make a fair comparison, revise each request to maximum of 1024 output tokens instead of random 100-1024 tokens)
+**Nano-vLLM** 
+
+   💡 (to make a fair comparison, revise each request to maximum of 1024 output tokens instead of random 100-1024 tokens)
 ```shell
 # with cuda graph, flash attention and model warmup
 python3 bench.py
@@ -73,9 +76,11 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ---
 
 ## 🐍 Quick Python Example
+   💡 To compile vllm.rs python whl, please refer to `API Server Mode (Python Interface)`
 
 ```python
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", ...)
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
@@ -123,8 +128,6 @@ pip install maturin[patchelf]  # For Linux/Windows
 
 2. **Build the Python package**
 
-   💡 Specify Python version with `-i`, e.g., `-i python3.9`
-
 ```bash
 # CUDA (normal context)
 maturin build --release --features cuda,python
@@ -133,7 +136,7 @@ maturin build --release --features cuda,python
 maturin build --release --features cuda,graph,python
 
 # CUDA with Flash Attention
-maturin build --release --features cuda,flash-attn,graph,python -i 3.9
+maturin build --release --features cuda,flash-attn,graph,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
@@ -142,16 +145,19 @@ maturin build --release --features metal,python
 3. **Install and Setup Chat Server**
 
 ```bash
-pip install target/wheels/vllm_rs-0.1.0*.whl
+pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
 
 4. **Start OpenAI API Server**
-
+   💡 You can use any client compatible with the OpenAI API.
 ```bash
+# Start OpenAI API Server (default http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:2000/v1/"
+# openai.api_key = "EMPTY"
+# add `--flash` to enalbe Flash attention (`flash-attn` feature required for maturin build）
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 ```
-💡 You can use any client compatible with the OpenAI API.
 
 ### Other Examples:
 

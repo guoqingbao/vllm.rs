@@ -1,6 +1,6 @@
 # 🚀 **vLLM.rs** – 用 Rust 实现的极简 vLLM
 
-一个极速 ⚡、轻量级 🦀 的 **Rust 实现版 vLLM**。
+一个极速 ⚡、轻量的 🦀**Rust 实现版 vLLM**。
 
 ---
 
@@ -35,6 +35,7 @@
 | **vLLM.rs** (**A100**)        | 257,792       | 25.21s    | **10216.44** (**提升30%+**)               |
 | Nano-vLLM (A100)       | 262144       | 34.22s    |   7660.26      | 
 
+#### 复现步骤
 
 **vLLM.rs**
 ```shell
@@ -47,11 +48,13 @@ cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-to
 
 # 启用cuda graph 获得更高性能
 cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
-# 启动cuda graph和flash attention获得最高性能 (编译flash attention需要较长时间)
-cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# 启用cuda graph和flash attention获得最高性能 (编译flash attention需要较长时间)
+cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024 --flash
 ```
 
-***nano-vllm** (为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)）
+***Nano-vLLM** 
+
+   💡 (为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)）
 ```shell
 # 默认启用cuda graph，启用flash attention 与模型预热
 python3 bench.py
@@ -73,9 +76,10 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ---
 
 ## 🐍 快速 Python 示例
-
+   💡 编译vllm.rs Python包可参见`API 服务模式（Python 接口）`
 ```python
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", ...)
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
@@ -119,14 +123,13 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 ```
 
 2. **构建 Python 包**
-   💡 使用 `-i` 指定 Python 版本，例如 `-i python3.9`：
 
 ```bash
 # CUDA（较短上下文）
 maturin build --release --features cuda,python
 
 # CUDA + Flash Attention (超长上下文 (>32k时) 推荐启用）
-maturin build --release --features cuda,flash-attn,python -i 3.9
+maturin build --release --features cuda,flash-attn,python
 
 # macOS（Metal）
 maturin build --release --features metal,python
@@ -135,18 +138,20 @@ maturin build --release --features metal,python
 3. **安装构建好的包与依赖**
 
 ```bash
-pip install target/wheels/vllm_rs-0.1.0*.whl
+pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
 
 4. **启动 OpenAI API 服务**
-
+   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 ```bash
-# 启动 OpenAI 接口兼容的 API 服务（监听 http://0.0.0.0:8000）
+# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:2000/v1/"
+# openai.api_key = "EMPTY"
+# 添加`--flash`选项以启用Flash attention （maturin生成whl包时需添加`flash-attn`）
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 ```
 
-💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
 ---
 

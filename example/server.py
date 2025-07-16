@@ -145,6 +145,7 @@ def parse_args():
     parser.add_argument("--max-num-seqs", type=int, default=32)
     parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--d", type=str, default="0")
+    parser.add_argument("--flash", action="store_true", help="Enable flash attention")
     return parser.parse_args()
 
 
@@ -157,6 +158,7 @@ def main():
         model_path=args.w,
         max_num_seqs=max_num_seqs,
         max_model_len=args.max_model_len,
+        use_flash_attn=args.flash,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
