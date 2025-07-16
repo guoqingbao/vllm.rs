@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import time
+import sys
 # pip install fastapi uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -150,9 +151,11 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
+    max_num_seqs = 8 if sys.platform == "darwin" else { args.max_num_seqs }
     cfg = EngineConfig(
         model_path=args.w,
-        max_num_seqs=args.max_num_seqs,
+        max_num_seqs=max_num_seqs,
         max_model_len=args.max_model_len,
         device_ids=[int(d) for d in args.d.split(",")],
     )

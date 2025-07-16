@@ -1,5 +1,6 @@
 import time
 import os
+import sys
 import argparse
 from vllm_rs import EngineConfig, SamplingParams, Message, GenerationOutput, Engine
 # Before running this code, first perform maturin build and then install the package in target/wheels
@@ -13,7 +14,8 @@ def run(args):
     if args.batch > 1:
         max_num_seqs = args.batch
     else:
-        max_num_seqs = args.max_num_seqs
+        # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
+        max_num_seqs = 8 if sys.platform == "darwin" else { args.max_num_seqs }
 
     cfg = EngineConfig(
         model_path=args.w,
