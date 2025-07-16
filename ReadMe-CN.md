@@ -12,7 +12,7 @@
 ## ✨ 主要特性
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
-* 🚀 **高性能** – 与原版 vLLM（PyTorch + ATen）性能相当
+* 🚀 **高性能** – 性能优于 vLLM 和 Nano-vLLM
 * 🧠 **极简核心** – 核心逻辑仅 **< 1000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
@@ -20,6 +20,45 @@
 * 🤝 **欢迎贡献** – 欢迎提交 PR、问题或给项目点亮 ⭐！
 
 ---
+
+### 性能对比
+
+> 模型: Qwen3-0.6B (BF16)；
+> 并发请求数: 256；
+> Max Model Length: 1024；
+> 每个请求最大输出: 1024
+
+| 推理引擎 | 输出Tokens | 耗时 (s) | 吞吐率 (tokens/s) |
+|------------------|---------------|----------|------------------------|
+| vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
+| Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
+| **vLLM.rs** (**A100**)        | 257,792       | 25.21s    | **10216.44** (**提升30%+**)               |
+| Nano-vLLM (A100)       | 262144       | 34.22s    |   7660.26      | 
+
+
+**vLLM.rs**
+```shell
+# 未启用Cuda Graph，未启用Flash Attention，无模型预热 (最终报告)
+cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# 日志
+2025-07-16T10:32:32.632729Z  INFO vllm_rs: --- Performance Metrics ---
+2025-07-16T10:32:32.632764Z  INFO vllm_rs: ⏱️ Prompt tokens: 4096 in 12.56s (326.17 tokens/s)
+2025-07-16T10:32:32.632781Z  INFO vllm_rs: ⏱️ Decoded tokens: 257792 in 25.21s (10216.44 tokens/s)
+
+# 启用cuda graph 获得更高性能
+cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# 启动cuda graph和flash attention获得最高性能 (编译flash attention需要较长时间)
+cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+```
+
+***nano-vllm** (为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)）
+```shell
+# 默认启用cuda graph，启用flash attention 与模型预热
+python3 bench.py
+# 日志
+Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
+Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
+```
 
 ## 📦 安装与使用
 
@@ -42,7 +81,7 @@ params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
 
 # 同步批量生成
-outputs = engine.generate_sync(params, [prompt, prompt])
+outputs = engine.generate_sync([params,params], [prompt, prompt])
 print(outputs)
 
 # 单请求流式生成
@@ -170,13 +209,13 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 
 ```bash
 # GGUF 模型（Rust）
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America."
+cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America." --max-model-len 1024
 
 # Safetensor 模型（Rust）
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
 
 # GGUF 模型（Python）
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?" --max-model-len 1024
 ```
 
 ---
@@ -213,21 +252,6 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 
 ---
 
-## 📊 批量推理示例
-
-**LLaMa3.1-8B（BF16，A100，16 请求）**
-
-```
-共生成 8450 tokens，耗时 14.28 秒（吞吐量：591.82 tokens/s）
-```
-
-**QwQ-32B GGUF Q4K（A100，4 请求）**
-
-```
-共生成 4000 tokens，耗时 48.23 秒（平均吞吐量：82.93 tokens/s）
-```
-
----
 
 ## ⚙️ 命令行参数说明
 
@@ -235,8 +259,9 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 | ----------- | -------------------------------------- | ----- |
 | `--w`       | 模型路径（Safetensor 目录或 GGUF 文件）           |       |
 | `--d`       | 设备 ID，例如 `--d 0`                       |       |
-| `--kvmem`   | KV 缓存大小（单位 MB，默认 `4096`）               |       |
-| `--max`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
+| `--max_num_seqs`   | 同时处理的最大请求数（默认 `32`）               |       |
+| `--max_tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
+| `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
 | `--prompts` | 输入的 prompt，多个使用 \`                     | \` 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
 

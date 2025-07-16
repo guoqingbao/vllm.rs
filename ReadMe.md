@@ -12,7 +12,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** – Comparable to original vLLM (PyTorch + ATen)
+* 🚀 **High Performance** – Superior than vLLM and Nano-vLLM
 * 🧠 **Minimalist Core** – Core logic written in **< 1000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
@@ -20,6 +20,45 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
+
+### Performance
+
+> Model: Qwen3-0.6B (BF16); 
+> Concurrent Requests: 256; 
+> Max Model Length: 1024; 
+> Max Tokens / Request: 1024
+
+| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
+|------------------|---------------|----------|------------------------|
+| vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
+| Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
+| **vLLM.rs** (**A100**)        | 257,792 (prompts not counted)      | **25.21s**    | **10216.44**  (**30%+**)             |
+| Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
+
+**vLLM.rs**
+```shell
+# no cuda graph, flash attention and model warmup (final report)
+cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# report
+2025-07-16T10:32:32.632729Z  INFO vllm_rs: --- Performance Metrics ---
+2025-07-16T10:32:32.632764Z  INFO vllm_rs: ⏱️ Prompt tokens: 4096 in 12.56s (326.17 tokens/s)
+2025-07-16T10:32:32.632781Z  INFO vllm_rs: ⏱️ Decoded tokens: 257792 in 25.21s (10216.44 tokens/s)
+
+# enable cuda graph for higher performance
+cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# enable cuda graph and flash attention for even higher performance (take some times to build flash-attn kernels)
+cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+```
+
+
+**nano-vllm** (to make a fair comparison, revise each request to maximum of 1024 output tokens instead of random 100-1024 tokens)
+```shell
+# with cuda graph, flash attention and model warmup
+python3 bench.py
+# report
+Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
+Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
+```
 
 ## 📦 Installation & Usage
 
@@ -42,7 +81,7 @@ params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
 
 # Synchronous generation for batched input
-outputs = engine.generate_sync(params, [prompt, prompt])
+outputs = engine.generate_sync([params,params], [prompt, prompt])
 print(outputs)
 
 # Streaming generation for single request
@@ -58,11 +97,14 @@ for token in stream:
 Run with `--i` for interactive chat and `--w` to specify model path:
 
 ```bash
-# CUDA (short context)
+# CUDA (normal context)
 cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with Flash Attention (long context, e.g., 32k tokens)
-cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
+# CUDA (with CUDA Graph)
+cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# CUDA with Flash Attention (extra-long context, e.g., 32k tokens)
+cargo run --release --features cuda,flash-attn,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -84,11 +126,14 @@ pip install maturin[patchelf]  # For Linux/Windows
    💡 Specify Python version with `-i`, e.g., `-i python3.9`
 
 ```bash
-# CUDA (short context)
+# CUDA (normal context)
 maturin build --release --features cuda,python
 
+# CUDA (with CUDA Graph)
+maturin build --release --features cuda,graph,python
+
 # CUDA with Flash Attention
-maturin build --release --features cuda,flash-attn,python -i 3.9
+maturin build --release --features cuda,flash-attn,graph,python -i 3.9
 
 # macOS (Metal)
 maturin build --release --features metal,python
@@ -132,10 +177,10 @@ Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0
 
 ```bash
 # CUDA
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+cargo run --release --features cuda,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # CUDA + Flash Attention
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 
 # Metal (macOS)
 cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
@@ -165,13 +210,13 @@ Use `|` to separate prompts:
 
 ```bash
 # GGUF (Rust)
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America."
+cargo run --release --features cuda,graph,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America." --max-model-len 1024
 
 # Safetensor (Rust)
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
 
 # GGUF (Python)
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?" --max-model-len 1024
 ```
 
 ---
@@ -208,30 +253,15 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 
 ---
 
-## 📊 Batched Output Examples
-
-**LLaMa3.1-8B (BF16, A100, 16 requests)**
-
-```
-8450 tokens generated in 14.28s (591.82 tokens/s)
-```
-
-**QwQ-32B GGUF Q4K (A100, 4 requests)**
-
-```
-4000 tokens in 48.23s (82.93 tokens/s)
-```
-
----
-
 ## ⚙️ CLI Flags
 
 | Flag        | Description                                                      |    |
 | ----------- | ---------------------------------------------------------------- | -- |
 | `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
 | `--d`       | Device ID (e.g. `--d 0`)                                         |    |
-| `--kvmem`   | KV cache size in MB (default: `4096`)                            |    |
-| `--max`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
+| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`)                            |    |
+| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
+| `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
 | `--prompts` | Prompts, separated by \`                                         | \` |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
 
@@ -258,6 +288,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] Batched inference (Metal)
 * [x] GGUF format support
 * [x] FlashAttention (CUDA)
+* [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
 * [ ] Multi-rank inference

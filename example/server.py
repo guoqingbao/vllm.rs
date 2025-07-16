@@ -103,12 +103,13 @@ def create_app(cfg, dtype):
                             stream.cancel()
                             return  # Stop streaming
                     yield "data: [DONE]\n\n"
-
+                    decode_finish_time = current_millis()
                     output = type("GenerationOutput", (), {
                         "seq_id": seq_id,
                         "decode_output": output_text,
                         "prompt_length": prompt_length,
                         "decode_start_time": decode_start_time,
+                        "decode_finish_time": decode_finish_time,
                         "decoded_length": decoded_length,
                     })()
                     performance_metric(seq_id, start_time, [output])
@@ -140,8 +141,8 @@ def parse_args():
     parser.add_argument("--w", type=str, required=True)  # weight path
     parser.add_argument(
         "--dtype", choices=["f16", "bf16", "f32"], default="bf16")
-    parser.add_argument("--max-num-seqs", type=int, default=64)
-    parser.add_argument("--kvmem", type=int, default=4096)
+    parser.add_argument("--max-num-seqs", type=int, default=32)
+    parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--d", type=str, default="0")
     return parser.parse_args()
 
@@ -152,7 +153,7 @@ def main():
     cfg = EngineConfig(
         model_path=args.w,
         max_num_seqs=args.max_num_seqs,
-        kvcache_mem_gpu=args.kvmem,
+        max_model_len=args.max_model_len,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 

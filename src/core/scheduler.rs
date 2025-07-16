@@ -109,6 +109,14 @@ impl Scheduler {
         }
     }
 
+    pub fn get_waiting(&self, id: usize) -> Option<&Sequence> {
+        if id < self.waiting.len() {
+            Some(&self.waiting[id])
+        } else {
+            None
+        }
+    }
+
     /// Postprocess output tokens and modify sequences by indexes
     pub fn postprocess(&mut self, ids: &[usize], output_ids: &[u32]) {
         for (i, &idx) in ids.iter().enumerate() {
@@ -116,9 +124,7 @@ impl Scheduler {
             let token = output_ids[i];
             seq.append_token(token);
 
-            if self.eos_token_id.contains(&token)
-                || seq.output_ids.len() >= seq.sampling_params.max_tokens
-            {
+            if self.eos_token_id.contains(&token) || seq.len() >= seq.sampling_params.max_tokens {
                 seq.status = SequenceStatus::Finished;
                 self.block_manager.deallocate(seq);
             }
@@ -129,6 +135,22 @@ impl Scheduler {
         // Remove finished sequences from running vector
         self.running
             .retain(|seq| seq.status != SequenceStatus::Finished);
+        self.waiting
+            .retain(|seq| seq.status != SequenceStatus::Finished);
+    }
+
+    pub fn release_all_waitings(&mut self) -> Vec<usize> {
+        // Release all waiting sequences since there are no more resources (kv cache)
+        let mut decode_ids = Vec::new();
+        for i in 0..self.waiting.len() {
+            let seq = &mut self.waiting[i];
+            seq.status = SequenceStatus::Finished;
+            self.block_manager.deallocate(seq);
+            decode_ids.push(i);
+        }
+        println!("{} waiting sequences released!", decode_ids.len());
+        assert!(decode_ids.len() > 0, "no more waiting");
+        decode_ids
     }
 
     pub fn cancel(&mut self, seq_id: usize) {

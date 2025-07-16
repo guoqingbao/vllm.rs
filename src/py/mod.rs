@@ -52,7 +52,7 @@ impl Engine {
     #[pyo3(name = "generate_sync", text_signature = "($self, params, prompts)")]
     pub fn generate_sync(
         &mut self,
-        params: SamplingParams,
+        params: Vec<SamplingParams>,
         prompts: Vec<String>,
     ) -> PyResult<Vec<GenerationOutput>> {
         tokio::task::block_in_place(|| {
@@ -153,33 +153,47 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_path, block_size=Some(32), max_num_seqs=Some(32), quant=None, num_shards=Some(1), kvcache_mem_gpu=Some(4096), device_ids=None))]
+    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), quant=None, num_shards=Some(1), device_ids=None, use_flash_attn=None))]
     pub fn new(
         model_path: String,
-        block_size: Option<usize>,
         max_num_seqs: Option<usize>,
+        max_model_len: Option<usize>,
         quant: Option<String>,
         num_shards: Option<usize>,
-        kvcache_mem_gpu: Option<usize>,
         device_ids: Option<Vec<usize>>,
+        use_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
         }
+
+        let mut use_flash_attn = use_flash_attn.clone();
+        #[cfg(not(feature = "flash-attn"))]
+        if let Some(flash) = use_flash_attn {
+            if flash {
+                use_flash_attn = Some(false);
+                crate::log_error!("User set use_flash_attn but this project is not built with flash attention, try rebuilt with 'flash-attn' feature.")
+            }
+        }
+
         Self {
             model_path,
             tokenizer: None,
             tokenizer_config: None,
             num_blocks: 128, //placeholder
-            block_size: block_size.unwrap_or(32),
+            block_size: if use_flash_attn.unwrap_or(false) {
+                256
+            } else {
+                32
+            },
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
-            max_model_len: 32768,          //placeholder
+            max_model_len,                 //placeholder
             quant,
             num_shards,
-            kvcache_mem_gpu,
             device_id: Some(device_ids[0]),
+            use_flash_attn,
         }
     }
 }

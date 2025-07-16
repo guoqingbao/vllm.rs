@@ -10,18 +10,17 @@ def current_millis():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="vllm.rs Python CLI")
-    parser.add_argument("--max-num-seqs", type=int, default=64)
-    parser.add_argument("--block-size", type=int, default=32)
+    parser.add_argument("--max-num-seqs", type=int, default=8)
+    parser.add_argument("--max-model-len", type=int, default=4096)
     parser.add_argument("--w", type=str, required=True)
     parser.add_argument("--dtype", type=str,
                         choices=["f16", "bf16", "f32"], default="bf16")
-    parser.add_argument("--kvmem", type=int, default=4096)
     parser.add_argument("--d", type=str, default="0")
     parser.add_argument("--log", action="store_true")
     parser.add_argument("--prompts", type=str,
                         help="Use '|' to separate multiple prompts")
     parser.add_argument("--i", action="store_true")
-    parser.add_argument("--max", dest="max_tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=4096)
 
     return parser.parse_args()
 
@@ -29,7 +28,8 @@ def parse_args():
 def build_engine_config(args):
     return EngineConfig(
         model_path=args.w,
-        kvcache_mem_gpu=args.kvmem,
+        max_num_seqs=args.max_num_seqs,
+        max_model_len=args.max_model_len,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
@@ -50,7 +50,7 @@ def main():
         print("[Warning] Ignoring predefined prompts in interactive mode.")
         prompts = []
 
-    sampling_params = SamplingParams()
+    sampling_params = []
 
     prompt_processed = []
 
@@ -59,6 +59,9 @@ def main():
             msg = Message(role="user", content=prompt)
             processed = engine.apply_chat_template([msg], log=True)
             prompt_processed.append(processed)
+            sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
+    else:
+        sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
 
     chat_history = []
     while True:
@@ -89,7 +92,7 @@ def main():
         start_time = current_millis()
         if interactive:
             seq_id, prompt_length, stream = engine.generate_stream(
-                sampling_params, prompt_processed[0])
+                sampling_params[0], prompt_processed[0])
             output_text = ""
             decode_start_time = 0
             decoded_length = 0
@@ -104,13 +107,14 @@ def main():
                 stream.cancel()
                 print("\n⛔️ Interrupted by user. Canceling generation...")
             print()  # newline after streaming ends
-
+            decode_finish_time = current_millis()
             # Construct a GenerationOutput-like object manually
             output = type("GenerationOutput", (), {
                 "seq_id": seq_id,
                 "decode_output": output_text,
                 "prompt_length": prompt_length,
                 "decode_start_time": decode_start_time,
+                "decode_finish_time": decode_finish_time,
                 "decoded_length": decoded_length,
             })()
 
@@ -137,7 +141,7 @@ def main():
             prompt_latency = (output.decode_start_time - start_time) / 1000.0
             prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
-            decode_latency = (current_millis() -
+            decode_latency = (output.decode_finish_time -
                               output.decode_start_time) / 1000.0
             decode_time_taken = max(decode_time_taken, decode_latency)
 

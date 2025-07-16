@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
-    tracing::info!("{:}", Path::new(path).join(json_file).display());
+    crate::log_info!("{:}", Path::new(path).join(json_file).display());
     let jsfile = std::fs::File::open(Path::new(path).join(json_file))?;
     let json: serde_json::Value =
         serde_json::from_reader(&jsfile).map_err(candle_core::Error::wrap)?;
@@ -44,13 +44,13 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
     } else {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
-            tracing::warn!(
+            crate::log_info!(
                 "Running on CPU, to run on GPU(metal), build this example with `--features metal`"
             );
         }
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
-            tracing::warn!(
+            crate::log_info!(
                 "Running on CPU, to run on GPU, build this example with `--features cuda`"
             );
         }
@@ -59,25 +59,37 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
 }
 
 pub fn get_kvcache_blocks(
-    kvcache_mem_gpu: usize,
+    max_num_seqs: usize,
+    max_model_len: usize,
     block_size: usize,
     config: &config::Config,
     num_shards: usize,
     dtype: DType,
 ) -> usize {
     const SIZE_IN_MB: usize = 1024 * 1024;
+
     let dsize = dtype.size_in_bytes();
     let head_dim = config
         .head_dim
         .unwrap_or(config.hidden_size / config.num_attention_heads);
 
-    let num_gpu_blocks = kvcache_mem_gpu * SIZE_IN_MB
-        / dsize
-        / block_size
-        / (config.num_key_value_heads / num_shards)
-        / head_dim
-        / config.num_hidden_layers
-        / 2;
+    let num_gpu_blocks = max_num_seqs * max_model_len / block_size;
+
+    let total_memory_bytes = num_gpu_blocks
+        * block_size
+        * (config.num_key_value_heads / num_shards)
+        * head_dim
+        * dsize
+        * 2
+        * config.num_hidden_layers;
+    crate::log_info!(
+        "Allocating {} KV blocks ({:2} MB) for [{} seqs x {} tokens]",
+        num_gpu_blocks,
+        total_memory_bytes as f32 / SIZE_IN_MB as f32,
+        max_num_seqs,
+        max_model_len,
+    );
+
     num_gpu_blocks
 }
 
@@ -123,7 +135,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         let vocab_size = md_get("tokenizer.ggml.tokens");
         if vocab_size.is_ok() {
             let size = vocab_size.unwrap().to_vec()?.len();
-            tracing::warn!(
+            crate::log_info!(
                 "No vocab_size in metadata, using tokenizer.ggml.tokens with size {}",
                 size
             );
@@ -194,7 +206,7 @@ pub fn init_config_tokenizer(
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
                 Ok(f) => serde_json::from_slice(&f).map_err(candle_core::Error::wrap)?,
                 _ => {
-                    tracing::error!(
+                    crate::log_error!(
                         "Missing tokenizer_config.json file, chat template may not correct!"
                     );
                     TokenizerConfig {

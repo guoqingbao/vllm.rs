@@ -121,6 +121,7 @@ pub struct Qwen3ForCausalLM {
     device: Device,
     config: Config,
     dtype: DType,
+    vocab_size: usize,
 }
 
 impl Qwen3ForCausalLM {
@@ -228,6 +229,7 @@ impl Qwen3ForCausalLM {
             device: device.clone(),
             config: config.clone(),
             dtype,
+            vocab_size,
         })
     }
 
@@ -287,6 +289,10 @@ impl Qwen3ForCausalLM {
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
-        self.lm_head.forward(&xs)
+        self.lm_head.forward(&xs)?.to_dtype(DType::F32)
+    }
+
+    pub fn get_vocab_size(&self) -> usize {
+        self.vocab_size
     }
 }

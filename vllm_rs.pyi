@@ -15,6 +15,7 @@ class GenerationOutput:
     seq_id: int
     prompt_length: int
     decode_start_time: int
+    decode_finish_time: int
     decoded_length: int
     decode_output: str
 
@@ -24,13 +25,11 @@ class EngineConfig:
     tokenizer: Optional[str]
     tokenizer_config: Optional[str]
     num_blocks: Optional[int]
-    block_size: Optional[int]
     max_num_seqs: Optional[int]
-    max_num_batched_tokens: Optional[int]
     max_model_len: Optional[int]
+    max_num_batched_tokens: Optional[int]
     quant: Optional[str]
     num_shards: Optional[int]
-    kvcache_mem_gpu: Optional[int]
     device_id: Optional[int]
 
 @dataclass

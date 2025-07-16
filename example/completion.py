@@ -10,9 +10,15 @@ def current_millis():
 
 
 def run(args):
+    if args.batch > 1:
+        max_num_seqs = args.batch
+    else:
+        max_num_seqs = args.max_num_seqs
+
     cfg = EngineConfig(
         model_path=args.w,
-        kvcache_mem_gpu=4096,  # MB
+        max_num_seqs=max_num_seqs,
+        max_model_len=args.max_model_len,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
@@ -21,15 +27,22 @@ def run(args):
     engine = Engine(cfg, "bf16")
 
     if prompts == None:
-        prompts = ["How are you?", "How to make money?"]
-        print("⛔️ No prompts found, use default ", prompts)
+        if args.batch > 1:
+            prompts = ["Please talk about China in more details."] * args.batch
+        else:
+            prompts = ["How are you?", "How to make money?"]
+            print("⛔️ No prompts found, use default ", prompts)
     else:
         prompts = prompts.split("|")
+        if args.batch > 1:
+            prompts = prompts[0] * args.batch
 
-    sampling_params = SamplingParams()
+    sampling_params = []
+    
     for i in range(len(prompts)):
         msg = Message("user", prompts[i])
-        prompts[i] = engine.apply_chat_template([msg], True)
+        prompts[i] = engine.apply_chat_template([msg], args.batch == 1)
+        sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
 
     start_time = current_millis()
     print("Start inference with", len(prompts), "prompts")
@@ -42,9 +55,10 @@ def run(args):
     total_prompt_tokens = 0
 
     for i, output in enumerate(outputs):
-        print(f"\n[Prompt {i + 1}]")
-        print(f"Prompt: {prompts[i]}")
-        print(f"Response: {output.decode_output}")
+        if args.batch == 1:
+            print(f"\n[Prompt {i + 1}]")
+            print(f"Prompt: {prompts[i]}")
+            print(f"Response: {output.decode_output}")
 
         total_prompt_tokens += output.prompt_length
         total_decoded_tokens += output.decoded_length
@@ -52,7 +66,7 @@ def run(args):
         prompt_latency = (output.decode_start_time - start_time) / 1000.0
         prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
-        decode_latency = (current_millis() - output.decode_start_time) / 1000.0
+        decode_latency = (output.decode_finish_time - output.decode_start_time) / 1000.0
         decode_time_taken = max(decode_time_taken, decode_latency)
 
     print("\n--- Performance Metrics ---")
@@ -71,6 +85,10 @@ if __name__ == "__main__":
     parser.add_argument("--prompts", type=str,
                         help="Use '|' to separate multiple prompts")
     parser.add_argument("--d", type=str, default="0")
+    parser.add_argument("--max-num-seqs", type=int, default=32)
+    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--batch", type=int, default=1)
 
     args = parser.parse_args()
     if not os.path.exists(args.w):

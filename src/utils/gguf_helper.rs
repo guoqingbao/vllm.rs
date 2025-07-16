@@ -16,8 +16,6 @@ use tokenizers::{
     normalizers::{self, Prepend, Replace},
     processors, AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
 };
-use tracing::info;
-// use indexmap::IndexMap;
 
 fn parse_gguf_value(value: &Value) -> String {
     match value {
@@ -79,7 +77,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 n_splits[0]
             );
         } else if n_splits.len() == 1 {
-            info!("GGUF file has been split into {} shards", n_splits[0]);
+            crate::log_info!("GGUF file has been split into {} shards", n_splits[0]);
         }
 
         let mut all_metadata = HashMap::new();
@@ -145,7 +143,7 @@ impl ContentMetadata<'_> {
 
             if !self.metadata.contains_key(&prop_key) {
                 all_props_are_present = false;
-                tracing::warn!("Expected GGUF metadata to have key: `{prop_key}`");
+                crate::log_info!("Expected GGUF metadata to have key: `{prop_key}`");
             }
         }
 
@@ -321,7 +319,7 @@ pub fn get_gguf_info<R: std::io::Seek + std::io::Read>(
             context_length = md_get(key).unwrap().to_u32().unwrap();
         }
         if !key.contains("tokenizer.") {
-            tracing::info!("{key} : {:?}", parse_gguf_value(&md_get(key).unwrap()));
+            crate::log_info!("{key} : {:?}", parse_gguf_value(&md_get(key).unwrap()));
         }
 
         if key.contains("tokenizer.ggml.token_type") {
@@ -352,7 +350,7 @@ pub fn get_gguf_info<R: std::io::Seek + std::io::Read>(
         }
     }
 
-    info!(
+    crate::log_info!(
         "GGUF tokenizer model is `{model}`, kind: `{kind:?}`, num tokens: {}, num special tokens: {}, num added tokens: {}, num merges: {}, num scores: {}",
         tokenizer.get_vocab_size(true),
         num_special_tokens,
