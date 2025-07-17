@@ -2,6 +2,7 @@ import time
 import os
 import sys
 import argparse
+import warnings
 from vllm_rs import EngineConfig, SamplingParams, Message, GenerationOutput, Engine
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
@@ -11,24 +12,7 @@ def current_millis():
 
 
 def run(args):
-    if args.batch > 1:
-        max_num_seqs = args.batch
-    else:
-        # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
-        max_num_seqs = 8 if sys.platform == "darwin" else args.max_num_seqs
-
-    cfg = EngineConfig(
-        model_path=args.w,
-        max_num_seqs=max_num_seqs,
-        max_model_len=args.max_model_len,
-        use_flash_attn=args.flash,
-        device_ids=[int(d) for d in args.d.split(",")],
-    )
-
     prompts = args.prompts
-
-    engine = Engine(cfg, "bf16")
-
     if prompts == None:
         if args.batch > 1:
             prompts = ["Please talk about China in more details."] * args.batch
@@ -39,6 +23,31 @@ def run(args):
         prompts = prompts.split("|")
         if args.batch > 1:
             prompts = prompts[0] * args.batch
+
+    if args.batch > 1:
+        max_num_seqs = args.batch
+    elif len(prompts) > 0:
+        max_num_seqs = len(prompts)
+    else:
+        # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
+        max_num_seqs = 8 if sys.platform == "darwin" else args.max_num_seqs
+
+    if args.max_model_len is None:
+        max_model_len = 32768 // max_num_seqs
+        warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
+    else:
+        max_model_len = args.max_model_len
+
+    cfg = EngineConfig(
+        model_path=args.w,
+        max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
+        use_flash_attn=args.flash,
+        device_ids=[int(d) for d in args.d.split(",")],
+    )
+
+
+    engine = Engine(cfg, "bf16")
 
     sampling_params = []
     
@@ -88,8 +97,8 @@ if __name__ == "__main__":
     parser.add_argument("--prompts", type=str,
                         help="Use '|' to separate multiple prompts")
     parser.add_argument("--d", type=str, default="0")
-    parser.add_argument("--max-num-seqs", type=int, default=32)
-    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--max-num-seqs", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--flash", action="store_true", help="Enable flash attention")

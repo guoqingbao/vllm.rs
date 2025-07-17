@@ -366,6 +366,10 @@ impl LLMEngine {
             }
         }
         self.scheduler.clear_finished();
+
+        if indices.is_empty() {
+            self.active_requests.clear();
+        }
         Ok(())
     }
 

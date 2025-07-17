@@ -124,7 +124,10 @@ impl Scheduler {
             let token = output_ids[i];
             seq.append_token(token);
 
-            if self.eos_token_id.contains(&token) || seq.len() >= seq.sampling_params.max_tokens {
+            if self.eos_token_id.contains(&token)
+                || seq.output_len() >= seq.sampling_params.max_tokens
+                || seq.len() > self.cfg.max_num_batched_tokens
+            {
                 seq.status = SequenceStatus::Finished;
                 self.block_manager.deallocate(seq);
             }
@@ -148,8 +151,8 @@ impl Scheduler {
             self.block_manager.deallocate(seq);
             decode_ids.push(i);
         }
-        println!("{} waiting sequences released!", decode_ids.len());
-        assert!(decode_ids.len() > 0, "no more waiting");
+        // println!("{} waiting sequences released!", decode_ids.len());
+        // assert!(decode_ids.len() > 0, "no more waiting");
         decode_ids
     }
 

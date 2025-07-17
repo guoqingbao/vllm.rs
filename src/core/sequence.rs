@@ -43,6 +43,10 @@ impl Sequence {
         self.token_ids.len()
     }
 
+    pub fn output_len(&self) -> usize {
+        self.output_ids.len()
+    }
+
     pub fn is_finished(&self) -> bool {
         self.status == SequenceStatus::Finished
     }

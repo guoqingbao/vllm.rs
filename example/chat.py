@@ -1,5 +1,6 @@
 import time
 import argparse
+import warnings
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
@@ -10,8 +11,8 @@ def current_millis():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="vllm.rs Python CLI")
-    parser.add_argument("--max-num-seqs", type=int, default=8)
-    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--max-num-seqs", type=int, default=1)
+    parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--w", type=str, required=True)
     parser.add_argument("--dtype", type=str,
                         choices=["f16", "bf16", "f32"], default="bf16")
@@ -26,11 +27,22 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_engine_config(args):
+def build_engine_config(args, num_of_prompts):
+    if args.max_model_len is None:
+        if args.i:
+            max_model_len = 32768
+        elif num_of_prompts > 0:
+            max_model_len = 32768 // num_of_prompts
+        else:
+            max_model_len = 32768 // args.max_num_seqs
+        warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
+    else:
+        max_model_len = args.max_model_len
+
     return EngineConfig(
         model_path=args.w,
         max_num_seqs=args.max_num_seqs,
-        max_model_len=args.max_model_len,
+        max_model_len=max_model_len,
         use_flash_attn = args.flash,
         device_ids=[int(d) for d in args.d.split(",")],
     )
@@ -39,14 +51,14 @@ def build_engine_config(args):
 def main():
     args = parse_args()
     interactive = args.i
-    econfig = build_engine_config(args)
-    engine = Engine(econfig, args.dtype)
-
     prompts = (
         args.prompts.split("|")
         if args.prompts and not interactive
         else ["How are you today?"]
     )
+
+    econfig = build_engine_config(args, len(prompts))
+    engine = Engine(econfig, args.dtype)
 
     if args.prompts and interactive:
         print("[Warning] Ignoring predefined prompts in interactive mode.")

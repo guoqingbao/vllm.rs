@@ -14,8 +14,8 @@ use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Maximum number of concurrent sequences to allow
-    #[arg(long, default_value_t = 8)]
+    /// Maximum number of concurrent sequences to allow, default 1 for interactive chat
+    #[arg(long, default_value_t = 1)]
     max_num_seqs: usize,
 
     /// Size of a block
@@ -106,14 +106,22 @@ async fn main() -> Result<()> {
         (args.max_num_seqs, args.interactive)
     };
 
-    if args.max_model_len.is_none() {
-        tracing::warn!("max_model_len is not given, default to 4096.");
-    }
+    let max_model_len = if args.max_model_len.is_none() {
+        let max_model_len = if args.interactive {
+            32768
+        } else {
+            32768 / max_num_seqs
+        };
+        tracing::warn!("max_model_len is not given, default to {max_model_len}.");
+        Some(max_model_len)
+    } else {
+        args.max_model_len
+    };
 
     let econfig = EngineConfig::new(
         args.weight_path.unwrap(),
         Some(max_num_seqs),
-        args.max_model_len,
+        max_model_len,
         args.quant.clone(),
         Some(1),
         args.device_ids.clone(),
