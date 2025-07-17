@@ -13,7 +13,7 @@ use std::sync::RwLock;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(all(feature = "cuda", feature = "graph"))]
-use crate::core::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 
 pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),

@@ -355,9 +355,6 @@ impl LLMEngine {
                                             );
                                             self.scheduler.cancel(seq_id);
                                         }
-                                    } else {
-                                        log_info!("[seq_id {}] Decode error", seq_id);
-                                        self.scheduler.cancel(seq_id);
                                     }
                                 } else {
                                     let _ = sender.try_send(StreamItem::TokenID(token_id));
