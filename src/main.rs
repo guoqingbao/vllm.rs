@@ -67,10 +67,6 @@ struct Args {
     /// for batch performance tetst
     #[arg(long, default_value = None)]
     batch: Option<usize>,
-
-    /// max tokens for each request
-    #[arg(long = "flash", default_value_t = false)]
-    use_flash_attn: bool,
 }
 
 #[tokio::main]
@@ -125,7 +121,6 @@ async fn main() -> Result<()> {
         args.quant.clone(),
         Some(1),
         args.device_ids.clone(),
-        Some(args.use_flash_attn),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

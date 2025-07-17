@@ -49,7 +49,7 @@ cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-to
 # 启用cuda graph 获得更高性能
 cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
 # 启用cuda graph和flash attention获得最高性能 (编译flash attention需要较长时间)
-cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024 --flash
+cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
 ```
 
 **Nano-vLLM** 
@@ -63,7 +63,14 @@ Generating: 100%|██████████████████| 1/1 [00
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
 
-## 📦 安装与使用
+## 预编译包
+
+[v0.1.0 - CUDA 12](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64.whl)
+
+[v0.1.0 - CUDA 12 - with Flash Attention (需解压)](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64.zip)
+
+
+## 📦 从源代码编译安装
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
 
@@ -73,48 +80,6 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 * 安装 **Linux** Build依赖项 `sudo apt install libssl-dev pkg-config -y`
 * **macOS** 平台需安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
 * 构建 Python 接口需安装 [Maturin](https://github.com/PyO3/maturin)
-
----
-
-## 🐍 快速 Python 示例
-   💡 编译vllm.rs Python包可参见`API 服务模式（Python 接口）`
-```python
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-
-# 同步批量生成
-outputs = engine.generate_sync([params,params], [prompt, prompt])
-print(outputs)
-
-# 单请求流式生成
-stream = engine.generate_stream(params, prompt)
-for token in stream:
-    print(token)
-```
-
----
-
-## 🤖✨ 交互模式（纯 Rust CLI）
-
-使用 `--i` 启用交互模式，`--w` 指定模型路径：
-
-```bash
-# CUDA（短上下文）
-cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
-
-# CUDA + Flash Attention（超长上下文，如 32k tokens）
-cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
-
-# macOS（Metal）
-cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-```
-
----
-
-## 🌐✨ API 服务模式（Python 接口）
 
 1. **安装 Maturin**
 
@@ -142,18 +107,57 @@ maturin build --release --features metal,python
 pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
+---
 
-4. **启动 OpenAI API 服务**
+## 使用方法
+
+### 🐍 快速 Python 示例
+   💡 编译vllm.rs Python包可参见`API 服务模式（Python 接口）`
+```python
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+engine = Engine(cfg, "bf16")
+params = SamplingParams(temperature=0.6, max_tokens=256)
+prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+
+# 同步批量生成
+outputs = engine.generate_sync([params,params], [prompt, prompt])
+print(outputs)
+
+# 单请求流式生成
+stream = engine.generate_stream(params, prompt)
+for token in stream:
+    print(token)
+```
+
+---
+
+### 🤖✨ 交互模式（纯 Rust CLI）
+
+使用 `--i` 启用交互模式，`--w` 指定模型路径：
+
+```bash
+# CUDA（短上下文）
+cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# CUDA + Flash Attention（超长上下文，如 32k tokens）
+cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# macOS（Metal）
+cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+```
+
+---
+
+### 🌐✨ API 服务模式（Python 接口）
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
+
 ```bash
 # 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:2000/v1/"
 # openai.api_key = "EMPTY"
-# 添加`--flash`选项以启用Flash attention （maturin生成whl包时需添加`flash-attn`）
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 ```
-
-
 ---
 
 ### 其他 Python 示例
@@ -166,19 +170,9 @@ python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
 
----
+### 🧾 补全模式（Rust CLI）
 
-### 📽️ 演示视频
-
-🎉 观看项目运行演示：
-
-<video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
-
----
-
-## 🧾 补全模式（Rust CLI）
-
-### GGUF 模型
+#### GGUF 模型
 
 ```bash
 # CUDA
@@ -191,13 +185,13 @@ cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf 
 cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
 ```
 
-### Python 调用：
+Python 调用：
 
 ```bash
 python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
 
-### Safetensor 模型（未量化）
+#### Safetensor 模型（未量化）
 
 ```bash
 # CUDA
@@ -208,6 +202,15 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 ```
 
 ---
+
+## 📽️ 演示视频
+
+🎉 观看项目运行演示：
+
+<video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
+
+---
+
 
 ## 📚 批量请求支持
 
@@ -270,7 +273,6 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 | `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
 | `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
-| `--flash`   | 启用 flash attention **decoding** (缺省值 `False`, 即使用 Paged Attention decoding), 编译feature `flash-attn`需打开   |    |
 ---
 
 ## 🧠 支持的模型架构

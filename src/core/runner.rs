@@ -32,7 +32,6 @@ pub struct ModelRunner {
     kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
     device: Device,
     config: EngineConfig,
-    pub use_flash_attn: Option<bool>,
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
 }
@@ -104,15 +103,13 @@ impl ModelRunner {
             }
         };
 
-        let kv_cache =
-            Self::init_kv_cache(econfig, config, dtype, &device, econfig.use_flash_attn)?;
+        let kv_cache = Self::init_kv_cache(econfig, config, dtype, &device)?;
 
         Ok(Self {
             model,
             kv_cache: Arc::new(Mutex::new(kv_cache)),
             device,
             config: econfig.clone(),
-            use_flash_attn: econfig.use_flash_attn,
             #[cfg(all(feature = "cuda", feature = "graph"))]
             capturer: GraphCapturer::new(
                 wrapper,
@@ -125,6 +122,7 @@ impl ModelRunner {
     }
 
     //[num_blocks, block_size, num_kv_heads, head_size]
+    #[cfg(feature = "flash-decoding")]
     fn calculate_flash_key_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -174,11 +172,10 @@ impl ModelRunner {
         config: &Config,
         dtype: DType,
         device: &Device,
-        flash_attn: Option<bool>,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        let flash_attn = flash_attn.unwrap_or(false);
-        if flash_attn {
+        #[cfg(feature = "flash-decoding")]
+        {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,
@@ -200,7 +197,10 @@ impl ModelRunner {
                 gpu_cache.push((key_blocks, value_blocks));
             }
             Ok(gpu_cache)
-        } else {
+        }
+
+        #[cfg(not(feature = "flash-decoding"))]
+        {
             let kshape = Self::calculate_key_block_shape(
                 config,
                 dtype,
@@ -370,7 +370,6 @@ impl ModelRunner {
             max_seqlen_q,
             max_seqlen_k,
             max_context_len: self.config.max_model_len.unwrap_or(4096),
-            use_flash_attn: self.use_flash_attn,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -413,7 +412,6 @@ impl ModelRunner {
             max_seqlen_q: 0,
             max_seqlen_k: 0,
             max_context_len: self.config.max_model_len.unwrap_or(4096),
-            use_flash_attn: self.use_flash_attn,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -433,7 +431,6 @@ impl ModelRunner {
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub fn warmup_capture(&mut self) -> Result<()> {
         let kv_cache_lock = self.kv_cache.lock().unwrap(); // no custom method call on `self`
-        self.capturer
-            .capture(&self.device, Some(&kv_cache_lock), self.use_flash_attn)
+        self.capturer.capture(&self.device, Some(&kv_cache_lock))
     }
 }

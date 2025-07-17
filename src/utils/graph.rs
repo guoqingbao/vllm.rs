@@ -375,7 +375,6 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         &mut self,
         device: &Device,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-        use_flash_attn: Option<bool>,
     ) -> Result<()> {
         let max_bs = self.graph_bs[self.graph_bs.len() - 1];
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
@@ -400,7 +399,6 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 max_seqlen_q: 0,
                 max_seqlen_k: 0,
                 max_context_len: self.max_model_len,
-                use_flash_attn,
             };
 
             self.model.start_capture(bs)?;

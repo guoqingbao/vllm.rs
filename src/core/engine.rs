@@ -277,7 +277,7 @@ impl LLMEngine {
             self.scheduler.postprocess(&scheduled_ids, &output_ids);
             DecodedIds(Either::Left(scheduled_ids))
         } else {
-            crate::log_error!("No more kv cache available, free all resources!");
+            crate::log_info!("No more kv cache available, free all resources!");
             DecodedIds(Either::Right(self.scheduler.release_all_waitings()))
         };
 

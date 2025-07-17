@@ -159,7 +159,7 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), quant=None, num_shards=Some(1), device_ids=None, use_flash_attn=None))]
+    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), quant=None, num_shards=Some(1), device_ids=None))]
     pub fn new(
         model_path: String,
         max_num_seqs: Option<usize>,
@@ -167,37 +167,27 @@ impl EngineConfig {
         quant: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
-        use_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-
-        #[cfg(not(feature = "flash-attn"))]
-        if let Some(flash) = use_flash_attn {
-            if flash {
-                panic!("Error: User set `use_flash_attn` but this project is not built with flash attention, try rebuilt with 'flash-attn' feature or remove `--flash` argument.")
-            }
-        }
-
+        #[cfg(feature = "flash-decoding")]
+        let block_size = 256;
+        #[cfg(not(feature = "flash-decoding"))]
+        let block_size = 32;
         Self {
             model_path,
             tokenizer: None,
             tokenizer_config: None,
             num_blocks: 128, //placeholder
-            block_size: if use_flash_attn.unwrap_or(false) {
-                256
-            } else {
-                32
-            },
+            block_size,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             max_model_len,                 //placeholder
             quant,
             num_shards,
             device_id: Some(device_ids[0]),
-            use_flash_attn,
         }
     }
 }

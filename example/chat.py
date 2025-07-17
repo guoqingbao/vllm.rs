@@ -22,7 +22,6 @@ def parse_args():
                         help="Use '|' to separate multiple prompts")
     parser.add_argument("--i", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=4096)
-    parser.add_argument("--flash", action="store_true", help="Enable flash attention")
 
     return parser.parse_args()
 
@@ -43,7 +42,6 @@ def build_engine_config(args, num_of_prompts):
         model_path=args.w,
         max_num_seqs=args.max_num_seqs,
         max_model_len=max_model_len,
-        use_flash_attn = args.flash,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 

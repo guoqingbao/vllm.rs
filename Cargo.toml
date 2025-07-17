@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "20bc32b" }
-candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "20bc32b" }
+candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "81db266" }
+candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "81db266" }
 serde = { version = "1.0.190", features = ["serde_derive"] }
 tokenizers = {version = "0.21.2", features = ["http"] }
-candle-transformers = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "20bc32b" }
+candle-transformers = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "81db266" }
 hf-hub = "0.4.1"
 anyhow = "1.0.75"
 itertools = "0.13.0"
@@ -35,7 +35,7 @@ ahash = "0.8.11"
 reedline = "0.40.0"
 pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py38"], optional = true }
 parking_lot = "0.12.4"
-attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "e1a611e" }
+attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.0", rev = "5b6e60b" }
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
@@ -49,5 +49,6 @@ crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "attention-rs/cuda"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
 flash-attn = ["attention-rs/flash-attn"]
+flash-decoding = ["attention-rs/flash-attn", "attention-rs/flash-decoding"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "attention-rs/metal"]
 python = ["pyo3"]
