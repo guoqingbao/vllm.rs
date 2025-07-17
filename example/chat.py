@@ -47,6 +47,31 @@ def build_engine_config(args, num_of_prompts):
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
+def show_tokens_left(tokens_left: int, total_tokens: int):
+    import shutil
+    width = shutil.get_terminal_size(fallback=(80, 20)).columns
+    if tokens_left < 0: 
+        tokens_left = 0
+    token_info = f"Tokens left: {tokens_left}"
+
+    # Choose color based on remaining tokens
+    if tokens_left * 1.0 / total_tokens > 0.5:
+        color = "\033[32m"  # Green
+    elif tokens_left * 1.0 / total_tokens > 0.1:
+        color = "\033[33m"  # Yellow
+    else:
+        color = "\033[31m"  # Red
+
+    reset = "\033[0m"
+
+    # Calculate padding
+    space_padding = width - 2 - len(token_info)
+    space_padding = max(1, space_padding)  # prevent negative spacing
+
+    # Build the final line
+    line = (" " * space_padding) + color + token_info + reset
+
+    print(line)
 
 def main():
     args = parse_args()
@@ -77,10 +102,13 @@ def main():
     else:
         sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
 
+    total_available_tokens = econfig.max_num_seqs * econfig.max_model_len
+    tokens_left = total_available_tokens
     chat_history = []
     while True:
         if interactive:
             try:
+                show_tokens_left(tokens_left, total_available_tokens)
                 prompt_input = input(
                     "\n🤖✨ Enter your prompt (Ctrl+C to reset chat, Ctrl+D to exit):\n> ")
                 if not prompt_input:
@@ -94,6 +122,7 @@ def main():
                 if chat_history:
                     print("\n🌀 Chat history cleared. Start a new conversation.")
                     chat_history.clear()
+                    tokens_left = total_available_tokens
                     continue
                 else:
                     print("\n👋 Exiting.")
@@ -122,6 +151,7 @@ def main():
                 print("\n⛔️ Interrupted by user. Canceling generation...")
             print()  # newline after streaming ends
             decode_finish_time = current_millis()
+            tokens_left = total_available_tokens - prompt_length - decoded_length
             # Construct a GenerationOutput-like object manually
             output = type("GenerationOutput", (), {
                 "seq_id": seq_id,

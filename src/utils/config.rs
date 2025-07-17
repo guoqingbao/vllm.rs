@@ -33,7 +33,7 @@ pub struct Config {
     pub quant: Option<String>,
 }
 
-#[cfg_attr(feature = "python", pyclass)]
+#[cfg(not(feature = "python"))]
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
     pub model_path: String,
@@ -47,6 +47,36 @@ pub struct EngineConfig {
     pub quant: Option<String>,
     pub num_shards: Option<usize>,
     pub device_id: Option<usize>,
+    pub use_flash_attn: Option<bool>,
+}
+
+#[cfg(feature = "python")]
+#[pyclass]
+#[allow(unused_variables)]
+#[derive(Clone, Debug)]
+pub struct EngineConfig {
+    #[pyo3(get, set)]
+    pub model_path: String,
+    #[pyo3(get, set)]
+    pub tokenizer: Option<String>,
+    #[pyo3(get, set)]
+    pub tokenizer_config: Option<String>,
+    #[pyo3(get, set)]
+    pub num_blocks: usize,
+    pub block_size: usize,
+    #[pyo3(get, set)]
+    pub max_num_seqs: usize,
+    #[pyo3(get, set)]
+    pub max_num_batched_tokens: usize,
+    #[pyo3(get, set)]
+    pub max_model_len: Option<usize>,
+    #[pyo3(get, set)]
+    pub quant: Option<String>,
+    #[pyo3(get, set)]
+    pub num_shards: Option<usize>,
+    #[pyo3(get, set)]
+    pub device_id: Option<usize>,
+    #[pyo3(get, set)]
     pub use_flash_attn: Option<bool>,
 }
 

@@ -1,7 +1,7 @@
 use candle_core::{DType, Result};
 use clap::Parser;
 // use rand::Rng;
-use reedline::{DefaultPrompt, Reedline, Signal};
+use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::StreamItem;
@@ -190,8 +190,16 @@ async fn main() -> Result<()> {
         params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
     }
 
+    let total_available_tokens = max_num_seqs * max_model_len.unwrap_or(4096);
+    let mut chat_context_left = total_available_tokens;
     let mut line_editor = Reedline::create();
-    let prompt = DefaultPrompt::default();
+    let mut prompt = DefaultPrompt {
+        left_prompt: DefaultPromptSegment::WorkingDirectory,
+        right_prompt: DefaultPromptSegment::Basic(format!(
+            "Tokens left: {} (full)",
+            chat_context_left
+        )),
+    };
 
     let mut chat_history = Vec::<Message>::new();
     loop {
@@ -212,6 +220,9 @@ async fn main() -> Result<()> {
                         prompt_processed.clear();
                         let e = engine.read();
                         prompt_processed.push(e.apply_chat_template(&chat_history, false));
+                    } else {
+                        print!("\n No prompt was given.");
+                        continue;
                     }
                 }
                 Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => {
@@ -221,6 +232,11 @@ async fn main() -> Result<()> {
                     } else {
                         print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
+                        chat_context_left = total_available_tokens;
+                        prompt.right_prompt = DefaultPromptSegment::Basic(format!(
+                            "Tokens left: {} (full)",
+                            chat_context_left
+                        ));
                         continue;
                     }
                 }
@@ -273,6 +289,9 @@ async fn main() -> Result<()> {
                     });
                 let (decode_start_time, decode_finish_time, decoded_length, decode_output) =
                     handle.await.map_err(candle_core::Error::wrap)?;
+                chat_context_left = total_available_tokens - prompt_length - decoded_length;
+                prompt.right_prompt =
+                    DefaultPromptSegment::Basic(format!("Tokens left: {}", chat_context_left));
                 vec![GenerationOutput {
                     seq_id,
                     prompt_length,
