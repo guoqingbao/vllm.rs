@@ -36,8 +36,9 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
 
 #[derive(Debug)]
 pub enum StreamItem {
-    Token(String),
-    Completion((usize, usize, usize, String)),
+    Token(String),                        //streaming
+    TokenID(u32),                         //completion
+    Completion((usize, usize, Vec<u32>)), //completion
     Done(String),
     Error(String),
 }
@@ -307,10 +308,6 @@ impl LLMEngine {
                                         .as_millis()
                                         as usize;
 
-                                    let decode_output = self
-                                        .tokenizer
-                                        .decode(&s.output_ids, true)
-                                        .expect("unable to decode!");
                                     let decode_start_time = if let Some(decode_start_time) =
                                         self.decode_start_times.get(&seq_id)
                                     {
@@ -322,8 +319,7 @@ impl LLMEngine {
                                     let _ = sender.try_send(StreamItem::Completion((
                                         decode_start_time,
                                         decode_finish_time,
-                                        s.output_ids.len(),
-                                        decode_output,
+                                        s.output_ids.clone(),
                                     )));
                                 }
                             }
@@ -346,11 +342,12 @@ impl LLMEngine {
 
                     let token_id = s.last_token;
                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                        if let Some(tok) = decoder.step(token_id) {
-                            if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
-                                if let Some(request_type) = self.request_types.get(&seq_id) {
-                                    let result = sender.try_send(StreamItem::Token(tok.clone()));
-                                    if *request_type == RequestType::Stream {
+                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                            if let Some(request_type) = self.request_types.get(&seq_id) {
+                                if *request_type == RequestType::Stream {
+                                    if let Some(tok) = decoder.step(token_id) {
+                                        let result =
+                                            sender.try_send(StreamItem::Token(tok.clone()));
                                         if result.is_err() {
                                             log_info!(
                                                 "[seq_id {}] Error when sending token to client",
@@ -358,7 +355,12 @@ impl LLMEngine {
                                             );
                                             self.scheduler.cancel(seq_id);
                                         }
+                                    } else {
+                                        log_info!("[seq_id {}] Decode error", seq_id);
+                                        self.scheduler.cancel(seq_id);
                                     }
+                                } else {
+                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
                                 }
                             }
                         }
@@ -436,6 +438,7 @@ impl LLMEngine {
 
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
+        tokenizer: Arc<Tokenizer>,
     ) -> Result<Vec<GenerationOutput>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
@@ -478,17 +481,18 @@ impl LLMEngine {
             .map(|(seq_id, prompt_length, mut rx)| {
                 let decoded_tokens = decoded_tokens.clone();
                 let decode_start_time_clone = decode_start_time.clone();
+                let tokenizer = Arc::clone(&tokenizer);
                 task::spawn(async move {
                     let mut output: Option<GenerationOutput> = None;
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
-                            StreamItem::Completion((
-                                decode_start,
-                                decode_finish,
-                                decoded_len,
-                                decode_output,
-                            )) => {
+                            StreamItem::Completion((decode_start, decode_finish, decoded_ids)) => {
+                                let decoded_len = decoded_ids.len();
+                                let decode_output = tokenizer
+                                    .decode(&decoded_ids, true)
+                                    .expect("unable to decode!");
+
                                 output = Some(GenerationOutput {
                                     seq_id,
                                     prompt_length,
@@ -499,7 +503,7 @@ impl LLMEngine {
                                 });
                                 break;
                             }
-                            StreamItem::Token(_) => {
+                            StreamItem::Token(_) | StreamItem::TokenID(_) => {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
 
                                 decode_start_time_clone

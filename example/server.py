@@ -153,7 +153,7 @@ def main():
     args = parse_args()
 
     # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
-    max_num_seqs = 8 if sys.platform == "darwin" else { args.max_num_seqs }
+    max_num_seqs = 8 if sys.platform == "darwin" else args.max_num_seqs
     cfg = EngineConfig(
         model_path=args.w,
         max_num_seqs=max_num_seqs,

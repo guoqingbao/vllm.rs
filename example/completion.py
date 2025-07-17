@@ -15,7 +15,7 @@ def run(args):
         max_num_seqs = args.batch
     else:
         # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
-        max_num_seqs = 8 if sys.platform == "darwin" else { args.max_num_seqs }
+        max_num_seqs = 8 if sys.platform == "darwin" else args.max_num_seqs
 
     cfg = EngineConfig(
         model_path=args.w,

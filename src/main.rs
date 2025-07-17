@@ -2,6 +2,7 @@ use candle_core::{DType, Result};
 use clap::Parser;
 // use rand::Rng;
 use reedline::{DefaultPrompt, Reedline, Signal};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
@@ -251,7 +252,7 @@ async fn main() -> Result<()> {
                                     use std::io::Write;
                                     let _ = std::io::stdout().flush();
                                 }
-                                StreamItem::Completion(_) => {}
+                                StreamItem::TokenID(_) | StreamItem::Completion(_) => {}
                                 StreamItem::Done(_) => tracing::info!("Generation completed!"),
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
                             }
@@ -275,11 +276,14 @@ async fn main() -> Result<()> {
             } else {
                 tracing::warn!("Starting the inference...");
 
-                let receivers = {
+                let (receivers, tokenizer) = {
                     let mut e = engine.write();
-                    e.generate_sync(&params, prompt_processed.clone())?
+                    (
+                        e.generate_sync(&params, prompt_processed.clone())?,
+                        Arc::new(e.tokenizer.clone()),
+                    )
                 };
-                LLMEngine::collect_sync_results(receivers).await?
+                LLMEngine::collect_sync_results(receivers, tokenizer).await?
             }
         };
 

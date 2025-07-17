@@ -57,14 +57,17 @@ impl Engine {
     ) -> PyResult<Vec<GenerationOutput>> {
         tokio::task::block_in_place(|| {
             GLOBAL_RT.block_on(async {
-                let receivers = {
+                let (receivers, tokenizer) = {
                     let mut engine = self.engine.write();
-                    engine.generate_sync(&params, prompts).map_err(|e| {
-                        PyValueError::new_err(format!("generate_sync failed: {:?}", e))
-                    })?
+                    (
+                        engine.generate_sync(&params, prompts).map_err(|e| {
+                            PyValueError::new_err(format!("generate_sync failed: {:?}", e))
+                        })?,
+                        Arc::new(engine.tokenizer.clone()),
+                    )
                 };
 
-                let results = LLMEngine::collect_sync_results(receivers)
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer)
                     .await
                     .map_err(|e| {
                         PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
@@ -137,6 +140,9 @@ impl EngineStream {
             Some(StreamItem::Token(token)) => Ok(token),
             Some(StreamItem::Done(_)) | None => Err(PyStopIteration::new_err("[DONE]")),
             Some(StreamItem::Error(e)) => Err(PyValueError::new_err(e)),
+            Some(StreamItem::TokenID(_)) => Err(PyValueError::new_err(
+                "We should not receive raw token id (used for completion) during streaming!",
+            )),
             Some(_) => self.__next__(), // Skip over Completion/etc
         }
     }
