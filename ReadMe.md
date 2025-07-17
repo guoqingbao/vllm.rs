@@ -70,7 +70,8 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ### 🛠️ Prerequisites
 
 * Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
-* On macOS, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
+* Install **Linux** build dependencies: `sudo apt install libssl-dev pkg-config -y`
+* On **macOS**, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
 * For Python bindings, install [Maturin](https://github.com/PyO3/maturin)
 
 ---
@@ -155,7 +156,7 @@ pip install fastapi uvicorn
 # Start OpenAI API Server (default http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:2000/v1/"
 # openai.api_key = "EMPTY"
-# add `--flash` to enalbe Flash attention (`flash-attn` feature required for maturin build）
+# add `--flash` to enalbe flash attention decoding (`flash-attn` feature required for maturin build）
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 ```
 
@@ -265,12 +266,12 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 | ----------- | ---------------------------------------------------------------- | -- |
 | `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
 | `--d`       | Device ID (e.g. `--d 0`)                                         |    |
-| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`)                            |    |
+| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |    |
 | `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
 | `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
-| `--prompts` | Prompts, separated by \`                                         | \` |
+| `--prompts` | Prompts separated by \| |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
-
+| `--flash`   | Enable flash attention **decoding** (default `False`, use Paged Attention decoding), build flag `flash-attn` required   |    |
 ---
 
 ## 🧠 Supported Architectures
@@ -299,7 +300,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] Continuous batching
 * [ ] Multi-rank inference
 * [ ] Additional model support
-
+* [ ] Speedup prompt processing on Metal/macOS
 ---
 
 ## 📚 References

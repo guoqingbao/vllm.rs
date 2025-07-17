@@ -52,7 +52,7 @@ cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --
 cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024 --flash
 ```
 
-***Nano-vLLM** 
+**Nano-vLLM** 
 
    💡 (为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)）
 ```shell
@@ -70,7 +70,8 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ### 🛠️ 环境要求
 
 * 安装 [Rust 工具链](https://www.rust-lang.org/tools/install)
-* macOS 平台需安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
+* 安装 **Linux** Build依赖项 `sudo apt install libssl-dev pkg-config -y`
+* **macOS** 平台需安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
 * 构建 Python 接口需安装 [Maturin](https://github.com/PyO3/maturin)
 
 ---
@@ -264,12 +265,12 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 | ----------- | -------------------------------------- | ----- |
 | `--w`       | 模型路径（Safetensor 目录或 GGUF 文件）           |       |
 | `--d`       | 设备 ID，例如 `--d 0`                       |       |
-| `--max_num_seqs`   | 同时处理的最大请求数（默认 `32`）               |       |
+| `--max_num_seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |       |
 | `--max_tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
 | `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
-| `--prompts` | 输入的 prompt，多个使用 \`                     | \` 分隔 |
+| `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
-
+| `--flash`   | 启用 flash attention **decoding** (缺省值 `False`, 即使用 Paged Attention decoding), 编译feature `flash-attn`需打开   |    |
 ---
 
 ## 🧠 支持的模型架构
@@ -297,6 +298,7 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 * [x] 持续批处理
 * [ ] 多卡并行推理
 * [ ] 支持更多模型类型
+* [ ] Metal/macOS平台Prompt处理加速
 
 ---
 
