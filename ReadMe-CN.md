@@ -105,7 +105,7 @@ maturin build --release --features metal,python
 3. **安装构建好的包与依赖**
 
 ```bash
-pip install target/wheels/vllm_rs-0.1.3-cp38-abi3-*.whl
+pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 

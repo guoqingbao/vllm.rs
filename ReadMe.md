@@ -112,7 +112,7 @@ maturin build --release --features metal,python
 
 ```bash
 # the package you built
-pip install target/wheels/vllm_rs-0.1.3-cp38-abi3-*.whl
+pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 

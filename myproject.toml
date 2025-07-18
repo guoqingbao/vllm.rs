@@ -4,6 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "vllm-rs"
+description = "A blazing-fast ⚡, lightweight Rust 🦀 implementation of vLLM."
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
@@ -14,3 +15,4 @@ classifiers = [
 [tool.maturin]
 python-source = "python"
 include = ["*.pyi"]
+sdist-include = ["PyPi.md"]

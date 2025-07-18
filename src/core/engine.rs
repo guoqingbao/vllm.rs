@@ -218,8 +218,16 @@ impl LLMEngine {
         Ok(engine)
     }
 
-    fn add_request_(&mut self, params: &SamplingParams, prompt: &str, request_type: &RequestType) -> Result<(usize, usize)> {
-        let tokens = self.tokenizer.encode_fast(prompt, true).expect("encode failed!");
+    fn add_request_(
+        &mut self,
+        params: &SamplingParams,
+        prompt: &str,
+        request_type: &RequestType,
+    ) -> Result<(usize, usize)> {
+        let tokens = self
+            .tokenizer
+            .encode_fast(prompt, true)
+            .expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
         let mut params = params.clone();

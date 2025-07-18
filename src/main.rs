@@ -268,10 +268,11 @@ async fn main() -> Result<()> {
                                     use std::io::Write;
                                     let _ = std::io::stdout().flush();
                                 }
-                                StreamItem::TokenID(_) | StreamItem::Completion(_) => {}
+                                StreamItem::TokenID(_) | StreamItem::Completion(_) => { break; }
                                 StreamItem::Done((prompt_start, _)) => {
                                     prompt_start_time = prompt_start;
-                                    tracing::info!("Generation completed!")
+                                    tracing::info!("Generation completed!");
+                                    break;
                                 }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
                             }
