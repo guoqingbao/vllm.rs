@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput
 import uvicorn
+import warnings
 
 def current_millis():
     return int(time.time() * 1000)
@@ -147,10 +148,9 @@ def parse_args():
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--w", type=str, required=True)  # weight path
-    parser.add_argument(
-        "--dtype", choices=["f16", "bf16", "f32"], default="bf16")
-    parser.add_argument("--max-num-seqs", type=int, default=32)
-    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument("--dtype", choices=["f16", "bf16", "f32"], default="bf16")
+    parser.add_argument("--max-num-seqs", type=int, default=4)
+    parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--d", type=str, default="0")
     return parser.parse_args()
 
@@ -158,12 +158,21 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # limit default max_num_seqs to 8 on MacOs (due to limited gpu memory)
-    max_num_seqs = 8 if sys.platform == "darwin" else args.max_num_seqs
+    # limit default max_num_seqs to 1 on MacOs (due to limited gpu memory)
+    max_num_seqs = 1 if sys.platform == "darwin" else args.max_num_seqs
+    if args.max_model_len is None:
+        if max_num_seqs > 0:
+            max_model_len = 65536 // max_num_seqs
+        else:
+            max_model_len = 65536
+        warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
+    else:
+        max_model_len = args.max_model_len
+    
     cfg = EngineConfig(
         model_path=args.w,
         max_num_seqs=max_num_seqs,
-        max_model_len=args.max_model_len,
+        max_model_len=max_model_len,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 
