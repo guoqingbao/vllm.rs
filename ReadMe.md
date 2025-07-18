@@ -28,27 +28,26 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 > Max Model Length: 1024; 
 > Max Tokens / Request: 1024
 
-| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
+| Inference Engine | Tokens | Time (s) | Throughput (tokens/s) |
 |------------------|---------------|----------|------------------------|
 | vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
 | Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
-| **vLLM.rs** (**A100**)        | 257,792 (prompts not counted)      | **25.21s**    | **10216.44**  (**30%+**)             |
+| **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**40%+ speedup**)               |
 | Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
 
 #### How to reproduce?
 **vLLM.rs**
 ```shell
-# w/o cuda graph, no flash attention and model warmup (final report)
-cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
-# report
-2025-07-16T10:32:32.632729Z  INFO vllm_rs: --- Performance Metrics ---
-2025-07-16T10:32:32.632764Z  INFO vllm_rs: ⏱️ Prompt tokens: 4096 in 12.56s (326.17 tokens/s)
-2025-07-16T10:32:32.632781Z  INFO vllm_rs: ⏱️ Decoded tokens: 257792 in 25.21s (10216.44 tokens/s)
+pip install vllm-rs
+python example/completion.py --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
 
-# enable cuda graph for higher performance
-cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
-# enable cuda graph and flash attention for even higher performance (take some times to build flash-attn kernels)
-cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# Log
+Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
+Maximum batched tokens 262144 (8192 blocks x Block_Size 32 for KV cache).
+Start inference with 256 prompts
+--- Performance Metrics ---
+⏱️ Prompt tokens: 4096 in 0.28s (14894.55 tokens/s)
+⏱️ Decoded tokens: 258048 in 23.60s (10944.62 tokens/s)
 ```
 
 
@@ -59,7 +58,7 @@ cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --b
 pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
 # with cuda graph, flash attention and model warmup
 python3 bench.py
-# report
+# log
 Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
@@ -113,7 +112,7 @@ maturin build --release --features metal,python
 
 ```bash
 # the package you built
-pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
+pip install target/wheels/vllm_rs-0.1.3-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
 

@@ -155,6 +155,7 @@ def main():
                 "seq_id": seq_id,
                 "decode_output": output_text,
                 "prompt_length": prompt_length,
+                "prompt_start_time": start_time,
                 "decode_start_time": decode_start_time,
                 "decode_finish_time": decode_finish_time,
                 "decoded_length": decoded_length,
@@ -180,7 +181,7 @@ def main():
             total_prompt_tokens += output.prompt_length
             total_decoded_tokens += output.decoded_length
 
-            prompt_latency = (output.decode_start_time - start_time) / 1000.0
+            prompt_latency = (output.decode_start_time - output.prompt_start_time) / 1000.0
             prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
             decode_latency = (output.decode_finish_time -

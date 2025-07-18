@@ -15,6 +15,8 @@ pub struct GenerationOutput {
     #[pyo3(get)]
     pub prompt_length: usize,
     #[pyo3(get)]
+    pub prompt_start_time: usize,
+    #[pyo3(get)]
     pub decode_start_time: usize,
     #[pyo3(get)]
     pub decode_finish_time: usize,
@@ -29,6 +31,7 @@ pub struct GenerationOutput {
 pub struct GenerationOutput {
     pub seq_id: usize,
     pub prompt_length: usize,
+    pub prompt_start_time: usize,
     pub decode_start_time: usize,
     pub decode_finish_time: usize,
     pub decoded_length: usize,

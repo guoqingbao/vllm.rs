@@ -12,7 +12,7 @@ import uvicorn
 def current_millis():
     return int(time.time() * 1000)
 
-def performance_metric(seq_id, start_time, outputs: GenerationOutput):
+def performance_metric(outputs: GenerationOutput, stream: bool):
     decode_time_taken = 0.0
     prompt_time_taken = 0.0
     total_decoded_tokens = 0
@@ -22,13 +22,17 @@ def performance_metric(seq_id, start_time, outputs: GenerationOutput):
         total_prompt_tokens += output.prompt_length
         total_decoded_tokens += output.decoded_length
 
-        prompt_latency = (output.decode_start_time - start_time) / 1000.0
+        prompt_latency = (output.decode_start_time - output.prompt_start_time) / 1000.0
         prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
         decode_latency = (current_millis() - output.decode_start_time) / 1000.0
         decode_time_taken = max(decode_time_taken, decode_latency)
 
-    print(f"\n--- Performance Metrics [seq_id {seq_id}]---")
+    if stream:
+        print(f"\n--- Performance Metrics [seq_id {outputs[0].seq_id}]---")
+    else:
+        print(f"\n--- Performance Metrics [{len(outputs)} reqeusts]---")
+
     print(
         f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
         f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
@@ -47,7 +51,9 @@ def create_app(cfg, dtype):
     def chat_complete(params, messages):
         prompts = [engine.apply_chat_template(
             [Message("user", m["content"])], True) for m in messages]
-        return engine.generate_sync(params, prompts)
+        outputs = engine.generate_sync(params, prompts)
+        performance_metric(outputs, False)
+        return outputs
 
     # chat stream: stream response to single request
     async def chat_stream(params, messages):
@@ -109,11 +115,12 @@ def create_app(cfg, dtype):
                         "seq_id": seq_id,
                         "decode_output": output_text,
                         "prompt_length": prompt_length,
+                        "prompt_start_time":start_time,
                         "decode_start_time": decode_start_time,
                         "decode_finish_time": decode_finish_time,
                         "decoded_length": decoded_length,
                     })()
-                    performance_metric(seq_id, start_time, [output])
+                    performance_metric([output], True)
                 except asyncio.CancelledError:
                     print("⛔️ Client disconnected. Cancelling stream.")
                     stream.cancel()

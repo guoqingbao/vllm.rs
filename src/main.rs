@@ -239,19 +239,16 @@ async fn main() -> Result<()> {
             }
         }
 
-        let prompt_start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as usize;
         let mut outputs = {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
                     e.generate_stream(&params[0], prompt_processed[0].clone())?
                 };
-                let handle: tokio::task::JoinHandle<(usize, usize, usize, String)> = GLOBAL_RT
-                    .spawn(async move {
+                let handle: tokio::task::JoinHandle<(usize, usize, usize, usize, String)> =
+                    GLOBAL_RT.spawn(async move {
                         let mut length = 0;
+                        let mut prompt_start_time = 0;
                         let mut decode_start_time = 0;
                         let mut decode_output = "".to_string();
                         let mut rx = stream;
@@ -272,7 +269,10 @@ async fn main() -> Result<()> {
                                     let _ = std::io::stdout().flush();
                                 }
                                 StreamItem::TokenID(_) | StreamItem::Completion(_) => {}
-                                StreamItem::Done(_) => tracing::info!("Generation completed!"),
+                                StreamItem::Done((prompt_start, _)) => {
+                                    prompt_start_time = prompt_start;
+                                    tracing::info!("Generation completed!")
+                                }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
                             }
                         }
@@ -280,16 +280,28 @@ async fn main() -> Result<()> {
                             .duration_since(UNIX_EPOCH)
                             .expect("Time went backwards")
                             .as_millis() as usize;
-                        (decode_start_time, decode_finish_time, length, decode_output)
+                        (
+                            prompt_start_time,
+                            decode_start_time,
+                            decode_finish_time,
+                            length,
+                            decode_output,
+                        )
                     });
-                let (decode_start_time, decode_finish_time, decoded_length, decode_output) =
-                    handle.await.map_err(candle_core::Error::wrap)?;
+                let (
+                    prompt_start_time,
+                    decode_start_time,
+                    decode_finish_time,
+                    decoded_length,
+                    decode_output,
+                ) = handle.await.map_err(candle_core::Error::wrap)?;
                 chat_context_left = total_available_tokens - prompt_length - decoded_length;
                 prompt.right_prompt =
                     DefaultPromptSegment::Basic(format!("Tokens left: {}", chat_context_left));
                 vec![GenerationOutput {
                     seq_id,
                     prompt_length,
+                    prompt_start_time,
                     decode_start_time,
                     decode_finish_time,
                     decoded_length,
@@ -321,6 +333,7 @@ async fn main() -> Result<()> {
             GenerationOutput {
                 seq_id,
                 prompt_length,
+                prompt_start_time,
                 decode_start_time,
                 decode_finish_time,
                 decoded_length,

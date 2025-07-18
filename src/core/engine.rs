@@ -36,10 +36,10 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
 
 #[derive(Debug)]
 pub enum StreamItem {
-    Token(String),                        //streaming
-    TokenID(u32),                         //completion
-    Completion((usize, usize, Vec<u32>)), //completion
-    Done(String),
+    Token(String),                               //streaming
+    TokenID(u32),                                //completion
+    Completion((usize, usize, usize, Vec<u32>)), //completion
+    Done((usize, String)),
     Error(String),
 }
 
@@ -60,6 +60,7 @@ pub struct LLMEngine {
     stream_senders: HashMap<usize, Sender<StreamItem>>,
     request_types: HashMap<usize, RequestType>,
     decode_start_times: HashMap<usize, usize>,
+    prompt_start_times: HashMap<usize, usize>,
     active_requests: HashSet<usize>,
 }
 
@@ -209,6 +210,7 @@ impl LLMEngine {
             stream_decoders: HashMap::new(),
             stream_senders: HashMap::new(),
             request_types: HashMap::new(),
+            prompt_start_times: HashMap::new(),
             decode_start_times: HashMap::new(),
             active_requests: HashSet::new(),
         }));
@@ -216,23 +218,30 @@ impl LLMEngine {
         Ok(engine)
     }
 
-    fn add_request_(&mut self, params: &SamplingParams, prompt: &str) -> Result<(usize, usize)> {
-        let tokens = self.tokenizer.encode(prompt, true).expect("encode failed!");
+    fn add_request_(&mut self, params: &SamplingParams, prompt: &str, request_type: &RequestType) -> Result<(usize, usize)> {
+        let tokens = self.tokenizer.encode_fast(prompt, true).expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
-        let seq = Sequence::new(token_ids, self.econfig.block_size, params.clone());
+        let mut params = params.clone();
+        let max_model_len = self.econfig.max_model_len.unwrap_or(params.max_tokens);
+        //we also need to consider prompt length
+        if length + params.max_tokens > max_model_len {
+            params.max_tokens = max_model_len - length;
+        }
+        let seq = Sequence::new(token_ids, self.econfig.block_size, params);
         let seq_id = self.scheduler.add(seq);
 
-        let tokenizer = self.tokenizer.clone();
-        let leaked: &'static _ = Box::leak(Box::new(tokenizer));
-        let decoder = leaked.decode_stream(false);
-        let wrapped = super::StreamWithTokenizer {
-            _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
-            stream: decoder,
-        };
-        let boxed_decoder: Box<dyn super::DecodeStreamTrait + Send + Sync> = Box::new(wrapped);
-
-        self.stream_decoders.insert(seq_id, boxed_decoder);
+        if *request_type == RequestType::Stream {
+            let tokenizer = self.tokenizer.clone();
+            let leaked: &'static _ = Box::leak(Box::new(tokenizer));
+            let decoder = leaked.decode_stream(false);
+            let wrapped = super::StreamWithTokenizer {
+                _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
+                stream: decoder,
+            };
+            let boxed_decoder: Box<dyn super::DecodeStreamTrait + Send + Sync> = Box::new(wrapped);
+            self.stream_decoders.insert(seq_id, boxed_decoder);
+        }
         self.active_requests.insert(seq_id);
         Ok((seq_id, length))
     }
@@ -243,7 +252,7 @@ impl LLMEngine {
         prompt: &str,
         request_type: RequestType,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
-        let (seq_id, prompt_length) = self.add_request_(params, prompt)?;
+        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type)?;
         let (tx, rx) = channel(if request_type == RequestType::Stream {
             16
         } else {
@@ -264,6 +273,12 @@ impl LLMEngine {
 
     pub fn step(&mut self) -> Result<()> {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
+
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
+
         // Get scheduled sequence indexes and prefill flag
         let (scheduled_ids, is_prefill) = self.scheduler.schedule();
         let decoded_ids = if !scheduled_ids.is_empty() {
@@ -290,6 +305,7 @@ impl LLMEngine {
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
             .as_millis() as usize;
+
         for &idx in indices {
             let sq = if is_running {
                 self.scheduler.get_running(idx)
@@ -299,34 +315,41 @@ impl LLMEngine {
             if let Some(s) = sq {
                 let seq_id = s.id;
                 if s.is_finished() {
-                    if let Some(_) = self.stream_decoders.get_mut(&seq_id) {
-                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
-                            if let Some(request_type) = self.request_types.get(&seq_id) {
-                                if *request_type == RequestType::Stream {
-                                    let _ = sender
-                                        .try_send(StreamItem::Done("data: [DONE]".to_string()));
+                    if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                        if let Some(request_type) = self.request_types.get(&seq_id) {
+                            let prompt_start_time = if let Some(prompt_start_time) =
+                                self.prompt_start_times.get(&seq_id)
+                            {
+                                *prompt_start_time
+                            } else {
+                                start_time
+                            };
+
+                            if *request_type == RequestType::Stream {
+                                let _ = sender.try_send(StreamItem::Done((
+                                    prompt_start_time,
+                                    "data: [DONE]".to_string(),
+                                )));
+                            } else {
+                                let decode_finish_time = cur_time;
+                                let decode_start_time = if let Some(decode_start_time) =
+                                    self.decode_start_times.get(&seq_id)
+                                {
+                                    *decode_start_time
                                 } else {
-                                    let decode_finish_time = cur_time;
-                                    let decode_start_time = if let Some(decode_start_time) =
-                                        self.decode_start_times.get(&seq_id)
-                                    {
-                                        *decode_start_time
-                                    } else {
-                                        0usize
-                                    };
+                                    cur_time
+                                };
 
-                                    let _ = sender.try_send(StreamItem::Completion((
-                                        decode_start_time,
-                                        decode_finish_time,
-                                        s.output_ids.clone(),
-                                    )));
-                                }
+                                let _ = sender.try_send(StreamItem::Completion((
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decode_finish_time,
+                                    s.output_ids.clone(),
+                                )));
                             }
-                            self.stream_senders.remove(&seq_id);
                         }
-                        self.stream_decoders.remove(&seq_id);
                     }
-
+                    self.stream_decoders.remove(&seq_id);
                     if let Some(_) = self.active_requests.get(&seq_id) {
                         self.active_requests.remove(&seq_id);
                     }
@@ -334,12 +357,14 @@ impl LLMEngine {
                     if !self.decode_start_times.contains_key(&seq_id) {
                         self.decode_start_times.insert(seq_id, cur_time);
                     }
-
+                    if is_prefill && !self.prompt_start_times.contains_key(&seq_id) {
+                        self.prompt_start_times.insert(seq_id, start_time);
+                    }
                     let token_id = s.last_token;
-                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
-                            if let Some(request_type) = self.request_types.get(&seq_id) {
-                                if *request_type == RequestType::Stream {
+                    if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                        if let Some(request_type) = self.request_types.get(&seq_id) {
+                            if *request_type == RequestType::Stream {
+                                if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                     if let Some(tok) = decoder.step(token_id) {
                                         let result =
                                             sender.try_send(StreamItem::Token(tok.clone()));
@@ -351,9 +376,10 @@ impl LLMEngine {
                                             self.scheduler.cancel(seq_id);
                                         }
                                     }
-                                } else {
-                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
                                 }
+                            } else {
+                                //completion request will be decoded at the final stage (at once)
+                                let _ = sender.try_send(StreamItem::TokenID(token_id));
                             }
                         }
                     }
@@ -484,7 +510,12 @@ impl LLMEngine {
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
-                            StreamItem::Completion((decode_start, decode_finish, decoded_ids)) => {
+                            StreamItem::Completion((
+                                prompt_start,
+                                decode_start,
+                                decode_finish,
+                                decoded_ids,
+                            )) => {
                                 let decoded_len = decoded_ids.len();
                                 let decode_output = tokenizer
                                     .decode(&decoded_ids, true)
@@ -493,6 +524,7 @@ impl LLMEngine {
                                 output = Some(GenerationOutput {
                                     seq_id,
                                     prompt_length,
+                                    prompt_start_time: prompt_start,
                                     decode_start_time: decode_start,
                                     decode_finish_time: decode_finish,
                                     decoded_length: decoded_len,

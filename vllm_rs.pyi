@@ -14,6 +14,7 @@ class DType(Enum):
 class GenerationOutput:
     seq_id: int
     prompt_length: int
+    prompt_start_time: int
     decode_start_time: int
     decode_finish_time: int
     decoded_length: int

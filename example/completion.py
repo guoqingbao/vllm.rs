@@ -55,7 +55,6 @@ def run(args):
         prompts[i] = engine.apply_chat_template([msg], args.batch == 1)
         sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
 
-    start_time = current_millis()
     print("Start inference with", len(prompts), "prompts")
     outputs: GenerationOutput = engine.generate_sync(sampling_params, prompts)
     outputs.sort(key=lambda o: o.seq_id)
@@ -74,7 +73,7 @@ def run(args):
         total_prompt_tokens += output.prompt_length
         total_decoded_tokens += output.decoded_length
 
-        prompt_latency = (output.decode_start_time - start_time) / 1000.0
+        prompt_latency = (output.decode_start_time - output.prompt_start_time) / 1000.0
         prompt_time_taken = max(prompt_time_taken, prompt_latency)
 
         decode_latency = (output.decode_finish_time - output.decode_start_time) / 1000.0

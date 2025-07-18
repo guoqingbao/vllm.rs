@@ -28,28 +28,27 @@
 > Max Model Length: 1024；
 > 每个请求最大输出: 1024
 
-| 推理引擎 | 输出Tokens | 耗时 (s) | 吞吐率 (tokens/s) |
+| 推理引擎 | Tokens | 耗时 (s) | 吞吐率 (tokens/s) |
 |------------------|---------------|----------|------------------------|
 | vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
 | Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
-| **vLLM.rs** (**A100**)        | 257,792       | 25.21s    | **10216.44** (**提升30%+**)               |
-| Nano-vLLM (A100)       | 262144       | 34.22s    |   7660.26      | 
+| **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**提升40%+**)               |
+| Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
 
 #### 复现步骤
 
 **vLLM.rs**
 ```shell
-# 未启用Cuda Graph，未启用Flash Attention，无模型预热 (最终报告)
-cargo run --release --features cuda -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
-# 日志
-2025-07-16T10:32:32.632729Z  INFO vllm_rs: --- Performance Metrics ---
-2025-07-16T10:32:32.632764Z  INFO vllm_rs: ⏱️ Prompt tokens: 4096 in 12.56s (326.17 tokens/s)
-2025-07-16T10:32:32.632781Z  INFO vllm_rs: ⏱️ Decoded tokens: 257792 in 25.21s (10216.44 tokens/s)
+pip install vllm-rs
+python example/completion.py --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
 
-# 启用cuda graph 获得更高性能
-cargo run --release --features cuda,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
-# 启用cuda graph和flash attention获得最高性能 (编译flash attention需要较长时间)
-cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --batch 256 --max-tokens 1024 --max-model-len 1024
+# 日志输出
+Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
+Maximum batched tokens 262144 (8192 blocks x Block_Size 32 for KV cache).
+Start inference with 256 prompts
+--- Performance Metrics ---
+⏱️ Prompt tokens: 4096 in 0.28s (14894.55 tokens/s)
+⏱️ Decoded tokens: 258048 in 23.60s (10944.62 tokens/s)
 ```
 
 **Nano-vLLM** 
@@ -57,9 +56,8 @@ cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --b
    💡 为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)
 ```shell
 pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
-# 默认启用cuda graph，启用flash attention 与模型预热
 python3 bench.py
-# 日志
+# 日志输出
 Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
@@ -107,7 +105,7 @@ maturin build --release --features metal,python
 3. **安装构建好的包与依赖**
 
 ```bash
-pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
+pip install target/wheels/vllm_rs-0.1.3-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
 
