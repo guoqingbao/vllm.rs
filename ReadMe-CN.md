@@ -54,8 +54,9 @@ cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --b
 
 **Nano-vLLM** 
 
-   💡 (为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)）
+   💡 为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)
 ```shell
+pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
 # 默认启用cuda graph，启用flash attention 与模型预热
 python3 bench.py
 # 日志
@@ -63,27 +64,29 @@ Generating: 100%|██████████████████| 1/1 [00
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
 
-## 预编译包
+## 📦 从pip安装
 
-[v0.1.0 - CUDA 12](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64.whl)
+```shell
+# 默认支持flash-attn prefilling
+pip install vllm-rs
+```
 
-[v0.1.0 - CUDA 12 - with Flash Attention (需解压)](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64.zip)
 
-
-## 📦 从源代码编译安装
+## 🔨 从源代码编译安装
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
 
 ### 🛠️ 环境要求
 
 * 安装 [Rust 工具链](https://www.rust-lang.org/tools/install)
-* 安装 **Linux** Build依赖项 `sudo apt install libssl-dev pkg-config -y`
 * **macOS** 平台需安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
 * 构建 Python 接口需安装 [Maturin](https://github.com/PyO3/maturin)
 
+### 编译步骤
 1. **安装 Maturin**
 
 ```bash
+sudo apt install libssl-dev pkg-config -y # 编译依赖 (Linux)
 pip install maturin
 pip install maturin[patchelf]  # Linux/Windows 平台
 ```
@@ -107,12 +110,10 @@ maturin build --release --features metal,python
 pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
----
 
-## 使用方法
+## 📘 使用方法
 
 ### 🐍 快速 Python 示例
-   💡 编译vllm.rs Python包可参见`API 服务模式（Python 接口）`
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
 cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
@@ -130,9 +131,27 @@ for token in stream:
     print(token)
 ```
 
----
+### 🌐✨ API Server
+   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
-### 🤖✨ 交互模式（纯 Rust CLI）
+```bash
+# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+```
+
+### 🤖✨ 交互式聊天与批处理 (Python)
+
+```bash
+# 交互式聊天
+python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+
+# 批量同步示例
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+```
+
+### 🤖✨ Rust CLI 模式
 
 使用 `--i` 启用交互模式，`--w` 指定模型路径：
 
@@ -147,61 +166,27 @@ cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.g
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 ```
 
----
-
-### 🌐✨ API 服务模式（Python 接口）
-   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
-
-```bash
-# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:2000/v1/"
-# openai.api_key = "EMPTY"
-python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-```
----
-
-### 其他 Python 示例
-
-```bash
-# 交互式聊天
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
-
-# 批量同步示例
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
-### 🧾 补全模式（Rust CLI）
-
-#### GGUF 模型
-
-```bash
-# CUDA
-cargo run --release --features cuda -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-
-# CUDA + Flash Attention
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-
-# Metal（macOS）
-cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-```
-
-Python 调用：
-
-```bash
-python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
-#### Safetensor 模型（未量化）
+Safetensor 模型（未量化）
 
 ```bash
 # CUDA
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 
-# Metal（macOS）
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+# Metal（macOS）, 多个 prompt 使用 `|` 分隔
+cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
 ```
 
----
+### ⚙️ 命令行参数说明
+
+| 参数          | 描述                                     |       |
+| ----------- | -------------------------------------- | ----- |
+| `--w`       | 模型路径（Safetensor 目录或 GGUF 文件）           |       |
+| `--d`       | 设备 ID，例如 `--d 0`                       |       |
+| `--max-num-seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |       |
+| `--max-tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
+| `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
+| `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
+| `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
 
 ## 📽️ 演示视频
 
@@ -209,25 +194,6 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 
 <video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
----
-
-
-## 📚 批量请求支持
-
-多个 prompt 使用 `|` 分隔：
-
-```bash
-# GGUF 模型（Rust）
-cargo run --release --features cuda,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America." --max-model-len 1024
-
-# Safetensor 模型（Rust）
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
-
-# GGUF 模型（Python）
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?" --max-model-len 1024
-```
-
----
 
 ## 🗜️ 实时量化（GGUF 格式转换）
 
@@ -241,40 +207,6 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prom
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
 ```
 
----
-
-## 📄 示例输出
-
-**单条请求**（Qwen3-0.6B，BF16，macOS Metal）：
-
-```bash
-cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today?"
-```
-
-```
-<think>
-用户提问："How are you today?"...
-</think>
-
-你好呀！今天感觉怎么样？我在这里可以帮你解答任何问题！😊 有需要尽管告诉我！
-```
-
----
-
-
-## ⚙️ 命令行参数说明
-
-| 参数          | 描述                                     |       |
-| ----------- | -------------------------------------- | ----- |
-| `--w`       | 模型路径（Safetensor 目录或 GGUF 文件）           |       |
-| `--d`       | 设备 ID，例如 `--d 0`                       |       |
-| `--max_num_seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |       |
-| `--max_tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
-| `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
-| `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
-| `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
----
-
 ## 🧠 支持的模型架构
 
 * ✅ LLaMa 系列（LLaMa2、LLaMa3）
@@ -283,13 +215,10 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 
 支持 **Safetensor** 和 **GGUF** 格式。
 
----
 
 ## 📌 项目状态
 
 > 🚧 **项目仍在积极开发中，接口与功能可能发生变更。**
-
----
 
 ## 🛠️ 开发计划（TODO）
 
@@ -302,11 +231,10 @@ cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today
 * [ ] 支持更多模型类型
 * [ ] Metal/macOS平台Prompt处理加速
 
----
 
 ## 📚 参考项目
 
-核心思路参考：
+参考：
 
 * [Candle-vLLM](https://github.com/EricLBuehler/candle-vllm)
 * Python nano-vllm 项目

@@ -54,8 +54,9 @@ cargo run --release --features cuda,flash-attn,graph -- --w /home/Qwen3-0.6B --b
 
 **Nano-vLLM** 
 
-   💡 (to make a fair comparison, revise each request to maximum of 1024 output tokens instead of random 100-1024 tokens)
+   💡 To ensure a fair comparison, revise each request to have a maximum of 1024 output tokens, instead of a random number between 100 and 1024.
 ```shell
+pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
 # with cuda graph, flash attention and model warmup
 python3 bench.py
 # report
@@ -63,26 +64,31 @@ Generating: 100%|██████████████████| 1/1 [00
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
 
-## Prebuild Python Packages
 
-[v0.1.0 - CUDA 12](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64.whl)
+## 📦 Install with pip
 
-[v0.1.0 - CUDA 12 - with Flash Attention (unzip required)](https://github.com/guoqingbao/vllm.rs/releases/download/v0.1.0/vllm_rs-0.1.0-cp38-abi3-manylinux_2_31_x86_64_flash.zip)
+```shell
+# flash-attn built-in for prefilling
+pip install vllm-rs
+```
 
-## 📦 Build from source
 
-> ⚠️ The first build may take time if Flash Attention is enabled.
+## 🔨 Build from source
+
+> ⚠️ The first build may take time if `Flash Attention` is enabled.
 
 ### 🛠️ Prerequisites
 
 * Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
-* Install **Linux** build dependencies: `sudo apt install libssl-dev pkg-config -y`
 * On **macOS**, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
 * For Python bindings, install [Maturin](https://github.com/PyO3/maturin)
 
+### Building steps
 1. **Install Maturin**
 
 ```bash
+# install build dependencies (Linux)
+sudo apt install libssl-dev pkg-config -y
 pip install maturin
 pip install maturin[patchelf]  # For Linux/Windows
 ```
@@ -110,12 +116,10 @@ maturin build --release --features metal,python
 pip install target/wheels/vllm_rs-0.1.0-cp38-abi3-*.whl
 pip install fastapi uvicorn
 ```
----
 
-## Usage
+## 📘 Usage
 
-## 🐍 Quick Python Example
-   💡 To compile vllm.rs python whl, please refer to `API Server Mode (Python Interface)`
+### 🐍 Quick Python Example
 
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
@@ -134,9 +138,29 @@ for token in stream:
     print(token)
 ```
 
----
 
-## 🤖✨ Interactive Mode (Rust CLI)
+### 🌐✨ API Server Mode (Python Interface)
+   💡 You can use any client compatible with the OpenAI API.
+
+```bash
+# Start OpenAI API Server (default http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+```
+
+### Interactive Chat and completion (Python)
+
+```bash
+# Interactive chat
+python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+
+# Chat completion
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+```
+
+
+### 🤖✨ Rust CLI Mode
 
 Run with `--i` for interactive chat and `--w` to specify model path:
 
@@ -154,52 +178,8 @@ cargo run --release --features cuda,flash-attn,graph -- --i --w /path/qwq-32b-q4
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 ```
 
----
 
-## 🌐✨ API Server Mode (Python Interface)
-   💡 You can use any client compatible with the OpenAI API.
-
-```bash
-# Start OpenAI API Server (default http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:2000/v1/"
-# openai.api_key = "EMPTY"
-python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-```
-
-### Other Examples:
-
-```bash
-# Interactive chat
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
-
-# Chat completion
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
----
-
-### 🧾 Completion Mode (Rust CLI)
-
-#### GGUF Models
-
-```bash
-# CUDA
-cargo run --release --features cuda,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-
-# CUDA + Flash Attention
-cargo run --release --features cuda,flash-attn,graph -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-
-# Metal (macOS)
-cargo run --release --features metal -- --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you today?"
-```
-
-With Python:
-
-```bash
-python example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
-#### Safetensor Models (Unquantized)
+Safetensor Models (Unquantized)
 
 ```bash
 # CUDA
@@ -209,31 +189,23 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts 
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
 ```
 
----
+## ⚙️ CLI Flags
 
-### 📽️ Demo Video
+| Flag        | Description                                                      |    |
+| ----------- | ---------------------------------------------------------------- | -- |
+| `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
+| `--d`       | Device ID (e.g. `--d 0`)                                         |    |
+| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |    |
+| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
+| `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
+| `--prompts` | Prompts separated by \| |
+| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
+
+
+## 📽️ Demo Video
 
 Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
----
-
-
-## 📚 Batched Requests
-
-Use `|` to separate prompts:
-
-```bash
-# GGUF (Rust)
-cargo run --release --features cuda,graph,flash-attn -- --w /path/qwq-32b-q4_k_m.gguf --prompts "Talk about China. | Talk about America." --max-model-len 1024
-
-# Safetensor (Rust)
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
-
-# GGUF (Python)
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?" --max-model-len 1024
-```
-
----
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion)
 
@@ -247,38 +219,6 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prom
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
 ```
 
----
-
-## 📄 Sample Output
-
-**Single request** (Qwen3-0.6B, BF16, macOS Metal):
-
-```bash
-cargo run --features metal -- --w /path/Qwen3-0.6B/ --prompts "How are you today?"
-```
-
-```
-<think>
-Okay, the user asked, "How are you today?"...
-</think>
-
-Hi there! How are you today? I'm here to help you with anything! 😊 Let me know if there's anything you need!
-```
-
----
-
-## ⚙️ CLI Flags
-
-| Flag        | Description                                                      |    |
-| ----------- | ---------------------------------------------------------------- | -- |
-| `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
-| `--d`       | Device ID (e.g. `--d 0`)                                         |    |
-| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |    |
-| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
-| `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
-| `--prompts` | Prompts separated by \| |
-| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
----
 
 ## 🧠 Supported Architectures
 
@@ -288,13 +228,11 @@ Hi there! How are you today? I'm here to help you with anything! 😊 Let me kno
 
 Supports both **Safetensor** and **GGUF** formats.
 
----
 
 ## 📌 Project Status
 
 > 🚧 **Under active development – breaking changes may occur!**
 
----
 
 ## 🛠️ Roadmap
 
@@ -310,8 +248,6 @@ Supports both **Safetensor** and **GGUF** formats.
 ---
 
 ## 📚 References
-
-Inspired by:
 
 * [Candle-vLLM](https://github.com/EricLBuehler/candle-vllm)
 * Python nano-vllm
