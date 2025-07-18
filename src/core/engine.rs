@@ -286,6 +286,10 @@ impl LLMEngine {
             Either::Right(indices) => (indices, false),
         };
 
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
         for &idx in indices {
             let sq = if is_running {
                 self.scheduler.get_running(idx)
@@ -302,12 +306,7 @@ impl LLMEngine {
                                     let _ = sender
                                         .try_send(StreamItem::Done("data: [DONE]".to_string()));
                                 } else {
-                                    let decode_finish_time = SystemTime::now()
-                                        .duration_since(UNIX_EPOCH)
-                                        .expect("Time went backwards")
-                                        .as_millis()
-                                        as usize;
-
+                                    let decode_finish_time = cur_time;
                                     let decode_start_time = if let Some(decode_start_time) =
                                         self.decode_start_times.get(&seq_id)
                                     {
@@ -333,11 +332,7 @@ impl LLMEngine {
                     }
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
-                        let decode_start_time = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("Time went backwards")
-                            .as_millis() as usize;
-                        self.decode_start_times.insert(seq_id, decode_start_time);
+                        self.decode_start_times.insert(seq_id, cur_time);
                     }
 
                     let token_id = s.last_token;
@@ -455,6 +450,7 @@ impl LLMEngine {
                 if start_time > 0 {
                     let count = decoded_tokens_clone.load(Ordering::Relaxed);
                     if count == last_logged {
+                        crate::log_info!("Finalizing...");
                         break;
                     }
                     last_logged = count;
