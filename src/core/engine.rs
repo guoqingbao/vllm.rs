@@ -39,7 +39,7 @@ pub enum StreamItem {
     Token(String),                               //streaming
     TokenID(u32),                                //completion
     Completion((usize, usize, usize, Vec<u32>)), //completion
-    Done((usize, String)),
+    Done((usize, usize, usize, usize)), //streaming end
     Error(String),
 }
 
@@ -333,21 +333,23 @@ impl LLMEngine {
                                 start_time
                             };
 
+                            let decode_finish_time = cur_time;
+                            let decode_start_time = if let Some(decode_start_time) =
+                                self.decode_start_times.get(&seq_id)
+                            {
+                                *decode_start_time
+                            } else {
+                                cur_time
+                            };
+
                             if *request_type == RequestType::Stream {
                                 let _ = sender.try_send(StreamItem::Done((
                                     prompt_start_time,
-                                    "data: [DONE]".to_string(),
+                                    decode_start_time,
+                                    decode_finish_time,
+                                    s.output_ids.len(),
                                 )));
                             } else {
-                                let decode_finish_time = cur_time;
-                                let decode_start_time = if let Some(decode_start_time) =
-                                    self.decode_start_times.get(&seq_id)
-                                {
-                                    *decode_start_time
-                                } else {
-                                    cur_time
-                                };
-
                                 let _ = sender.try_send(StreamItem::Completion((
                                     prompt_start_time,
                                     decode_start_time,

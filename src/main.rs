@@ -3,7 +3,6 @@ use clap::Parser;
 // use rand::Rng;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
@@ -247,47 +246,39 @@ async fn main() -> Result<()> {
                 };
                 let handle: tokio::task::JoinHandle<(usize, usize, usize, usize, String)> =
                     GLOBAL_RT.spawn(async move {
-                        let mut length = 0;
-                        let mut prompt_start_time = 0;
-                        let mut decode_start_time = 0;
+                        let mut tickets: (usize, usize, usize, usize) = (0, 0, 0, 0);
                         let mut decode_output = "".to_string();
                         let mut rx = stream;
                         while let Some(item) = rx.recv().await {
                             match item {
                                 StreamItem::Token(t) => {
-                                    if decode_start_time == 0 {
-                                        decode_start_time = SystemTime::now()
-                                            .duration_since(UNIX_EPOCH)
-                                            .expect("Time went backwards")
-                                            .as_millis()
-                                            as usize;
-                                    }
-                                    length += 1;
                                     decode_output += &t.to_string();
                                     print!("{}", t);
                                     use std::io::Write;
                                     let _ = std::io::stdout().flush();
                                 }
-                                StreamItem::TokenID(_) | StreamItem::Completion(_) => { break; }
-                                StreamItem::Done((prompt_start, _)) => {
-                                    prompt_start_time = prompt_start;
+                                StreamItem::TokenID(_) | StreamItem::Completion(_) => {
+                                    break;
+                                }
+                                StreamItem::Done((
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decode_finish_time,
+                                    length,
+                                )) => {
+                                    tickets = (
+                                        prompt_start_time,
+                                        decode_start_time,
+                                        decode_finish_time,
+                                        length,
+                                    );
                                     tracing::info!("Generation completed!");
                                     break;
                                 }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
                             }
                         }
-                        let decode_finish_time = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("Time went backwards")
-                            .as_millis() as usize;
-                        (
-                            prompt_start_time,
-                            decode_start_time,
-                            decode_finish_time,
-                            length,
-                            decode_output,
-                        )
+                        (tickets.0, tickets.1, tickets.2, tickets.3, decode_output)
                     });
                 let (
                     prompt_start_time,
