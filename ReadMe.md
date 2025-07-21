@@ -154,6 +154,9 @@ python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 800
 # Interactive chat
 python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
 
+# Use the second device (device order 1，`--d 1`)
+python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
 # Chat completion
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
@@ -166,6 +169,9 @@ Run with `--i` for interactive chat and `--w` to specify model path:
 ```bash
 # CUDA (normal context)
 cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# Use the third device (device order 2，`--d 2`)
+cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA (with CUDA Graph)
 cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
@@ -224,6 +230,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * ✅ LLaMa (LLaMa2, LLaMa3)
 * ✅ Qwen (Qwen2, Qwen3)
 * ✅ Mistral
+* ✅ GLM4 (0414, **Not ChatGLM**)
 
 Supports both **Safetensor** and **GGUF** formats.
 

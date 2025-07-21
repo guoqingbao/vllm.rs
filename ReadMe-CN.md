@@ -145,6 +145,9 @@ python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 800
 # 交互式聊天
 python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
 
+# 指定设备2 (设备序号为1，`--d 1`)
+python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
 # 批量同步示例
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
@@ -156,6 +159,9 @@ python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are y
 ```bash
 # CUDA（短上下文）
 cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
+
+# 使用第三个设备 (设备序号2，`--d 2`)
+cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA + Flash Attention（超长上下文，如 32k tokens）
 cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
@@ -210,6 +216,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * ✅ LLaMa 系列（LLaMa2、LLaMa3）
 * ✅ Qwen 系列（Qwen2、Qwen3）
 * ✅ Mistral
+* ✅ GLM4 (0414版本, **非ChatGLM**)
 
 支持 **Safetensor** 和 **GGUF** 格式。
 

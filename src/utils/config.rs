@@ -29,6 +29,7 @@ pub struct Config {
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
+    pub partial_rotary_factor: Option<f32>,
     pub hidden_act: candle_nn::Activation,
     pub quant: Option<String>,
 }

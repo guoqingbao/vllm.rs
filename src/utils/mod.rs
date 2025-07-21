@@ -10,6 +10,7 @@ use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
 use config::{Config, EngineConfig, EosToken, TokenizerConfig};
 use either::Either;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
@@ -167,8 +168,13 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
     let has_output_weight = ct.tensor(reader, "output.weight", &Device::Cpu).is_ok();
 
+    //no partial rotary factor info in gguf file
+    let partial_rot_arch_map: HashMap<String, bool> =
+        [("glm4".to_string(), true)].iter().cloned().collect();
+
+    let arch = architecture.to_string();
     let cfg = Config {
-        architectures: vec![architecture.clone()],
+        architectures: vec![arch.clone()],
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
         num_key_value_heads: head_count_kv,
@@ -187,6 +193,11 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
+        partial_rotary_factor: if partial_rot_arch_map.contains_key(&arch) {
+            Some(0.5f32)
+        } else {
+            None
+        },
         hidden_act: candle_nn::Activation::Silu,
         quant: None,
     };

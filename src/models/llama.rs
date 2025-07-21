@@ -50,6 +50,7 @@ impl LLaMaDecoderLayer {
                 vb.pp("mlp").clone()
             },
             config,
+            false,
             dtype,
         )?;
 

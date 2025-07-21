@@ -1,4 +1,4 @@
-// src/models/qwen3.rs
+// src/models/GLM4.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
 use crate::models::layers::mask::get_attention_casual_mask;
@@ -18,14 +18,16 @@ use std::iter::zip;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-pub struct Qwen3DecoderLayer {
+pub struct GLM4DecoderLayer {
     self_attn: Attention,
     mlp: MLP,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
+    post_self_attn_layernorm: RmsNorm,
+    post_mlp_layernorm: RmsNorm,
 }
 
-impl Qwen3DecoderLayer {
+impl GLM4DecoderLayer {
     pub fn new(
         vb: VarBuilderX,
         rotary_emb: Arc<RotaryEmbedding>,
@@ -51,7 +53,7 @@ impl Qwen3DecoderLayer {
                 vb.pp("mlp").clone()
             },
             config,
-            false,
+            true, //gate and up merged
             dtype,
         )?;
         let is_qvar_builder = vb.is_qvar_builder();
@@ -59,6 +61,8 @@ impl Qwen3DecoderLayer {
         let key_map: HashMap<&str, &str> = [
             ("input_layernorm", "attn_norm"),
             ("post_attention_layernorm", "ffn_norm"),
+            ("post_self_attn_layernorm", "post_attention_norm"),
+            ("post_mlp_layernorm", "post_ffw_norm"),
         ]
         .iter()
         .cloned()
@@ -84,11 +88,33 @@ impl Qwen3DecoderLayer {
             },
         )?;
 
+        let post_self_attn_layernorm = rms_norm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            if is_qvar_builder {
+                vb.pp(key_map["post_self_attn_layernorm"]).clone()
+            } else {
+                vb.pp("post_self_attn_layernorm").clone()
+            },
+        )?;
+
+        let post_mlp_layernorm = rms_norm(
+            config.hidden_size,
+            config.rms_norm_eps,
+            if is_qvar_builder {
+                vb.pp(key_map["post_mlp_layernorm"]).clone()
+            } else {
+                vb.pp("post_mlp_layernorm").clone()
+            },
+        )?;
+
         Ok(Self {
             self_attn,
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            post_self_attn_layernorm,
+            post_mlp_layernorm,
         })
     }
 
@@ -105,18 +131,19 @@ impl Qwen3DecoderLayer {
         let attn_output =
             self.self_attn
                 .forward(&xs, attention_mask, positions, cache, input_metadata)?;
+        let attn_output = self.post_self_attn_layernorm.forward(&attn_output)?;
         let xs = (attn_output + residual)?;
         let residual = &xs;
         let xs = self.post_attention_layernorm.forward(&xs)?;
         let mlp_output = self.mlp.forward(&xs)?;
-
+        let mlp_output = self.post_mlp_layernorm.forward(&mlp_output)?;
         residual + mlp_output
     }
 }
 
-pub struct Qwen3ForCausalLM {
+pub struct GLM4ForCausalLM {
     embed_tokens: candle_nn::Embedding,
-    layers: Vec<Qwen3DecoderLayer>,
+    layers: Vec<GLM4DecoderLayer>,
     norm: RmsNorm,
     lm_head: Linear,
     device: Device,
@@ -125,7 +152,7 @@ pub struct Qwen3ForCausalLM {
     vocab_size: usize,
 }
 
-impl Qwen3ForCausalLM {
+impl GLM4ForCausalLM {
     pub fn new(
         vb: &VarBuilderX,
         config: &Config,
@@ -170,7 +197,7 @@ impl Qwen3ForCausalLM {
 
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
-            let layer = Qwen3DecoderLayer::new(
+            let layer = GLM4DecoderLayer::new(
                 vb.pp(format!(
                     "{}.{}",
                     if is_qvar_builder {

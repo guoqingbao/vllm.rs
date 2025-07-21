@@ -97,6 +97,8 @@ impl LLMEngine {
             ("Qwen3ForCausalLM", false),
             ("MistralForCausalLM", false),
             ("LlamaForCausalLM", false),
+            ("Glm4ForCausalLM", true),
+            ("glm4", true),
             ("qwen2", false),
             ("qwen3", false),
             ("llama", true),
@@ -139,6 +141,10 @@ impl LLMEngine {
                     (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
                 }
             }
+            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
+                ModelType::GLM4,
+                "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+            ),
             _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
         };
 

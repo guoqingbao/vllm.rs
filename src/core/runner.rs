@@ -3,6 +3,7 @@ use crate::models::layers::VarBuilderX;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::{
     core::sequence::Sequence,
+    models::glm4::GLM4ForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
     utils::config::{Config, EngineConfig, ModelType},
@@ -18,10 +19,10 @@ use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn}
 pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
+    GLM4(Arc<GLM4ForCausalLM>),
     // Gemma(GemmaForCausalLM),
     // Phi(PhiForCausalLM),
     // Mistral(MistralForCausalLM),
-    // GLM4(GLM4ForCausalLM),
     // Yi(YiForCausalLM),
     // StableLM(StableLMForCausalLM),
     // DeepSeek(DeepSeekForCausalLM),
@@ -65,10 +66,17 @@ impl ModelRunner {
                 &device,
                 Arc::clone(&reporter),
             )?)),
+            ModelType::GLM4 => Model::GLM4(Arc::new(GLM4ForCausalLM::new(
+                vb,
+                config,
+                dtype,
+                is_rope_i,
+                &device,
+                Arc::clone(&reporter),
+            )?)),
             // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::GLM4 => GLM4ForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Yi => YiForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::StableLM => StableLMForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::DeepSeek => DeepSeekForCausalLM::new(vb, config, dtype, &device)?,
@@ -91,6 +99,17 @@ impl ModelRunner {
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
             }
             Model::LLaMa(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+            Model::GLM4(m) => {
                 let model_arc = Arc::clone(m);
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
@@ -267,6 +286,12 @@ impl ModelRunner {
                 Some(&self.get_kv_cache()),
                 &input_metadata,
             )?,
+            Model::GLM4(model) => model.forward(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+            )?,
             // _ => {
             //     candle_core::bail!("Unsupported model type for forward pass");
             // }
@@ -425,6 +450,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
+            Model::GLM4(model) => model.get_vocab_size(),
         }
     }
 

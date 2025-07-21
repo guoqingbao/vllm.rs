@@ -61,7 +61,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
             .filter_map(|ct| {
                 ct.metadata
                     .get("split.count")
-                    .map(|val| val.to_u64().unwrap())
+                    .map(|val| val.to_u64().unwrap_or(0))
             })
             .fold(Vec::new(), |mut accum, x| {
                 if !accum.contains(&x) {
