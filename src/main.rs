@@ -113,16 +113,6 @@ async fn main() -> Result<()> {
         args.max_model_len
     };
 
-    let econfig = EngineConfig::new(
-        args.weight_path.unwrap(),
-        Some(max_num_seqs),
-        max_model_len,
-        args.quant.clone(),
-        Some(1),
-        args.device_ids.clone(),
-    );
-
-    let engine = LLMEngine::new(&econfig, dtype)?;
     let prompts = match (args.prompts, interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
@@ -153,9 +143,18 @@ async fn main() -> Result<()> {
         prompts
     };
 
-    let mut params = Vec::new();
+    let econfig = EngineConfig::new(
+        args.weight_path.unwrap(),
+        Some(std::cmp::max(max_num_seqs, prompts.len())),
+        max_model_len,
+        args.quant.clone(),
+        Some(1),
+        args.device_ids.clone(),
+    );
 
-    tracing::info!("{:?}\n", params);
+    let engine = LLMEngine::new(&econfig, dtype)?;
+
+    let mut params = Vec::new();
 
     let mut prompt_processed = Vec::new();
     // let mut rng = rand::rng();

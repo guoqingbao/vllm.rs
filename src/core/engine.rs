@@ -39,7 +39,7 @@ pub enum StreamItem {
     Token(String),                               //streaming
     TokenID(u32),                                //completion
     Completion((usize, usize, usize, Vec<u32>)), //completion
-    Done((usize, usize, usize, usize)), //streaming end
+    Done((usize, usize, usize, usize)),          //streaming end
     Error(String),
 }
 
