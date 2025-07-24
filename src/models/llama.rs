@@ -1,5 +1,6 @@
 // src/models/llama.rs
 use crate::models::layers::attention::Attention;
+use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
@@ -13,10 +14,11 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::var_builder::Shard;
 use candle_nn::{Module, RmsNorm};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::iter::zip;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 pub struct LLaMaDecoderLayer {
     self_attn: Attention,
@@ -28,6 +30,7 @@ pub struct LLaMaDecoderLayer {
 impl LLaMaDecoderLayer {
     pub fn new(
         vb: VarBuilderX,
+        comm: Rc<Comm>,
         rotary_emb: Arc<RotaryEmbedding>,
         config: &Config,
         dtype: DType,
@@ -39,6 +42,7 @@ impl LLaMaDecoderLayer {
             } else {
                 vb.pp("self_attn").clone()
             },
+            comm.clone(),
             rotary_emb,
             config,
             dtype,
@@ -49,6 +53,7 @@ impl LLaMaDecoderLayer {
             } else {
                 vb.pp("mlp").clone()
             },
+            comm.clone(),
             config,
             false,
             dtype,
@@ -126,6 +131,7 @@ pub struct LLaMaForCausalLM {
 impl LLaMaForCausalLM {
     pub fn new(
         vb: &VarBuilderX,
+        comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
         is_rope_i: bool,
@@ -145,10 +151,7 @@ impl LLaMaForCausalLM {
 
         let is_qvar_builder = vb.is_qvar_builder();
         if is_qvar_builder {
-            reporter
-                .write()
-                .unwrap()
-                .set_progress(config.num_hidden_layers);
+            reporter.write().set_progress(config.num_hidden_layers);
         }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
@@ -181,13 +184,14 @@ impl LLaMaForCausalLM {
                 )
                 .as_str())
                     .clone(),
+                comm.clone(),
                 rotary_emb.clone(),
                 config,
                 dtype,
             )?;
             layers.push(layer);
             if !is_qvar_builder {
-                reporter.write().unwrap().set_progress(i + 1);
+                reporter.write().set_progress(i + 1);
             }
         }
 

@@ -4,17 +4,26 @@ use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::core::GenerationOutput;
 use crate::log_info;
+use crate::models::layers::distributed::{Comm, Id};
 use crate::models::layers::VarBuilderX;
+use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
-use crate::utils::init_config_tokenizer;
-use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks, new_device};
+use crate::utils::progress::{progress_worker, ProgressReporter};
+use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
+use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use candle_core::{DType, Result};
 use either::Either;
 use futures::future::join_all;
+use interprocess::local_socket::traits::Listener;
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
+use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
+use interprocess::TryClone;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::io::{BufRead, BufReader};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
@@ -26,7 +35,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::{task, time::sleep};
-
 pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -49,8 +57,13 @@ pub enum RequestType {
     Completion,
 }
 
+pub enum RunnerType {
+    Thread(ModelRunner),
+    Process(Vec<LocalStream>),
+}
+
 pub struct LLMEngine {
-    model_runner: ModelRunner,
+    pub runners: RunnerType,
     pub scheduler: Scheduler,
     pub tokenizer: Tokenizer,
     econfig: EngineConfig,
@@ -67,10 +80,7 @@ pub struct LLMEngine {
 impl LLMEngine {
     #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
-        let device = new_device(econfig.device_id.unwrap_or(0))?;
-        log_info!("Loading model...");
         let (config, config_tokenizer, tokenizer) = init_config_tokenizer(econfig)?;
-        let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
         log_info!("{:?}\n", config);
 
         log_info!("{:?}\n", config_tokenizer);
@@ -156,17 +166,25 @@ impl LLMEngine {
 
         log_info!("Use ROPE interleaved {is_rope_i}");
 
+        let mut device_ids = econfig.device_ids.clone().unwrap_or_default();
+        if device_ids.is_empty() {
+            device_ids.push(0);
+        }
+
+        let num_shards = device_ids.len();
+
         let num_blocks = get_kvcache_blocks(
             econfig.max_num_seqs,
             econfig.max_model_len.unwrap_or(4096),
             econfig.block_size,
             &config,
-            econfig.num_shards.unwrap_or(1),
+            num_shards,
             dtype,
         );
 
         econfig.num_blocks = num_blocks;
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
+        econfig.num_shards = Some(num_shards);
         log_info!("{:?}", econfig);
 
         log_info!(
@@ -176,15 +194,145 @@ impl LLMEngine {
             econfig.block_size
         );
 
-        let mut model_runner = ModelRunner::new(
-            model_type,
-            &vb,
-            &econfig,
-            &config,
-            dtype,
-            is_rope_i,
-            device.clone(),
-        )?;
+        #[cfg(not(feature = "nccl"))]
+        assert!(
+            num_shards == 1,
+            "Multi-rank inference is only available when `nccl` feature is enabled!"
+        );
+
+        let runners = if device_ids.len() == 1 {
+            let device = crate::utils::new_device(device_ids[0])?;
+            log_info!("Loading model...");
+            let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
+            let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
+            let mut model_runner = ModelRunner::new(
+                model_type,
+                &vb,
+                #[cfg(not(feature = "nccl"))]
+                Rc::new(Comm::default()),
+                #[cfg(feature = "nccl")]
+                Rc::new(
+                    Comm::from_rank(
+                        device.as_cuda_device().unwrap().cuda_device(),
+                        0,
+                        1,
+                        Id::new().unwrap(),
+                    )
+                    .unwrap(),
+                ),
+                &econfig,
+                &config,
+                dtype,
+                is_rope_i,
+                device.clone(),
+                reporter,
+            )?;
+
+            #[cfg(all(feature = "cuda", feature = "graph"))]
+            match model_runner.warmup_capture() {
+                Ok(_) => {
+                    log_info!("Cuda graph captured for performance enhancement!")
+                }
+                Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
+            }
+
+            RunnerType::Thread(model_runner)
+        } else {
+            log_info!("Loading model with runner(s)...");
+
+            #[cfg(feature = "nccl")]
+            let nccl_id = Id::new().unwrap();
+
+            let runner_path = get_runner_path()?;
+
+            #[cfg(feature = "python")]
+            pyo3::Python::with_gil(|py| {
+                for (rank, _) in device_ids.iter().enumerate() {
+                    let sock_name = format!("@vllm-rs-runner-{}", rank);
+                    spawn_runner(py, &runner_path.display().to_string(), &sock_name)
+                        .expect("Failed to spawn runner");
+                }
+            });
+
+            #[cfg(not(feature = "python"))]
+            for (rank, _) in device_ids.iter().enumerate() {
+                let sock_name = format!("@vllm-rs-runner-{}", rank);
+                spawn_runner(&runner_path.display().to_string(), &sock_name)
+                    .expect("Failed to spawn runner");
+            }
+
+            use rayon::iter::IndexedParallelIterator;
+            use rayon::iter::IntoParallelRefIterator;
+            use rayon::iter::ParallelIterator;
+            let runner_streams: Result<Vec<LocalStream>> = device_ids
+                .par_iter()
+                .enumerate()
+                .map(|(rank, dev_id)| {
+                    let model_type = model_type.clone();
+                    let config = config.clone();
+                    let econfig = econfig.clone();
+                    let sock_name = format!("@vllm-rs-runner-{}", rank);
+                    let listener = ListenerOptions::new()
+                        .name(
+                            sock_name
+                                .clone()
+                                .to_ns_name::<GenericNamespaced>()
+                                .expect("Failed to to_ns_name"),
+                        )
+                        .create_sync()
+                        .expect("Failed to create listener");
+
+                    crate::log_info!("listener starting accepting runner {}", rank);
+
+                    // Accept one connection
+                    let mut stream = listener.accept()?;
+                    crate::log_info!("Accepted runner {}", rank);
+
+                    // Wait for "ready"
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut message = String::new();
+                    reader.read_line(&mut message)?;
+                    if message.trim() != "ready" {
+                        return Err(candle_core::Error::Msg(format!(
+                            "Runner {} did not send ready",
+                            rank
+                        )));
+                    }
+
+                    // Build init message
+                    let init_msg = MessageType::Init(RunnerInitRequest {
+                        rank,
+                        dev_id: *dev_id,
+                        num_shards,
+                        model_type,
+                        config,
+                        econfig,
+                        dtype: dtype.into(),
+                        is_rope_i,
+                        #[cfg(feature = "nccl")]
+                        nccl_id: crate::runner::NcclId(nccl_id.clone()),
+                    });
+
+                    send_local(&mut vec![stream.try_clone()?], &init_msg)?;
+
+                    crate::log_info!("Waiting runner {} response...", rank);
+
+                    if let MessageType::InitAck(ack) = receive_local(&mut stream)? {
+                        if !ack {
+                            candle_core::bail!("Runner {} failed to initialize", rank);
+                        }
+                    } else {
+                        candle_core::bail!("Runner {} unable to initialize", rank);
+                    }
+
+                    crate::log_info!("Runner {} started!", rank);
+
+                    Ok(stream)
+                })
+                .collect();
+            RunnerType::Process(runner_streams?)
+        };
+
         let scheduler = Scheduler::new(&econfig, &config);
         log_info!("Model loaded.\n");
 
@@ -198,16 +346,8 @@ impl LLMEngine {
             true,
         );
 
-        #[cfg(all(feature = "cuda", feature = "graph"))]
-        match model_runner.warmup_capture() {
-            Ok(_) => {
-                log_info!("Cuda graph captured for performance enhancement!")
-            }
-            Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
-        }
-
         let engine = Arc::new(RwLock::new(Self {
-            model_runner,
+            runners,
             scheduler,
             tokenizer,
             econfig,
@@ -299,11 +439,52 @@ impl LLMEngine {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
-            // Run model on the scheduled sequences
-            let output_ids = self.model_runner.run(&seqs, is_prefill)?;
+            match &mut self.runners {
+                RunnerType::Thread(model_runner) => {
+                    // Run model on the scheduled sequences in the main thread
+                    let output_ids = model_runner.run(&seqs, is_prefill)?;
 
-            // Postprocess sequences by modifying them inside the scheduler
-            self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                    // Postprocess sequences by modifying them inside the scheduler
+                    self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                }
+                RunnerType::Process(ref mut runner_streams) => {
+                    let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
+                    let request = MessageType::Run((sequences, is_prefill));
+
+                    let cloned_streams: Vec<LocalStream> = runner_streams
+                        .iter_mut()
+                        .map(|s| s.try_clone().expect("clone failed"))
+                        .collect();
+
+                    use rayon::iter::IntoParallelIterator;
+                    use rayon::iter::ParallelIterator;
+                    let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
+                        .into_par_iter()
+                        .map(|mut stream| {
+                            let msg = request.clone();
+                            send_local(&mut vec![stream.try_clone()?], &msg)?;
+                            let response = receive_local(&mut stream)?;
+
+                            match response {
+                                MessageType::RunResponse(output_ids) => Ok(output_ids),
+                                other => {
+                                    candle_core::bail!("Unexpected response type: {:?}", other)
+                                }
+                            }
+                        })
+                        .collect();
+
+                    let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                    // Only run postprocess once after all runners finish (use first result)
+                    if let Some(output_ids) = all_outputs.first() {
+                        // println!("[LLMEngine] Postprocessing output ids: {:?}", output_ids);
+                        self.scheduler.postprocess(&scheduled_ids, output_ids);
+                    } else {
+                        candle_core::bail!("No output ids received from model runners");
+                    }
+                }
+            }
+
             DecodedIds(Either::Left(scheduled_ids))
         } else {
             crate::log_info!("No more kv cache available, free all resources!");

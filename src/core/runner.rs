@@ -1,4 +1,5 @@
 // src/core/runner.rs
+use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::{
@@ -10,7 +11,8 @@ use crate::{
 };
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-use std::sync::RwLock;
+use parking_lot::RwLock;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -41,17 +43,18 @@ impl ModelRunner {
     pub fn new(
         model_type: ModelType,
         vb: &VarBuilderX,
+        comm: Rc<Comm>,
         econfig: &EngineConfig,
         config: &Config,
         dtype: DType,
         is_rope_i: bool,
         device: Device,
+        reporter: Arc<RwLock<ProgressReporter>>,
     ) -> Result<Self> {
-        let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
-        progress_worker(Some(1), config.num_hidden_layers, Arc::clone(&reporter));
         let model = match model_type {
             ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -60,6 +63,7 @@ impl ModelRunner {
             )?)),
             ModelType::LLaMa => Model::LLaMa(Arc::new(LLaMaForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -68,6 +72,7 @@ impl ModelRunner {
             )?)),
             ModelType::GLM4 => Model::GLM4(Arc::new(GLM4ForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -257,7 +262,7 @@ impl ModelRunner {
         }
     }
 
-    pub fn run(&mut self, seqs: &[&Sequence], is_prefill: bool) -> Result<Vec<u32>> {
+    pub fn run(&self, seqs: &[&Sequence], is_prefill: bool) -> Result<Vec<u32>> {
         let (input_ids, positions, input_metadata) = if is_prefill {
             self.prepare_prefill(seqs)
         } else {

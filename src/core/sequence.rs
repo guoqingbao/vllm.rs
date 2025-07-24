@@ -1,14 +1,14 @@
 // src/core/sequence.rs
 use crate::utils::config::SamplingParams;
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SequenceStatus {
     Waiting,
     Running,
     Finished,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub id: usize,
     pub status: SequenceStatus,

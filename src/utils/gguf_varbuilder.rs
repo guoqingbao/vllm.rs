@@ -8,8 +8,8 @@ use crate::utils::progress::{progress_worker, ProgressReporter};
 use candle::quantized::QTensor;
 use candle::{Device, Result, Shape};
 use candle_core as candle;
+use parking_lot::RwLock;
 use std::sync::Arc;
-use std::sync::RwLock;
 // VarBuilder specialized for QTensors
 #[derive(Clone)]
 pub struct VarBuilder {
@@ -20,20 +20,17 @@ pub struct VarBuilder {
 
 impl VarBuilder {
     pub fn from_gguf<P: AsRef<std::path::Path>>(p: P, device: &Device) -> Result<Self> {
-        let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
+        let reporter = vec![Arc::new(RwLock::new(ProgressReporter::new(0)))];
         let mut file = std::fs::File::open(p)?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-        progress_worker(
-            Some(1),
-            content.tensor_infos.keys().len(),
-            Arc::clone(&reporter),
-        );
+        let handle = progress_worker(1, content.tensor_infos.keys().len(), &reporter);
         let mut data = std::collections::HashMap::new();
         for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
             let tensor = content.tensor(&mut file, tensor_name, device)?;
             data.insert(tensor_name.to_string(), Arc::new(tensor));
-            reporter.write().unwrap().set_progress(i + 1);
+            reporter[0].write().set_progress(i + 1);
         }
+        handle.join().unwrap();
         Ok(Self {
             data: Arc::new(data),
             path: Vec::new(),

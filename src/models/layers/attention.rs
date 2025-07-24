@@ -1,23 +1,22 @@
-use crate::models::layers::linear::{
-    linear_b_x as linear_b, linear_no_bias_x as linear_no_bias, LinearX as Linear,
+use crate::models::layers::distributed::{
+    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::rms_norm;
 use crate::models::layers::rotary_emb::RotaryEmbedding;
+use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
 use candle_core::{DType, Module, Result, Tensor};
-use candle_nn::var_builder::Shard;
-// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
-use crate::models::layers::VarBuilderX;
 use candle_nn::RmsNorm;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub struct Attention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
+    q_proj: TensorParallelColumnLinear,
+    k_proj: TensorParallelColumnLinear,
+    v_proj: TensorParallelColumnLinear,
+    o_proj: TensorParallelRowLinear,
     q_norm: Option<RmsNorm>,
     k_norm: Option<RmsNorm>,
     num_heads: usize,
@@ -31,6 +30,7 @@ pub struct Attention {
 impl Attention {
     pub fn new(
         vb: VarBuilderX,
+        comm: Rc<Comm>,
         rotary_emb: Arc<RotaryEmbedding>,
         config: &Config,
         dtype: DType,
@@ -39,7 +39,6 @@ impl Attention {
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads;
         let head_dim = config.head_dim.unwrap_or(hidden_size / num_heads);
-        let sd = Shard::default();
         let attention_bias = config.attention_bias.unwrap_or(true);
         let key_map: HashMap<&str, &str> = [
             ("q_proj", "attn_q"),
@@ -54,7 +53,7 @@ impl Attention {
         .collect();
         let is_qvar_builder = vb.is_qvar_builder();
 
-        let q_proj = linear_b(
+        let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_heads * head_dim,
             attention_bias,
@@ -63,11 +62,11 @@ impl Attention {
             } else {
                 vb.pp("q_proj")
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;
-        let k_proj = linear_b(
+        let k_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
@@ -76,11 +75,11 @@ impl Attention {
             } else {
                 vb.pp("k_proj")
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;
-        let v_proj = linear_b(
+        let v_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
@@ -89,11 +88,12 @@ impl Attention {
             } else {
                 vb.pp("v_proj")
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;
-        let o_proj = linear_no_bias(
+
+        let o_proj = TensorParallelRowLinear::load_with_hints(
             num_heads * head_dim,
             hidden_size,
             if is_qvar_builder {
@@ -101,7 +101,7 @@ impl Attention {
             } else {
                 vb.pp("o_proj")
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;
@@ -136,6 +136,9 @@ impl Attention {
             None
         };
 
+        let attention_heads = num_heads / comm.world_size();
+        let kv_heads = num_kv_heads / comm.world_size();
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -143,15 +146,15 @@ impl Attention {
             o_proj,
             q_norm,
             k_norm,
-            num_heads,
-            num_kv_heads,
+            num_heads: attention_heads,
+            num_kv_heads: kv_heads,
             head_dim,
             rotary_emb,
             attn: PagedAttention::new(
-                num_heads,
+                attention_heads,
                 head_dim,
                 1. / ((head_dim as f32).sqrt()),
-                Some(num_kv_heads),
+                Some(kv_heads),
                 config.sliding_window,
                 vb.device().clone(),
                 None,

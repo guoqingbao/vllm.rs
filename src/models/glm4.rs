@@ -1,5 +1,6 @@
 // src/models/GLM4.rs
 use crate::models::layers::attention::Attention;
+use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
@@ -13,10 +14,11 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::var_builder::Shard;
 use candle_nn::{Module, RmsNorm};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::iter::zip;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 pub struct GLM4DecoderLayer {
     self_attn: Attention,
@@ -30,6 +32,7 @@ pub struct GLM4DecoderLayer {
 impl GLM4DecoderLayer {
     pub fn new(
         vb: VarBuilderX,
+        comm: Rc<Comm>,
         rotary_emb: Arc<RotaryEmbedding>,
         config: &Config,
         dtype: DType,
@@ -41,6 +44,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("self_attn").clone()
             },
+            comm.clone(),
             rotary_emb,
             config,
             dtype,
@@ -52,6 +56,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("mlp").clone()
             },
+            comm.clone(),
             config,
             true, //gate and up merged
             dtype,
@@ -155,6 +160,7 @@ pub struct GLM4ForCausalLM {
 impl GLM4ForCausalLM {
     pub fn new(
         vb: &VarBuilderX,
+        comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
         is_rope_i: bool,
@@ -174,10 +180,7 @@ impl GLM4ForCausalLM {
 
         let is_qvar_builder = vb.is_qvar_builder();
         if is_qvar_builder {
-            reporter
-                .write()
-                .unwrap()
-                .set_progress(config.num_hidden_layers);
+            reporter.write().set_progress(config.num_hidden_layers);
         }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
@@ -208,13 +211,14 @@ impl GLM4ForCausalLM {
                     i
                 )
                 .as_str()),
+                comm.clone(),
                 rotary_emb.clone(),
                 config,
                 dtype,
             )?;
             layers.push(layer);
             if !is_qvar_builder {
-                reporter.write().unwrap().set_progress(i + 1);
+                reporter.write().set_progress(i + 1);
             }
         }
 

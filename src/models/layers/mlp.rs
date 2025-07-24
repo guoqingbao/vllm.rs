@@ -1,26 +1,28 @@
-use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
-use crate::utils::config::Config;
-use candle_core::{DType, Module, Result, Tensor, D};
-use candle_nn::var_builder::Shard;
-// use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
+use crate::models::layers::distributed::{
+    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
+};
 use crate::models::layers::VarBuilderX;
+use crate::utils::config::Config;
+use candle_core::{DType, Result, Tensor, D};
 use std::collections::HashMap;
+use std::rc::Rc;
+
 pub struct MLP {
-    gate_proj: Option<Linear>,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj: Option<TensorParallelColumnLinear>,
+    up_proj: TensorParallelColumnLinear,
+    down_proj: TensorParallelRowLinear,
 }
 
 impl MLP {
     pub fn new(
         vb: VarBuilderX,
+        comm: Rc<Comm>,
         config: &Config,
         gate_up_merged: bool,
         dtype: DType,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let intermediate_size = config.intermediate_size;
-        let sd = Shard::default();
         let key_map: HashMap<&str, &str> = [
             ("gate_proj", "ffn_gate"),
             ("up_proj", "ffn_up"),
@@ -33,15 +35,16 @@ impl MLP {
         let is_qvar_builder = vb.is_qvar_builder();
 
         let gate_proj = if !gate_up_merged {
-            Some(linear_no_bias(
+            Some(TensorParallelColumnLinear::load_with_hints(
                 hidden_size,
                 intermediate_size,
+                false,
                 if is_qvar_builder {
                     vb.pp(key_map["gate_proj"])
                 } else {
                     vb.pp("gate_proj")
                 },
-                sd,
+                comm.clone(),
                 &config.quant,
                 dtype,
             )?)
@@ -49,13 +52,14 @@ impl MLP {
             None
         };
 
-        let up_proj = linear_no_bias(
+        let up_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             if gate_up_merged {
                 intermediate_size * 2
             } else {
                 intermediate_size
             },
+            false,
             if is_qvar_builder {
                 vb.pp(key_map["up_proj"])
             } else {
@@ -65,11 +69,12 @@ impl MLP {
                     "up_proj"
                 })
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;
-        let down_proj = linear_no_bias(
+
+        let down_proj = TensorParallelRowLinear::load_with_hints(
             intermediate_size,
             hidden_size,
             if is_qvar_builder {
@@ -77,7 +82,7 @@ impl MLP {
             } else {
                 vb.pp("down_proj")
             },
-            sd,
+            comm.clone(),
             &config.quant,
             dtype,
         )?;

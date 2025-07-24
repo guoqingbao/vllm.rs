@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod distributed;
 pub mod linear;
 pub mod mask;
 pub mod mlp;

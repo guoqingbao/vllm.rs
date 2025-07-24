@@ -79,9 +79,6 @@ async fn main() -> Result<()> {
             "Must provide weight-path (folder of safetensors or path of gguf file)!"
         );
     }
-    if args.device_ids.is_some() && args.device_ids.as_ref().unwrap().len() > 1 {
-        candle_core::bail!("Multi-rank inference is under development!");
-    }
 
     let dtype = match args.dtype.as_deref() {
         Some("f16") => DType::F16,

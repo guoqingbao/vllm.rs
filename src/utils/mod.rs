@@ -8,8 +8,7 @@ pub mod progress;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use config::{Config, EngineConfig, EosToken, TokenizerConfig};
-use either::Either;
+use config::{Config, EngineConfig, EosTokenId, TokenizerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -159,9 +158,9 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
     let eos_token_id = if eos_token_id.is_ok() {
-        EosToken(Either::Left(Some(eos_token_id.unwrap().to_u32()?)))
+        EosTokenId::Single(eos_token_id.unwrap().to_u32()?)
     } else {
-        EosToken(Either::Left(None))
+        EosTokenId::Multiple(vec![])
     };
 
     let head_dim = head_dim.unwrap_or(embedding_length / head_count);
@@ -274,5 +273,90 @@ pub fn init_config_tokenizer(
         Ok((config, config_tokenizer, tokenizer))
     } else {
         candle_core::bail!("No valid config found");
+    }
+}
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::PyModule;
+
+pub fn get_runner_path() -> Result<PathBuf> {
+    #[cfg(feature = "python")]
+    {
+        Python::with_gil(|py| {
+            let module = PyModule::import(py, "vllm_rs").map_err(candle_core::Error::wrap)?;
+            let file: String = module
+                .getattr("__file__")
+                .map_err(candle_core::Error::wrap)?
+                .extract()
+                .map_err(candle_core::Error::wrap)?;
+            let module_path = Path::new(&file).parent().unwrap().join("runner");
+            Ok(module_path)
+        })
+    }
+
+    #[cfg(not(feature = "python"))]
+    {
+        let exe_path = std::env::current_exe()?;
+        let exe_dir = exe_path
+            .parent()
+            .ok_or("Failed to get exe directory")
+            .map_err(candle_core::Error::wrap)?;
+        Ok(exe_dir.join("runner"))
+    }
+}
+
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+
+pub fn spawn_runner(
+    #[cfg(feature = "python")] py: Python,
+    runner_path: &str,
+    sock_name: &str,
+) -> Result<()> {
+    #[cfg(feature = "python")]
+    {
+        use pyo3::prelude::*;
+        use pyo3::types::{PyDict, PyString, PyTuple};
+        use std::ffi::CString;
+        crate::log_info!("Spawning runner at: {}", runner_path);
+        let subprocess = py.import("subprocess").map_err(candle_core::Error::wrap)?;
+        let sys = py.import("sys").map_err(candle_core::Error::wrap)?;
+
+        let args = PyTuple::new(
+            py,
+            &[
+                PyString::new(py, runner_path),
+                PyString::new(py, "--sock"),
+                PyString::new(py, sock_name),
+            ],
+        )
+        .map_err(candle_core::Error::wrap)?;
+
+        let kwargs = PyDict::new(py);
+        kwargs
+            .set_item("shell", false)
+            .map_err(candle_core::Error::wrap)?;
+        kwargs
+            .set_item("text", true)
+            .map_err(candle_core::Error::wrap)?;
+
+        let result = subprocess
+            .call_method("Popen", (args,), Some(&kwargs))
+            .map_err(candle_core::Error::wrap)?;
+        crate::log_info!("Runner spawned {:?}", result);
+        Ok(())
+    }
+    #[cfg(not(feature = "python"))]
+    {
+        use std::process::Command;
+
+        Command::new(runner_path)
+            .arg("--sock")
+            .arg(sock_name)
+            .spawn()
+            .map_err(|e| e.into())
+            .map(|_child| ())
     }
 }

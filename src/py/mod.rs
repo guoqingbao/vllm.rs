@@ -36,11 +36,8 @@ impl Engine {
         };
 
         match LLMEngine::new(&econfig, dtype_parsed) {
-            Ok(engine) => Ok(Engine { engine, econfig }),
-            Err(e) => Err(PyValueError::new_err(format!(
-                "Failed to create engine ({:?})",
-                e
-            ))),
+            Ok(engine) => Ok(Self { engine, econfig }),
+            Err(e) => Err(PyValueError::new_err(format!("Engine init failed: {e:?}"))),
         }
     }
 
@@ -187,7 +184,7 @@ impl EngineConfig {
             max_model_len,                 //placeholder
             quant,
             num_shards,
-            device_id: Some(device_ids[0]),
+            device_ids: Some(device_ids),
         }
     }
 }
