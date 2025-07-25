@@ -21,12 +21,12 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 ---
 
-### Performance
+### Performance Comparison
 
 > Model: Qwen3-0.6B (BF16); 
 > Concurrent Requests: 256; 
 > Max Model Length: 1024; 
-> Max Tokens / Request: 1024
+> Max Output Tokens / Request: 1024
 
 | Inference Engine | Tokens | Time (s) | Throughput (tokens/s) |
 |------------------|---------------|----------|------------------------|
@@ -62,6 +62,20 @@ python3 bench.py
 Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
 Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ```
+
+### Performance of vLLM.rs on **Metal (Apple Silicon, M4)**
+> Models: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
+> Concurrent Requests: 1 - 128；
+> Max Model Length: 512 - 2048；
+> Max Output Tokens / Request: 512 - 2048；
+
+| Model | Batch Size | Output Tokens | Time (s) | Throughput (tokens/s) |
+|------------------|--------|--------|---------|-------------|
+| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
+| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
+| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
+| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
+| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 
 ## 📦 Install with pip
