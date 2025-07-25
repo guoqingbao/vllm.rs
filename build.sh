@@ -33,27 +33,40 @@ echo "Features: $FEATURES"
 echo "Building runner binary..."
 cargo build $RELEASE --bin runner --features "$FEATURES"
 
-# Step 2: Copy runner binary into vllm_rs/runner_bin
-#echo "Copying runner binary..."
-#BIN_NAME="runner"
-#[[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && BIN_NAME="runner.exe"
+# Step 2: Copy runner binary into vllm_rs/
+echo "Copying runner binary..."
+BIN_NAME="runner"
+[[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && BIN_NAME="runner.exe"
 
-#RUNNER_BINARY="target/$PROFILE/$BIN_NAME"
-#DEST_DIR="python/vllm_rs"
+RUNNER_BINARY="target/$PROFILE/$BIN_NAME"
+DEST_DIR="vllm_rs"
 
-#cp "$RUNNER_BINARY" "$DEST_DIR/runner"
-# mkdir -p "$DEST_DIR"
-# cp "$RUNNER_BINARY" "$DEST_DIR/"
-# cp "vllm_rs.pyi" "vllm_rs/__init__.pyi"
-# cp "python/vllm_rs/__init__.py" "vllm_rs/"
-# touch "vllm_rs/py.typed"
+mkdir -p "$DEST_DIR"
+cp "$RUNNER_BINARY" "$DEST_DIR"
+chmod 755 "$DEST_DIR/runner"
+cp "vllm_rs.pyi" "$DEST_DIR/__init__.pyi"
+chmod 755 "$DEST_DIR/__init__.pyi"
+touch "$DEST_DIR/py.typed"
+chmod 755 "$DEST_DIR/py.typed"
+cp "python/__init__.py" "$DEST_DIR/__init__.py"
+chmod 755 "$DEST_DIR/__init__.py"
 
-#echo "✅ Done. Runner binary copied to $DEST_DIR/"
+echo "✅ Done. Runner binary copied to $DEST_DIR/"
 
 # Step 3: Build Python package with maturin
 echo "Building Python extension with maturin..."
+
+# Remove 'flash-attn' if present
+FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
+echo "Building Python extension features: $FEATURES"
 maturin build $RELEASE --features "$FEATURES"
 
 # Step 4: remove temporary vllm_rs/runner_bin
-#echo "Cleaning up temporary files..."
-#rm "$DEST_DIR/runner"
+echo "Cleaning up temporary files..."
+rm "$DEST_DIR/runner"
+rm "$DEST_DIR/__init__.py"
+rm "$DEST_DIR/__init__.pyi"
+rm "$DEST_DIR/py.typed"
+rm -r "$DEST_DIR"
+
+echo "✅ Build complete. Python package created in target/wheels/"
