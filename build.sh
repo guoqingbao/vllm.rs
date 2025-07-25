@@ -30,8 +30,9 @@ echo "Building with profile: $PROFILE"
 echo "Features: $FEATURES"
 
 # Step 1: Build runner binary
+FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
 echo "Building runner binary..."
-cargo build $RELEASE --bin runner --features "$FEATURES"
+cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
 
 # Step 2: Copy runner binary into vllm_rs/
 echo "Copying runner binary..."

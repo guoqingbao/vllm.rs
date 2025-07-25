@@ -1,7 +1,8 @@
 //src/core/engine.rs
-use super::runner::ModelRunner;
+use super::runner::{ModelRunner, Seqs};
 use super::scheduler::Scheduler;
 use super::sequence::Sequence;
+use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
 use crate::log_info;
 use crate::models::layers::distributed::{Comm, Id};
@@ -9,7 +10,7 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
-use crate::utils::progress::{progress_worker, ProgressReporter};
+use crate::utils::progress::ProgressReporter;
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use candle_core::{DType, Result};
@@ -442,14 +443,22 @@ impl LLMEngine {
             match &mut self.runners {
                 RunnerType::Thread(model_runner) => {
                     // Run model on the scheduled sequences in the main thread
-                    let output_ids = model_runner.run(&seqs, is_prefill)?;
+                    let output_ids = model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?;
 
                     // Postprocess sequences by modifying them inside the scheduler
                     self.scheduler.postprocess(&scheduled_ids, &output_ids);
                 }
                 RunnerType::Process(ref mut runner_streams) => {
-                    let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
-                    let request = MessageType::Run((sequences, is_prefill));
+                    let request = if is_prefill {
+                        let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
+                        MessageType::RunPrefill((sequences, true))
+                    } else {
+                        let sequences = seqs
+                            .iter()
+                            .map(|s| DecodeSequence::new(s))
+                            .collect::<Vec<_>>();
+                        MessageType::RunDecode((sequences, false))
+                    };
 
                     let cloned_streams: Vec<LocalStream> = runner_streams
                         .iter_mut()

@@ -106,6 +106,9 @@ maturin build --release --features cuda,flash-attn,graph,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
+
+# build for multi-rank inference (CUDA, standalone runner)
+./build.sh --release --features cuda,nccl,flash-attn,python
 ```
 
 3. **Install packages**
@@ -192,6 +195,9 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts 
 
 # Metal
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+
+# Multi-GPUs (interactive mode)
+./run.sh run --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 ```
 
 ## ⚙️ CLI Flags
@@ -248,7 +254,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
-* [ ] Multi-rank inference
+* [x] Multi-rank inference (available for Non-quantized safetensors models)
 * [ ] Additional model support
 * [ ] Speedup prompt processing on Metal/macOS
 ---

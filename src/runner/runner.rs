@@ -6,7 +6,7 @@ use parking_lot::RwLock;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::Arc;
-use vllm_rs::core::runner::ModelRunner;
+use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
@@ -105,8 +105,18 @@ fn main() -> anyhow::Result<()> {
                 vllm_rs::log_info!("Runner exit");
                 break;
             }
-            Ok(MessageType::Run((sequences, is_prefill))) => {
-                let outputs = runner.run(&sequences.iter().collect::<Vec<_>>(), is_prefill)?;
+            Ok(MessageType::RunPrefill((sequences, is_prefill))) => {
+                let outputs = runner.run(
+                    Seqs::SeqRefs(&sequences.iter().collect::<Vec<_>>()),
+                    is_prefill,
+                )?;
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::RunResponse(outputs),
+                )?;
+            }
+            Ok(MessageType::RunDecode((sequences, is_prefill))) => {
+                let outputs = runner.run(Seqs::DecodeVec(&sequences), is_prefill)?;
                 send_local(
                     &mut vec![stream.try_clone()?],
                     &MessageType::RunResponse(outputs),

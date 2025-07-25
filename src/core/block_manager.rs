@@ -123,7 +123,7 @@ impl BlockManager {
                 self.hash_to_block.insert(block_hash, block_id);
             }
 
-            seq.block_table.push(block_id);
+            seq.block_table.push(block_id as u32);
             if !cache_miss {
                 seq.num_cached_tokens += self.block_size;
             }
@@ -132,6 +132,7 @@ impl BlockManager {
 
     pub fn deallocate(&mut self, seq: &Sequence) {
         for &block_id in seq.block_table.iter().rev() {
+            let block_id = block_id as usize;
             let block = &mut self.blocks[block_id];
             block.ref_count = block.ref_count.saturating_sub(1);
             if block.ref_count == 0 {
@@ -174,16 +175,16 @@ impl BlockManager {
                 .pop_front()
                 .expect("No free blocks available");
             self.allocate_block(block_id);
-            seq.block_table.push(block_id);
+            seq.block_table.push(block_id as u32);
         } else if len_mod == 0 {
             // assert_eq!(last_block.hash, -1);
             let token_ids = seq.block(seq.num_blocks() - 1);
             let prefix = if seq.block_table.len() > 1 {
-                self.blocks[seq.block_table[seq.block_table.len() - 2]].hash
+                self.blocks[seq.block_table[seq.block_table.len() - 2] as usize].hash
             } else {
                 -1
             };
-            let last_block_index = *seq.block_table.last().expect("Block table is empty");
+            let last_block_index = *seq.block_table.last().expect("Block table is empty") as usize;
             let h = self.compute_hash(&token_ids, prefix);
             self.blocks[last_block_index].update(h, token_ids.clone());
             self.hash_to_block

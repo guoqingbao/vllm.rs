@@ -1,7 +1,6 @@
 // src/models/GLM4.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
-use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm};
@@ -12,7 +11,6 @@ use crate::utils::progress::ProgressLike;
 use crate::utils::progress::ProgressReporter;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::var_builder::Shard;
 use candle_nn::{Module, RmsNorm};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -150,7 +148,7 @@ pub struct GLM4ForCausalLM {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<GLM4DecoderLayer>,
     norm: RmsNorm,
-    lm_head: Linear,
+    lm_head: ReplicatedLinear,
     device: Device,
     config: Config,
     dtype: DType,
@@ -232,7 +230,7 @@ impl GLM4ForCausalLM {
             },
         )?;
 
-        let lm_head = linear_no_bias(
+        let lm_head = ReplicatedLinear::load_no_bias(
             config.hidden_size,
             vocab_size,
             if config.tie_word_embeddings.is_some_and(|x| x) {
@@ -248,7 +246,6 @@ impl GLM4ForCausalLM {
                     vb.pp("lm_head")
                 }
             },
-            Shard::default(),
             &None,
             dtype,
         )?;

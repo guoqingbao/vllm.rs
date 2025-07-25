@@ -6,6 +6,7 @@ use crate::models::layers::VarBuilderX;
 pub use candle_core::cuda_backend::cudarc::nccl::safe::{Comm, Id};
 use candle_core::CustomOp1;
 use candle_core::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor};
+use candle_nn::var_builder::Shard;
 #[cfg(not(feature = "nccl"))]
 pub struct Comm {}
 #[cfg(not(feature = "nccl"))]
@@ -229,6 +230,19 @@ impl TensorParallelColumnLinear {
             quant,
             dtype,
         )?;
+        Ok(Self { linear })
+    }
+
+    pub fn load_with_shard(
+        in_dim: usize,
+        out_dim: usize,
+        bias: bool,
+        vb: VarBuilderX,
+        shard: Shard,
+        quant: &Option<String>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let linear = linear_b(in_dim, out_dim, bias, vb, shard, quant, dtype)?;
         Ok(Self { linear })
     }
 }

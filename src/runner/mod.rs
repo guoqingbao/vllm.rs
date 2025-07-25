@@ -1,4 +1,4 @@
-use crate::core::sequence::Sequence;
+use crate::core::sequence::{DecodeSequence, Sequence};
 use crate::models::layers::distributed::Id;
 use crate::utils::config::{Config, EngineConfig, ModelType};
 use candle_core::DType;
@@ -131,8 +131,10 @@ pub enum MessageType {
     /// Sent by runner in response to `Init` with initialization status.
     InitAck(bool),
 
+    RunPrefill((Vec<Sequence>, bool)),
+
     /// Sent by main process to request inference on sequences.
-    Run((Vec<Sequence>, bool)),
+    RunDecode((Vec<DecodeSequence>, bool)),
 
     /// Sent by runner in response to `Run` with generated token IDs.
     RunResponse(Vec<u32>),
