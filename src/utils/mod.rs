@@ -307,9 +307,6 @@ pub fn get_runner_path() -> Result<PathBuf> {
     }
 }
 
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-
 pub fn spawn_runner(
     #[cfg(feature = "python")] py: Python,
     runner_path: &str,
@@ -319,10 +316,8 @@ pub fn spawn_runner(
     {
         use pyo3::prelude::*;
         use pyo3::types::{PyDict, PyString, PyTuple};
-        use std::ffi::CString;
         crate::log_info!("Spawning runner at: {}", runner_path);
         let subprocess = py.import("subprocess").map_err(candle_core::Error::wrap)?;
-        let sys = py.import("sys").map_err(candle_core::Error::wrap)?;
 
         let args = PyTuple::new(
             py,

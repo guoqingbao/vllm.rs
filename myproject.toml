@@ -14,5 +14,5 @@ classifiers = [
 
 [tool.maturin]
 python-source = "python"
-include = ["*.pyi"]
+include = ["*.pyi", { path = "target/release/runner" }]
 sdist-include = ["PyPi.md"]
