@@ -140,6 +140,8 @@ for token in stream:
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# 或，多GPU推理服务：
+python example/server.py --w /path/QwQ-32B --d 0,1 --host 0.0.0.0 --port 8000
 ```
 
 ### 🤖✨ 交互式聊天与批处理 (Python)
@@ -153,6 +155,9 @@ python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # 批量同步示例
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# 批量同步示例 (多GPU)
+python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
 ```
 
 ### 🤖✨ Rust CLI 模式
