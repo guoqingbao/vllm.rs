@@ -1,25 +1,106 @@
 // src/core/sequence.rs
 use crate::utils::config::SamplingParams;
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+use serde::{Deserialize, Serialize};
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SequenceStatus {
     Waiting,
     Running,
     Finished,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub id: usize,
     pub status: SequenceStatus,
     pub token_ids: Vec<u32>,
     pub output_ids: Vec<u32>,
-    pub block_table: Vec<usize>,
+    pub block_table: Vec<u32>,
     pub num_cached_tokens: usize,
     pub last_token: u32,
     pub block_size: usize,
     pub sampling_params: SamplingParams,
     pub prompt_length: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DecodeSequence {
+    pub last_token: u32,
+    pub len: usize,
+    pub last_block_tokens: usize,
+    pub block_table_last: u32,
+    pub block_tables: Vec<u32>,
+}
+
+impl DecodeSequence {
+    pub fn new(sequence: &Sequence) -> Self {
+        let last_token = sequence.last_token;
+        let len = sequence.len();
+        let last_block_tokens = sequence.last_block_num_tokens();
+        let block_table_last = *sequence.block_table.last().unwrap();
+        DecodeSequence {
+            last_token,
+            len,
+            last_block_tokens,
+            block_table_last,
+            block_tables: sequence.block_table.clone(),
+        }
+    }
+
+    pub fn tokens_len(&self) -> usize {
+        self.len
+    }
+}
+
+pub trait ToDecodeInput {
+    fn last_token(&self) -> u32;
+    fn len(&self) -> usize;
+    fn last_block_tokens(&self) -> usize;
+    fn block_table_last(&self) -> u32;
+    fn block_table(&self) -> &Vec<u32>;
+}
+
+impl ToDecodeInput for DecodeSequence {
+    fn last_token(&self) -> u32 {
+        self.last_token
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn last_block_tokens(&self) -> usize {
+        self.last_block_tokens
+    }
+
+    fn block_table_last(&self) -> u32 {
+        self.block_table_last
+    }
+
+    fn block_table(&self) -> &Vec<u32> {
+        &self.block_tables
+    }
+}
+
+impl ToDecodeInput for &Sequence {
+    fn last_token(&self) -> u32 {
+        self.last_token
+    }
+
+    fn len(&self) -> usize {
+        self.tokens_len()
+    }
+
+    fn last_block_tokens(&self) -> usize {
+        self.last_block_num_tokens()
+    }
+
+    fn block_table_last(&self) -> u32 {
+        *self.block_table.last().unwrap()
+    }
+
+    fn block_table(&self) -> &Vec<u32> {
+        &self.block_table
+    }
 }
 
 impl Sequence {
@@ -37,6 +118,10 @@ impl Sequence {
             last_token: *token_ids.last().unwrap_or(&0),
             prompt_length,
         }
+    }
+
+    pub fn tokens_len(&self) -> usize {
+        self.token_ids.len()
     }
 
     pub fn len(&self) -> usize {

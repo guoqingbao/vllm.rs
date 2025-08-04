@@ -120,6 +120,9 @@ maturin build --release --features cuda,flash-attn,graph,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
+
+# build for multi-rank inference (CUDA, standalone runner)
+./build.sh --release --features cuda,nccl,flash-attn,python
 ```
 
 3. **Install packages**
@@ -160,6 +163,8 @@ for token in stream:
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# or Multi-GPU
+python example/server.py --w /path/QwQ-32B --d 0,1 --host 0.0.0.0 --port 8000
 ```
 
 ### Interactive Chat and completion (Python)
@@ -173,6 +178,9 @@ python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # Chat completion
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# Chat completion (Multi-GPU)
+python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
 ```
 
 
@@ -206,6 +214,9 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts 
 
 # Metal
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
+
+# Multi-GPUs (interactive mode)
+./run.sh run --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 ```
 
 ## ⚙️ CLI Flags
@@ -262,7 +273,7 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
-* [ ] Multi-rank inference
+* [x] Multi-rank inference (available for Non-quantized safetensors models)
 * [ ] Additional model support
 * [ ] Speedup prompt processing on Metal/macOS
 ---

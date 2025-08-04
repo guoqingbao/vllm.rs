@@ -14,5 +14,5 @@ classifiers = [
 
 [tool.maturin]
 python-source = "python"
-include = ["*.pyi"]
+include = ["vllm_rs/runner", "vllm_rs/__init__.py", "vllm_rs/__init__.pyi", "py.typed"]
 sdist-include = ["PyPi.md"]

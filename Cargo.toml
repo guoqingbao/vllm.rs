@@ -2,6 +2,7 @@
 name = "vllm-rs"
 version = "0.1.8"
 edition = "2021"
+default-run = "vllm-rs"
 
 [dependencies]
 candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "67f5ca8" }
@@ -39,6 +40,7 @@ attention-rs = {git = "https://github.com/guoqingbao/attention.rs.git", version=
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
+crossbeam = "0.8.4"
 
 [lib]
 name = "vllm_rs"
@@ -47,8 +49,13 @@ crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "attention-rs/cuda"]
+nccl = ["candle-core/nccl"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
 flash-attn = ["attention-rs/flash-attn"]
 flash-decoding = ["attention-rs/flash-attn", "attention-rs/flash-decoding"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "attention-rs/metal"]
 python = ["pyo3"]
+
+[[bin]]
+name = "runner"
+path = "src/runner/runner.rs"

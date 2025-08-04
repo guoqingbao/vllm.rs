@@ -115,6 +115,9 @@ maturin build --release --features cuda,flash-attn,python
 
 # macOS（Metal）
 maturin build --release --features metal,python
+
+# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程)
+./build.sh --release --features cuda,nccl,flash-attn,python
 ```
 
 3. **安装构建好的包与依赖**
@@ -152,6 +155,8 @@ for token in stream:
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# 或，多GPU推理服务：
+python example/server.py --w /path/QwQ-32B --d 0,1 --host 0.0.0.0 --port 8000
 ```
 
 ### 🤖✨ 交互式聊天与批处理 (Python)
@@ -165,6 +170,9 @@ python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # 批量同步示例
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# 批量同步示例 (多GPU)
+python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
 ```
 
 ### 🤖✨ Rust CLI 模式
@@ -193,6 +201,9 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts 
 
 # Metal（macOS）, 多个 prompt 使用 `|` 分隔
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
+
+# 多GPU推理（交互模式）
+./run.sh run --release --features cuda,flash-attn,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 ```
 
 ### ⚙️ 命令行参数说明
@@ -247,7 +258,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * [x] CUDA 平台 Flash Attention 支持
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
-* [ ] 多卡并行推理
+* [x] 多卡并行推理 （目前支持Safetensors非量化格式模型，GGUF多卡推理待支持）
 * [ ] 支持更多模型类型
 * [ ] Metal/macOS平台Prompt处理加速
 

@@ -1,8 +1,9 @@
 // src/core/runner.rs
+use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
-use crate::utils::progress::{progress_worker, ProgressReporter};
+use crate::utils::progress::ProgressReporter;
 use crate::{
-    core::sequence::Sequence,
+    core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
@@ -10,11 +11,17 @@ use crate::{
 };
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-use std::sync::RwLock;
+use parking_lot::RwLock;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+
+pub enum Seqs<'a> {
+    SeqRefs(&'a [&'a Sequence]),
+    DecodeVec(&'a Vec<DecodeSequence>),
+}
 
 pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
@@ -41,17 +48,18 @@ impl ModelRunner {
     pub fn new(
         model_type: ModelType,
         vb: &VarBuilderX,
+        comm: Rc<Comm>,
         econfig: &EngineConfig,
         config: &Config,
         dtype: DType,
         is_rope_i: bool,
         device: Device,
+        reporter: Arc<RwLock<ProgressReporter>>,
     ) -> Result<Self> {
-        let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
-        progress_worker(Some(1), config.num_hidden_layers, Arc::clone(&reporter));
         let model = match model_type {
             ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -60,6 +68,7 @@ impl ModelRunner {
             )?)),
             ModelType::LLaMa => Model::LLaMa(Arc::new(LLaMaForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -68,6 +77,7 @@ impl ModelRunner {
             )?)),
             ModelType::GLM4 => Model::GLM4(Arc::new(GLM4ForCausalLM::new(
                 vb,
+                comm.clone(),
                 config,
                 dtype,
                 is_rope_i,
@@ -257,12 +267,22 @@ impl ModelRunner {
         }
     }
 
-    pub fn run(&mut self, seqs: &[&Sequence], is_prefill: bool) -> Result<Vec<u32>> {
+    pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
         let (input_ids, positions, input_metadata) = if is_prefill {
-            self.prepare_prefill(seqs)
+            match seqs {
+                Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
+                Seqs::DecodeVec(_) => {
+                    candle_core::bail!(
+                        "Decode sequences are not supported for prefill. Use SeqRefs instead."
+                    );
+                }
+            }
         } else {
-            self.prepare_decode(seqs)
-        }?;
+            match seqs {
+                Seqs::SeqRefs(seqs) => self.prepare_decode(seqs)?,
+                Seqs::DecodeVec(decode_seqs) => self.prepare_decode(decode_seqs.iter())?,
+            }
+        };
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
         if !is_prefill && self.capturer.is_captured(input_ids.dim(0)?) {
@@ -300,27 +320,28 @@ impl ModelRunner {
         Ok(output_ids)
     }
 
-    fn prepare_block_tables(&self, seqs: &[&Sequence]) -> Result<Tensor> {
-        let max_len = seqs
+    fn prepare_block_tables<'a, I, S>(&self, seqs: I) -> Result<Tensor>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: ToDecodeInput + 'a,
+    {
+        let seq_refs: Vec<&'a S> = seqs.into_iter().collect(); // only references, no clone
+        let len = seq_refs.len();
+
+        let max_len = seq_refs
             .iter()
-            .map(|seq| seq.block_table.len())
+            .map(|seq| seq.block_table().len())
             .max()
             .unwrap_or(0);
 
-        let mut block_tables: Vec<u32> = Vec::with_capacity(seqs.len() * max_len);
-        for seq in seqs {
-            let row_len = seq.block_table.len();
-            block_tables.extend(
-                seq.block_table
-                    .iter()
-                    .map(|x| *x as u32)
-                    .collect::<Vec<u32>>(),
-            );
-            //i32?
-            block_tables.extend(std::iter::repeat(0u32).take(max_len - row_len));
+        let mut flat: Vec<u32> = Vec::with_capacity(len * max_len);
+        for seq in &seq_refs {
+            let bt = seq.block_table();
+            flat.extend_from_slice(bt);
+            flat.extend(std::iter::repeat(0).take(max_len - bt.len()));
         }
 
-        Tensor::from_vec(block_tables, (seqs.len(), max_len), &self.device)
+        Tensor::from_vec(flat, (len, max_len), &self.device)
     }
 
     fn prepare_prefill(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
@@ -345,7 +366,7 @@ impl ModelRunner {
             max_seqlen_k = std::cmp::max(max_seqlen_k, seqlen_k);
 
             for i in seq.num_cached_blocks()..seq.num_blocks() {
-                let start = (seq.block_table[i] * self.config.block_size) as i64;
+                let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
                 let end = if i == seq.num_blocks() - 1 {
                     start + seq.last_block_num_tokens() as i64
                 } else {
@@ -400,18 +421,24 @@ impl ModelRunner {
         Ok((input_ids, positions, input_metadata))
     }
 
-    fn prepare_decode(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
+    fn prepare_decode<'a, I, S>(&self, seqs: I) -> Result<(Tensor, Tensor, InputMetadata)>
+    where
+        I: IntoIterator<Item = &'a S>,
+        S: ToDecodeInput + 'a,
+    {
         let mut input_ids = Vec::new();
         let mut positions = Vec::new();
         let mut slot_mapping = Vec::new();
         let mut context_lens = Vec::new();
 
-        for seq in seqs {
-            input_ids.push(seq.last_token);
+        let seq_refs: Vec<&'a S> = seqs.into_iter().collect(); // only references, no clone
+
+        for seq in &seq_refs {
+            input_ids.push(seq.last_token());
             positions.push(seq.len() as i64);
             context_lens.push(seq.len() as u32);
-            let slot = seq.block_table.last().unwrap() * self.config.block_size
-                + seq.last_block_num_tokens()
+            let slot = seq.block_table_last() * self.config.block_size as u32
+                + seq.last_block_tokens() as u32
                 - 1;
             slot_mapping.push(slot as i64);
         }
@@ -425,7 +452,7 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
-        let block_tables = self.prepare_block_tables(seqs)?;
+        let block_tables = self.prepare_block_tables(seq_refs)?;
 
         let input_metadata = InputMetadata {
             is_prefill: false,

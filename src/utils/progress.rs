@@ -1,7 +1,8 @@
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::sync::{Arc, RwLock};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::{thread, time};
-
 pub trait ProgressLike: Send + Sync {
     fn get_progress(&self) -> (usize, usize);
     fn set_progress(&mut self, p: usize);
@@ -56,9 +57,9 @@ impl Progress {
             bars.push(pb);
         }
 
-        if n > 1 {
-            m.println(format!("Loading model in {} ranks!", n)).unwrap();
-        }
+        // if n > 1 {
+        //     m.println(format!("Loading model in {} ranks!", n)).unwrap();
+        // }
         Self { m, bars, size }
     }
 
@@ -90,21 +91,28 @@ impl Progress {
 
 #[allow(unused_variables)]
 pub fn progress_worker(
-    num_shards: Option<usize>,
+    num_shards: usize,
     length: usize,
-    progress_reporter: Arc<RwLock<ProgressReporter>>,
-) {
-    let reporter = progress_reporter.clone();
-    let progress_bar = Some(Progress::new(num_shards.unwrap_or(1), length));
+    progress_reporter: &Vec<Arc<RwLock<ProgressReporter>>>,
+) -> std::thread::JoinHandle<()> {
+    let mut finished_map = HashMap::<usize, usize>::new();
+    let reporters = progress_reporter.clone();
+    let progress_bar = Some(Progress::new(num_shards, length));
     let handle = thread::spawn(move || loop {
         {
-            let (rank, progress) = reporter.read().unwrap().get_progress();
-            progress_bar.as_ref().unwrap().update(rank, progress);
-            if progress >= length {
+            let _ = thread::sleep(time::Duration::from_millis(500 as u64));
+            for i in 0..num_shards {
+                let (rank, progress) = reporters[i].read().get_progress();
+                finished_map.insert(rank, progress);
+                progress_bar.as_ref().unwrap().update(rank, progress);
+            }
+
+            if finished_map.values().all(|v| v >= &length) {
                 progress_bar.as_ref().unwrap().finish();
                 break;
             }
         }
-        let _ = thread::sleep(time::Duration::from_millis(500 as u64));
     });
+
+    handle
 }

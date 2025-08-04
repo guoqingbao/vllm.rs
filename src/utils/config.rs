@@ -1,14 +1,92 @@
 // src/utils/config.rs
-use either::Either;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
-use serde::Deserialize;
-#[derive(Deserialize, Debug, Clone)]
-pub struct EosToken(
-    #[serde(with = "either::serde_untagged")] pub Either<Option<u32>, Option<Vec<u32>>>,
-);
+use serde::de::value::SeqAccessDeserializer;
+use serde::de::{Deserializer, Visitor};
+use serde::{Deserialize, Serialize, Serializer};
+use std::fmt;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
+pub enum EosTokenId {
+    Single(u32),
+    Multiple(Vec<u32>),
+}
+
+impl<'de> Deserialize<'de> for EosTokenId {
+    fn deserialize<D>(deserializer: D) -> Result<EosTokenId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            // For JSON: deserialize as "untagged" using a visitor
+            struct EosTokenIdVisitor;
+
+            impl<'de> Visitor<'de> for EosTokenIdVisitor {
+                type Value = EosTokenId;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a u32 or a sequence of u32s")
+                }
+
+                // Handle a single number
+                fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                    Ok(EosTokenId::Single(v as u32))
+                }
+
+                // Handle an array of numbers
+                fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let vals = Vec::<u32>::deserialize(SeqAccessDeserializer::new(seq))?;
+                    Ok(EosTokenId::Multiple(vals))
+                }
+            }
+
+            deserializer.deserialize_any(EosTokenIdVisitor)
+        } else {
+            // For Bincode: deserialize as "tagged"
+            let bincode_id = BincodeEosTokenId::deserialize(deserializer)?;
+            let id = match bincode_id {
+                BincodeEosTokenId::Single(v) => EosTokenId::Single(v),
+                BincodeEosTokenId::Multiple(v) => EosTokenId::Multiple(v),
+            };
+            Ok(id)
+        }
+    }
+}
+
+impl Serialize for EosTokenId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            // For JSON: serialize as "untagged"
+            match self {
+                EosTokenId::Single(v) => v.serialize(serializer),
+                EosTokenId::Multiple(v) => v.serialize(serializer),
+            }
+        } else {
+            // For Bincode: serialize as "tagged"
+            let bincode_id = match self {
+                EosTokenId::Single(v) => BincodeEosTokenId::Single(*v),
+                EosTokenId::Multiple(v) => BincodeEosTokenId::Multiple(v.clone()),
+            };
+            bincode_id.serialize(serializer)
+        }
+    }
+}
+
+// To make the "tagged" logic work for bincode, we need a separate
+// definition of the enum with derived traits. We keep it private inside this module.
+#[derive(Serialize, Deserialize)]
+enum BincodeEosTokenId {
+    Single(u32),
+    Multiple(Vec<u32>),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub architectures: Vec<String>,
     pub head_dim: Option<usize>,
@@ -25,7 +103,7 @@ pub struct Config {
     pub attention_bias: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: EosToken,
+    pub eos_token_id: EosTokenId,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
@@ -35,7 +113,7 @@ pub struct Config {
 }
 
 #[cfg(not(feature = "python"))]
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
     pub model_path: String,
     pub tokenizer: Option<String>,
@@ -47,13 +125,13 @@ pub struct EngineConfig {
     pub max_model_len: Option<usize>,
     pub quant: Option<String>,
     pub num_shards: Option<usize>,
-    pub device_id: Option<usize>,
+    pub device_ids: Option<Vec<usize>>,
 }
 
 #[cfg(feature = "python")]
 #[pyclass]
 #[allow(unused_variables)]
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
     #[pyo3(get, set)]
     pub model_path: String,
@@ -75,7 +153,7 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub num_shards: Option<usize>,
     #[pyo3(get, set)]
-    pub device_id: Option<usize>,
+    pub device_ids: Option<Vec<usize>>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -109,7 +187,7 @@ impl EngineConfig {
             max_model_len,                                             //placeholder
             quant,
             num_shards,
-            device_id: Some(device_ids[0]),
+            device_ids: Some(device_ids),
         }
     }
 }
@@ -125,7 +203,7 @@ pub struct TokenizerConfig {
 }
 
 #[cfg_attr(feature = "python", pyclass)]
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SamplingParams {
     pub temperature: f32,
     pub max_tokens: usize,
@@ -175,7 +253,7 @@ impl Default for SamplingParams {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ModelType {
     Qwen3,
     LLaMa,

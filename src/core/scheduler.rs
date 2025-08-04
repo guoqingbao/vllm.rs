@@ -3,8 +3,7 @@ use super::{
     block_manager::BlockManager,
     sequence::{Sequence, SequenceStatus},
 };
-use crate::utils::config::{Config, EngineConfig, EosToken};
-use either::Either;
+use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use std::collections::VecDeque;
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
@@ -23,9 +22,8 @@ impl Scheduler {
             block_manager: BlockManager::new(econfig.num_blocks, econfig.block_size),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
-                EosToken(Either::Left(Some(eos))) => vec![*eos],
-                EosToken(Either::Right(Some(eos))) => eos.into_iter().map(|x| *x).collect(),
-                _ => vec![],
+                EosTokenId::Single(eos) => vec![*eos],
+                EosTokenId::Multiple(eos) => eos.into_iter().map(|x| *x).collect(),
             },
             cfg: econfig.clone(),
         }
