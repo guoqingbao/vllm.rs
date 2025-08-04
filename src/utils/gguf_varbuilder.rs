@@ -20,7 +20,8 @@ pub struct VarBuilder {
 
 impl VarBuilder {
     pub fn from_gguf<P: AsRef<std::path::Path>>(p: P, device: &Device) -> Result<Self> {
-        let reporter = vec![Arc::new(RwLock::new(ProgressReporter::new(0)))];
+        let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+            Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
         let mut file = std::fs::File::open(p)?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
         let handle = progress_worker(1, content.tensor_infos.keys().len(), &reporter);
@@ -28,7 +29,7 @@ impl VarBuilder {
         for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
             let tensor = content.tensor(&mut file, tensor_name, device)?;
             data.insert(tensor_name.to_string(), Arc::new(tensor));
-            reporter[0].write().set_progress(i + 1);
+            reporter.write().set_progress(i + 1);
         }
         handle.join().unwrap();
         Ok(Self {

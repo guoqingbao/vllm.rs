@@ -8,7 +8,6 @@ use crate::models::layers::rotary_emb::RotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
-use crate::utils::progress::ProgressReporter;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Module, RmsNorm};
@@ -136,7 +135,7 @@ impl Qwen3ForCausalLM {
         dtype: DType,
         is_rope_i: bool,
         device: &Device,
-        progress_reporter: Arc<RwLock<ProgressReporter>>,
+        progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
         let key_map: HashMap<&str, &str> = [
             ("model.embed_tokens", "token_embd"),

@@ -1,10 +1,17 @@
+use crate::runner::send_local;
+use crate::runner::{receive_local, MessageType};
+use candle_core::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use interprocess::local_socket::traits::{Listener, Stream};
+use interprocess::local_socket::{GenericNamespaced, ToNsName};
+use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::{thread, time};
 pub trait ProgressLike: Send + Sync {
-    fn get_progress(&self) -> (usize, usize);
+    fn get_progress(&mut self) -> Vec<(usize, usize)>;
     fn set_progress(&mut self, p: usize);
 }
 
@@ -14,8 +21,8 @@ pub struct ProgressReporter {
 }
 
 impl ProgressLike for ProgressReporter {
-    fn get_progress(&self) -> (usize, usize) {
-        (self.rank, self.progress)
+    fn get_progress(&mut self) -> Vec<(usize, usize)> {
+        vec![(self.rank, self.progress)]
     }
 
     fn set_progress(&mut self, p: usize) {
@@ -31,6 +38,81 @@ impl ProgressReporter {
 
 unsafe impl Send for ProgressReporter {}
 unsafe impl Sync for ProgressReporter {}
+
+pub struct RemoteProgressReporter {
+    pub rank: usize,
+    pub progress: usize,
+    pub streams: Vec<LocalStream>,
+}
+
+impl RemoteProgressReporter {
+    pub fn new(rank: usize, shards: usize, sock_name: String, client: bool) -> Result<Self> {
+        let mut streams = Vec::<LocalStream>::with_capacity(shards);
+        if client {
+            crate::log_info!("Remote progress reporter initialized for rank {}", rank);
+            let name = sock_name.clone().to_ns_name::<GenericNamespaced>()?;
+            let mut stream = LocalStream::connect(name.clone());
+
+            loop {
+                if stream.is_ok() {
+                    break;
+                }
+                crate::log_info!("Runner retry connecting to socket: {}", sock_name);
+                stream = LocalStream::connect(name.clone());
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            streams.push(stream.unwrap());
+        } else {
+            let listener = ListenerOptions::new()
+                .name(
+                    sock_name
+                        .clone()
+                        .to_ns_name::<GenericNamespaced>()
+                        .expect("Failed to to_ns_name"),
+                )
+                .create_sync()?;
+
+            crate::log_info!("listener starting accepting runner {}", rank);
+            for _ in 0..shards {
+                match listener.accept() {
+                    Ok(stream) => streams.push(stream),
+                    Err(e) => {
+                        crate::log_error!("Failed to accept connection: {}", e);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            rank,
+            progress: 0,
+            streams,
+        })
+    }
+}
+
+impl ProgressLike for RemoteProgressReporter {
+    fn get_progress(&mut self) -> Vec<(usize, usize)> {
+        let mut progress_values = Vec::with_capacity(self.streams.len());
+        for mut stream in &mut self.streams {
+            if let Ok(msg) = receive_local(&mut stream) {
+                if let MessageType::LoadingProgress((rank, progress)) = msg {
+                    progress_values.push((rank, progress));
+                }
+            }
+        }
+        progress_values
+    }
+
+    fn set_progress(&mut self, p: usize) {
+        let _ = send_local(
+            &mut self.streams,
+            &MessageType::LoadingProgress((self.rank, p)),
+        );
+    }
+}
+
+unsafe impl Send for RemoteProgressReporter {}
+unsafe impl Sync for RemoteProgressReporter {}
 
 pub struct Progress {
     m: MultiProgress,
@@ -93,16 +175,16 @@ impl Progress {
 pub fn progress_worker(
     num_shards: usize,
     length: usize,
-    progress_reporter: &Vec<Arc<RwLock<ProgressReporter>>>,
+    progress_reporter: &Arc<RwLock<Box<dyn ProgressLike>>>,
 ) -> std::thread::JoinHandle<()> {
     let mut finished_map = HashMap::<usize, usize>::new();
-    let reporters = progress_reporter.clone();
+    let reporter = progress_reporter.clone();
     let progress_bar = Some(Progress::new(num_shards, length));
     let handle = thread::spawn(move || loop {
         {
             let _ = thread::sleep(time::Duration::from_millis(500 as u64));
-            for i in 0..num_shards {
-                let (rank, progress) = reporters[i].read().get_progress();
+            let progress = reporter.write().get_progress();
+            for (rank, progress) in progress {
                 finished_map.insert(rank, progress);
                 progress_bar.as_ref().unwrap().update(rank, progress);
             }
@@ -115,4 +197,27 @@ pub fn progress_worker(
     });
 
     handle
+}
+
+pub fn spawn_progress_thread(
+    num_shards: usize,
+    num_layers: usize,
+    progress_sock_name: String,
+) -> JoinHandle<Option<JoinHandle<()>>> {
+    thread::spawn(move || {
+        match RemoteProgressReporter::new(0, num_shards, progress_sock_name, false) {
+            Ok(reporter) => {
+                let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+                    Arc::new(RwLock::new(Box::new(reporter)));
+
+                // Call the real worker — assumed to return a JoinHandle
+                let handle = progress_worker(num_shards, num_layers, &reporter);
+                Some(handle)
+            }
+            Err(e) => {
+                eprintln!("Unable to create progress monitor: {e}");
+                None
+            }
+        }
+    })
 }

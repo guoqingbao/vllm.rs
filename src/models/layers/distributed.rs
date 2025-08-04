@@ -88,7 +88,7 @@ impl MergedParallelColumnLinear {
 pub struct TensorParallelRowLinear {
     linear: Linear,
     #[cfg(feature = "nccl")]
-    all_reduce: AllReduce,
+    all_reduce: Option<AllReduce>,
     bias: Option<Tensor>,
 }
 
@@ -168,7 +168,11 @@ impl TensorParallelRowLinear {
     #[allow(unused_variables)]
     pub fn new(linear: Linear, comm: Rc<Comm>) -> Self {
         #[cfg(feature = "nccl")]
-        let all_reduce = AllReduce { comm };
+        let all_reduce = if comm.world_size() > 1 {
+            Some(AllReduce { comm })
+        } else {
+            None
+        };
         Self {
             linear,
             #[cfg(feature = "nccl")]
@@ -180,7 +184,11 @@ impl TensorParallelRowLinear {
     #[allow(unused_variables)]
     pub fn new_with_bias(linear: Linear, bias: Option<Tensor>, comm: Rc<Comm>) -> Self {
         #[cfg(feature = "nccl")]
-        let all_reduce = AllReduce { comm };
+        let all_reduce = if comm.world_size() > 1 {
+            Some(AllReduce { comm })
+        } else {
+            None
+        };
         Self {
             linear,
             #[cfg(feature = "nccl")]
@@ -190,16 +198,15 @@ impl TensorParallelRowLinear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let xs = self.linear.forward(x)?;
+        let mut xs = self.linear.forward(x)?;
         #[cfg(feature = "nccl")]
-        let xs = xs.apply_op1_no_bwd(&self.all_reduce)?;
-
-        if let Some(bias) = &self.bias {
-            let xs = xs.broadcast_add(bias)?;
-            Ok(xs)
-        } else {
-            Ok(xs)
+        if let Some(all_reduce) = &self.all_reduce {
+            xs = xs.apply_op1_no_bwd(all_reduce)?;
         }
+        if let Some(bias) = &self.bias {
+            xs = xs.broadcast_add(bias)?;
+        }
+        Ok(xs)
     }
 }
 

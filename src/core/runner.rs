@@ -1,7 +1,7 @@
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
-use crate::utils::progress::ProgressReporter;
+use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
@@ -54,7 +54,7 @@ impl ModelRunner {
         dtype: DType,
         is_rope_i: bool,
         device: Device,
-        reporter: Arc<RwLock<ProgressReporter>>,
+        reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
         let model = match model_type {
             ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(

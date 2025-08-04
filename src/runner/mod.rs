@@ -131,6 +131,9 @@ pub enum MessageType {
     /// Sent by runner in response to `Init` with initialization status.
     InitAck(bool),
 
+    LoadingProgress((usize, usize)),
+
+    /// Sent by main process to request prefill on sequences.
     RunPrefill((Vec<Sequence>, bool)),
 
     /// Sent by main process to request inference on sequences.

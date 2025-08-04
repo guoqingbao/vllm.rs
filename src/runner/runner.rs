@@ -11,7 +11,7 @@ use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
 use vllm_rs::utils::new_device;
-use vllm_rs::utils::progress::ProgressReporter;
+use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
 
 fn main() -> anyhow::Result<()> {
     vllm_rs::log_info!("runner started");
@@ -67,8 +67,28 @@ fn main() -> anyhow::Result<()> {
             let vb =
                 VarBuilderX::new(&init_req.econfig.model_path, init_req.dtype.into(), &device)?;
 
-            let progress_reporter = Arc::new(RwLock::new(ProgressReporter::new(init_req.rank)));
+            let progress_sock_name = "@vllm-rs-progress".to_string();
 
+            let progress_reporter = match RemoteProgressReporter::new(
+                init_req.rank,
+                init_req.num_shards,
+                progress_sock_name,
+                true,
+            ) {
+                Ok(reporter) => {
+                    let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+                        Arc::new(RwLock::new(Box::new(reporter)));
+                    reporter
+                }
+                _ => {
+                    vllm_rs::log_error!("Unable to create remote progress reporter!");
+                    let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+                        Arc::new(RwLock::new(Box::new(ProgressReporter::new(init_req.rank))));
+                    reporter
+                }
+            };
+
+            #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
                 &vb,
@@ -121,6 +141,9 @@ fn main() -> anyhow::Result<()> {
                     &mut vec![stream.try_clone()?],
                     &MessageType::RunResponse(outputs),
                 )?;
+            }
+            Ok(MessageType::LoadingProgress(_)) => {
+                vllm_rs::log_info!("Received loading progress message");
             }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {

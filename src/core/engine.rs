@@ -10,7 +10,8 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
-use crate::utils::progress::ProgressReporter;
+use crate::utils::progress::{progress_worker, ProgressReporter};
+use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use candle_core::{DType, Result};
@@ -204,7 +205,9 @@ impl LLMEngine {
         let runners = if device_ids.len() == 1 {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
-            let reporter = Arc::new(RwLock::new(ProgressReporter::new(0)));
+            let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+                Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
+            let handle = progress_worker(1, config.num_hidden_layers, &reporter);
             let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
             let mut model_runner = ModelRunner::new(
                 model_type,
@@ -237,6 +240,7 @@ impl LLMEngine {
                 Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
             }
 
+            let _ = handle.join();
             RunnerType::Thread(model_runner)
         } else {
             log_info!("Loading model with runner(s)...");
@@ -261,6 +265,10 @@ impl LLMEngine {
                 spawn_runner(&runner_path.display().to_string(), &sock_name)
                     .expect("Failed to spawn runner");
             }
+
+            let progress_sock_name = "@vllm-rs-progress".to_string();
+            let progress_handle =
+                spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
 
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
@@ -331,6 +339,10 @@ impl LLMEngine {
                     Ok(stream)
                 })
                 .collect();
+
+            if let Ok(Some(handle)) = progress_handle.join() {
+                let _ = handle.join();
+            }
             RunnerType::Process(runner_streams?)
         };
 
