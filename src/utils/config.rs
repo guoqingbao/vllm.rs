@@ -87,6 +87,16 @@ enum BincodeEosTokenId {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MoEConfig {
+    pub moe_intermediate_size: usize,
+    pub num_experts: Option<usize>,
+    pub mlp_only_layers: Option<Vec<usize>>,
+    pub decoder_sparse_step: Option<usize>,
+    pub norm_topk_prob: bool,
+    pub num_experts_per_tok: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub architectures: Vec<String>,
     pub head_dim: Option<usize>,
@@ -110,6 +120,7 @@ pub struct Config {
     pub partial_rotary_factor: Option<f32>,
     pub hidden_act: candle_nn::Activation,
     pub quant: Option<String>,
+    pub moe_cfg: Option<MoEConfig>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -256,6 +267,7 @@ impl Default for SamplingParams {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum ModelType {
     Qwen3,
+    Qwen3MoE,
     LLaMa,
     Gemma,
     Phi,

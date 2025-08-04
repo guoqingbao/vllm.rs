@@ -131,6 +131,10 @@ impl LLMEngine {
                 ModelType::Qwen3,
                 "<|im_start|>user\n {} <|im_end|>".to_string(),
             ),
+            "Qwen3MoeForCausalLM" => (
+                ModelType::Qwen3MoE,
+                "<|im_start|>user\n {} <|im_end|>".to_string(),
+            ),
             "LlamaForCausalLM"
             | "MistralForCausalLM"
             | "LlamaForConditionalGeneration"

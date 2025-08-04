@@ -7,6 +7,7 @@ use crate::{
     models::glm4::GLM4ForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
+    models::qwen3_moe::Qwen3MoEForCausalLM,
     utils::config::{Config, EngineConfig, ModelType},
 };
 use attention_rs::InputMetadata;
@@ -25,6 +26,7 @@ pub enum Seqs<'a> {
 
 pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
+    Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
     // Gemma(GemmaForCausalLM),
@@ -66,6 +68,15 @@ impl ModelRunner {
                 &device,
                 Arc::clone(&reporter),
             )?)),
+            ModelType::Qwen3MoE => Model::Qwen3MoE(Arc::new(Qwen3MoEForCausalLM::new(
+                vb,
+                comm.clone(),
+                config,
+                dtype,
+                is_rope_i,
+                &device,
+                Arc::clone(&reporter),
+            )?)),
             ModelType::LLaMa => Model::LLaMa(Arc::new(LLaMaForCausalLM::new(
                 vb,
                 comm.clone(),
@@ -98,6 +109,17 @@ impl ModelRunner {
         #[cfg(all(feature = "cuda", feature = "graph"))]
         let wrapper = match &model {
             Model::Qwen3(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+            Model::Qwen3MoE(m) => {
                 let model_arc = Arc::clone(m);
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
@@ -300,6 +322,12 @@ impl ModelRunner {
                 Some(&self.get_kv_cache()),
                 &input_metadata,
             )?,
+            Model::Qwen3MoE(model) => model.forward(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+            )?,
             Model::LLaMa(model) => model.forward(
                 &input_ids,
                 &positions,
@@ -476,6 +504,7 @@ impl ModelRunner {
     pub fn get_model_vocab_size(&self) -> usize {
         match &self.model {
             Model::Qwen3(model) => model.get_vocab_size(),
+            Model::Qwen3MoE(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),
         }

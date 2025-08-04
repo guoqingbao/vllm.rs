@@ -18,11 +18,12 @@ impl MLP {
         vb: VarBuilderX,
         comm: Rc<Comm>,
         config: &Config,
+        intermediate_size: usize,
         gate_up_merged: bool,
         dtype: DType,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
-        let intermediate_size = config.intermediate_size;
+        // let intermediate_size = config.intermediate_size;
         let key_map: HashMap<&str, &str> = [
             ("gate_proj", "ffn_gate"),
             ("up_proj", "ffn_up"),

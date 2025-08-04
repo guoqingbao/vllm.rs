@@ -156,7 +156,7 @@ for token in stream:
 # openai.api_key = "EMPTY"
 python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
 # 或，多GPU推理服务：
-python example/server.py --w /path/QwQ-32B --d 0,1 --host 0.0.0.0 --port 8000
+python example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
 ```
 
 ### 🤖✨ 交互式聊天与批处理 (Python)
@@ -241,6 +241,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 
 * ✅ LLaMa 系列（LLaMa2、LLaMa3）
 * ✅ Qwen 系列（Qwen2、Qwen3）
+* ✅ Qwen MoE 系列
 * ✅ Mistral
 * ✅ GLM4 (0414版本, **非ChatGLM**)
 

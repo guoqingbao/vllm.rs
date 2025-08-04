@@ -55,6 +55,7 @@ impl GLM4DecoderLayer {
             },
             comm.clone(),
             config,
+            config.intermediate_size,
             true, //gate and up merged
             dtype,
         )?;

@@ -5,6 +5,7 @@ pub mod gguf_varbuilder;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod progress;
+use crate::utils::config::MoEConfig;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
@@ -199,6 +200,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         },
         hidden_act: candle_nn::Activation::Silu,
         quant: None,
+        moe_cfg: None,
     };
 
     Ok(cfg)
@@ -210,8 +212,15 @@ pub fn init_config_tokenizer(
     let config_path = format!("{}/config.json", econfig.model_path);
     if Path::new(&config_path).exists() {
         let mut config: Config =
-            serde_json::from_slice(&std::fs::read(config_path).map_err(candle_core::Error::wrap)?)
+            serde_json::from_slice(&std::fs::read(&config_path).map_err(candle_core::Error::wrap)?)
                 .map_err(candle_core::Error::wrap)?;
+        if config.architectures[0] == "Qwen3MoeForCausalLM" {
+            let moe_cfg: MoEConfig = serde_json::from_slice(
+                &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
+            )
+            .map_err(candle_core::Error::wrap)?;
+            config.moe_cfg = Some(moe_cfg);
+        }
         config.quant = econfig.quant.clone();
         let tokenizer_config_path = format!("{}/tokenizer_config.json", econfig.model_path);
         let config_tokenizer: TokenizerConfig = {

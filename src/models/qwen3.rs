@@ -53,6 +53,7 @@ impl Qwen3DecoderLayer {
             },
             comm.clone(),
             config,
+            config.intermediate_size,
             false,
             dtype,
         )?;
