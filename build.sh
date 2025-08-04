@@ -5,6 +5,7 @@ set -e
 RELEASE=""
 PROFILE="release"
 FEATURES=""
+PUBLISH=false
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -17,6 +18,9 @@ while [[ "$#" -gt 0 ]]; do
       FEATURES="$2"
       shift
       ;;
+    publish)
+      PUBLISH=true
+      ;;
     *)
       echo "Unknown argument: $1"
       exit 1
@@ -28,6 +32,7 @@ done
 # Echo config
 echo "Building with profile: $PROFILE"
 echo "Features: $FEATURES"
+echo "Publish: $PUBLISH"
 
 # Step 1: Build runner binary
 FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
@@ -54,15 +59,21 @@ chmod 755 "$DEST_DIR/__init__.py"
 
 echo "✅ Done. Runner binary copied to $DEST_DIR/"
 
-# Step 3: Build Python package with maturin
+# Step 3: Build or publish Python package with maturin
 echo "Building Python extension with maturin..."
 
 # Remove 'flash-attn' if present
 FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
-echo "Building Python extension features: $FEATURES"
-maturin build $RELEASE --features "$FEATURES"
+echo "Python extension features: $FEATURES"
 
-# Step 4: remove temporary vllm_rs/runner_bin
+if [ "$PUBLISH" = true ]; then
+  echo "Publishing package to PyPI..."
+  maturin publish --features "$FEATURES" --username __token__
+else
+  maturin build $RELEASE --features "$FEATURES"
+fi
+
+# Step 4: Clean up
 echo "Cleaning up temporary files..."
 rm "$DEST_DIR/runner"
 rm "$DEST_DIR/__init__.py"
@@ -70,4 +81,4 @@ rm "$DEST_DIR/__init__.pyi"
 rm "$DEST_DIR/py.typed"
 rm -r "$DEST_DIR"
 
-echo "✅ Build complete. Python package created in target/wheels/"
+echo "✅ ${PUBLISH:+Publish}Build complete."
