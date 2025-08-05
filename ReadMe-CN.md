@@ -76,16 +76,73 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
+## 🧠 支持的模型架构
+
+* ✅ LLaMa 系列（LLaMa2、LLaMa3）
+* ✅ Qwen 系列（Qwen2、Qwen3）
+* ✅ Qwen3 MoE 系列
+* ✅ Mistral
+* ✅ GLM4 (0414版本, **非ChatGLM**)
+
+支持 **Safetensor** 和 **GGUF** 格式。
 
 ## 📦 从pip安装
 
 ```shell
 # 默认支持flash-attn prefilling
-pip install vllm-rs
+python3 -m pip install vllm-rs
 ```
 
 
-## 🔨 从源代码编译安装
+## 📘 使用方法（Python）
+
+### 🐍 快速 Python 示例
+```python
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+engine = Engine(cfg, "bf16")
+params = SamplingParams(temperature=0.6, max_tokens=256)
+prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+
+# 同步批量生成
+outputs = engine.generate_sync([params,params], [prompt, prompt])
+print(outputs)
+
+# 单请求流式生成
+stream = engine.generate_stream(params, prompt)
+for token in stream:
+    print(token)
+```
+
+### 🌐✨ API Server
+   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
+
+```bash
+# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# 或，多GPU推理服务：
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
+```
+
+### 🤖✨ 交互式聊天与批处理
+
+```bash
+# 交互式聊天
+python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+
+# 指定设备2 (设备序号为1，`--d 1`)
+python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# 批量同步示例
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# 批量同步示例 (多GPU)
+python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+```
+
+## 🔨 从源代码编译安装（可选）
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
 
@@ -127,54 +184,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 
-## 📘 使用方法
-
-### 🐍 快速 Python 示例
-```python
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-
-# 同步批量生成
-outputs = engine.generate_sync([params,params], [prompt, prompt])
-print(outputs)
-
-# 单请求流式生成
-stream = engine.generate_stream(params, prompt)
-for token in stream:
-    print(token)
-```
-
-### 🌐✨ API Server
-   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
-
-```bash
-# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:8000/v1/"
-# openai.api_key = "EMPTY"
-python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-# 或，多GPU推理服务：
-python example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
-```
-
-### 🤖✨ 交互式聊天与批处理 (Python)
-
-```bash
-# 交互式聊天
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
-
-# 指定设备2 (设备序号为1，`--d 1`)
-python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
-
-# 批量同步示例
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-
-# 批量同步示例 (多GPU)
-python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
-
+## 📘 使用方法（Rust）
 ### 🤖✨ Rust CLI 模式
 
 使用 `--i` 启用交互模式，`--w` 指定模型路径：
@@ -237,16 +247,6 @@ cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prom
 cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
 ```
 
-## 🧠 支持的模型架构
-
-* ✅ LLaMa 系列（LLaMa2、LLaMa3）
-* ✅ Qwen 系列（Qwen2、Qwen3）
-* ✅ Qwen MoE 系列
-* ✅ Mistral
-* ✅ GLM4 (0414版本, **非ChatGLM**)
-
-支持 **Safetensor** 和 **GGUF** 格式。
-
 
 ## 📌 项目状态
 
@@ -260,8 +260,8 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
 * [x] 多卡并行推理 （目前支持Safetensors非量化格式模型，GGUF多卡推理待支持）
+* [x] Metal/macOS平台Prompt处理加速
 * [ ] 支持更多模型类型
-* [ ] Metal/macOS平台Prompt处理加速
 
 
 ## 📚 参考项目

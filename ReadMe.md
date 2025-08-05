@@ -78,15 +78,75 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 
+## 🧠 Supported Architectures
+
+* ✅ LLaMa (LLaMa2, LLaMa3)
+* ✅ Qwen (Qwen2, Qwen3)
+* ✅ Qwen3 Moe
+* ✅ Mistral
+* ✅ GLM4 (0414, **Not ChatGLM**)
+
+Supports both **Safetensor** and **GGUF** formats.
+
 ## 📦 Install with pip
 
 ```shell
 # flash-attn built-in for prefilling
-pip install vllm-rs
+python3 -m pip install vllm-rs
+```
+
+## 📘 Usage in Python
+
+### 🐍 Quick Example
+
+```python
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+engine = Engine(cfg, "bf16")
+params = SamplingParams(temperature=0.6, max_tokens=256)
+prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+
+# Synchronous generation for batched input
+outputs = engine.generate_sync([params,params], [prompt, prompt])
+print(outputs)
+
+# Streaming generation for single request
+stream = engine.generate_stream(params, prompt)
+for token in stream:
+    print(token)
 ```
 
 
-## 🔨 Build from source
+### 🌐✨ API Server Mode
+   💡 You can use any client compatible with the OpenAI API.
+
+```bash
+# Start OpenAI API Server (default http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# or Multi-GPU
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
+```
+
+### Interactive Chat and completion
+
+```bash
+# Interactive chat
+python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+
+# Use the second device (device order 1，`--d 1`)
+python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# Chat completion
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# Chat completion (Multi-GPU)
+python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+```
+
+
+## 🔨 Build Python Package from source (Optional)
 
 > ⚠️ The first build may take time if `Flash Attention` is enabled.
 
@@ -133,57 +193,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 
-## 📘 Usage
-
-### 🐍 Quick Python Example
-
-```python
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-
-# Synchronous generation for batched input
-outputs = engine.generate_sync([params,params], [prompt, prompt])
-print(outputs)
-
-# Streaming generation for single request
-stream = engine.generate_stream(params, prompt)
-for token in stream:
-    print(token)
-```
-
-
-### 🌐✨ API Server Mode (Python Interface)
-   💡 You can use any client compatible with the OpenAI API.
-
-```bash
-# Start OpenAI API Server (default http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:8000/v1/"
-# openai.api_key = "EMPTY"
-python example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-# or Multi-GPU
-python example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
-```
-
-### Interactive Chat and completion (Python)
-
-```bash
-# Interactive chat
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
-
-# Use the second device (device order 1，`--d 1`)
-python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
-
-# Chat completion
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-
-# Chat completion (Multi-GPU)
-python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
-
-
+## 📘 Usage in Rust
 ### 🤖✨ Rust CLI Mode
 
 Run with `--i` for interactive chat and `--w` to specify model path:
@@ -250,17 +260,6 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 ```
 
 
-## 🧠 Supported Architectures
-
-* ✅ LLaMa (LLaMa2, LLaMa3)
-* ✅ Qwen (Qwen2, Qwen3)
-* ✅ Qwen Moe
-* ✅ Mistral
-* ✅ GLM4 (0414, **Not ChatGLM**)
-
-Supports both **Safetensor** and **GGUF** formats.
-
-
 ## 📌 Project Status
 
 > 🚧 **Under active development – breaking changes may occur!**
@@ -275,8 +274,8 @@ Supports both **Safetensor** and **GGUF** formats.
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
 * [x] Multi-rank inference (available for Non-quantized safetensors models)
+* [x] Speedup prompt processing on Metal/macOS
 * [ ] Additional model support
-* [ ] Speedup prompt processing on Metal/macOS
 ---
 
 ## 📚 References
