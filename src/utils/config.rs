@@ -134,7 +134,7 @@ pub struct EngineConfig {
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
     pub max_model_len: Option<usize>,
-    pub quant: Option<String>,
+    pub isq: Option<String>,
     pub num_shards: Option<usize>,
     pub device_ids: Option<Vec<usize>>,
 }
@@ -160,7 +160,7 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub max_model_len: Option<usize>,
     #[pyo3(get, set)]
-    pub quant: Option<String>,
+    pub isq: Option<String>,
     #[pyo3(get, set)]
     pub num_shards: Option<usize>,
     #[pyo3(get, set)]
@@ -173,7 +173,7 @@ impl EngineConfig {
         model_path: String,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
-        quant: Option<String>,
+        isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
     ) -> Self {
@@ -196,7 +196,7 @@ impl EngineConfig {
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder
             max_model_len,                                             //placeholder
-            quant,
+            isq,
             num_shards,
             device_ids: Some(device_ids),
         }

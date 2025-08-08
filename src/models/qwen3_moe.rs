@@ -1,7 +1,10 @@
 // src/models/qwen3_moe.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
-use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
+use crate::models::layers::linear::{
+    linear_no_bias_fused_x as linear_no_bias_fused, linear_no_bias_x as linear_no_bias,
+    LinearX as Linear,
+};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm};
@@ -65,10 +68,20 @@ impl Moe {
         let router_logits = xs.apply(&self.gate)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
+        #[cfg(feature = "cuda")]
         let experts_per_tok = routing_weights
             .arg_sort_last_dim(false)?
             .narrow(D::Minus1, 0, self.num_experts_per_tok)?
             .contiguous()?;
+
+        #[cfg(not(feature = "cuda"))]
+        let experts_per_tok = routing_weights
+            .to_device(&candle_core::Device::Cpu)?
+            .arg_sort_last_dim(false)?
+            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+            .contiguous()?
+            .to_device(&xs.device())?;
+
         let routing_weights = routing_weights.gather(&experts_per_tok, D::Minus1)?;
 
         let routing_weights = routing_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
@@ -110,8 +123,118 @@ impl Moe {
     }
 }
 
+struct FusedMoe {
+    gate: Linear,
+    gate_experts: Linear,
+    up_experts: Linear,
+    down_experts: Linear,
+    act: candle_nn::Activation,
+    norm_topk_prob: bool,
+    num_experts_per_tok: usize,
+}
+
+impl FusedMoe {
+    fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+        assert!(
+            comm.world_size() < 2,
+            "Fused quant MoE is currently not avialable for multi-gpu inference!"
+        );
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+        let gate = linear_no_bias(
+            cfg.hidden_size,
+            num_experts,
+            vb.pp("ffn_gate_inp"),
+            Shard::default(),
+            &None,
+            dtype,
+        )?;
+
+        let gate_experts = linear_no_bias_fused(
+            moe_cfg.num_experts.unwrap(),
+            cfg.hidden_size,
+            moe_cfg.moe_intermediate_size,
+            vb.pp("ffn_gate_exps"),
+            Shard::default(),
+            &None,
+            dtype,
+        )?;
+
+        let up_experts = linear_no_bias_fused(
+            moe_cfg.num_experts.unwrap(),
+            cfg.hidden_size,
+            moe_cfg.moe_intermediate_size,
+            vb.pp("ffn_up_exps"),
+            Shard::default(),
+            &None,
+            dtype,
+        )?;
+
+        let down_experts = linear_no_bias_fused(
+            moe_cfg.num_experts.unwrap(),
+            moe_cfg.moe_intermediate_size,
+            cfg.hidden_size,
+            vb.pp("ffn_down_exps"),
+            Shard::default(),
+            &None,
+            dtype,
+        )?;
+
+        Ok(Self {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: cfg.hidden_act,
+            norm_topk_prob: moe_cfg.norm_topk_prob,
+            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let original_dtype = xs.dtype();
+        let (num_tokens, hidden_dim) = xs.dims2()?;
+        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
+        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
+
+        #[cfg(feature = "cuda")]
+        let indices = routing_weights
+            .arg_sort_last_dim(false)?
+            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+            .contiguous()?;
+
+        #[cfg(not(feature = "cuda"))]
+        let indices = routing_weights
+            .to_device(&candle_core::Device::Cpu)?
+            .arg_sort_last_dim(false)?
+            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+            .contiguous()?
+            .to_device(&xs.device())?;
+        let mut scores = routing_weights.gather(&indices, D::Minus1)?;
+
+        if self.norm_topk_prob {
+            scores = scores.broadcast_div(&scores.sum_keepdim(D::Minus1)?)?;
+        }
+
+        let ys = {
+            let xs = xs.reshape((num_tokens, 1, hidden_dim))?;
+            let gate = self.gate_experts.indexed_moe_forward(&xs, &indices)?;
+            let up = self.up_experts.indexed_moe_forward(&xs, &indices)?;
+            let xs = self
+                .down_experts
+                .indexed_moe_forward(&(up * gate.apply(&self.act)?)?, &indices)?;
+            xs
+        };
+        ys.broadcast_mul(&scores.unsqueeze(D::Minus1)?)?
+            .sum(D::Minus2)?
+            .reshape((num_tokens, hidden_dim))?
+            .to_dtype(original_dtype)
+    }
+}
+
 enum MoeOrMlp {
     Moe(Moe),
+    FusedMoe(FusedMoe),
     Mlp(MLP),
 }
 
@@ -120,6 +243,7 @@ impl MoeOrMlp {
         match self {
             Self::Mlp(m) => m.forward(xs),
             Self::Moe(m) => m.forward(xs),
+            Self::FusedMoe(m) => m.forward(xs),
         }
     }
 }
@@ -166,16 +290,12 @@ impl Qwen3DecoderLayer {
             && (moe_cfg.num_experts.unwrap() > 0
                 && (layer_idx + 1) % moe_cfg.decoder_sparse_step.unwrap() == 0)
         {
-            MoeOrMlp::Moe(Moe::new(
-                config,
-                if is_qvar_builder {
-                    vb.clone()
-                } else {
-                    vb.pp("mlp").clone()
-                },
-                comm.clone(),
-                dtype,
-            )?)
+            if is_qvar_builder {
+                //experts weights packed
+                MoeOrMlp::FusedMoe(FusedMoe::new(config, vb.clone(), comm.clone(), dtype)?)
+            } else {
+                MoeOrMlp::Moe(Moe::new(config, vb.pp("mlp").clone(), comm.clone(), dtype)?)
+            }
         } else {
             let mlp = MLP::new(
                 if is_qvar_builder {

@@ -152,6 +152,7 @@ def parse_args():
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--d", type=str, default="0")
+    parser.add_argument("--isq", type=str, default=None)
     return parser.parse_args()
 
 
@@ -173,6 +174,7 @@ def main():
         model_path=args.w,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
+        isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
     )
 

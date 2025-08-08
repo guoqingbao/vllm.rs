@@ -173,6 +173,26 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         [("glm4".to_string(), true)].iter().cloned().collect();
 
     let arch = architecture.to_string();
+
+    let mod_cfg = if arch == "qwen3moe" {
+        Some(MoEConfig {
+            moe_intermediate_size: md_get(
+                format!("{}.expert_feed_forward_length", architecture).as_str(),
+            )?
+            .to_u32()? as usize,
+            num_experts: Some(
+                md_get(format!("{}.expert_count", architecture).as_str())?.to_u32()? as usize,
+            ),
+            mlp_only_layers: Some(vec![]),
+            decoder_sparse_step: Some(1),
+            norm_topk_prob: true,
+            num_experts_per_tok: md_get(format!("{}.expert_used_count", architecture).as_str())?
+                .to_u32()? as usize,
+        })
+    } else {
+        None
+    };
+
     let cfg = Config {
         architectures: vec![arch.clone()],
         head_dim: Some(head_dim),
@@ -200,7 +220,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         },
         hidden_act: candle_nn::Activation::Silu,
         quant: None,
-        moe_cfg: None,
+        moe_cfg: mod_cfg,
     };
 
     Ok(cfg)
@@ -221,7 +241,7 @@ pub fn init_config_tokenizer(
             .map_err(candle_core::Error::wrap)?;
             config.moe_cfg = Some(moe_cfg);
         }
-        config.quant = econfig.quant.clone();
+        config.quant = econfig.isq.clone();
         let tokenizer_config_path = format!("{}/tokenizer_config.json", econfig.model_path);
         let config_tokenizer: TokenizerConfig = {
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
@@ -250,6 +270,7 @@ pub fn init_config_tokenizer(
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
         Ok((config, config_tokenizer, tokenizer))
     } else if Path::new(&econfig.model_path).exists() {
+        assert!(econfig.isq.is_none(), "GGUF model does not support ISQ!");
         let GGUFInfo {
             tokenizer,
             bos,

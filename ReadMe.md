@@ -20,6 +20,16 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
+### Chat Performace
+
+> A100 (Single Card, 40G)
+
+| Model | Format | Size| Decoding Speed |
+|------------------|---------------|----------|------------------------|
+| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
+| GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
+| QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
+| **Qwen3-30B-A3B** | Q4_K_M | 30B (MoE)| **75.91** tokens/s  |
 
 ### Performance Comparison
 
@@ -125,6 +135,8 @@ for token in stream:
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# or
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
 # or Multi-GPU
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
 ```
@@ -133,10 +145,13 @@ python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0
 
 ```bash
 # Interactive chat
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # Use the second device (device order 1，`--d 1`)
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# Load unquantized model as GGUF quantized (e.g., q4k)
+python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k
 
 # Chat completion
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -240,16 +255,16 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
 | `--prompts` | Prompts separated by \| |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
-
+| `--isq`   | Load unquantized model as GGUF quantized format such as `q2k`, `q4k`, etc.   |       |
 
 ## 📽️ Demo Video
 
 Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
 
-## 🗜️ In-Situ Quantization (GGUF Conversion)
+## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
 
-This may take several minutes:
+Run any unquantized models as GGUF quantized format:
 
 ```bash
 # macOS

@@ -20,6 +20,16 @@
 * 🤝 **欢迎贡献** – 欢迎提交 PR、问题或给项目点亮 ⭐！
 
 ---
+### 对话性能
+
+> A100 (单卡, 40G)
+
+| 模型 | 格式 | 大小 | 输出速度 |
+|------------------|---------------|----------|------------------------|
+| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
+| GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
+| QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
+| **Qwen3-30B-A3B** | Q4_K_M | 30B (MoE)| **75.91** tokens/s  |
 
 ### 性能对比
 
@@ -122,6 +132,8 @@ for token in stream:
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
+# 或
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
 # 或，多GPU推理服务：
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
 ```
@@ -130,10 +142,13 @@ python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0
 
 ```bash
 # 交互式聊天
-python3 example/chat.py --i --w /path/qwq-32b-q4_k_m.gguf
+python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # 指定设备2 (设备序号为1，`--d 1`)
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，适用于任意已支持的模型架构
+python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k
 
 # 批量同步示例
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -227,6 +242,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
 | `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
+| `--isq`   | 将未量化模型加载为GGUF量化模型，可选`q2k`, `q4k`  等   |       |
 
 ## 📽️ 演示视频
 

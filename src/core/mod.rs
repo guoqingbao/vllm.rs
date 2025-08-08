@@ -55,6 +55,22 @@ macro_rules! log_info {
 }
 
 #[macro_export]
+macro_rules! log_warn {
+    ($($arg:tt)*) => {
+        {
+            #[cfg(feature = "python")]
+            {
+                eprintln!($($arg)*);
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                tracing::warn!($($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {
         {

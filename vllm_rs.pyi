@@ -29,7 +29,7 @@ class EngineConfig:
     max_num_seqs: Optional[int]
     max_model_len: Optional[int]
     max_num_batched_tokens: Optional[int]
-    quant: Optional[str]
+    isq: Optional[str]
     num_shards: Optional[int]
     device_id: Optional[int]
 

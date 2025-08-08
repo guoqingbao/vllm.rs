@@ -156,12 +156,12 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), quant=None, num_shards=Some(1), device_ids=None))]
+    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), isq=None, num_shards=Some(1), device_ids=None))]
     pub fn new(
         model_path: String,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
-        quant: Option<String>,
+        isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
     ) -> Self {
@@ -182,7 +182,7 @@ impl EngineConfig {
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             max_model_len,                 //placeholder
-            quant,
+            isq,
             num_shards,
             device_ids: Some(device_ids),
         }

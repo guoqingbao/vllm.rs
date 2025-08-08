@@ -105,6 +105,24 @@ pub fn linear_no_bias(
     Ok(Linear::new(weight, None))
 }
 
+pub fn linear_no_bias_fused(
+    num_experts: usize,
+    in_dim: usize,
+    out_dim: usize,
+    vb: VarBuilder,
+    shards: Shard,
+    dtype: DType,
+) -> Result<Linear> {
+    let sd = shard(shards.dim + 1, shards.rank, shards.world_size);
+    let weight = vb.get_with_hints((num_experts, out_dim, in_dim), "weight", sd)?;
+    let weight = if weight.dtype() != dtype {
+        weight.to_dtype(dtype)?
+    } else {
+        weight
+    };
+    Ok(Linear::new(weight, None))
+}
+
 pub fn linear(
     in_dim: usize,
     out_dim: usize,
@@ -172,6 +190,27 @@ impl QLinear {
         vb: crate::utils::gguf_varbuilder::VarBuilder,
     ) -> Result<Self> {
         let ws = vb.get((out_dim, in_dim), "weight")?;
+        let inner = candle_core::quantized::QMatMul::from_arc(ws)?;
+        let b = vb.get(out_dim, "bias");
+        let bias = if b.is_ok() {
+            Some(b.unwrap().dequantize(vb.device())?)
+        } else {
+            None
+        };
+        Ok(Self {
+            inner,
+            bias,
+            dtype: DType::F32,
+        })
+    }
+
+    pub fn new_fused(
+        num_experts: usize,
+        in_dim: usize,
+        out_dim: usize,
+        vb: crate::utils::gguf_varbuilder::VarBuilder,
+    ) -> Result<Self> {
+        let ws = vb.get((num_experts, out_dim, in_dim), "weight")?;
         let inner = candle_core::quantized::QMatMul::from_arc(ws)?;
         let b = vb.get(out_dim, "bias");
         let bias = if b.is_ok() {
@@ -294,6 +333,19 @@ impl Module for QLinear {
     }
 }
 
+impl QLinear {
+    pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
+        let xs = self
+            .inner
+            .indexed_moe_forward(&x.to_dtype(DType::F32)?, ids)?;
+        if let Some(bias) = &self.bias {
+            xs.broadcast_add(bias)?.to_dtype(self.dtype)
+        } else {
+            xs.to_dtype(self.dtype)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LinearX(Either<Linear, QLinear>);
 
@@ -306,6 +358,16 @@ impl Module for LinearX {
     }
 }
 
+impl LinearX {
+    pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
+        match &self.0 {
+            Either::Left(_) => {
+                panic!("No supported!")
+            }
+            Either::Right(ln) => ln.indexed_moe_forward(x, ids),
+        }
+    }
+}
 impl LinearX {
     pub fn new(weight: Tensor, bias: Option<Tensor>, quant: &Option<String>) -> Self {
         let ln = Linear::new(weight, bias);
@@ -369,6 +431,36 @@ pub fn linear_no_bias_x(
             }
         }
         Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new(
+            in_dim,
+            out_dim,
+            vb.clone(),
+        )?))),
+    }
+}
+
+pub fn linear_no_bias_fused_x(
+    num_experts: usize,
+    in_dim: usize,
+    out_dim: usize,
+    vb: VarBuilderX,
+    shards: Shard,
+    quant: &Option<String>,
+    dtype: DType,
+) -> Result<LinearX> {
+    match &vb.0 {
+        Either::Left(vb) => {
+            let ln = linear_no_bias_fused(num_experts, in_dim, out_dim, vb.clone(), shards, dtype)?;
+            if let Some(quantized_type) = quant {
+                Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                    ln,
+                    quantized_type.clone(),
+                ))))
+            } else {
+                Ok(LinearX(Either::Left(ln)))
+            }
+        }
+        Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new_fused(
+            num_experts,
             in_dim,
             out_dim,
             vb.clone(),

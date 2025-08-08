@@ -4,7 +4,6 @@ use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
-use crate::log_info;
 use crate::models::layers::distributed::{Comm, Id};
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
@@ -14,6 +13,7 @@ use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
+use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
 use either::Either;
 use futures::future::join_all;
@@ -99,6 +99,13 @@ impl LLMEngine {
             config_model_len,
         ));
 
+        if econfig.max_model_len.unwrap() < config_model_len {
+            log_warn!(
+                "***This model has maximum context {} but only {} is set to use in Engine config!***",
+                config_model_len,
+                econfig.max_model_len.unwrap()
+            );
+        }
         assert!(
             config.architectures.len() == 1,
             "Only one architecture is supported at the moment!"
@@ -131,7 +138,7 @@ impl LLMEngine {
                 ModelType::Qwen3,
                 "<|im_start|>user\n {} <|im_end|>".to_string(),
             ),
-            "Qwen3MoeForCausalLM" => (
+            "qwen3moe" | "Qwen3MoeForCausalLM" => (
                 ModelType::Qwen3MoE,
                 "<|im_start|>user\n {} <|im_end|>".to_string(),
             ),

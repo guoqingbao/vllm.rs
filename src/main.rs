@@ -54,7 +54,7 @@ struct Args {
     // if not provided, it will not perform in-situ quantization for the original model
     // do not use this option if you are using a gguf file
     #[arg(long, default_value = None)]
-    quant: Option<String>,
+    isq: Option<String>,
 
     #[arg(long = "i", default_value_t = false)]
     interactive: bool,
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
         args.weight_path.unwrap(),
         Some(std::cmp::max(max_num_seqs, prompts.len())),
         max_model_len,
-        args.quant.clone(),
+        args.isq.clone(),
         Some(1),
         args.device_ids.clone(),
     );

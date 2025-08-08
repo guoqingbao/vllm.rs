@@ -17,7 +17,7 @@ use crate::utils::hub_load_local_safetensors;
 
 impl VarBuilderX<'_> {
     pub fn new(model_path: &String, dtype: DType, device: &Device) -> Result<Self> {
-        let mut is_gguf = false;
+        let mut is_gguf: bool = false;
         let model_path = model_path.clone();
         let weight_files = if Path::new(&model_path)
             .join("model.safetensors.index.json")
