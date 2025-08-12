@@ -218,8 +218,12 @@ impl LLMEngine {
             log_info!("Loading model...");
             let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
                 Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
-            let handle = progress_worker(1, config.num_hidden_layers, &reporter);
-            let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
+            let handle = progress_worker(
+                1,
+                config.num_hidden_layers + config.extra_loading_len.unwrap_or(0),
+                &reporter,
+            );
+            let vb = VarBuilderX::new(&econfig.model_path, dtype, &device, &reporter)?;
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -278,8 +282,11 @@ impl LLMEngine {
             }
 
             let progress_sock_name = "@vllm-rs-progress".to_string();
-            let progress_handle =
-                spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
+            let progress_handle = spawn_progress_thread(
+                num_shards,
+                config.num_hidden_layers + config.extra_loading_len.unwrap_or(0),
+                progress_sock_name,
+            );
 
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
@@ -838,7 +845,8 @@ impl LLMEngine {
                 {
                     let mut guard = engine.write();
                     if let Err(e) = guard.step() {
-                        panic!("[Engine Loop] Step error: {:?}", e);
+                        crate::log_error!("\n\n[Engine Loop] Step error: {:?}", e);
+                        std::process::exit(1);
                     }
                 }
 

@@ -79,6 +79,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
+            dtype,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -89,6 +90,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
+            dtype,
         )?;
 
         let post_self_attn_layernorm = rms_norm(
@@ -99,6 +101,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("post_self_attn_layernorm").clone()
             },
+            dtype,
         )?;
 
         let post_mlp_layernorm = rms_norm(
@@ -109,6 +112,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("post_mlp_layernorm").clone()
             },
+            dtype,
         )?;
 
         Ok(Self {
@@ -177,9 +181,6 @@ impl GLM4ForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        if is_qvar_builder {
-            reporter.write().set_progress(config.num_hidden_layers);
-        }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -188,6 +189,7 @@ impl GLM4ForCausalLM {
             } else {
                 vb.pp("model.embed_tokens")
             },
+            dtype,
         )?;
         let rotary_emb = Arc::new(RotaryEmbedding::new(
             dtype,
@@ -215,9 +217,9 @@ impl GLM4ForCausalLM {
                 dtype,
             )?;
             layers.push(layer);
-            if !is_qvar_builder {
-                reporter.write().set_progress(i + 1);
-            }
+            reporter
+                .write()
+                .set_progress(config.extra_loading_len.unwrap_or(0) + i + 1);
         }
 
         let norm = rms_norm(
@@ -228,6 +230,7 @@ impl GLM4ForCausalLM {
             } else {
                 vb.pp("model.norm")
             },
+            dtype,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

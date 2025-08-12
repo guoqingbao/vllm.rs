@@ -182,7 +182,7 @@ pub fn progress_worker(
     let progress_bar = Some(Progress::new(num_shards, length));
     let handle = thread::spawn(move || loop {
         {
-            let _ = thread::sleep(time::Duration::from_millis(500 as u64));
+            let _ = thread::sleep(time::Duration::from_millis(10 as u64));
             let progress = reporter.write().get_progress();
             for (rank, progress) in progress {
                 finished_map.insert(rank, progress);
@@ -201,7 +201,7 @@ pub fn progress_worker(
 
 pub fn spawn_progress_thread(
     num_shards: usize,
-    num_layers: usize,
+    length: usize,
     progress_sock_name: String,
 ) -> JoinHandle<Option<JoinHandle<()>>> {
     thread::spawn(move || {
@@ -211,7 +211,7 @@ pub fn spawn_progress_thread(
                     Arc::new(RwLock::new(Box::new(reporter)));
 
                 // Call the real worker — assumed to return a JoinHandle
-                let handle = progress_worker(num_shards, num_layers, &reporter);
+                let handle = progress_worker(num_shards, length, &reporter);
                 Some(handle)
             }
             Err(e) => {

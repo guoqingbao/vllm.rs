@@ -193,6 +193,8 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
+    let extra_loading_len = ct.tensor_infos.keys().len();
+
     let cfg = Config {
         architectures: vec![arch.clone()],
         head_dim: Some(head_dim),
@@ -213,6 +215,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
+        extra_loading_len: Some(extra_loading_len),
         partial_rotary_factor: if partial_rot_arch_map.contains_key(&arch) {
             Some(0.5f32)
         } else {

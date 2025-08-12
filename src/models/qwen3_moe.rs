@@ -1,20 +1,16 @@
 // src/models/qwen3_moe.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
-use crate::models::layers::linear::{
-    linear_no_bias_fused_x as linear_no_bias_fused, linear_no_bias_x as linear_no_bias,
-    LinearX as Linear,
-};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
+use crate::models::layers::moe::{FusedMoeGGUF, FusedMoeISQ, MoeNaive};
 use crate::models::layers::others::{embedding, rms_norm};
 use crate::models::layers::rotary_emb::RotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::var_builder::Shard;
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Module, RmsNorm};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -22,219 +18,10 @@ use std::iter::zip;
 use std::rc::Rc;
 use std::sync::Arc;
 
-struct Moe {
-    gate: Linear,
-    experts: Vec<MLP>,
-    norm_topk_prob: bool,
-    num_experts_per_tok: usize,
-}
-
-impl Moe {
-    fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
-        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
-        let num_experts = moe_cfg.num_experts.unwrap();
-        let gate = linear_no_bias(
-            cfg.hidden_size,
-            num_experts,
-            vb.pp("gate"),
-            Shard::default(),
-            &None,
-            dtype,
-        )?;
-
-        let experts_vb = vb.pp("experts");
-        let mut experts = Vec::with_capacity(num_experts);
-        for i in 0..num_experts {
-            experts.push(MLP::new(
-                experts_vb.pp(format!("{}", i).as_str()).clone(),
-                comm.clone(),
-                cfg,
-                moe_cfg.moe_intermediate_size,
-                false,
-                dtype,
-            )?);
-        }
-
-        Ok(Self {
-            gate,
-            experts,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (_, hidden_dim) = xs.dims2()?;
-        let router_logits = xs.apply(&self.gate)?;
-        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
-
-        #[cfg(feature = "cuda")]
-        let experts_per_tok = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
-
-        #[cfg(not(feature = "cuda"))]
-        let experts_per_tok = routing_weights
-            .to_device(&candle_core::Device::Cpu)?
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?
-            .to_device(&xs.device())?;
-
-        let routing_weights = routing_weights.gather(&experts_per_tok, D::Minus1)?;
-
-        let routing_weights = routing_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-        let experts_per_tok = experts_per_tok.to_vec2::<u32>()?;
-        let mut top_x = vec![vec![]; self.experts.len()];
-        let mut selected_experts = vec![vec![]; self.experts.len()];
-        for (row_idx, (rw, expert_idxs)) in routing_weights
-            .iter()
-            .zip(experts_per_tok.iter())
-            .enumerate()
-        {
-            let sum_rw = rw.iter().sum::<f32>();
-            for (&rw, &expert_idx) in rw.iter().zip(expert_idxs.iter()) {
-                top_x[expert_idx as usize].push(row_idx as u32);
-                let rw = if self.norm_topk_prob { rw / sum_rw } else { rw };
-                selected_experts[expert_idx as usize].push(rw)
-            }
-        }
-
-        let mut ys = xs.zeros_like()?;
-        for (expert_idx, expert_layer) in self.experts.iter().enumerate() {
-            let top_x = &top_x[expert_idx];
-            if top_x.is_empty() {
-                continue;
-            }
-            let top_x = Tensor::new(top_x.as_slice(), xs.device())?;
-            let selected_experts =
-                Tensor::new(selected_experts[expert_idx].as_slice(), xs.device())?
-                    .reshape(((), 1))?
-                    .to_dtype(xs.dtype())?;
-            let current_state = xs.index_select(&top_x, 0)?.reshape(((), hidden_dim))?;
-            let current_hidden_states = expert_layer
-                .forward(&current_state.unsqueeze(0)?)?
-                .squeeze(0)?;
-            let current_hidden_states = current_hidden_states.broadcast_mul(&selected_experts)?;
-            ys = ys.index_add(&top_x, &current_hidden_states, 0)?;
-        }
-        Ok(ys)
-    }
-}
-
-struct FusedMoe {
-    gate: Linear,
-    gate_experts: Linear,
-    up_experts: Linear,
-    down_experts: Linear,
-    act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    num_experts_per_tok: usize,
-}
-
-impl FusedMoe {
-    fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
-        assert!(
-            comm.world_size() < 2,
-            "Fused quant MoE is currently not avialable for multi-gpu inference!"
-        );
-        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
-        let num_experts = moe_cfg.num_experts.unwrap();
-        let gate = linear_no_bias(
-            cfg.hidden_size,
-            num_experts,
-            vb.pp("ffn_gate_inp"),
-            Shard::default(),
-            &None,
-            dtype,
-        )?;
-
-        let gate_experts = linear_no_bias_fused(
-            moe_cfg.num_experts.unwrap(),
-            cfg.hidden_size,
-            moe_cfg.moe_intermediate_size,
-            vb.pp("ffn_gate_exps"),
-            Shard::default(),
-            &None,
-            dtype,
-        )?;
-
-        let up_experts = linear_no_bias_fused(
-            moe_cfg.num_experts.unwrap(),
-            cfg.hidden_size,
-            moe_cfg.moe_intermediate_size,
-            vb.pp("ffn_up_exps"),
-            Shard::default(),
-            &None,
-            dtype,
-        )?;
-
-        let down_experts = linear_no_bias_fused(
-            moe_cfg.num_experts.unwrap(),
-            moe_cfg.moe_intermediate_size,
-            cfg.hidden_size,
-            vb.pp("ffn_down_exps"),
-            Shard::default(),
-            &None,
-            dtype,
-        )?;
-
-        Ok(Self {
-            gate,
-            gate_experts,
-            up_experts,
-            down_experts,
-            act: cfg.hidden_act,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let original_dtype = xs.dtype();
-        let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
-        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
-
-        #[cfg(feature = "cuda")]
-        let indices = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
-
-        #[cfg(not(feature = "cuda"))]
-        let indices = routing_weights
-            .to_device(&candle_core::Device::Cpu)?
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?
-            .to_device(&xs.device())?;
-        let mut scores = routing_weights.gather(&indices, D::Minus1)?;
-
-        if self.norm_topk_prob {
-            scores = scores.broadcast_div(&scores.sum_keepdim(D::Minus1)?)?;
-        }
-
-        let ys = {
-            let xs = xs.reshape((num_tokens, 1, hidden_dim))?;
-            let gate = self.gate_experts.indexed_moe_forward(&xs, &indices)?;
-            let up = self.up_experts.indexed_moe_forward(&xs, &indices)?;
-            let xs = self
-                .down_experts
-                .indexed_moe_forward(&(up * gate.apply(&self.act)?)?, &indices)?;
-            xs
-        };
-        ys.broadcast_mul(&scores.unsqueeze(D::Minus1)?)?
-            .sum(D::Minus2)?
-            .reshape((num_tokens, hidden_dim))?
-            .to_dtype(original_dtype)
-    }
-}
-
 enum MoeOrMlp {
-    Moe(Moe),
-    FusedMoe(FusedMoe),
+    MoeNaive(MoeNaive),
+    FusedMoeGGUF(FusedMoeGGUF),
+    FusedMoeISQ(FusedMoeISQ),
     Mlp(MLP),
 }
 
@@ -242,8 +29,9 @@ impl MoeOrMlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Mlp(m) => m.forward(xs),
-            Self::Moe(m) => m.forward(xs),
-            Self::FusedMoe(m) => m.forward(xs),
+            Self::MoeNaive(m) => m.forward(xs),
+            Self::FusedMoeGGUF(m) => m.forward(xs),
+            Self::FusedMoeISQ(m) => m.forward(xs),
         }
     }
 }
@@ -292,9 +80,21 @@ impl Qwen3DecoderLayer {
         {
             if is_qvar_builder {
                 //experts weights packed
-                MoeOrMlp::FusedMoe(FusedMoe::new(config, vb.clone(), comm.clone(), dtype)?)
+                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
+            } else if config.quant.is_some() {
+                MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
+                    config,
+                    vb.pp("mlp").clone(),
+                    comm.clone(),
+                    dtype,
+                )?)
             } else {
-                MoeOrMlp::Moe(Moe::new(config, vb.pp("mlp").clone(), comm.clone(), dtype)?)
+                MoeOrMlp::MoeNaive(MoeNaive::new(
+                    config,
+                    vb.pp("mlp").clone(),
+                    comm.clone(),
+                    dtype,
+                )?)
             }
         } else {
             let mlp = MLP::new(
@@ -331,6 +131,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
+            dtype,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -341,6 +142,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
+            dtype,
         )?;
 
         Ok(Self {
@@ -406,9 +208,6 @@ impl Qwen3MoEForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        if is_qvar_builder {
-            reporter.write().set_progress(config.num_hidden_layers);
-        }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -417,6 +216,7 @@ impl Qwen3MoEForCausalLM {
             } else {
                 vb.pp("model.embed_tokens")
             },
+            dtype,
         )?;
         let rotary_emb = Arc::new(RotaryEmbedding::new(
             dtype,
@@ -445,9 +245,9 @@ impl Qwen3MoEForCausalLM {
                 i,
             )?;
             layers.push(layer);
-            if !is_qvar_builder {
-                reporter.write().set_progress(i + 1);
-            }
+            reporter
+                .write()
+                .set_progress(config.extra_loading_len.unwrap_or(0) + i + 1);
         }
 
         let norm = rms_norm(
@@ -458,6 +258,7 @@ impl Qwen3MoEForCausalLM {
             } else {
                 vb.pp("model.norm")
             },
+            dtype,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

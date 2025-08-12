@@ -114,6 +114,7 @@ impl Attention {
             } else {
                 vb.pp("q_norm")
             },
+            dtype,
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -129,6 +130,7 @@ impl Attention {
             } else {
                 vb.pp("k_norm")
             },
+            dtype,
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())

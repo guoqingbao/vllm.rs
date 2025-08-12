@@ -134,11 +134,11 @@ for token in stream:
 # Start OpenAI API Server (default http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
-python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-# or
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
 # or Multi-GPU
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+# or Multi-GPU (with in-situ quant to Q4K during model loading)
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k
 ```
 
 ### Interactive Chat and completion
@@ -150,8 +150,8 @@ python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 # Use the second device (device order 1，`--d 1`)
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
-# Load unquantized model as GGUF quantized (e.g., q4k)
-python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k
+# Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
+python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 
 # Chat completion
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -223,8 +223,8 @@ cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.
 # CUDA (with CUDA Graph)
 cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with Flash Attention (extra-long context, e.g., 32k tokens)
-cargo run --release --features cuda,flash-attn,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
+# CUDA with Flash Attention (extra-long context, e.g., 256 tokens)
+cargo run --release --features cuda,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -264,14 +264,16 @@ Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
 
-Run any unquantized models as GGUF quantized format:
+   💡 Run any unquantized models as GGUF quantized format, but it may takes few minutes for `--isq` other than q4k and q8_0.
+
+
 
 ```bash
 # macOS
-cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --isq q4k --prompts "How are you today?"
 
 # CUDA
-cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k --prompts "How are you today?"
 ```
 
 
@@ -288,7 +290,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
-* [x] Multi-rank inference (available for Non-quantized safetensors models)
+* [x] Multi-rank inference
 * [x] Speedup prompt processing on Metal/macOS
 * [ ] Additional model support
 ---

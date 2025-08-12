@@ -4,7 +4,6 @@
 //! These tensors can be loaded from disk using `from_gguf` or from an in-memory
 //! buffer using `from_gguf_buffer`.
 use crate::utils::progress::ProgressLike;
-use crate::utils::progress::{progress_worker, ProgressReporter};
 use candle::quantized::QTensor;
 use candle::{Device, Result, Shape};
 use candle_core as candle;
@@ -19,19 +18,23 @@ pub struct VarBuilder {
 }
 
 impl VarBuilder {
-    pub fn from_gguf<P: AsRef<std::path::Path>>(p: P, device: &Device) -> Result<Self> {
-        let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
-            Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
+    pub fn from_gguf<P: AsRef<std::path::Path>>(
+        p: P,
+        device: &Device,
+        reporter: &Arc<RwLock<Box<dyn ProgressLike>>>,
+    ) -> Result<Self> {
+        // let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
+        //     Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
         let mut file = std::fs::File::open(p)?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)?;
-        let handle = progress_worker(1, content.tensor_infos.keys().len(), &reporter);
+        // let handle = progress_worker(1, content.tensor_infos.keys().len(), &reporter);
         let mut data = std::collections::HashMap::new();
         for (i, tensor_name) in content.tensor_infos.keys().enumerate() {
             let tensor = content.tensor(&mut file, tensor_name, device)?;
             data.insert(tensor_name.to_string(), Arc::new(tensor));
             reporter.write().set_progress(i + 1);
         }
-        handle.join().unwrap();
+        // handle.join().unwrap();
         Ok(Self {
             data: Arc::new(data),
             path: Vec::new(),

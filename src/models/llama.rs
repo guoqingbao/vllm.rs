@@ -73,6 +73,7 @@ impl LLaMaDecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
+            dtype,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -83,6 +84,7 @@ impl LLaMaDecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
+            dtype,
         )?;
 
         Ok(Self {
@@ -148,9 +150,6 @@ impl LLaMaForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        if is_qvar_builder {
-            reporter.write().set_progress(config.num_hidden_layers);
-        }
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -159,6 +158,7 @@ impl LLaMaForCausalLM {
             } else {
                 vb.pp("model.embed_tokens").clone()
             },
+            dtype,
         )?;
 
         let rotary_emb = Arc::new(RotaryEmbedding::new(
@@ -188,9 +188,9 @@ impl LLaMaForCausalLM {
                 dtype,
             )?;
             layers.push(layer);
-            if !is_qvar_builder {
-                reporter.write().set_progress(i + 1);
-            }
+            reporter
+                .write()
+                .set_progress(config.extra_loading_len.unwrap_or(0) + i + 1);
         }
 
         let norm = rms_norm(
@@ -201,6 +201,7 @@ impl LLaMaForCausalLM {
             } else {
                 vb.pp("model.norm").clone()
             },
+            dtype,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

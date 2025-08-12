@@ -64,9 +64,6 @@ fn main() -> anyhow::Result<()> {
 
             vllm_rs::log_info!("Loading model at rank {}", init_req.rank);
 
-            let vb =
-                VarBuilderX::new(&init_req.econfig.model_path, init_req.dtype.into(), &device)?;
-
             let progress_sock_name = "@vllm-rs-progress".to_string();
 
             let progress_reporter = match RemoteProgressReporter::new(
@@ -88,6 +85,12 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
+            let vb = VarBuilderX::new(
+                &init_req.econfig.model_path,
+                init_req.dtype.into(),
+                &device,
+                &progress_reporter,
+            )?;
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,

@@ -131,11 +131,11 @@ for token in stream:
 # 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
-python3 example/server.py --w /path/qwq-32b-q4_k_m.gguf --host 0.0.0.0 --port 8000
-# 或
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-# 或，多GPU推理服务：
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000
+# 或多GPU推理
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+# 或多GPU推理（同时将权重量化为Q4K格式）：
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k
 ```
 
 ### 🤖✨ 交互式聊天与批处理
@@ -147,11 +147,11 @@ python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 # 指定设备2 (设备序号为1，`--d 1`)
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
-# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，适用于任意已支持的模型架构
-python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k
+# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
+python3 example/chat.py --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 
 # 批量同步示例
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
 
 # 批量同步示例 (多GPU)
 python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
@@ -211,8 +211,8 @@ cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 # 使用第三个设备 (设备序号2，`--d 2`)
 cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
-# CUDA + Flash Attention（超长上下文，如 32k tokens）
-cargo run --release --features cuda,flash-attn -- --i --w /path/qwq-32b-q4_k_m.gguf
+# CUDA + Flash Attention（超长上下文，如 256k tokens）
+cargo run --release --features cuda,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
 
 # macOS（Metal）
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -253,14 +253,14 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 
 ## 🗜️ 实时量化（GGUF 格式转换）
 
-量化过程可能需要几分钟时间：
+   💡 将任意非量化模型实时量化加载为GGUF格式，指定`--isq`非q4k、q8_0时可能需要几分钟时间：
 
 ```bash
 # macOS
-cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --isq q4k --prompts "How are you today?"
 
 # CUDA
-cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4k --prompts "How are you today?"
+cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k --prompts "How are you today?"
 ```
 
 
@@ -275,7 +275,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --quant q4
 * [x] CUDA 平台 Flash Attention 支持
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
-* [x] 多卡并行推理 （目前支持Safetensors非量化格式模型，GGUF多卡推理待支持）
+* [x] 多卡并行推理
 * [x] Metal/macOS平台Prompt处理加速
 * [ ] 支持更多模型类型
 
