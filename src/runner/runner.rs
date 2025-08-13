@@ -85,12 +85,8 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let vb = VarBuilderX::new(
-                &init_req.econfig.model_path,
-                init_req.dtype.into(),
-                &device,
-                &progress_reporter,
-            )?;
+            let vb =
+                VarBuilderX::new(&init_req.econfig.model_path, init_req.dtype.into(), &device)?;
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,

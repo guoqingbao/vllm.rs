@@ -26,10 +26,14 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 | Model | Format | Size| Decoding Speed |
 |------------------|---------------|----------|------------------------|
+| Qwen3-0.6B | BF16 | 0.6B | **182.88** tokens/s |
+| Llama-3.1-8B | BF16 | 8B | **60.99** tokens/s |
+| Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
+| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **82.14** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
-| **Qwen3-30B-A3B** | Q4_K_M | 30B (MoE)| **75.91** tokens/s  |
+| **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **75.91** tokens/s  |
 
 ### Performance Comparison
 

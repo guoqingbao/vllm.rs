@@ -7,26 +7,18 @@ pub mod moe;
 pub mod others;
 pub mod rotary_emb;
 use crate::utils::gguf_varbuilder::VarBuilder as QVarBuilder;
-use crate::utils::progress::ProgressLike;
 use candle_core::DType;
 use candle_core::{Device, Result};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use either::Either;
-use parking_lot::RwLock;
 use std::path::Path;
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct VarBuilderX<'a>(pub Either<VarBuilder<'a>, QVarBuilder>);
 use crate::utils::hub_load_local_safetensors;
 
 impl VarBuilderX<'_> {
-    pub fn new(
-        model_path: &String,
-        dtype: DType,
-        device: &Device,
-        reporter: &Arc<RwLock<Box<dyn ProgressLike>>>,
-    ) -> Result<Self> {
+    pub fn new(model_path: &String, dtype: DType, device: &Device) -> Result<Self> {
         let mut is_gguf: bool = false;
         let model_path = model_path.clone();
         let weight_files = if Path::new(&model_path)
@@ -47,7 +39,6 @@ impl VarBuilderX<'_> {
             let vb = crate::utils::gguf_varbuilder::VarBuilder::from_gguf(
                 weight_files[0].clone(),
                 device,
-                reporter,
             )?;
             Ok(Self(Either::Right(vb)))
         } else {

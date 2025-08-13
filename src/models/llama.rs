@@ -188,9 +188,7 @@ impl LLaMaForCausalLM {
                 dtype,
             )?;
             layers.push(layer);
-            reporter
-                .write()
-                .set_progress(config.extra_loading_len.unwrap_or(0) + i + 1);
+            reporter.write().set_progress(i + 1);
         }
 
         let norm = rms_norm(
