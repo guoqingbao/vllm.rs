@@ -380,23 +380,38 @@ impl ModelRunner {
         let mut max_seqlen_q = 0;
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
+        const CHUNK_SIZE: usize = 8192;
 
         for seq in seqs {
             let seqlen = seq.len();
-            input_ids.extend(&seq.token_ids[seq.num_cached_tokens..]);
-            positions.extend((seq.num_cached_tokens as i64..seqlen as i64).collect::<Vec<_>>());
+            let num_tokens = std::cmp::min(CHUNK_SIZE, seqlen - seq.num_cached_tokens);
+            input_ids
+                .extend(&seq.token_ids[seq.num_cached_tokens..seq.num_cached_tokens + num_tokens]);
+            positions.extend(
+                (seq.num_cached_tokens as i64..(seq.num_cached_tokens + num_tokens) as i64)
+                    .collect::<Vec<_>>(),
+            );
 
-            let seqlen_q = seqlen - seq.num_cached_tokens;
-            let seqlen_k = seqlen;
+            let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
+            let seqlen_k = num_tokens;
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
             cu_seqlens_k.push(cu_seqlens_k.last().unwrap() + seqlen_k as u32);
             max_seqlen_q = std::cmp::max(max_seqlen_q, seqlen_q);
             max_seqlen_k = std::cmp::max(max_seqlen_k, seqlen_k);
 
-            for i in seq.num_cached_blocks()..seq.num_blocks() {
+            let end_block = std::cmp::min(
+                num_tokens.div_ceil(seq.block_size) + seq.num_cached_blocks(),
+                seq.num_blocks(),
+            );
+
+            let mut last_block_num_tokens = seq.last_block_num_tokens();
+            if end_block < seq.num_blocks() {
+                last_block_num_tokens = seq.block_size;
+            }
+            for i in seq.num_cached_blocks()..end_block {
                 let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
-                let end = if i == seq.num_blocks() - 1 {
-                    start + seq.last_block_num_tokens() as i64
+                let end = if i == end_block - 1 {
+                    start + last_block_num_tokens as i64
                 } else {
                     start + self.config.block_size as i64
                 };

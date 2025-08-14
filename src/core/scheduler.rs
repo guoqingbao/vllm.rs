@@ -49,15 +49,17 @@ impl Scheduler {
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
             if scheduled_ids.len() >= self.cfg.max_num_seqs
-                || num_tokens + seq.len() > self.cfg.max_num_batched_tokens
-                || !self.block_manager.can_allocate(&seq)
+                || num_tokens + seq.len() - seq.num_cached_tokens > self.cfg.max_num_batched_tokens
+                || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
             {
                 // Put it back and break out if cannot schedule more
                 self.waiting.push_front(seq);
                 break;
             }
 
-            self.block_manager.allocate(&mut seq);
+            if seq.block_table.is_empty() {
+                self.block_manager.allocate(&mut seq);
+            }
             seq.status = SequenceStatus::Running;
             num_tokens += seq.len() - seq.num_cached_tokens;
             self.running.push(seq);
@@ -99,17 +101,17 @@ impl Scheduler {
         ids.iter().map(|&i| &self.running[i]).collect()
     }
 
-    pub fn get_running(&self, id: usize) -> Option<&Sequence> {
-        if id < self.running.len() {
-            Some(&self.running[id])
+    pub fn get_running(&self, idx: usize) -> Option<&Sequence> {
+        if idx < self.running.len() {
+            Some(&self.running[idx])
         } else {
             None
         }
     }
 
-    pub fn get_waiting(&self, id: usize) -> Option<&Sequence> {
-        if id < self.waiting.len() {
-            Some(&self.waiting[id])
+    pub fn get_waiting(&self, idx: usize) -> Option<&Sequence> {
+        if idx < self.waiting.len() {
+            Some(&self.waiting[idx])
         } else {
             None
         }
@@ -163,5 +165,42 @@ impl Scheduler {
                 break;
             }
         }
+    }
+
+    pub fn filter_prefill_finished(
+        &mut self,
+        scheduled_ids: &Vec<usize>,
+    ) -> (Vec<usize>, Vec<usize>) {
+        let mut finished_seqs = Vec::new();
+        let mut remove_ids = Vec::new();
+        const CHUNK_SIZE: usize = 8192;
+        for (i, id) in scheduled_ids.iter().enumerate() {
+            if *id < self.running.len() {
+                let seq = &self.running[*id];
+                if seq.len() < CHUNK_SIZE || seq.num_cached_tokens + CHUNK_SIZE >= seq.len() {
+                    finished_seqs.push((i, seq.id));
+                } else {
+                    remove_ids.push(seq.id);
+                    //unfinished due to chunked_prefill, push back to waiting list
+                    let mut seq = seq.clone();
+                    seq.num_cached_tokens += CHUNK_SIZE; //current prefilled CHUNK_SIZE
+                    seq.status = SequenceStatus::Waiting;
+                    crate::log_warn!(
+                        "seq {} chunk prefilled {} (remain {} tokens)",
+                        seq.id,
+                        seq.num_cached_tokens,
+                        seq.len() - seq.num_cached_tokens
+                    );
+                    self.waiting.push_back(seq);
+                }
+            }
+        }
+        self.running.retain(|s| !remove_ids.contains(&s.id));
+        let (indices, finished_ids): (Vec<usize>, Vec<usize>) = finished_seqs.into_iter().unzip();
+        let finished_indices: Vec<usize> = finished_ids
+            .iter()
+            .filter_map(|&target_id| self.running.iter().position(|seq| seq.id == target_id))
+            .collect();
+        (indices, finished_indices)
     }
 }

@@ -54,7 +54,7 @@ fn get_casual_mask_internal(
 pub fn get_attention_casual_mask(
     device: &Device,
     dtype: DType,
-    positions: &Tensor,
+    _: &Tensor,
     seqlens: Vec<u32>,
     sliding_window: Option<usize>,
     is_prefill: bool,
@@ -62,18 +62,19 @@ pub fn get_attention_casual_mask(
     if !is_prefill {
         return None;
     }
-    let vec_positions = positions.to_vec1::<i64>().unwrap();
+    // let vec_positions = positions.to_vec1::<i64>().unwrap();
     let mut offsets = vec![0u32];
     offsets.extend(seqlens.clone());
     let mut vec_mask = Vec::new();
     let mut start = 0;
-    for (i, seq_offset) in seqlens.iter().enumerate() {
+    for (_, seq_offset) in seqlens.iter().enumerate() {
         let seq_len = seq_offset - start;
         let mask = get_casual_mask_internal(
             device,
             dtype,
             seq_len as usize,
-            vec_positions[offsets[i] as usize] as usize,
+            0,
+            // vec_positions[offsets[i] as usize] as usize,
             sliding_window,
         )
         .unwrap();

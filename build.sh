@@ -56,6 +56,8 @@ touch "$DEST_DIR/py.typed"
 chmod 755 "$DEST_DIR/py.typed"
 cp "python/__init__.py" "$DEST_DIR/__init__.py"
 chmod 755 "$DEST_DIR/__init__.py"
+cp "ReadMe.md" "$DEST_DIR/ReadMe.md"
+chmod 755 "$DEST_DIR/ReadMe.md"
 
 echo "✅ Done. Runner binary copied to $DEST_DIR/"
 
@@ -79,6 +81,7 @@ rm "$DEST_DIR/runner"
 rm "$DEST_DIR/__init__.py"
 rm "$DEST_DIR/__init__.pyi"
 rm "$DEST_DIR/py.typed"
+rm "$DEST_DIR/ReadMe.md"
 rm -r "$DEST_DIR"
 
 echo "✅ ${PUBLISH:+Publish}Build complete."

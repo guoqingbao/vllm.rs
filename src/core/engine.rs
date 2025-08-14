@@ -463,13 +463,10 @@ impl LLMEngine {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
-            match &mut self.runners {
+            let output_ids = match &mut self.runners {
                 RunnerType::Thread(model_runner) => {
                     // Run model on the scheduled sequences in the main thread
-                    let output_ids = model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?;
-
-                    // Postprocess sequences by modifying them inside the scheduler
-                    self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                    model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
                 }
                 RunnerType::Process(ref mut runner_streams) => {
                     let request = if is_prefill {
@@ -509,15 +506,29 @@ impl LLMEngine {
                     let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
                     // Only run postprocess once after all runners finish (use first result)
                     if let Some(output_ids) = all_outputs.first() {
-                        // println!("[LLMEngine] Postprocessing output ids: {:?}", output_ids);
-                        self.scheduler.postprocess(&scheduled_ids, output_ids);
+                        output_ids.clone()
+                        // self.scheduler.postprocess(&scheduled_ids, output_ids);
                     } else {
                         candle_core::bail!("No output ids received from model runners");
                     }
                 }
+            };
+            // Postprocess sequences by modifying them inside the scheduler
+            if is_prefill {
+                let (indices, finished_indices) =
+                    self.scheduler.filter_prefill_finished(&scheduled_ids);
+                if indices.is_empty() {
+                    //chunked prefill, no finished
+                    return Ok(());
+                } else {
+                    let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
+                    self.scheduler.postprocess(&finished_indices, &output_ids);
+                    DecodedIds(Either::Left(finished_indices))
+                }
+            } else {
+                self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                DecodedIds(Either::Left(scheduled_ids))
             }
-
-            DecodedIds(Either::Left(scheduled_ids))
         } else {
             crate::log_info!("No more kv cache available, free all resources!");
             DecodedIds(Either::Right(self.scheduler.release_all_waitings()))
