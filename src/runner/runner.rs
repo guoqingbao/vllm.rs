@@ -27,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         .expect("Socket name missing");
     let sock_name = sock.clone().to_ns_name::<GenericNamespaced>()?;
     let mut stream = LocalStream::connect(sock_name.clone());
-    
+
     ctrlc::set_handler(move || {
         vllm_rs::log_info!("Runner start new session!");
     })
