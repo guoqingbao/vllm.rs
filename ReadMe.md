@@ -50,8 +50,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 #### How to reproduce?
 **vLLM.rs**
 ```shell
-pip install vllm-rs
-python example/completion.py --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
+pip install vllm_rs
+python -m vllm_rs.completion --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
 
 # Log
 Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
@@ -104,12 +104,47 @@ Supports both **Safetensor** and **GGUF** formats.
 
 ```shell
 # flash-attn built-in for prefilling
-python3 -m pip install vllm-rs
+python3 -m pip install vllm_rs
 ```
 
 ## 📘 Usage in Python
 
-### 🐍 Quick Example
+### 🌐✨ API Server Mode
+   💡 You can use any client compatible with the OpenAI API.
+
+```bash
+# install server dependency
+pip install fastapi uvicorn
+# Start OpenAI API Server (default http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+# or Multi-GPU
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+# or Multi-GPU (with in-situ quant to Q4K during model loading, enable maximum context length)
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
+```
+
+### Interactive Chat and completion
+
+```bash
+# Interactive chat
+python -m vllm_rs.chat --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
+# Use the second device (device order 1，`--d 1`)
+python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
+python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# Chat completion
+python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+
+# Chat completion (Multi-GPU)
+python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+```
+
+### 🐍 Python API
 
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
@@ -127,43 +162,6 @@ stream = engine.generate_stream(params, prompt)
 for token in stream:
     print(token)
 ```
-
-
-### 🌐✨ API Server Mode
-   💡 You can use any client compatible with the OpenAI API.
-
-```bash
-# install server dependency
-pip install fastapi uvicorn
-# Start OpenAI API Server (default http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:8000/v1/"
-# openai.api_key = "EMPTY"
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-# or Multi-GPU
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# or Multi-GPU (with in-situ quant to Q4K during model loading, enable maximum context length)
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
-```
-
-### Interactive Chat and completion
-
-```bash
-# Interactive chat
-python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-
-# Use the second device (device order 1，`--d 1`)
-python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
-
-# Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
-python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
-
-# Chat completion
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-
-# Chat completion (Multi-GPU)
-python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
-
 
 ## 🔨 Build Python Package from source (Optional)
 

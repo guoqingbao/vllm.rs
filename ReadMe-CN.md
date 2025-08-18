@@ -51,8 +51,8 @@
 
 **vLLM.rs**
 ```shell
-pip install vllm-rs
-python example/completion.py --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
+pip install vllm_rs
+python -m vllm_rs.completion --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
 
 # 日志输出
 Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
@@ -102,13 +102,48 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 
 ```shell
 # 默认支持flash-attn prefilling
-python3 -m pip install vllm-rs
+python3 -m pip install vllm_rs
 ```
 
 
 ## 📘 使用方法（Python）
 
-### 🐍 快速 Python 示例
+### 🌐✨ API Server
+   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
+
+```bash
+# 安装web service依赖
+pip install fastapi uvicorn
+# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
+# openai.base_url = "http://localhost:8000/v1/"
+# openai.api_key = "EMPTY"
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+# 或多GPU推理
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+# 或多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
+```
+
+### 🤖✨ 交互式聊天与批处理
+
+```bash
+# 交互式聊天
+python -m vllm_rs.chat --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
+# 指定设备2 (设备序号为1，`--d 1`)
+python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+
+# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
+python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# 批量同步示例
+python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+
+# 批量同步示例 (多GPU)
+python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+```
+
+### 🐍 Python API
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
 cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
@@ -124,41 +159,6 @@ print(outputs)
 stream = engine.generate_stream(params, prompt)
 for token in stream:
     print(token)
-```
-
-### 🌐✨ API Server
-   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
-
-```bash
-# 安装web service依赖
-pip install fastapi uvicorn
-# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:8000/v1/"
-# openai.api_key = "EMPTY"
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-# 或多GPU推理
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# 或多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
-```
-
-### 🤖✨ 交互式聊天与批处理
-
-```bash
-# 交互式聊天
-python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-
-# 指定设备2 (设备序号为1，`--d 1`)
-python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
-
-# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
-python3 example/chat.py --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
-
-# 批量同步示例
-python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
-
-# 批量同步示例 (多GPU)
-python3 example/completion.py --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
 ```
 
 ## 🔨 从源代码编译安装（可选）
