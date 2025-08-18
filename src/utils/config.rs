@@ -137,6 +137,8 @@ pub struct EngineConfig {
     pub isq: Option<String>,
     pub num_shards: Option<usize>,
     pub device_ids: Option<Vec<usize>>,
+    pub generation_cfg: Option<GenerationConfig>,
+    pub seed: Option<u64>,
 }
 
 #[cfg(feature = "python")]
@@ -165,6 +167,10 @@ pub struct EngineConfig {
     pub num_shards: Option<usize>,
     #[pyo3(get, set)]
     pub device_ids: Option<Vec<usize>>,
+    #[pyo3(get, set)]
+    pub generation_cfg: Option<GenerationConfig>,
+    #[pyo3(get, set)]
+    pub seed: Option<u64>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -176,6 +182,8 @@ impl EngineConfig {
         isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
+        generation_cfg: Option<GenerationConfig>,
+        seed: Option<u64>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -199,6 +207,8 @@ impl EngineConfig {
             isq,
             num_shards,
             device_ids: Some(device_ids),
+            generation_cfg,
+            seed,
         }
     }
 }
@@ -216,10 +226,10 @@ pub struct TokenizerConfig {
 #[cfg_attr(feature = "python", pyclass)]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SamplingParams {
-    pub temperature: f32,
+    pub temperature: Option<f32>,
     pub max_tokens: usize,
     pub ignore_eos: bool,
-    pub top_k: Option<usize>,
+    pub top_k: Option<isize>,
     pub top_p: Option<f32>,
 }
 
@@ -229,11 +239,11 @@ impl SamplingParams {
         temperature: Option<f32>,
         max_tokens: Option<usize>,
         ignore_eos: Option<bool>,
-        top_k: Option<usize>,
+        top_k: Option<isize>,
         top_p: Option<f32>,
     ) -> Self {
         Self {
-            temperature: temperature.unwrap_or(1.0),
+            temperature,
             max_tokens: max_tokens.unwrap_or(4096),
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
@@ -243,7 +253,7 @@ impl SamplingParams {
 
     pub fn new_with_max_tokens(max_tokens: usize) -> Self {
         Self {
-            temperature: 1.0,
+            temperature: None,
             max_tokens: max_tokens,
             ignore_eos: false,
             top_k: None,
@@ -255,7 +265,7 @@ impl SamplingParams {
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
-            temperature: 1.0,
+            temperature: None,
             max_tokens: 4096,
             ignore_eos: false,
             top_k: None,
@@ -276,4 +286,20 @@ pub enum ModelType {
     Yi,
     StableLM,
     DeepSeek,
+}
+
+#[cfg_attr(feature = "python", pyclass)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    /// Randomness of sampling.
+    /// rec. default = 1
+    pub temperature: Option<f32>,
+    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.  
+    /// rec. default = 1    
+    pub top_p: Option<f32>,
+    /// Control the number of top tokens to consider, set -1 to consider all.
+    /// rec. default = -1
+    pub top_k: Option<isize>,
+
+    pub penalty: Option<f32>,
 }

@@ -3,7 +3,7 @@ use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, SamplingParams};
+use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use candle_core::DType;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
@@ -156,7 +156,7 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), isq=None, num_shards=Some(1), device_ids=None))]
+    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), isq=None, num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None))]
     pub fn new(
         model_path: String,
         max_num_seqs: Option<usize>,
@@ -164,6 +164,8 @@ impl EngineConfig {
         isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
+        generation_cfg: Option<GenerationConfig>,
+        seed: Option<u64>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -185,6 +187,8 @@ impl EngineConfig {
             isq,
             num_shards,
             device_ids: Some(device_ids),
+            generation_cfg,
+            seed,
         }
     }
 }
@@ -197,15 +201,34 @@ impl SamplingParams {
         temperature: Option<f32>,
         max_tokens: Option<usize>,
         ignore_eos: Option<bool>,
-        top_k: Option<usize>,
+        top_k: Option<isize>,
         top_p: Option<f32>,
     ) -> Self {
         Self {
-            temperature: temperature.unwrap_or(1.0),
+            temperature,
             max_tokens: max_tokens.unwrap_or(4096),
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
+        }
+    }
+}
+
+#[pymethods]
+impl GenerationConfig {
+    #[new]
+    #[pyo3(signature = (temperature=None, top_p=None, top_k=None, penalty=None))]
+    pub fn new(
+        temperature: Option<f32>,
+        top_p: Option<f32>,
+        top_k: Option<isize>,
+        penalty: Option<f32>,
+    ) -> Self {
+        Self {
+            temperature,
+            top_p,
+            top_k,
+            penalty,
         }
     }
 }

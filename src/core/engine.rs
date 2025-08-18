@@ -82,7 +82,7 @@ pub struct LLMEngine {
 impl LLMEngine {
     #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
-        let (config, config_tokenizer, tokenizer) = init_config_tokenizer(econfig)?;
+        let (config, config_tokenizer, tokenizer, generation_cfg) = init_config_tokenizer(econfig)?;
         log_info!("{:?}\n", config);
 
         log_info!("{:?}\n", config_tokenizer);
@@ -106,6 +106,26 @@ impl LLMEngine {
                 econfig.max_model_len.unwrap()
             );
         }
+
+        match (&generation_cfg, &mut econfig.generation_cfg) {
+            (Some(gen_cfg), None) => {
+                econfig.generation_cfg = Some(gen_cfg.clone());
+            }
+            (Some(gen_cfg), Some(egen_cfg)) => {
+                if egen_cfg.penalty.is_none() {
+                    egen_cfg.penalty = gen_cfg.penalty;
+                }
+                if egen_cfg.temperature.is_none() {
+                    egen_cfg.temperature = gen_cfg.temperature;
+                    egen_cfg.top_p = gen_cfg.top_p;
+                    egen_cfg.top_k = gen_cfg.top_k;
+                }
+            }
+            _ => {
+                crate::log_warn!("No generation config found for this model!");
+            }
+        }
+
         assert!(
             config.architectures.len() == 1,
             "Only one architecture is supported at the moment!"
@@ -405,6 +425,15 @@ impl LLMEngine {
         //we also need to consider prompt length
         if length + params.max_tokens > max_model_len {
             params.max_tokens = max_model_len - length;
+        }
+
+        if let Some(gen_cfg) = &self.econfig.generation_cfg {
+            let temperature = params.temperature.or(gen_cfg.temperature);
+            let top_k = params.top_k.or(gen_cfg.top_k);
+            let top_p = params.top_p.or(gen_cfg.top_p);
+            params.temperature = temperature;
+            params.top_k = top_k;
+            params.top_p = top_p;
         }
         let seq = Sequence::new(token_ids, self.econfig.block_size, params);
         let seq_id = self.scheduler.add(seq);

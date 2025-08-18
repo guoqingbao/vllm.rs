@@ -21,6 +21,13 @@ class GenerationOutput:
     decode_output: str
 
 @dataclass
+class GenerationConfig:
+    temperature: Optional[float]
+    top_p: Optional[float]
+    top_k: Optional[int]
+    penalty: Optional[float]
+
+@dataclass
 class EngineConfig:
     model_path: str
     tokenizer: Optional[str]
@@ -32,6 +39,8 @@ class EngineConfig:
     isq: Optional[str]
     num_shards: Optional[int]
     device_id: Optional[int]
+    generation_cfg: Optional[GenerationConfig]
+    seed: Optional[int]
 
 @dataclass
 class SamplingParams:

@@ -4,12 +4,13 @@ pub mod gguf_helper;
 pub mod gguf_varbuilder;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
+pub mod logits_processor;
 pub mod progress;
 use crate::utils::config::MoEConfig;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use config::{Config, EngineConfig, EosTokenId, TokenizerConfig};
+use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -228,7 +229,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
 pub fn init_config_tokenizer(
     econfig: &EngineConfig,
-) -> Result<(Config, TokenizerConfig, Tokenizer)> {
+) -> Result<(Config, TokenizerConfig, Tokenizer, Option<GenerationConfig>)> {
     let config_path = format!("{}/config.json", econfig.model_path);
     if Path::new(&config_path).exists() {
         let mut config: Config =
@@ -268,7 +269,19 @@ pub fn init_config_tokenizer(
         };
 
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
-        Ok((config, config_tokenizer, tokenizer))
+
+        let generation_config_path = format!("{}/generation_config.json", econfig.model_path);
+        let generation_cfg = if generation_config_path != ""
+            && Path::new(&generation_config_path).exists()
+        {
+            let str_cfg: Option<String> = std::fs::read_to_string(generation_config_path).ok();
+            let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
+            Some(cfg)
+        } else {
+            None
+        };
+
+        Ok((config, config_tokenizer, tokenizer, generation_cfg))
     } else if Path::new(&econfig.model_path).exists() {
         assert!(econfig.isq.is_none(), "GGUF model does not support ISQ!");
         let GGUFInfo {
@@ -300,7 +313,7 @@ pub fn init_config_tokenizer(
             eos_token: eos,
         };
 
-        Ok((config, config_tokenizer, tokenizer))
+        Ok((config, config_tokenizer, tokenizer, None))
     } else {
         candle_core::bail!("Model file(s) not found!");
     }

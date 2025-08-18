@@ -6,7 +6,7 @@ import sys
 # pip install fastapi uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput
+from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig
 import uvicorn
 import warnings
 
@@ -152,6 +152,11 @@ def parse_args():
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--d", type=str, default="0")
     parser.add_argument("--isq", type=str, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--penalty", type=float, default=None)
+
     return parser.parse_args()
 
 
@@ -168,13 +173,17 @@ def main():
         warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
     else:
         max_model_len = args.max_model_len
-    
+
+    generation_cfg = None
+    if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.penalty != None:
+         generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.penalty)
     cfg = EngineConfig(
         model_path=args.w,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
+        generation_cfg=generation_cfg,
     )
 
     app = create_app(cfg, args.dtype)

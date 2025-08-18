@@ -1,7 +1,7 @@
 import time
 import argparse
 import warnings
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+from vllm_rs import Engine, EngineConfig, SamplingParams, Message, GenerationConfig
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
 
@@ -23,7 +23,11 @@ def parse_args():
     parser.add_argument("--i", action="store_true")
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--isq", type=str, default=None)
-
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--penalty", type=float, default=None)
+    
     return parser.parse_args()
 
 
@@ -39,12 +43,17 @@ def build_engine_config(args, num_of_prompts):
     else:
         max_model_len = args.max_model_len
 
+    generation_cfg = None
+    if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.penalty != None:
+         generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.penalty)
+
     return EngineConfig(
         model_path=args.w,
         max_num_seqs=args.max_num_seqs,
         max_model_len=max_model_len,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
+        generation_cfg=generation_cfg,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):

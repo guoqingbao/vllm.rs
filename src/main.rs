@@ -8,6 +8,7 @@ use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
 use vllm_rs::utils::chat_template::Message;
+use vllm_rs::utils::config::GenerationConfig;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 
 #[derive(Parser, Debug)]
@@ -66,6 +67,21 @@ struct Args {
     /// for batch performance tetst
     #[arg(long, default_value = None)]
     batch: Option<usize>,
+
+    #[arg(long, default_value = None)]
+    temperature: Option<f32>,
+
+    #[arg(long, default_value = None)]
+    top_k: Option<isize>,
+
+    #[arg(long, default_value = None)]
+    top_p: Option<f32>,
+
+    #[arg(long, default_value = None)]
+    penalty: Option<f32>,
+
+    #[arg(long, default_value = None)]
+    seed: Option<u64>, //seed for reproduce the results
 }
 
 #[tokio::main]
@@ -140,6 +156,20 @@ async fn main() -> Result<()> {
         prompts
     };
 
+    let generation_cfg = if (args.temperature.is_some()
+        && (args.top_k.is_some() && args.top_p.is_some()))
+        || args.penalty.is_some()
+    {
+        Some(GenerationConfig {
+            temperature: args.temperature,
+            top_p: args.top_p,
+            top_k: args.top_k,
+            penalty: args.penalty,
+        })
+    } else {
+        None
+    };
+
     let econfig = EngineConfig::new(
         args.weight_path.unwrap(),
         Some(std::cmp::max(max_num_seqs, prompts.len())),
@@ -147,6 +177,8 @@ async fn main() -> Result<()> {
         args.isq.clone(),
         Some(1),
         args.device_ids.clone(),
+        generation_cfg,
+        args.seed,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

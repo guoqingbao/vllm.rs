@@ -3,7 +3,7 @@ import os
 import sys
 import argparse
 import warnings
-from vllm_rs import EngineConfig, SamplingParams, Message, GenerationOutput, Engine
+from vllm_rs import EngineConfig, SamplingParams, Message, GenerationOutput, GenerationConfig, Engine
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
 
@@ -38,12 +38,17 @@ def run(args):
     else:
         max_model_len = args.max_model_len
 
+    generation_cfg = None
+    if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.penalty != None:
+         generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.penalty)
+
     cfg = EngineConfig(
         model_path=args.w,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
+        generation_cfg=generation_cfg,
     )
 
 
@@ -101,6 +106,10 @@ if __name__ == "__main__":
     parser.add_argument("--max-tokens", type=int, default=4096)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--isq", type=str, default=None)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--penalty", type=float, default=None)
 
     args = parser.parse_args()
     if not os.path.exists(args.w):

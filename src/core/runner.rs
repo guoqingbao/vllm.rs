@@ -1,6 +1,10 @@
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
+use crate::utils::config::SamplingParams;
+#[cfg(all(feature = "cuda", feature = "graph"))]
+use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::logits_processor::LogitsProcessor;
 use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
@@ -11,13 +15,10 @@ use crate::{
     utils::config::{Config, EngineConfig, ModelType},
 };
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{DType, Device, Result, Tensor};
 use parking_lot::RwLock;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-
-#[cfg(all(feature = "cuda", feature = "graph"))]
-use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
@@ -44,6 +45,8 @@ pub struct ModelRunner {
     config: EngineConfig,
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
+    logit_processor: LogitsProcessor,
+    sampling_params: RwLock<SamplingParams>,
 }
 
 impl ModelRunner {
@@ -156,6 +159,21 @@ impl ModelRunner {
 
         let kv_cache = Self::init_kv_cache(econfig, config, dtype, &device)?;
 
+        let (temperature, top_k, top_p) = if econfig.generation_cfg.is_some() {
+            (
+                econfig.generation_cfg.as_ref().unwrap().temperature.clone(),
+                econfig.generation_cfg.as_ref().unwrap().top_k.clone(),
+                econfig.generation_cfg.as_ref().unwrap().top_p.clone(),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        let seed = if econfig.seed.is_none() {
+            rand::random::<u64>()
+        } else {
+            econfig.seed.unwrap()
+        };
         Ok(Self {
             model,
             kv_cache: Arc::new(Mutex::new(kv_cache)),
@@ -169,6 +187,8 @@ impl ModelRunner {
                 econfig.block_size,
                 config.hidden_size,
             ),
+            logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
+            sampling_params: RwLock::new(SamplingParams::default()),
         })
     }
 
@@ -344,7 +364,7 @@ impl ModelRunner {
             //     candle_core::bail!("Unsupported model type for forward pass");
             // }
         };
-        let output_ids = self.sample(&logits)?;
+        let output_ids = self.sample(&logits, seqs, is_prefill)?;
         Ok(output_ids)
     }
 
@@ -512,8 +532,16 @@ impl ModelRunner {
         Ok((input_ids, positions, input_metadata))
     }
 
-    fn sample(&self, logits: &Tensor) -> Result<Vec<u32>> {
-        logits.argmax(D::Minus1)?.to_vec1::<u32>()
+    fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
+        if let Seqs::SeqRefs(seqs) = seqs {
+            if is_prefill {
+                *self.sampling_params.write() = seqs[0].sampling_params.clone();
+            }
+        }
+        let sampling_params = self.sampling_params.read();
+        self.logit_processor
+            .sample(logits, &Some(sampling_params.clone()))
+        // logits.argmax(D::Minus1)?.to_vec1::<u32>()
     }
 
     pub fn get_model_vocab_size(&self) -> usize {
