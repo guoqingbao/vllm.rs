@@ -331,7 +331,7 @@ impl ModelRunner {
             let logits = self
                 .capturer
                 .replay(&input_ids, &positions, &input_metadata)?;
-            let output_ids = self.sample(&logits)?;
+            let output_ids = self.sample(&logits, seqs, is_prefill)?;
             return Ok(output_ids);
         }
 
@@ -541,7 +541,6 @@ impl ModelRunner {
         let sampling_params = self.sampling_params.read();
         self.logit_processor
             .sample(logits, &Some(sampling_params.clone()))
-        // logits.argmax(D::Minus1)?.to_vec1::<u32>()
     }
 
     pub fn get_model_vocab_size(&self) -> usize {

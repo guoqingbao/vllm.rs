@@ -82,7 +82,8 @@ pub struct LLMEngine {
 impl LLMEngine {
     #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
-        let (config, config_tokenizer, tokenizer, generation_cfg) = init_config_tokenizer(econfig)?;
+        let (config, config_tokenizer, tokenizer, mut generation_cfg) =
+            init_config_tokenizer(econfig)?;
         log_info!("{:?}\n", config);
 
         log_info!("{:?}\n", config_tokenizer);
@@ -105,25 +106,6 @@ impl LLMEngine {
                 config_model_len,
                 econfig.max_model_len.unwrap()
             );
-        }
-
-        match (&generation_cfg, &mut econfig.generation_cfg) {
-            (Some(gen_cfg), None) => {
-                econfig.generation_cfg = Some(gen_cfg.clone());
-            }
-            (Some(gen_cfg), Some(egen_cfg)) => {
-                if egen_cfg.penalty.is_none() {
-                    egen_cfg.penalty = gen_cfg.penalty;
-                }
-                if egen_cfg.temperature.is_none() {
-                    egen_cfg.temperature = gen_cfg.temperature;
-                    egen_cfg.top_p = gen_cfg.top_p;
-                    egen_cfg.top_k = gen_cfg.top_k;
-                }
-            }
-            _ => {
-                crate::log_warn!("No generation config found for this model!");
-            }
         }
 
         assert!(
@@ -184,10 +166,17 @@ impl LLMEngine {
                     (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
                 }
             }
-            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
-                ModelType::GLM4,
-                "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
-            ),
+            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => {
+                if let Some(ref mut gen_cfg) = generation_cfg {
+                    if gen_cfg.penalty.is_none() {
+                        gen_cfg.penalty = Some(1.2); //default repetition penalty for glm4 models
+                    }
+                }
+                (
+                    ModelType::GLM4,
+                    "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+                )
+            }
             _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
         };
 
@@ -198,6 +187,25 @@ impl LLMEngine {
         };
 
         log_info!("Use ROPE interleaved {is_rope_i}");
+
+        match (&generation_cfg, &mut econfig.generation_cfg) {
+            (Some(gen_cfg), None) => {
+                econfig.generation_cfg = Some(gen_cfg.clone());
+            }
+            (Some(gen_cfg), Some(egen_cfg)) => {
+                if egen_cfg.penalty.is_none() {
+                    egen_cfg.penalty = gen_cfg.penalty;
+                }
+                if egen_cfg.temperature.is_none() {
+                    egen_cfg.temperature = gen_cfg.temperature;
+                    egen_cfg.top_p = gen_cfg.top_p;
+                    egen_cfg.top_k = gen_cfg.top_k;
+                }
+            }
+            _ => {
+                crate::log_warn!("No generation config found for this model!");
+            }
+        }
 
         let mut device_ids = econfig.device_ids.clone().unwrap_or_default();
         if device_ids.is_empty() {

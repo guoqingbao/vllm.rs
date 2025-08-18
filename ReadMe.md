@@ -246,7 +246,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 ./run.sh run --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 ```
 
-## ⚙️ CLI Flags
+## ⚙️ Command Line Arguments
 
 | Flag        | Description                                                      |    |
 | ----------- | ---------------------------------------------------------------- | -- |
@@ -258,6 +258,10 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--prompts` | Prompts separated by \| |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
 | `--isq`   | Load unquantized model as GGUF quantized format such as `q2k`, `q4k`, etc.   |       |
+| `--temperature`   | Controls randomness: lower (0.) → deterministic, higher (1.0) → creative/random.  |       |
+| `--top-k`   | Limits choices to the top k highest-probability tokens. smaller k → more stable；larger k → more random   |       |
+| `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |       |
+| `--penalty`   | Penalizes previously used tokens to reduce repetition (≥ 1.0 ~ 2.0 = stronger penalty).   |       |
 
 ## 📽️ Demo Video
 
@@ -294,6 +298,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Continuous batching
 * [x] Multi-rank inference
 * [x] Speedup prompt processing on Metal/macOS
+* [x] Chunked Prefill
 * [ ] Additional model support
 ---
 

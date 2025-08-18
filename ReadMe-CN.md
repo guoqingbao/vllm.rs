@@ -247,6 +247,10 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
 | `--isq`   | 将未量化模型加载为GGUF量化模型，可选`q2k`, `q4k`  等   |       |
+| `--temperature`   | 采样温度 (sampling temperature)，控制输出“随机性/创造性”的一个超参数，介于0-1之间  |       |
+| `--top-k`   | top-k 控制模型在每一步只从前 k 个最高概率的词里挑选，k 越小 → 越稳定；k 越大 → 越随机   |       |
+| `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |       |
+| `--penalty`   | repetition Penalty 控制模型避免重复，值为 ≥ 1.0，通常取 1.1 ~ 2.0。数值越大，惩罚越强，输出越多样化   |       |
 
 ## 📽️ 演示视频
 
@@ -277,10 +281,12 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Metal 平台支持批量推理
 * [x] 支持 GGUF 格式
 * [x] CUDA 平台 Flash Attention 支持
+* [x] CUDA Graph
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
 * [x] 多卡并行推理
 * [x] Metal/macOS平台Prompt处理加速
+* [x] 分块预填充（Chunked Prefill）
 * [ ] 支持更多模型类型
 
 
