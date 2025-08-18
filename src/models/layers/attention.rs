@@ -79,6 +79,8 @@ impl Attention {
             &config.quant,
             dtype,
         )?;
+        //v_proj requires higher precision format
+        let q8_0_qunat = Some("q8_0".to_string());
         let v_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_kv_heads * head_dim,
@@ -89,7 +91,11 @@ impl Attention {
                 vb.pp("v_proj")
             },
             comm.clone(),
-            &config.quant,
+            if config.quant.is_some() {
+                &q8_0_qunat
+            } else {
+                &None
+            },
             dtype,
         )?;
 

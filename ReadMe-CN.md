@@ -26,8 +26,6 @@
 
 | 模型 | 格式 | 大小 | 输出速度 |
 |------------------|---------------|----------|------------------------|
-| Qwen3-0.6B | BF16 | 0.6B | **182.88** tokens/s |
-| Llama-3.1-8B | BF16 | 8B | **60.99** tokens/s |
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
 | DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **82.14** tokens/s |
@@ -132,14 +130,16 @@ for token in stream:
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
 ```bash
+# 安装web service依赖
+pip install fastapi uvicorn
 # 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
 # 或多GPU推理
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# 或多GPU推理（同时将权重量化为Q4K格式）：
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k
+# 或多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
 ```
 
 ### 🤖✨ 交互式聊天与批处理
@@ -152,7 +152,7 @@ python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
-python3 example/chat.py --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
+python3 example/chat.py --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # 批量同步示例
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"

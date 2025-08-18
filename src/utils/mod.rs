@@ -302,7 +302,7 @@ pub fn init_config_tokenizer(
 
         Ok((config, config_tokenizer, tokenizer))
     } else {
-        candle_core::bail!("No valid config found");
+        candle_core::bail!("Model file(s) not found!");
     }
 }
 

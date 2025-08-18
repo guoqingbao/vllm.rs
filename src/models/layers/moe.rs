@@ -158,12 +158,6 @@ impl FusedMoeGGUF {
         };
 
         let (ggml_dtype, block_size) = (GgmlDType::Q4K, GgmlDType::Q4K.block_size());
-        // let (ggml_dtype, block_size) = match gate_experts.wdtype() {
-        //     Either::Left(_) => {
-        //         candle_core::bail!("Invalid dtype!");
-        //     }
-        //     Either::Right(t) => (t, t.block_size()),
-        // };
 
         let moe_intermediate_chunk =
             if moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0 {
@@ -206,7 +200,7 @@ impl FusedMoeGGUF {
         let qtensor = QTensor::quantize(&up_experts, ggml_dtype)?;
         let up_experts = QMatMul::QTensor(Arc::new(qtensor));
 
-        let qtensor = QTensor::quantize(&down_experts, ggml_dtype)?;
+        let qtensor = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
         let down_experts = QMatMul::QTensor(Arc::new(qtensor));
 
         let world_size = comm.world_size();
@@ -485,7 +479,7 @@ impl FusedMoeISQ {
         let qtensor = QTensor::quantize(&up_experts, quant_type).unwrap();
         let up_experts = QMatMul::QTensor(Arc::new(qtensor));
 
-        let qtensor = QTensor::quantize(&down_experts, quant_type).unwrap();
+        let qtensor = QTensor::quantize(&down_experts, GgmlDType::Q8_0).unwrap();
         let down_experts = QMatMul::QTensor(Arc::new(qtensor));
         let world_size = comm.world_size();
 

@@ -26,8 +26,6 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 | Model | Format | Size| Decoding Speed |
 |------------------|---------------|----------|------------------------|
-| Qwen3-0.6B | BF16 | 0.6B | **182.88** tokens/s |
-| Llama-3.1-8B | BF16 | 8B | **60.99** tokens/s |
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
 | DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **82.14** tokens/s |
@@ -135,14 +133,16 @@ for token in stream:
    💡 You can use any client compatible with the OpenAI API.
 
 ```bash
+# install server dependency
+pip install fastapi uvicorn
 # Start OpenAI API Server (default http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
 # or Multi-GPU
 python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# or Multi-GPU (with in-situ quant to Q4K during model loading)
-python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k
+# or Multi-GPU (with in-situ quant to Q4K during model loading, enable maximum context length)
+python3 example/server.py --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
 ```
 
 ### Interactive Chat and completion
@@ -155,7 +155,7 @@ python3 example/chat.py --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 python3 example/chat.py --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
-python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
+python3 example/chat.py --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # Chat completion
 python3 example/completion.py --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"

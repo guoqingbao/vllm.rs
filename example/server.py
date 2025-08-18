@@ -78,7 +78,6 @@ def create_app(cfg, dtype):
             async def streamer():
                 (seq_id, prompt_length, stream) = engine.generate_stream(
                     params, prompt)
-                print(body)
                 decode_start_time = 0
                 decoded_length = 0
                 output_text = ""
