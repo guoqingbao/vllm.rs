@@ -232,7 +232,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts 
 cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
 
 # 多GPU推理（交互模式）
-./run.sh run --release --features cuda,flash-attn,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
+./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 ```
 
 ### ⚙️ 命令行参数说明
