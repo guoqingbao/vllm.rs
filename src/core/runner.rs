@@ -206,6 +206,7 @@ impl ModelRunner {
         (block_size, cfg.num_key_value_heads / num_shards, head_dim)
     }
 
+    #[cfg(not(feature = "flash-decoding"))]
     fn calculate_key_block_shape(
         cfg: &Config,
         dtype: DType,
@@ -226,6 +227,7 @@ impl ModelRunner {
         )
     }
 
+    #[cfg(not(feature = "flash-decoding"))]
     fn calculate_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -413,35 +415,60 @@ impl ModelRunner {
             );
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
+            #[cfg(feature = "flash-decoding")]
+            let seqlen_k = seq.num_cached_tokens + num_tokens;
+            #[cfg(not(feature = "flash-decoding"))]
             let seqlen_k = num_tokens;
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
             cu_seqlens_k.push(cu_seqlens_k.last().unwrap() + seqlen_k as u32);
             max_seqlen_q = std::cmp::max(max_seqlen_q, seqlen_q);
             max_seqlen_k = std::cmp::max(max_seqlen_k, seqlen_k);
 
-            let end_block = std::cmp::min(
-                num_tokens.div_ceil(seq.block_size) + seq.num_cached_blocks(),
-                seq.num_blocks(),
-            );
+            if seq.num_cached_tokens % self.config.block_size == 0 {
+                let end_block = std::cmp::min(
+                    num_tokens.div_ceil(seq.block_size) + seq.num_cached_blocks(),
+                    seq.num_blocks(),
+                );
 
-            let mut last_block_num_tokens = seq.last_block_num_tokens();
-            if end_block < seq.num_blocks() {
-                last_block_num_tokens = seq.block_size;
-            }
-            for i in seq.num_cached_blocks()..end_block {
-                let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
-                let end = if i == end_block - 1 {
-                    start + last_block_num_tokens as i64
-                } else {
-                    start + self.config.block_size as i64
-                };
-                slot_mapping.extend((start..end).collect::<Vec<i64>>());
+                let mut last_block_num_tokens = seq.last_block_num_tokens();
+                if end_block < seq.num_blocks() {
+                    last_block_num_tokens = seq.block_size;
+                }
+                for i in seq.num_cached_blocks()..end_block {
+                    let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
+                    let end = if i == end_block - 1 {
+                        start + last_block_num_tokens as i64
+                    } else {
+                        start + self.config.block_size as i64
+                    };
+                    slot_mapping.extend((start..end).collect::<Vec<i64>>());
+                }
+            } else {
+                for i in seq.num_cached_blocks()..seq.num_blocks() {
+                    let start_offset = (seq.block_table[i] * self.config.block_size as u32) as i64;
+                    let start = if seq.num_cached_tokens > 0 && i == seq.num_cached_blocks() {
+                        start_offset
+                            + (seq.num_cached_tokens as i64 % self.config.block_size as i64)
+                    } else {
+                        start_offset
+                    };
+                    let end = if i == seq.num_blocks() - 1 {
+                        start_offset + seq.last_block_num_tokens() as i64
+                    } else {
+                        start_offset + self.config.block_size as i64
+                    };
+                    slot_mapping.extend((start..end).collect::<Vec<i64>>());
+                }
             }
         }
 
         // Validate lengths
         if input_ids.len() != slot_mapping.len() {
-            candle_core::bail!("input_ids and slot_mapping must have same length",);
+            candle_core::bail!(
+                "input_ids and slot_mapping must have same length: {:?}, {:?}",
+                input_ids,
+                slot_mapping
+            );
         }
         if input_ids.len() != *cu_seqlens_q.last().unwrap() as usize {
             candle_core::bail!("input_ids length must match last cu_seqlens_q",);
@@ -457,7 +484,7 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        // Handle prefix caching
+        // Handle context cache
         let (context_lens, block_tables) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
             let context_lens_t = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;

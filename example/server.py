@@ -50,8 +50,7 @@ def create_app(cfg, dtype):
 
     # chat completion for single and batch requests
     def chat_complete(params, messages):
-        prompts = [engine.apply_chat_template(
-            [Message("user", m["content"])], True) for m in messages]
+        prompts = [engine.apply_chat_template(params, [Message("user", m["content"])], True) for m in messages]
         outputs = engine.generate_sync(params, prompts)
         performance_metric(outputs, False)
         return outputs
@@ -59,7 +58,7 @@ def create_app(cfg, dtype):
     # chat stream: stream response to single request
     async def chat_stream(params, messages):
         all_messages = [Message(m["role"], m["content"]) for m in messages]
-        prompt = engine.apply_chat_template(all_messages, False)
+        prompt = engine.apply_chat_template(params, all_messages, False)
         return prompt, engine
 
     @app.post("/v1/chat/completions")
@@ -69,7 +68,8 @@ def create_app(cfg, dtype):
                                 body.get("max_tokens", 4096),
                                 body.get("ignore_eos", False),
                                 body.get("top_k", None),
-                                body.get("top_p", None))
+                                body.get("top_p", None),
+                                body.get("session_id", None))
         stream = body.get("stream", False)
         if stream:
             start_time = current_millis()

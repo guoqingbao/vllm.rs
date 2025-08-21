@@ -72,6 +72,7 @@ echo "Building Python extension with maturin..."
 
 # Remove 'flash-attn' if present
 FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
+# FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-decoding\b//g' | xargs)
 echo "Python extension features: $FEATURES"
 
 if [ "$PUBLISH" = true ]; then

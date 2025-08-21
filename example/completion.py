@@ -55,11 +55,11 @@ def run(args):
     engine = Engine(cfg, "bf16")
 
     sampling_params = []
-    
+    params = SamplingParams(max_tokens=args.max_tokens)
     for i in range(len(prompts)):
         msg = Message("user", prompts[i])
-        prompts[i] = engine.apply_chat_template([msg], args.batch == 1)
-        sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
+        prompts[i] = engine.apply_chat_template(params, [msg], args.batch == 1)
+        sampling_params.append(params)
 
     print("Start inference with", len(prompts), "prompts")
     outputs: GenerationOutput = engine.generate_sync(sampling_params, prompts)

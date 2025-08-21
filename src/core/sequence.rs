@@ -6,6 +6,7 @@ pub enum SequenceStatus {
     Waiting,
     Running,
     Finished,
+    Cached, //Finished but resources not freed
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -19,7 +20,6 @@ pub struct Sequence {
     pub last_token: u32,
     pub block_size: usize,
     pub sampling_params: SamplingParams,
-    pub prompt_length: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -105,7 +105,6 @@ impl ToDecodeInput for &Sequence {
 
 impl Sequence {
     pub fn new(token_ids: Vec<u32>, block_size: usize, sampling_params: SamplingParams) -> Self {
-        let prompt_length = token_ids.len();
         Self {
             id: 0, // Will be set by scheduler
             status: SequenceStatus::Waiting,
@@ -116,7 +115,6 @@ impl Sequence {
             sampling_params,
             block_size,
             last_token: *token_ids.last().unwrap_or(&0),
-            prompt_length,
         }
     }
 
@@ -133,7 +131,7 @@ impl Sequence {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.status == SequenceStatus::Finished
+        self.status == SequenceStatus::Finished || self.status == SequenceStatus::Cached
     }
 
     pub fn num_blocks(&self) -> usize {

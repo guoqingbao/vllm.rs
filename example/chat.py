@@ -1,6 +1,7 @@
 import time
 import argparse
 import warnings
+import uuid
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message, GenerationConfig
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
@@ -27,7 +28,8 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--penalty", type=float, default=None)
-    
+    parser.add_argument("--context-cache", action="store_true")
+
     return parser.parse_args()
 
 
@@ -82,6 +84,9 @@ def show_tokens_left(tokens_left: int, total_tokens: int):
 
     print(line)
 
+def remove_surrogates(s: str) -> str:
+    return ''.join(c for c in s if not (0xD800 <= ord(c) <= 0xDFFF))
+
 def main():
     args = parse_args()
     interactive = args.i
@@ -101,19 +106,20 @@ def main():
     sampling_params = []
 
     prompt_processed = []
-
+    params = SamplingParams(max_tokens=args.max_tokens)
     if not interactive:
         for prompt in prompts:
-            msg = Message(role="user", content=prompt)
-            processed = engine.apply_chat_template([msg], log=True)
+            msg = Message(role="user", content=remove_surrogates(prompt))
+            processed = engine.apply_chat_template(params, [msg], log=True)
             prompt_processed.append(processed)
-            sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
+            sampling_params.append(params)
     else:
-        sampling_params.append(SamplingParams(max_tokens=args.max_tokens))
+        sampling_params.append(params)
 
     total_available_tokens = econfig.max_num_seqs * econfig.max_model_len
     tokens_left = total_available_tokens
     chat_history = []
+    session_id = str(uuid.uuid4())
     while True:
         if interactive:
             try:
@@ -122,16 +128,21 @@ def main():
                     "\n🤖✨ Enter your prompt (Ctrl+C to reset chat, Ctrl+D to exit):\n> ")
                 if not prompt_input:
                     continue
-                msg = Message(role="user", content=prompt_input)
+                msg = Message(role="user", content=remove_surrogates(prompt_input))
                 chat_history.append(msg)
+                if args.context_cache:
+                    params.session_id = session_id
+                else:
+                    params.session_id = None
                 prompt_processed = [
-                    engine.apply_chat_template(chat_history, log=False)]
+                    engine.apply_chat_template(params, chat_history, log=False)]
 
             except KeyboardInterrupt:
                 if chat_history:
                     print("\n🌀 Chat history cleared. Start a new conversation.")
                     chat_history.clear()
                     tokens_left = total_available_tokens
+                    session_id = str(uuid.uuid4())
                     continue
                 else:
                     print("\n👋 Exiting.")
@@ -160,7 +171,11 @@ def main():
                 print("\n⛔️ Interrupted by user. Canceling generation...")
             print()  # newline after streaming ends
             decode_finish_time = current_millis()
-            tokens_left = total_available_tokens - prompt_length - decoded_length
+            if args.context_cache:
+                tokens_left -= prompt_length
+                tokens_left -= decoded_length
+            else:
+                tokens_left = total_available_tokens - prompt_length - decoded_length
             # Construct a GenerationOutput-like object manually
             output = type("GenerationOutput", (), {
                 "seq_id": seq_id,

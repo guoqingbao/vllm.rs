@@ -12,7 +12,7 @@
 ## ✨ 主要特性
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
-* 🚀 **高性能** – 性能优于 vLLM 和 Nano-vLLM
+* 🚀 **高性能** (支持**上下文缓存**) – 性能优于 vLLM 和 Nano-vLLM
 * 🧠 **极简核心** – 核心逻辑仅 **< 1000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
@@ -101,7 +101,7 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 ## 📦 从pip安装
 
 ```shell
-# 默认支持flash-attn prefilling
+# 默认支持上下文缓存（快速响应功能）
 python3 -m pip install vllm_rs
 ```
 
@@ -122,6 +122,9 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --hos
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
 # 或多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# 或多GPU推理+上下文缓存 (缓存上下文，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置)
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 
 ```
 
 ### 🤖✨ 交互式聊天与批处理
@@ -135,6 +138,9 @@ python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
 python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# 启用上下文缓存（快速响应请求）
+python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # 批量同步示例
 python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
@@ -194,6 +200,9 @@ maturin build --release --features metal,python
 
 # 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程)
 ./build.sh --release --features cuda,nccl,flash-attn,python
+
+# 多GPU推理 + 上下文缓存
+./build.sh --release --features cuda,nccl,flash-decoding,python
 ```
 
 3. **安装构建好的包与依赖**
@@ -216,7 +225,10 @@ cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA + Flash Attention（超长上下文，如 256k tokens）
-cargo run --release --features cuda,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+cargo run --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+
+# CUDA + Context Cache
+cargo run --release --features cuda,nccl,flash-decoding -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS（Metal）
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -233,6 +245,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 
 # 多GPU推理（交互模式）
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
+
+# 多GPU推理+上下文缓存（交互模式）
+./run.sh --release --features cuda,nccl,flash-decoding -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
 ### ⚙️ 命令行参数说明
@@ -287,6 +302,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] 多卡并行推理
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
+* [x] 上下文缓存 (当`flash-decoding`特性启用时生效)
 * [ ] 支持更多模型类型
 
 

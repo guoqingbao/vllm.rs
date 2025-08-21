@@ -23,7 +23,7 @@ use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
 use interprocess::TryClone;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -77,6 +77,7 @@ pub struct LLMEngine {
     decode_start_times: HashMap<usize, usize>,
     prompt_start_times: HashMap<usize, usize>,
     active_requests: HashSet<usize>,
+    active_sessions: VecDeque<(usize, String)>,
 }
 
 impl LLMEngine {
@@ -411,6 +412,7 @@ impl LLMEngine {
             prompt_start_times: HashMap::new(),
             decode_start_times: HashMap::new(),
             active_requests: HashSet::new(),
+            active_sessions: VecDeque::new(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -443,8 +445,28 @@ impl LLMEngine {
             params.top_k = top_k;
             params.top_p = top_p;
         }
-        let seq = Sequence::new(token_ids, self.econfig.block_size, params);
-        let seq_id = self.scheduler.add(seq);
+        let session_id = params.session_id.clone();
+
+        #[cfg(not(feature = "flash-decoding"))]
+        if session_id.is_some() {
+            candle_core::bail!(
+                "Context cache is only available when `flash-decoding` feature is enabled!"
+            );
+        }
+        let seq_id = if let Some(session_id) = session_id {
+            if self.scheduler.has_cache(&session_id) {
+                self.scheduler.get_cache(&session_id, token_ids)?
+            } else {
+                let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+                let seq_id = self.scheduler.add(seq);
+                self.active_sessions.push_back((seq_id, session_id.clone()));
+                seq_id
+            }
+        } else {
+            let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+            let seq_id = self.scheduler.add(seq);
+            seq_id
+        };
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -477,7 +499,7 @@ impl LLMEngine {
         self.request_types.insert(seq_id, request_type.clone());
         if request_type != RequestType::Completion {
             log_info!(
-                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!",
+                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!\n",
                 request_type,
                 seq_id,
                 prompt_length
@@ -559,15 +581,21 @@ impl LLMEngine {
                     return Ok(());
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
-                    self.scheduler.postprocess(&finished_indices, &output_ids);
+                    self.scheduler.postprocess(
+                        &finished_indices,
+                        &output_ids,
+                        &self.active_sessions,
+                    );
                     DecodedIds(Either::Left(finished_indices))
                 }
             } else {
-                self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                self.scheduler
+                    .postprocess(&scheduled_ids, &output_ids, &self.active_sessions);
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
             crate::log_info!("No more kv cache available, free all resources!");
+            self.active_sessions.clear();
             DecodedIds(Either::Right(self.scheduler.release_all_waitings()))
         };
 
@@ -630,6 +658,8 @@ impl LLMEngine {
                     if let Some(_) = self.active_requests.get(&seq_id) {
                         self.active_requests.remove(&seq_id);
                     }
+                    self.prompt_start_times.remove(&seq_id);
+                    self.decode_start_times.remove(&seq_id);
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
                         self.decode_start_times.insert(seq_id, cur_time);
@@ -676,9 +706,19 @@ impl LLMEngine {
         self.scheduler.clear_finished();
     }
 
-    pub fn apply_chat_template(&self, messages: &Vec<Message>, log: bool) -> String {
+    pub fn apply_chat_template(
+        &self,
+        params: &SamplingParams,
+        messages: &Vec<Message>,
+        log: bool,
+    ) -> String {
         let mut prompt_template = self.template.clone();
-        prompt_template.set_messages(messages);
+        if params.session_id.is_some() {
+            //context cache, only retrieve the last message
+            prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
+        } else {
+            prompt_template.set_messages(messages);
+        }
         let prompt_processed = prompt_template
             .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);

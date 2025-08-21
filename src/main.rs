@@ -3,6 +3,7 @@ use clap::Parser;
 // use rand::Rng;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use std::sync::Arc;
+use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
@@ -82,6 +83,9 @@ struct Args {
 
     #[arg(long, default_value = None)]
     seed: Option<u64>, //seed for reproduce the results
+
+    #[arg(long, default_value_t = false)]
+    context_cache: bool,
 }
 
 #[tokio::main]
@@ -193,11 +197,12 @@ async fn main() -> Result<()> {
         }
         for prompt in prompts.iter() {
             let msg = Message::new("user".to_string(), prompt.clone());
+            let param = SamplingParams::new_with_max_tokens(args.max_tokens);
             let e = engine.read();
-            let prompt = e.apply_chat_template(&vec![msg], !args.batch.is_some());
+            let prompt = e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
             prompt_processed.push(prompt);
             // let max_tokens = rng.random_range(100..=args.max_tokens);
-            params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
+            params.push(param);
         }
         if let Some(max_model_len) = args.max_model_len {
             if args.max_tokens > max_model_len {
@@ -223,6 +228,13 @@ async fn main() -> Result<()> {
         )),
     };
 
+    let mut request_params = params[0].clone();
+    request_params.session_id = if args.context_cache {
+        Some(format!("{}", Uuid::new_v4()))
+    } else {
+        None
+    };
+
     let mut chat_history = Vec::<Message>::new();
     loop {
         if interactive {
@@ -241,7 +253,11 @@ async fn main() -> Result<()> {
                         chat_history.push(msg.clone());
                         prompt_processed.clear();
                         let e = engine.read();
-                        prompt_processed.push(e.apply_chat_template(&chat_history, false));
+                        prompt_processed.push(e.apply_chat_template(
+                            &request_params,
+                            &chat_history,
+                            false,
+                        ));
                     } else {
                         print!("\n No prompt was given.");
                         continue;
@@ -259,6 +275,11 @@ async fn main() -> Result<()> {
                             "Tokens left: {} (full)",
                             chat_context_left
                         ));
+                        request_params.session_id = if args.context_cache {
+                            Some(format!("{}", Uuid::new_v4()))
+                        } else {
+                            None
+                        };
                         continue;
                     }
                 }
@@ -270,7 +291,7 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    e.generate_stream(&params[0], prompt_processed[0].clone())?
+                    e.generate_stream(&request_params, prompt_processed[0].clone())?
                 };
                 let handle: tokio::task::JoinHandle<(usize, usize, usize, usize, String)> =
                     GLOBAL_RT.spawn(async move {
@@ -315,7 +336,11 @@ async fn main() -> Result<()> {
                     decoded_length,
                     decode_output,
                 ) = handle.await.map_err(candle_core::Error::wrap)?;
-                chat_context_left = total_available_tokens - prompt_length - decoded_length;
+                if args.context_cache {
+                    chat_context_left -= prompt_length + decoded_length;
+                } else {
+                    chat_context_left = total_available_tokens - prompt_length - decoded_length;
+                }
                 prompt.right_prompt =
                     DefaultPromptSegment::Basic(format!("Tokens left: {}", chat_context_left));
                 vec![GenerationOutput {

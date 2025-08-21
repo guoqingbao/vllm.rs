@@ -4,6 +4,7 @@ use super::{
     sequence::{Sequence, SequenceStatus},
 };
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
+use candle_core::Result;
 use std::collections::VecDeque;
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
@@ -12,6 +13,7 @@ pub struct Scheduler {
     next_seq_id: usize,
     eos_token_id: Vec<u32>,
     cfg: EngineConfig,
+    cached_seqs: VecDeque<(usize, String)>,
 }
 
 impl Scheduler {
@@ -26,6 +28,7 @@ impl Scheduler {
                 EosTokenId::Multiple(eos) => eos.into_iter().map(|x| *x).collect(),
             },
             cfg: econfig.clone(),
+            cached_seqs: VecDeque::new(),
         }
     }
 
@@ -118,7 +121,12 @@ impl Scheduler {
     }
 
     /// Postprocess output tokens and modify sequences by indexes
-    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[u32]) {
+    pub fn postprocess(
+        &mut self,
+        ids: &[usize],
+        output_ids: &[u32],
+        active_sessions: &VecDeque<(usize, String)>,
+    ) {
         for (i, &idx) in ids.iter().enumerate() {
             let seq = &mut self.running[idx];
             let token = output_ids[i];
@@ -128,13 +136,70 @@ impl Scheduler {
                 || seq.output_len() >= seq.sampling_params.max_tokens
                 || seq.len() > self.cfg.max_num_batched_tokens
             {
-                seq.status = SequenceStatus::Finished;
-                self.block_manager.deallocate(seq);
+                if let Some((_, v)) = active_sessions.iter().find(|(k, _)| *k == seq.id) {
+                    seq.status = SequenceStatus::Cached;
+                    seq.num_cached_tokens = seq.len();
+                    self.cached_seqs.push_back((seq.id, v.clone()));
+                    crate::log_warn!("\n\nSeq {} marked as cached (session_id {})", seq.id, v);
+                } else {
+                    seq.status = SequenceStatus::Finished;
+                    self.block_manager.deallocate(seq);
+                }
             }
         }
     }
 
+    pub fn has_cache(&self, session_id: &String) -> bool {
+        self.cached_seqs.iter().any(|(_, v)| v == session_id)
+    }
+
+    pub fn get_cache(&mut self, session_id: &String, new_tokens_ids: Vec<u32>) -> Result<usize> {
+        if let Some((seq_id, _)) = self.cached_seqs.iter().find(|(_, v)| v == session_id) {
+            for i in 0..self.waiting.len() {
+                let seq: &mut Sequence = &mut self.waiting[i];
+                if seq.id == *seq_id {
+                    crate::log_warn!(
+                        "\nSeq {} continued with {} new tokens (cached {} tokens, session_id {})",
+                        seq.id,
+                        new_tokens_ids.len(),
+                        seq.token_ids.len(),
+                        session_id.clone()
+                    );
+                    seq.token_ids.extend(new_tokens_ids.clone());
+                    seq.status = SequenceStatus::Waiting;
+                    seq.output_ids.clear();
+                    if self.block_manager.can_append(seq) {
+                        self.block_manager.ensure_allocate(seq);
+                    } else {
+                        seq.status = SequenceStatus::Finished;
+                        crate::log_info!("Not enough space for seq {}", seq.id);
+                    }
+                    break;
+                }
+            }
+            Ok(*seq_id)
+        } else {
+            candle_core::bail!("Cache for session {} not found!", session_id);
+        }
+    }
+
     pub fn clear_finished(&mut self) {
+        let mut remove_ids = Vec::new();
+        for i in 0..self.running.len() {
+            let seq: &mut Sequence = &mut self.running[i];
+            if seq.status != SequenceStatus::Cached {
+                continue;
+            }
+            //push cached sessions back to waiting list
+            let mut seq = seq.clone();
+            // crate::log_info!("clear_finished {:?}", seq);
+            seq.output_ids.clear();
+            // seq.num_cached_tokens = seq.token_ids.len();
+            remove_ids.push(seq.id);
+            self.waiting.push_back(seq);
+        }
+        self.running.retain(|s| !remove_ids.contains(&s.id));
+
         // Remove finished sequences from running vector
         self.running
             .retain(|seq| seq.status != SequenceStatus::Finished);
@@ -151,6 +216,7 @@ impl Scheduler {
             self.block_manager.deallocate(seq);
             decode_ids.push(i);
         }
+        self.cached_seqs.clear();
         // println!("{} waiting sequences released!", decode_ids.len());
         // assert!(decode_ids.len() > 0, "no more waiting");
         decode_ids

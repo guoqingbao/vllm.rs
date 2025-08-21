@@ -12,7 +12,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** – Superior than vLLM and Nano-vLLM
+* 🚀 **High Performance** (with **session-based context cache**) – Superior than vLLM and Nano-vLLM
 * 🧠 **Minimalist Core** – Core logic written in **< 1000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
@@ -103,7 +103,7 @@ Supports both **Safetensor** and **GGUF** formats.
 ## 📦 Install with pip
 
 ```shell
-# flash-attn built-in for prefilling
+# built-in `context cache` feature for fast prefill and response
 python3 -m pip install vllm_rs
 ```
 
@@ -123,6 +123,9 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --hos
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
 # or Multi-GPU (with in-situ quant to Q4K during model loading, enable maximum context length)
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# Or multi-GPU inference + context caching (to cache context, you need to include a `session_id` in the `extra_body` field when making a request through the OpenAI API. The session_id should remain the same throughout a conversation, and a new `session_id` should be used for a new conversation, unsed session cache will be cleared. No need to change other settings of the API).
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
 ### Interactive Chat and completion
@@ -136,6 +139,9 @@ python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
 python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+
+# Enable context cache for fast response
+python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # Chat completion
 python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -193,13 +199,19 @@ maturin build --release --features cuda,python
 maturin build --release --features cuda,graph,python
 
 # CUDA with Flash Attention
-maturin build --release --features cuda,flash-attn,graph,python
+maturin build --release --features cuda,flash-attn,python
+
+# CUDA with Context Cache features (takes time to build)
+maturin build --release --features cuda,flash-decoding,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
 
-# build for multi-rank inference (CUDA, standalone runner)
+# build for multi-gpu inference (CUDA, standalone runner)
 ./build.sh --release --features cuda,nccl,flash-attn,python
+
+# build for multi-gpu inference with Context Cache
+./build.sh --release --features cuda,nccl,flash-decoding,python
 ```
 
 3. **Install packages**
@@ -225,8 +237,11 @@ cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.
 # CUDA (with CUDA Graph)
 cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with Flash Attention (extra-long context, e.g., 256 tokens)
-cargo run --release --features cuda,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+# CUDA with Flash Attention (extra-long context, e.g., 256k tokens)
+cargo run --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+
+# CUDA with Context Cache
+cargo run --release --features cuda,nccl,flash-decoding -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -244,6 +259,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 
 # Multi-GPUs (interactive mode)
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
+
+# Multi-GPUs with Context Cache (interactive mode)
+./run.sh --release --features cuda,nccl,flash-decoding -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
 ## ⚙️ Command Line Arguments
@@ -299,6 +317,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Multi-rank inference
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
+* [x] Session-based context cache (available when `flash-decoding` feature enabled)
 * [ ] Additional model support
 ---
 
