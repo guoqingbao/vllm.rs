@@ -77,7 +77,7 @@ def create_app(cfg, dtype):
         if stream:
             start_time = current_millis()
             prompt, engine = await chat_stream(params, body["messages"])
-
+            print("session_id: ", params.session_id)
             async def streamer():
                 try:
                     (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)

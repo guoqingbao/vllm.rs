@@ -146,8 +146,8 @@ impl Scheduler {
                     }
                     crate::log_warn!(
                         "\n\nSeq {} - {} tokens cached (session_id {})",
-                        seq.num_cached_tokens,
                         seq.id,
+                        seq.num_cached_tokens,
                         v
                     );
                 } else {

@@ -159,39 +159,55 @@ def main():
 
         start_time = current_millis()
         if interactive:
-            seq_id, prompt_length, stream = engine.generate_stream(
-                params, prompt_processed[0])
-            output_text = ""
-            decode_start_time = 0
-            decoded_length = 0
             try:
+                seq_id, prompt_length, stream = engine.generate_stream(
+                    params, prompt_processed[0])
+                output_text = ""
+                decode_start_time = 0
+                decoded_length = 0
                 for token in stream:
                     if not decode_start_time:
                         decode_start_time = current_millis()
                     decoded_length += 1
                     output_text += token
                     print(token, end="", flush=True)
+
+                print()  # newline after streaming ends
+                decode_finish_time = current_millis()
+                if args.context_cache:
+                    tokens_left = total_available_tokens - engine.get_num_cached_tokens()
+                else:
+                    tokens_left = total_available_tokens - prompt_length - decoded_length
+                # Construct a GenerationOutput-like object manually
+                output = type("GenerationOutput", (), {
+                    "seq_id": seq_id,
+                    "decode_output": output_text,
+                    "prompt_length": prompt_length,
+                    "prompt_start_time": start_time,
+                    "decode_start_time": decode_start_time,
+                    "decode_finish_time": decode_finish_time,
+                    "decoded_length": decoded_length,
+                })()
+
+                outputs = [output]
             except KeyboardInterrupt:
                 stream.cancel()
-                print("\n⛔️ Interrupted by user. Canceling generation...")
-            print()  # newline after streaming ends
-            decode_finish_time = current_millis()
-            if args.context_cache:
-                tokens_left = total_available_tokens - engine.get_num_cached_tokens()
-            else:
-                tokens_left = total_available_tokens - prompt_length - decoded_length
-            # Construct a GenerationOutput-like object manually
-            output = type("GenerationOutput", (), {
-                "seq_id": seq_id,
-                "decode_output": output_text,
-                "prompt_length": prompt_length,
-                "prompt_start_time": start_time,
-                "decode_start_time": decode_start_time,
-                "decode_finish_time": decode_finish_time,
-                "decoded_length": decoded_length,
-            })()
-
-            outputs = [output]
+                chat_history.clear()
+                if args.context_cache:
+                    tokens_left = total_available_tokens - engine.get_num_cached_tokens()
+                else:
+                    tokens_left = total_available_tokens
+                print("\n⛔️ Interrupted by user, chat session closed!")
+                continue
+            except Exception as e:
+                session_id = str(uuid.uuid4())
+                chat_history.clear()
+                if args.context_cache:
+                    tokens_left = total_available_tokens - engine.get_num_cached_tokens()
+                else:
+                    tokens_left = total_available_tokens
+                print("\n⛔️", e, ", chat session closed!")
+                continue
         else:
             outputs = engine.generate_sync(sampling_params, prompt_processed)
 
