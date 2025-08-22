@@ -140,7 +140,7 @@ use_context_cache = True #flag to use context_cache
 session_id = str(uuid.uuid4())
 extra_body = {"top_k": top_k, "thinking": thinking, "session_id": session_id if use_context_cache else None }
 
-# vllm.rs服务地址
+# vllm.rs service url
 openai.api_key = "EMPTY"
 openai.base_url = "http://localhost:8000/v1/"
 
