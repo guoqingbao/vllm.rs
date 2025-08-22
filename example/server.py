@@ -13,7 +13,7 @@ import warnings
 def current_millis():
     return int(time.time() * 1000)
 
-def performance_metric(outputs: GenerationOutput, stream: bool):
+def performance_metric(outputs: GenerationOutput, total_tokens: int, cached_tokens: int, stream: bool):
     decode_time_taken = 0.0
     prompt_time_taken = 0.0
     total_decoded_tokens = 0
@@ -33,6 +33,9 @@ def performance_metric(outputs: GenerationOutput, stream: bool):
         print(f"\n--- Performance Metrics [seq_id {outputs[0].seq_id}]---")
     else:
         print(f"\n--- Performance Metrics [{len(outputs)} reqeusts]---")
+
+    if cached_tokens > 0:
+        print(f"\n--- Context Cache Usage [{cached_tokens}/{total_tokens} tokens cached]---")
 
     print(
         f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
@@ -76,12 +79,11 @@ def create_app(cfg, dtype):
             prompt, engine = await chat_stream(params, body["messages"])
 
             async def streamer():
-                (seq_id, prompt_length, stream) = engine.generate_stream(
-                    params, prompt)
-                decode_start_time = 0
-                decoded_length = 0
-                output_text = ""
                 try:
+                    (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
+                    decode_start_time = 0
+                    decoded_length = 0
+                    output_text = ""
                     for token in stream:
                         if await request.is_disconnected():
                             print(
@@ -120,7 +122,7 @@ def create_app(cfg, dtype):
                         "decode_finish_time": decode_finish_time,
                         "decoded_length": decoded_length,
                     })()
-                    performance_metric([output], True)
+                    performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
                 except asyncio.CancelledError:
                     print("⛔️ Client disconnected. Cancelling stream.")
                     stream.cancel()

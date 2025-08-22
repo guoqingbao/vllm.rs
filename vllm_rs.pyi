@@ -98,3 +98,12 @@ class Engine:
 
         Return: (seq_id, prompt_length, stream) tuples
         """
+
+    def get_num_cached_tokens(
+        self,
+    ) -> int:
+        """
+        Call this function when context-cache feature enabled
+
+        Return: total number of context cached for all requests
+        """

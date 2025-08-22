@@ -13,7 +13,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
 * 🚀 **High Performance** (with **session-based context cache**) – Superior than vLLM and Nano-vLLM
-* 🧠 **Minimalist Core** – Core logic written in **< 1000 lines** of clean Rust
+* 🧠 **Minimalist Core** – Core logic written in **< 2000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion

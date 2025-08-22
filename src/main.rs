@@ -217,7 +217,7 @@ async fn main() -> Result<()> {
         params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
     }
 
-    let total_available_tokens = max_num_seqs * max_model_len.unwrap_or(4096);
+    let total_available_tokens: i64 = max_num_seqs as i64 * max_model_len.unwrap_or(4096) as i64;
     let mut chat_context_left = total_available_tokens;
     let mut line_editor = Reedline::create();
     let mut prompt = DefaultPrompt {
@@ -243,8 +243,11 @@ async fn main() -> Result<()> {
             } else {
                 print!("🤖✨ Enter another prompt to continue current chat (Press Ctrl+C to start a new chat):\n");
             }
-
             let sig = line_editor.read_line(&prompt);
+            if chat_context_left < 0 {
+                tracing::error!("No tokens left, press Ctrl+C to start a new chat session!");
+                continue;
+            }
             match sig {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
@@ -270,7 +273,13 @@ async fn main() -> Result<()> {
                     } else {
                         print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
-                        chat_context_left = total_available_tokens;
+                        if args.context_cache {
+                            let e = engine.read();
+                            chat_context_left =
+                                total_available_tokens - e.get_num_cached_tokens() as i64;
+                        } else {
+                            chat_context_left = total_available_tokens;
+                        }
                         prompt.right_prompt = DefaultPromptSegment::Basic(format!(
                             "Tokens left: {} (full)",
                             chat_context_left
@@ -291,7 +300,13 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    e.generate_stream(&request_params, prompt_processed[0].clone())?
+                    match e.generate_stream(&request_params, prompt_processed[0].clone()) {
+                        Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                        Err(e) => {
+                            tracing::error!("Session unexpectedly ended because: {:?}", e);
+                            continue;
+                        }
+                    }
                 };
                 let handle: tokio::task::JoinHandle<(usize, usize, usize, usize, String)> =
                     GLOBAL_RT.spawn(async move {
@@ -337,9 +352,11 @@ async fn main() -> Result<()> {
                     decode_output,
                 ) = handle.await.map_err(candle_core::Error::wrap)?;
                 if args.context_cache {
-                    chat_context_left -= prompt_length + decoded_length;
+                    let e = engine.read();
+                    chat_context_left = total_available_tokens - e.get_num_cached_tokens() as i64;
                 } else {
-                    chat_context_left = total_available_tokens - prompt_length - decoded_length;
+                    chat_context_left =
+                        total_available_tokens - prompt_length as i64 - decoded_length as i64;
                 }
                 prompt.right_prompt =
                     DefaultPromptSegment::Basic(format!("Tokens left: {}", chat_context_left));

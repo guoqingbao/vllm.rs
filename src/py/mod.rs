@@ -108,6 +108,12 @@ impl Engine {
             },
         ))
     }
+
+    #[pyo3(name = "get_num_cached_tokens", text_signature = "($self)")]
+    pub fn get_num_cached_tokens(&mut self) -> PyResult<usize> {
+        let engine = self.engine.read();
+        Ok(engine.get_num_cached_tokens())
+    }
 }
 
 #[pyclass]

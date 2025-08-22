@@ -74,16 +74,17 @@ impl BlockManager {
         self.free_block_ids.len() >= seq.num_blocks()
     }
 
-    pub fn allocate(&mut self, seq: &mut Sequence) {
+    pub fn allocate(&mut self, seq: &mut Sequence) -> candle_core::Result<()> {
         assert!(seq.block_table.is_empty());
         for _ in 0..seq.num_blocks() {
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .expect("No free blocks available");
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
         }
+        Ok(())
     }
 
     pub fn deallocate(&mut self, seq: &Sequence) {
@@ -102,27 +103,29 @@ impl BlockManager {
         self.free_block_ids.len() >= (need_block as usize)
     }
 
-    pub fn may_append(&mut self, seq: &mut Sequence) {
+    pub fn may_append(&mut self, seq: &mut Sequence) -> candle_core::Result<()> {
         let len_mod = seq.len() % self.block_size;
         if len_mod == 1 {
             //approaching next block
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .expect("No free blocks available");
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
         }
+        Ok(())
     }
 
-    pub fn ensure_allocate(&mut self, seq: &mut Sequence) {
+    pub fn ensure_allocate(&mut self, seq: &mut Sequence) -> candle_core::Result<()> {
         for _ in seq.block_table.len()..seq.num_blocks() {
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .expect("No free blocks available");
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
         }
+        Ok(())
     }
 }

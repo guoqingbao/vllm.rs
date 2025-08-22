@@ -424,55 +424,43 @@ impl ModelRunner {
             max_seqlen_q = std::cmp::max(max_seqlen_q, seqlen_q);
             max_seqlen_k = std::cmp::max(max_seqlen_k, seqlen_k);
 
-            if seq.num_cached_tokens % self.config.block_size == 0 {
-                let end_block = std::cmp::min(
-                    num_tokens.div_ceil(seq.block_size) + seq.num_cached_blocks(),
-                    seq.num_blocks(),
-                );
-
-                let mut last_block_num_tokens = seq.last_block_num_tokens();
-                if end_block < seq.num_blocks() {
-                    last_block_num_tokens = seq.block_size;
-                }
-                for i in seq.num_cached_blocks()..end_block {
-                    let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
-                    let end = if i == end_block - 1 {
-                        start + last_block_num_tokens as i64
-                    } else {
-                        start + self.config.block_size as i64
-                    };
-                    slot_mapping.extend((start..end).collect::<Vec<i64>>());
-                }
-            } else {
-                for i in seq.num_cached_blocks()..seq.num_blocks() {
-                    let start_offset = (seq.block_table[i] * self.config.block_size as u32) as i64;
-                    let start = if seq.num_cached_tokens > 0 && i == seq.num_cached_blocks() {
-                        start_offset
-                            + (seq.num_cached_tokens as i64 % self.config.block_size as i64)
-                    } else {
-                        start_offset
-                    };
-                    let end = if i == seq.num_blocks() - 1 {
-                        start_offset + seq.last_block_num_tokens() as i64
-                    } else {
-                        start_offset + self.config.block_size as i64
-                    };
-                    slot_mapping.extend((start..end).collect::<Vec<i64>>());
+            let mut slot_mapping_tokens: i64 = 0;
+            for i in seq.num_cached_blocks()..seq.num_blocks() {
+                let start = (seq.block_table[i] * self.config.block_size as u32) as i64;
+                let start = if i == seq.num_cached_blocks() {
+                    start + (seq.num_cached_tokens as i64 % self.config.block_size as i64)
+                } else {
+                    start
+                };
+                let end = start
+                    + std::cmp::min(
+                        num_tokens as i64 - slot_mapping_tokens,
+                        self.config.block_size as i64,
+                    );
+                slot_mapping.extend((start..end).collect::<Vec<i64>>());
+                slot_mapping_tokens += end - start;
+                if slot_mapping_tokens >= num_tokens as i64 {
+                    break;
                 }
             }
         }
 
+        assert!(
+            input_ids.len() > 0 && positions.len() > 0 && slot_mapping.len() > 0,
+            "Invalid inputs!"
+        );
         // Validate lengths
         if input_ids.len() != slot_mapping.len() {
             candle_core::bail!(
-                "input_ids and slot_mapping must have same length: {:?}, {:?}",
-                input_ids,
-                slot_mapping
+                "input_ids and slot_mapping must have same length: {}, {}",
+                input_ids.len(),
+                slot_mapping.len()
             );
         }
         if input_ids.len() != *cu_seqlens_q.last().unwrap() as usize {
             candle_core::bail!("input_ids length must match last cu_seqlens_q",);
         }
+        // crate::log_info!("input_ids {:?}, positions {:?}, slot_mapping {:?}", input_ids, positions, slot_mapping);
 
         // Create tensors
         let length = input_ids.len();

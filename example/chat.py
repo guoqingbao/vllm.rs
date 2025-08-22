@@ -2,6 +2,8 @@ import time
 import argparse
 import warnings
 import uuid
+import sys
+import readline # input without cutoff
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message, GenerationConfig
 # Before running this code, first perform maturin build and then install the package in target/wheels
 
@@ -125,7 +127,7 @@ def main():
             try:
                 show_tokens_left(tokens_left, total_available_tokens)
                 prompt_input = input(
-                    "\n🤖✨ Enter your prompt (Ctrl+C to reset chat, Ctrl+D to exit):\n> ")
+                    "\n🤖✨ Enter your prompt (or paste as one line, Ctrl+C to reset chat, Ctrl+D to exit):\n> ")
                 if not prompt_input:
                     continue
                 msg = Message(role="user", content=remove_surrogates(prompt_input))
@@ -141,7 +143,10 @@ def main():
                 if chat_history:
                     print("\n🌀 Chat history cleared. Start a new conversation.")
                     chat_history.clear()
-                    tokens_left = total_available_tokens
+                    if args.context_cache:
+                        tokens_left = total_available_tokens - engine.get_num_cached_tokens()
+                    else:
+                        tokens_left = total_available_tokens
                     session_id = str(uuid.uuid4())
                     continue
                 else:
@@ -155,7 +160,7 @@ def main():
         start_time = current_millis()
         if interactive:
             seq_id, prompt_length, stream = engine.generate_stream(
-                sampling_params[0], prompt_processed[0])
+                params, prompt_processed[0])
             output_text = ""
             decode_start_time = 0
             decoded_length = 0
@@ -172,8 +177,7 @@ def main():
             print()  # newline after streaming ends
             decode_finish_time = current_millis()
             if args.context_cache:
-                tokens_left -= prompt_length
-                tokens_left -= decoded_length
+                tokens_left = total_available_tokens - engine.get_num_cached_tokens()
             else:
                 tokens_left = total_available_tokens - prompt_length - decoded_length
             # Construct a GenerationOutput-like object manually
