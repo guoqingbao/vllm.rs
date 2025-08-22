@@ -193,7 +193,7 @@ impl ModelRunner {
     }
 
     //[num_blocks, block_size, num_kv_heads, head_size]
-    #[cfg(feature = "flash-decoding")]
+    #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
     fn calculate_flash_key_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -206,7 +206,7 @@ impl ModelRunner {
         (block_size, cfg.num_key_value_heads / num_shards, head_dim)
     }
 
-    #[cfg(not(feature = "flash-decoding"))]
+    #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
     fn calculate_key_block_shape(
         cfg: &Config,
         dtype: DType,
@@ -227,7 +227,7 @@ impl ModelRunner {
         )
     }
 
-    #[cfg(not(feature = "flash-decoding"))]
+    #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
     fn calculate_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -247,7 +247,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        #[cfg(feature = "flash-decoding")]
+        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
@@ -272,7 +272,7 @@ impl ModelRunner {
             Ok(gpu_cache)
         }
 
-        #[cfg(not(feature = "flash-decoding"))]
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
         {
             let kshape = Self::calculate_key_block_shape(
                 config,
@@ -415,9 +415,9 @@ impl ModelRunner {
             );
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            #[cfg(feature = "flash-decoding")]
+            #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
             let seqlen_k = seq.num_cached_tokens + num_tokens;
-            #[cfg(not(feature = "flash-decoding"))]
+            #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
             let seqlen_k = num_tokens;
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
             cu_seqlens_k.push(cu_seqlens_k.last().unwrap() + seqlen_k as u32);

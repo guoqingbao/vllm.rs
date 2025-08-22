@@ -128,6 +128,35 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
+### 🤖 Client Usage of Context Cache
+
+**Key changes for the client:**
+
+```python
+import uuid
+import openai
+use_context_cache = True #flag to use context_cache
+# create session_id for each new chat session and use it throughout that session (session cache will be cleared if the client aborted the connection)
+session_id = str(uuid.uuid4())
+extra_body = {"top_k": top_k, "thinking": thinking, "session_id": session_id if use_context_cache else None }
+
+# vllm.rs服务地址
+openai.api_key = "EMPTY"
+openai.base_url = "http://localhost:8000/v1/"
+
+response = openai.chat.completions.create(
+   model="",
+   messages=messages + [user_msg],
+   stream=True,
+   max_tokens = max_tokens,
+   temperature = temperature,
+   top_p = top_p,
+   extra_body = extra_body, #pass session_id through extra_body
+)
+
+```
+---
+
 ### Interactive Chat and completion
 
 ```bash
@@ -163,6 +192,7 @@ prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
 outputs = engine.generate_sync([params,params], [prompt, prompt])
 print(outputs)
 
+params.session_id = xxx # pass session to use context cache
 # Streaming generation for single request
 stream = engine.generate_stream(params, prompt)
 for token in stream:
@@ -202,16 +232,16 @@ maturin build --release --features cuda,graph,python
 maturin build --release --features cuda,flash-attn,python
 
 # CUDA with Context Cache features (takes time to build)
-maturin build --release --features cuda,flash-decoding,python
+maturin build --release --features cuda,flash-context,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
 
-# build for multi-gpu inference (CUDA, standalone runner)
+# build for multi-gpu inference (CUDA, also build and pack the runner)
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
 # build for multi-gpu inference with Context Cache
-./build.sh --release --features cuda,nccl,flash-decoding,python
+./build.sh --release --features cuda,nccl,flash-decoding,flash-context,python
 ```
 
 3. **Install packages**
@@ -237,11 +267,11 @@ cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.
 # CUDA (with CUDA Graph)
 cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
 
-# CUDA with Flash Attention (extra-long context, e.g., 256k tokens)
-cargo run --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+# CUDA with Flash Attention (extra-long context, e.g., 256k tokens) (this scirpt help build the runner)
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
 
 # CUDA with Context Cache
-cargo run --release --features cuda,nccl,flash-decoding -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+./run --release --features cuda,nccl,flash-context -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -261,7 +291,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 
 # Multi-GPUs with Context Cache (interactive mode)
-./run.sh --release --features cuda,nccl,flash-decoding -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
+./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
 ## ⚙️ Command Line Arguments
@@ -317,7 +347,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Multi-rank inference
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
-* [x] Session-based context cache (available when `flash-decoding` feature enabled)
+* [x] Session-based context cache (available when `flash-context` feature enabled)
 * [ ] Additional model support
 ---
 

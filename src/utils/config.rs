@@ -190,9 +190,9 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        #[cfg(feature = "flash-decoding")]
+        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        #[cfg(not(feature = "flash-decoding"))]
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
         let block_size = 32;
 
         Self {

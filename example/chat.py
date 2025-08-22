@@ -192,12 +192,11 @@ def main():
                 outputs = [output]
             except KeyboardInterrupt:
                 stream.cancel()
-                chat_history.clear()
                 if args.context_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens
-                print("\n⛔️ Interrupted by user, chat session closed!")
+                print("\n⛔️ Interrupted by user!")
                 continue
             except Exception as e:
                 session_id = str(uuid.uuid4())

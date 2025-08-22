@@ -458,10 +458,10 @@ impl LLMEngine {
         }
         let session_id = params.session_id.clone();
 
-        #[cfg(not(feature = "flash-decoding"))]
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
         if session_id.is_some() {
             candle_core::bail!(
-                "Context cache is only available when `flash-decoding` feature is enabled!"
+                "Context cache is only available when `flash-context` feature is enabled!"
             );
         }
         let seq_id = if let Some(session_id) = session_id {
@@ -776,9 +776,13 @@ impl LLMEngine {
         log: bool,
     ) -> String {
         let mut prompt_template = self.template.clone();
-        if params.session_id.is_some() {
-            //context cache, only retrieve the last message
-            prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
+        if let Some(session_id) = &params.session_id {
+            if self.scheduler.has_cache(&session_id) {
+                //context cache, only retrieve the last message
+                prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
+            } else {
+                prompt_template.set_messages(messages);
+            }
         } else {
             prompt_template.set_messages(messages);
         }

@@ -127,6 +127,35 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 
 ```
 
+### 🤖 客户端使用上下文缓存特性
+
+**主要修改点**
+
+```python
+import uuid
+import openai
+use_context_cache = True #是否启用上下文缓存特性
+# 为每一个新对话创建一个session_id，并在此对话中一直使用（当客户端主动中断对话时，此对话缓存会被立即清理）
+session_id = str(uuid.uuid4())
+extra_body = {"top_k": top_k, "thinking": thinking, "session_id": session_id if use_context_cache else None }
+
+# vllm.rs服务地址
+openai.api_key = "EMPTY"
+openai.base_url = "http://localhost:8000/v1/"
+
+response = openai.chat.completions.create(
+   model="",
+   messages=messages + [user_msg],
+   stream=True,
+   max_tokens = max_tokens,
+   temperature = temperature,
+   top_p = top_p,
+   extra_body = extra_body, #将session_id通过extra_body传入
+)
+
+```
+---
+
 ### 🤖✨ 交互式聊天与批处理
 
 ```bash
@@ -160,6 +189,8 @@ prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
 # 同步批量生成
 outputs = engine.generate_sync([params,params], [prompt, prompt])
 print(outputs)
+
+params.session_id = xxx #传入session_id以使用上下文缓存功能
 
 # 单请求流式生成
 stream = engine.generate_stream(params, prompt)
@@ -202,7 +233,7 @@ maturin build --release --features metal,python
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
 # 多GPU推理 + 上下文缓存
-./build.sh --release --features cuda,nccl,flash-decoding,python
+./build.sh --release --features cuda,nccl,flash-decoding,flash-context,python
 ```
 
 3. **安装构建好的包与依赖**
@@ -225,10 +256,10 @@ cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
 cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA + Flash Attention（超长上下文，如 256k tokens）
-cargo run --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
 
 # CUDA + Context Cache
-cargo run --release --features cuda,nccl,flash-decoding -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+./run.sh --release --features cuda,nccl,flash-context -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS（Metal）
 cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -247,7 +278,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 
 # 多GPU推理+上下文缓存（交互模式）
-./run.sh --release --features cuda,nccl,flash-decoding -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
+./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
 ### ⚙️ 命令行参数说明
@@ -302,7 +333,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] 多卡并行推理
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
-* [x] 上下文缓存 (当`flash-decoding`特性启用时生效)
+* [x] 上下文缓存 (当`flash-context`特性启用时生效)
 * [ ] 支持更多模型类型
 
 
