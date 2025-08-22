@@ -190,9 +190,9 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        #[cfg(feature = "flash-decoding")]
+        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        #[cfg(not(feature = "flash-decoding"))]
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
         let block_size = 32;
 
         Self {
@@ -223,7 +223,7 @@ pub struct TokenizerConfig {
     pub eos_token: Option<String>,
 }
 
-#[cfg_attr(feature = "python", pyclass)]
+#[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SamplingParams {
     pub temperature: Option<f32>,
@@ -231,6 +231,25 @@ pub struct SamplingParams {
     pub ignore_eos: bool,
     pub top_k: Option<isize>,
     pub top_p: Option<f32>,
+    pub session_id: Option<String>,
+}
+
+#[cfg(feature = "python")]
+#[pyclass]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SamplingParams {
+    #[pyo3(get, set)]
+    pub temperature: Option<f32>,
+    #[pyo3(get, set)]
+    pub max_tokens: usize,
+    #[pyo3(get, set)]
+    pub ignore_eos: bool,
+    #[pyo3(get, set)]
+    pub top_k: Option<isize>,
+    #[pyo3(get, set)]
+    pub top_p: Option<f32>,
+    #[pyo3(get, set)]
+    pub session_id: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -241,6 +260,7 @@ impl SamplingParams {
         ignore_eos: Option<bool>,
         top_k: Option<isize>,
         top_p: Option<f32>,
+        session_id: Option<String>,
     ) -> Self {
         Self {
             temperature,
@@ -248,6 +268,7 @@ impl SamplingParams {
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
+            session_id,
         }
     }
 
@@ -258,6 +279,7 @@ impl SamplingParams {
             ignore_eos: false,
             top_k: None,
             top_p: None,
+            session_id: None,
         }
     }
 }
@@ -270,6 +292,7 @@ impl Default for SamplingParams {
             ignore_eos: false,
             top_k: None,
             top_p: None,
+            session_id: None,
         }
     }
 }

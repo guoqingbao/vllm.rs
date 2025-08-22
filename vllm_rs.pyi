@@ -49,6 +49,7 @@ class SamplingParams:
     ignore_eos: Optional[bool]
     top_k: Optional[int]
     top_p: Optional[float]
+    session_id: Optional[str]
 
 @dataclass
 class Message:
@@ -75,7 +76,7 @@ class Engine:
         Create a vllm.rs engine with given engine config and dtype ("f16", "bf16", and "f32")
         """
 
-    def apply_chat_template(self, messages: List[Message], log: bool) -> str:
+    def apply_chat_template(self, params: SamplingParams, messages: List[Message], log: bool) -> str:
         """
         Apply chat template to given messages
         """
@@ -96,4 +97,13 @@ class Engine:
         Chat streaming using given prompts and sampling parameters.
 
         Return: (seq_id, prompt_length, stream) tuples
+        """
+
+    def get_num_cached_tokens(
+        self,
+    ) -> int:
+        """
+        Call this function when context-cache feature enabled
+
+        Return: total number of context cached for all requests
         """

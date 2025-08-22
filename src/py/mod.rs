@@ -42,8 +42,15 @@ impl Engine {
     }
 
     #[pyo3(text_signature = "($self, messages, log)")]
-    pub fn apply_chat_template(&self, messages: Vec<Message>, log: bool) -> String {
-        self.engine.read().apply_chat_template(&messages, log)
+    pub fn apply_chat_template(
+        &self,
+        params: SamplingParams,
+        messages: Vec<Message>,
+        log: bool,
+    ) -> String {
+        self.engine
+            .read()
+            .apply_chat_template(&params, &messages, log)
     }
 
     #[pyo3(name = "generate_sync", text_signature = "($self, params, prompts)")]
@@ -100,6 +107,12 @@ impl Engine {
                 rx: std::sync::Mutex::new(stream),
             },
         ))
+    }
+
+    #[pyo3(name = "get_num_cached_tokens", text_signature = "($self)")]
+    pub fn get_num_cached_tokens(&mut self) -> PyResult<usize> {
+        let engine = self.engine.read();
+        Ok(engine.get_num_cached_tokens())
     }
 }
 
@@ -171,9 +184,9 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        #[cfg(feature = "flash-decoding")]
+        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        #[cfg(not(feature = "flash-decoding"))]
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
         let block_size = 32;
         Self {
             model_path,
@@ -196,13 +209,14 @@ impl EngineConfig {
 #[pymethods]
 impl SamplingParams {
     #[new]
-    #[pyo3(signature = (temperature=None, max_tokens=Some(4096), ignore_eos=Some(false), top_k=None, top_p=None))]
+    #[pyo3(signature = (temperature=None, max_tokens=Some(4096), ignore_eos=Some(false), top_k=None, top_p=None, session_id=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
         ignore_eos: Option<bool>,
         top_k: Option<isize>,
         top_p: Option<f32>,
+        session_id: Option<String>,
     ) -> Self {
         Self {
             temperature,
@@ -210,6 +224,7 @@ impl SamplingParams {
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
+            session_id,
         }
     }
 }

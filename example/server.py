@@ -13,7 +13,7 @@ import warnings
 def current_millis():
     return int(time.time() * 1000)
 
-def performance_metric(outputs: GenerationOutput, stream: bool):
+def performance_metric(outputs: GenerationOutput, total_tokens: int, cached_tokens: int, stream: bool):
     decode_time_taken = 0.0
     prompt_time_taken = 0.0
     total_decoded_tokens = 0
@@ -34,6 +34,9 @@ def performance_metric(outputs: GenerationOutput, stream: bool):
     else:
         print(f"\n--- Performance Metrics [{len(outputs)} reqeusts]---")
 
+    if cached_tokens > 0:
+        print(f"\n--- Context Cache Usage [{cached_tokens}/{total_tokens} tokens cached]---")
+
     print(
         f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
         f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
@@ -50,8 +53,7 @@ def create_app(cfg, dtype):
 
     # chat completion for single and batch requests
     def chat_complete(params, messages):
-        prompts = [engine.apply_chat_template(
-            [Message("user", m["content"])], True) for m in messages]
+        prompts = [engine.apply_chat_template(params, [Message("user", m["content"])], True) for m in messages]
         outputs = engine.generate_sync(params, prompts)
         performance_metric(outputs, False)
         return outputs
@@ -59,7 +61,7 @@ def create_app(cfg, dtype):
     # chat stream: stream response to single request
     async def chat_stream(params, messages):
         all_messages = [Message(m["role"], m["content"]) for m in messages]
-        prompt = engine.apply_chat_template(all_messages, False)
+        prompt = engine.apply_chat_template(params, all_messages, False)
         return prompt, engine
 
     @app.post("/v1/chat/completions")
@@ -69,19 +71,19 @@ def create_app(cfg, dtype):
                                 body.get("max_tokens", 4096),
                                 body.get("ignore_eos", False),
                                 body.get("top_k", None),
-                                body.get("top_p", None))
+                                body.get("top_p", None),
+                                body.get("session_id", None))
         stream = body.get("stream", False)
         if stream:
             start_time = current_millis()
             prompt, engine = await chat_stream(params, body["messages"])
-
+            print("session_id: ", params.session_id)
             async def streamer():
-                (seq_id, prompt_length, stream) = engine.generate_stream(
-                    params, prompt)
-                decode_start_time = 0
-                decoded_length = 0
-                output_text = ""
                 try:
+                    (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
+                    decode_start_time = 0
+                    decoded_length = 0
+                    output_text = ""
                     for token in stream:
                         if await request.is_disconnected():
                             print(
@@ -120,7 +122,7 @@ def create_app(cfg, dtype):
                         "decode_finish_time": decode_finish_time,
                         "decoded_length": decoded_length,
                     })()
-                    performance_metric([output], True)
+                    performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
                 except asyncio.CancelledError:
                     print("⛔️ Client disconnected. Cancelling stream.")
                     stream.cancel()

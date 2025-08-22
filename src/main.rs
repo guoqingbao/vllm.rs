@@ -3,6 +3,7 @@ use clap::Parser;
 // use rand::Rng;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use std::sync::Arc;
+use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
@@ -82,6 +83,9 @@ struct Args {
 
     #[arg(long, default_value = None)]
     seed: Option<u64>, //seed for reproduce the results
+
+    #[arg(long, default_value_t = false)]
+    context_cache: bool,
 }
 
 #[tokio::main]
@@ -193,11 +197,12 @@ async fn main() -> Result<()> {
         }
         for prompt in prompts.iter() {
             let msg = Message::new("user".to_string(), prompt.clone());
+            let param = SamplingParams::new_with_max_tokens(args.max_tokens);
             let e = engine.read();
-            let prompt = e.apply_chat_template(&vec![msg], !args.batch.is_some());
+            let prompt = e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
             prompt_processed.push(prompt);
             // let max_tokens = rng.random_range(100..=args.max_tokens);
-            params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
+            params.push(param);
         }
         if let Some(max_model_len) = args.max_model_len {
             if args.max_tokens > max_model_len {
@@ -212,7 +217,7 @@ async fn main() -> Result<()> {
         params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
     }
 
-    let total_available_tokens = max_num_seqs * max_model_len.unwrap_or(4096);
+    let total_available_tokens: i64 = max_num_seqs as i64 * max_model_len.unwrap_or(4096) as i64;
     let mut chat_context_left = total_available_tokens;
     let mut line_editor = Reedline::create();
     let mut prompt = DefaultPrompt {
@@ -223,6 +228,13 @@ async fn main() -> Result<()> {
         )),
     };
 
+    let mut request_params = params[0].clone();
+    request_params.session_id = if args.context_cache {
+        Some(format!("{}", Uuid::new_v4()))
+    } else {
+        None
+    };
+
     let mut chat_history = Vec::<Message>::new();
     loop {
         if interactive {
@@ -231,8 +243,11 @@ async fn main() -> Result<()> {
             } else {
                 print!("🤖✨ Enter another prompt to continue current chat (Press Ctrl+C to start a new chat):\n");
             }
-
             let sig = line_editor.read_line(&prompt);
+            if chat_context_left < 0 {
+                tracing::error!("No tokens left, press Ctrl+C to start a new chat session!");
+                continue;
+            }
             match sig {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
@@ -241,7 +256,11 @@ async fn main() -> Result<()> {
                         chat_history.push(msg.clone());
                         prompt_processed.clear();
                         let e = engine.read();
-                        prompt_processed.push(e.apply_chat_template(&chat_history, false));
+                        prompt_processed.push(e.apply_chat_template(
+                            &request_params,
+                            &chat_history,
+                            false,
+                        ));
                     } else {
                         print!("\n No prompt was given.");
                         continue;
@@ -254,11 +273,22 @@ async fn main() -> Result<()> {
                     } else {
                         print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
-                        chat_context_left = total_available_tokens;
+                        if args.context_cache {
+                            let e = engine.read();
+                            chat_context_left =
+                                total_available_tokens - e.get_num_cached_tokens() as i64;
+                        } else {
+                            chat_context_left = total_available_tokens;
+                        }
                         prompt.right_prompt = DefaultPromptSegment::Basic(format!(
                             "Tokens left: {} (full)",
                             chat_context_left
                         ));
+                        request_params.session_id = if args.context_cache {
+                            Some(format!("{}", Uuid::new_v4()))
+                        } else {
+                            None
+                        };
                         continue;
                     }
                 }
@@ -270,7 +300,13 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    e.generate_stream(&params[0], prompt_processed[0].clone())?
+                    match e.generate_stream(&request_params, prompt_processed[0].clone()) {
+                        Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                        Err(e) => {
+                            tracing::error!("Session unexpectedly ended because: {:?}", e);
+                            continue;
+                        }
+                    }
                 };
                 let handle: tokio::task::JoinHandle<(usize, usize, usize, usize, String)> =
                     GLOBAL_RT.spawn(async move {
@@ -315,7 +351,13 @@ async fn main() -> Result<()> {
                     decoded_length,
                     decode_output,
                 ) = handle.await.map_err(candle_core::Error::wrap)?;
-                chat_context_left = total_available_tokens - prompt_length - decoded_length;
+                if args.context_cache {
+                    let e = engine.read();
+                    chat_context_left = total_available_tokens - e.get_num_cached_tokens() as i64;
+                } else {
+                    chat_context_left =
+                        total_available_tokens - prompt_length as i64 - decoded_length as i64;
+                }
                 prompt.right_prompt =
                     DefaultPromptSegment::Basic(format!("Tokens left: {}", chat_context_left));
                 vec![GenerationOutput {

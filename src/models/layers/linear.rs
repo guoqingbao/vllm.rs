@@ -203,13 +203,13 @@ impl QLinear {
             let ws = ws.dequantize_f16(&vb.device())?;
             let chunk_size = ws.shape().dims()[shards.dim] / shards.world_size;
             if chunk_size % wdtype.block_size() != 0 {
-                crate::log_warn!(
-                    "Invalid dim_size to chunk {} (start {}, size {}) for block_size {}, switching to Q8_0 format!",
-                    ws.shape().dims()[shards.dim],
-                    shards.rank * chunk_size,
-                    chunk_size,
-                    wdtype.block_size()
-                );
+                // crate::log_warn!(
+                //     "Invalid dim_size to chunk {} (start {}, size {}) for block_size {}, switching to Q8_0 format!",
+                //     ws.shape().dims()[shards.dim],
+                //     shards.rank * chunk_size,
+                //     chunk_size,
+                //     wdtype.block_size()
+                // );
                 wdtype = GgmlDType::Q8_0;
             }
 

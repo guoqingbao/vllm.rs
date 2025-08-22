@@ -23,7 +23,7 @@ use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
 use interprocess::TryClone;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -77,6 +77,8 @@ pub struct LLMEngine {
     decode_start_times: HashMap<usize, usize>,
     prompt_start_times: HashMap<usize, usize>,
     active_requests: HashSet<usize>,
+    active_sessions: VecDeque<(usize, String)>,
+    cancelled_sequences: Vec<usize>,
 }
 
 impl LLMEngine {
@@ -411,6 +413,8 @@ impl LLMEngine {
             prompt_start_times: HashMap::new(),
             decode_start_times: HashMap::new(),
             active_requests: HashSet::new(),
+            active_sessions: VecDeque::new(),
+            cancelled_sequences: Vec::new(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -428,6 +432,15 @@ impl LLMEngine {
             .expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
+        if let Some(max_model_len) = self.econfig.max_model_len {
+            if length > max_model_len - 1 {
+                candle_core::bail!(
+                    "Inputs token length {} exceed max_model_len {}",
+                    length,
+                    max_model_len
+                );
+            }
+        }
         let mut params = params.clone();
         let max_model_len = self.econfig.max_model_len.unwrap_or(params.max_tokens);
         //we also need to consider prompt length
@@ -443,8 +456,34 @@ impl LLMEngine {
             params.top_k = top_k;
             params.top_p = top_p;
         }
-        let seq = Sequence::new(token_ids, self.econfig.block_size, params);
-        let seq_id = self.scheduler.add(seq);
+        let session_id = params.session_id.clone();
+
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
+        if session_id.is_some() {
+            candle_core::bail!(
+                "Context cache is only available when `flash-context` feature is enabled!"
+            );
+        }
+        let seq_id = if let Some(session_id) = session_id {
+            crate::log_warn!(
+                "Cached {} sessions: {:?} ({} tokens cached).",
+                self.active_sessions.len(),
+                self.active_sessions,
+                self.get_num_cached_tokens(),
+            );
+            if self.scheduler.has_cache(&session_id) {
+                self.scheduler.get_cache(&session_id, token_ids)?
+            } else {
+                let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+                let seq_id = self.scheduler.add(seq);
+                self.active_sessions.push_back((seq_id, session_id.clone()));
+                seq_id
+            }
+        } else {
+            let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+            let seq_id = self.scheduler.add(seq);
+            seq_id
+        };
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -477,13 +516,17 @@ impl LLMEngine {
         self.request_types.insert(seq_id, request_type.clone());
         if request_type != RequestType::Completion {
             log_info!(
-                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!",
+                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!\n",
                 request_type,
                 seq_id,
                 prompt_length
             );
         }
         Ok((seq_id, prompt_length, rx))
+    }
+
+    pub fn get_num_cached_tokens(&self) -> usize {
+        self.scheduler.get_num_cached_tokens()
     }
 
     pub fn step(&mut self) -> Result<()> {
@@ -495,7 +538,10 @@ impl LLMEngine {
             .as_millis() as usize;
 
         // Get scheduled sequence indexes and prefill flag
-        let (scheduled_ids, is_prefill) = self.scheduler.schedule();
+        let (scheduled_ids, is_prefill) = match self.scheduler.schedule() {
+            Ok((ids, prefill)) => (ids, prefill),
+            Err(_) => (vec![], true),
+        };
         let decoded_ids = if !scheduled_ids.is_empty() {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
@@ -559,16 +605,20 @@ impl LLMEngine {
                     return Ok(());
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
-                    self.scheduler.postprocess(&finished_indices, &output_ids);
+                    self.scheduler.postprocess(
+                        &finished_indices,
+                        &output_ids,
+                        &self.active_sessions,
+                    );
                     DecodedIds(Either::Left(finished_indices))
                 }
             } else {
-                self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                self.scheduler
+                    .postprocess(&scheduled_ids, &output_ids, &self.active_sessions);
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
-            crate::log_info!("No more kv cache available, free all resources!");
-            DecodedIds(Either::Right(self.scheduler.release_all_waitings()))
+            DecodedIds(Either::Right(vec![]))
         };
 
         let (indices, is_running): (&Vec<usize>, bool) = match &decoded_ids.0 {
@@ -626,10 +676,13 @@ impl LLMEngine {
                             }
                         }
                     }
+                    self.stream_senders.remove(&seq_id);
                     self.stream_decoders.remove(&seq_id);
                     if let Some(_) = self.active_requests.get(&seq_id) {
                         self.active_requests.remove(&seq_id);
                     }
+                    self.prompt_start_times.remove(&seq_id);
+                    self.decode_start_times.remove(&seq_id);
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
                         self.decode_start_times.insert(seq_id, cur_time);
@@ -650,7 +703,7 @@ impl LLMEngine {
                                                 "[seq_id {}] Error when sending token to client",
                                                 seq_id
                                             );
-                                            self.scheduler.cancel(seq_id);
+                                            self.cancelled_sequences.push(seq_id);
                                         }
                                     }
                                 }
@@ -668,17 +721,71 @@ impl LLMEngine {
         if indices.is_empty() {
             self.active_requests.clear();
         }
+        self.check_cache();
+        self.check_canceled();
         Ok(())
     }
 
-    pub fn cancel(&mut self, seq_id: usize) {
-        self.scheduler.cancel(seq_id);
-        self.scheduler.clear_finished();
+    pub fn check_cache(&mut self) {
+        if self.active_sessions.len() > self.econfig.max_num_seqs {
+            if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
+                self.scheduler.release_cache(seq_id);
+                crate::log_warn!(
+                    "***Cache removed for Seq {} (session id {})!\n",
+                    seq_id,
+                    session_id
+                );
+            }
+        }
     }
 
-    pub fn apply_chat_template(&self, messages: &Vec<Message>, log: bool) -> String {
+    pub fn check_canceled(&mut self) {
+        if self.cancelled_sequences.is_empty() {
+            return;
+        }
+        for i in 0..self.cancelled_sequences.len() {
+            let seq_id = self.cancelled_sequences[i];
+            self.scheduler.cancel(seq_id);
+            if let Some(pos) = self
+                .active_sessions
+                .iter()
+                .position(|(id, _)| *id == seq_id)
+            {
+                self.active_sessions.remove(pos);
+            }
+            if let Some(_) = self.active_requests.get(&seq_id) {
+                self.active_requests.remove(&seq_id);
+            }
+            self.stream_decoders.remove(&seq_id);
+            self.prompt_start_times.remove(&seq_id);
+            self.decode_start_times.remove(&seq_id);
+            self.stream_senders.remove(&seq_id);
+        }
+        self.scheduler.clear_finished();
+        self.cancelled_sequences.clear();
+    }
+
+    pub fn cancel(&mut self, seq_id: usize) {
+        self.cancelled_sequences.push(seq_id);
+    }
+
+    pub fn apply_chat_template(
+        &self,
+        params: &SamplingParams,
+        messages: &Vec<Message>,
+        log: bool,
+    ) -> String {
         let mut prompt_template = self.template.clone();
-        prompt_template.set_messages(messages);
+        if let Some(session_id) = &params.session_id {
+            if self.scheduler.has_cache(&session_id) {
+                //context cache, only retrieve the last message
+                prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
+            } else {
+                prompt_template.set_messages(messages);
+            }
+        } else {
+            prompt_template.set_messages(messages);
+        }
         let prompt_processed = prompt_template
             .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);
@@ -830,7 +937,7 @@ impl LLMEngine {
                                 break;
                             }
                             StreamItem::Error(e) => {
-                                eprintln!("Error in seq {}: {}", seq_id, e);
+                                eprintln!("Error in Seq {}: {}", seq_id, e);
                                 break;
                             }
                         }
@@ -855,17 +962,24 @@ impl LLMEngine {
         Ok(results)
     }
 
+    pub fn free_resources(&mut self) {
+        crate::log_error!("***Release all resources for future usage!");
+        self.scheduler.clear_finished();
+        self.scheduler.release_waitings();
+        self.active_sessions.clear();
+    }
+
     pub fn generate_stream(
         &mut self,
         params: &SamplingParams,
         prompt: String,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        if let Ok((seq_id, prompt_length, rx)) =
-            self.add_request(params, &prompt, RequestType::Stream)
-        {
-            Ok((seq_id, prompt_length, rx))
-        } else {
-            candle_core::bail!("Failed to create stream!")
+        match self.add_request(params, &prompt, RequestType::Stream) {
+            Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
+            Err(e) => {
+                self.free_resources();
+                candle_core::bail!("{:?}", e)
+            }
         }
     }
 
