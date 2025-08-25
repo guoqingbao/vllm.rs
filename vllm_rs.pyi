@@ -29,7 +29,11 @@ class GenerationConfig:
 
 @dataclass
 class EngineConfig:
-    model_path: str
+    model_id: Optional[str]
+    weight_path: Optional[str]
+    weight_file: Optional[str]
+    hf_token: Optional[str]
+    hf_token_path: Optional[str]
     tokenizer: Optional[str]
     tokenizer_config: Optional[str]
     num_blocks: Optional[int]

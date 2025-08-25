@@ -118,14 +118,21 @@ pip install fastapi uvicorn
 # Start OpenAI API Server (default http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-# or Multi-GPU
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# or Multi-GPU (with in-situ quant to Q4K during model loading, enable maximum context length)
+
+# Local gguf file (`--f`)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+
+# Use model weights from huggingface (`--m`: model_id, `--f`: gguf file)
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+
+# Multi-GPU (`--d`)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+
+# Multi-GPU for safetensors model: local safetensors model (`--w`) with in-situ quant to Q4K during model loading (enable maximum context length)
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
-# Or multi-GPU inference + context caching (to cache context, you need to include a `session_id` in the `extra_body` field when making a request through the OpenAI API. The session_id should remain the same throughout a conversation, and a new `session_id` should be used for a new conversation, unsed session cache will be cleared. No need to change other settings of the API).
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 --context-cache
+# multi-GPU inference + context caching for GGUF model (to cache context, you need to include a `session_id` in the `extra_body` field when making a request through the OpenAI API. The session_id should remain the same throughout a conversation, and a new `session_id` should be used for a new conversation, unsed session cache will be cleared. No need to change other settings of the API).
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
 ### 🤖 Client Usage of Context Cache
@@ -138,7 +145,7 @@ import openai
 use_context_cache = True #flag to use context_cache
 # create session_id for each new chat session and use it throughout that session (session cache will be cleared if the client aborted the connection)
 session_id = str(uuid.uuid4())
-extra_body = {"top_k": top_k, "thinking": thinking, "session_id": session_id if use_context_cache else None }
+extra_body = {"session_id": session_id if use_context_cache else None }
 
 # vllm.rs service url
 openai.api_key = "EMPTY"
@@ -161,19 +168,23 @@ response = openai.chat.completions.create(
 
 ```bash
 # Interactive chat
-python -m vllm_rs.chat --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+# Load with model id
+python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
+# local gguf file
+python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # Use the second device (device order 1，`--d 1`)
-python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+python -m vllm_rs.chat --i --d 1 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
 
-# Load unquantized model as GGUF quantized (e.g., q4k), with maximum model context length
+# Load unquantized safetensors model as GGUF quantized (e.g., q4k), with maximum model context length
 python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # Enable context cache for fast response
-python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --context-cache
+python -m vllm_rs.chat --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # Chat completion
-python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 
 # Chat completion (Multi-GPU)
 python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
@@ -183,7 +194,7 @@ python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-mod
 
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
@@ -255,26 +266,26 @@ pip install fastapi uvicorn
 ## 📘 Usage in Rust
 ### 🤖✨ Rust CLI Mode
 
-Run with `--i` for interactive chat and `--w` to specify model path:
+Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
 
 ```bash
 # CUDA (normal context)
-cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
+cargo run --release --features cuda -- --i --f /path/qwq-32b-q4_k_m.gguf
 
 # Use the third device (device order 2，`--d 2`)
-cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+cargo run --release --features cuda -- --i --d 2 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA (with CUDA Graph)
-cargo run --release --features cuda,graph -- --i --w /path/qwq-32b-q4_k_m.gguf
+cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf
 
 # CUDA with Flash Attention (extra-long context, e.g., 256k tokens) (this scirpt help build the runner)
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 
 # CUDA with Context Cache
-./run --release --features cuda,nccl,flash-context -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+./run --release --features cuda,nccl,flash-context -- --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS (Metal)
-cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 ```
 
 
@@ -298,7 +309,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 
 | Flag        | Description                                                      |    |
 | ----------- | ---------------------------------------------------------------- | -- |
-| `--w`       | Path to model folder (Safetensor) or file (GGUF)                 |    |
+| `--m`       | Hugginface Model ID                 |    |
+| `--w`       | Path to Safetensors model                 |    |
+| `--f`       | GGUF filename when model_id given or GGUF file path                 |    |
 | `--d`       | Device ID (e.g. `--d 0`)                                         |    |
 | `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |    |
 | `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
@@ -344,10 +357,12 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
-* [x] Multi-rank inference
+* [x] Multi-gpu inference (Unquantized safetensors, GGUF)
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
 * [x] Session-based context cache (available when `flash-context` feature enabled)
+* [x] Model loading from hugginface hub
+* [ ] Model loading from ModelScope (China)
 * [ ] Additional model support
 ---
 

@@ -6,35 +6,28 @@ pub mod mlp;
 pub mod moe;
 pub mod others;
 pub mod rotary_emb;
+use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_varbuilder::VarBuilder as QVarBuilder;
 use candle_core::DType;
 use candle_core::{Device, Result};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use either::Either;
-use std::path::Path;
 
 #[derive(Clone)]
 pub struct VarBuilderX<'a>(pub Either<VarBuilder<'a>, QVarBuilder>);
-use crate::utils::hub_load_local_safetensors;
 
 impl VarBuilderX<'_> {
-    pub fn new(model_path: &String, dtype: DType, device: &Device) -> Result<Self> {
-        let mut is_gguf: bool = false;
-        let model_path = model_path.clone();
-        let weight_files = if Path::new(&model_path)
-            .join("model.safetensors.index.json")
-            .exists()
-        {
-            hub_load_local_safetensors(&model_path, "model.safetensors.index.json")?
-        } else if Path::new(&model_path).join("model.safetensors").exists() {
-            vec![Path::new(&model_path).join("model.safetensors")]
-        } else if Path::new(&model_path).exists() {
-            is_gguf = true;
-            vec![Path::new(&model_path).into()]
-        } else {
-            candle_core::bail!("Safetensors files not found in path {}", model_path);
-        };
-
+    pub fn new(
+        model_pathes: &ModelPaths,
+        is_gguf: bool,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        assert!(
+            !model_pathes.get_weight_filenames().is_empty(),
+            "No weight files found!"
+        );
+        let weight_files = model_pathes.get_weight_filenames();
         if is_gguf {
             let vb = crate::utils::gguf_varbuilder::VarBuilder::from_gguf(
                 weight_files[0].clone(),

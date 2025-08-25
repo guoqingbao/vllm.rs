@@ -24,14 +24,21 @@ struct Args {
     max_model_len: Option<usize>,
 
     /// if weight_path is passed, it will ignore the model_id
-    #[arg(long)]
+    #[arg(long = "m")]
     model_id: Option<String>,
 
     /// The folder name that contains safetensor weights and json files
     /// (same structure as huggingface online)
-    /// or the path to a gguf file
     #[arg(long = "w")]
     weight_path: Option<String>,
+
+    /// gguf file path or gguf file name when model_id is given
+    #[arg(long = "f")]
+    weight_file: Option<String>,
+
+    hf_token: Option<String>,
+
+    hf_token_path: Option<String>,
 
     #[arg(long)]
     dtype: Option<String>,
@@ -94,10 +101,9 @@ async fn main() -> Result<()> {
         .with_max_level(tracing::Level::INFO)
         .init();
     let args = Args::parse();
-    if args.weight_path.is_none() {
-        candle_core::bail!(
-            "Must provide weight-path (folder of safetensors or path of gguf file)!"
-        );
+
+    if args.model_id.is_none() && args.weight_path.is_none() && args.weight_file.is_none() {
+        candle_core::bail!("Must provide model_id or weight_path or weight_file!");
     }
 
     let dtype = match args.dtype.as_deref() {
@@ -175,7 +181,11 @@ async fn main() -> Result<()> {
     };
 
     let econfig = EngineConfig::new(
-        args.weight_path.unwrap(),
+        args.model_id,
+        args.weight_path,
+        args.weight_file,
+        args.hf_token,
+        args.hf_token_path,
         Some(std::cmp::max(max_num_seqs, prompts.len())),
         max_model_len,
         args.isq.clone(),
