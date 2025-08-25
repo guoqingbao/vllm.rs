@@ -87,33 +87,44 @@ impl Downloader {
             &self.weight_file,
         ) {
             //model in a folder (safetensor format, huggingface folder structure)
-            (None, Some(path), None) => (
-                ModelPaths {
-                    tokenizer_filename: Path::new(path).join("tokenizer.json"),
-                    tokenizer_config_filename: Path::new(path).join("tokenizer_config.json"),
-                    config_filename: Path::new(path).join("config.json"),
-                    filenames: if Path::new(path)
-                        .join("model.safetensors.index.json")
-                        .exists()
-                    {
-                        super::hub_load_local_safetensors(path, "model.safetensors.index.json")?
-                    } else {
-                        //a single weight file case
-                        let mut safetensors_files = Vec::<std::path::PathBuf>::new();
-                        safetensors_files.insert(0, Path::new(path).join("model.safetensors"));
-                        safetensors_files
-                    },
-                    generation_config_filename: if Path::new(path)
-                        .join("generation_config.json")
-                        .exists()
-                    {
-                        Path::new(path).join("generation_config.json")
-                    } else {
-                        "".into()
-                    },
-                },
-                false,
-            ),
+            (None, Some(path), None) => {
+                if !Path::new(path).is_dir() {
+                    candle_core::bail!("Safetensor weight path must be a directory! \n\t***Tips: use `--f` to specify gguf model file!***");
+                } else {
+                    (
+                        ModelPaths {
+                            tokenizer_filename: Path::new(path).join("tokenizer.json"),
+                            tokenizer_config_filename: Path::new(path)
+                                .join("tokenizer_config.json"),
+                            config_filename: Path::new(path).join("config.json"),
+                            filenames: if Path::new(path)
+                                .join("model.safetensors.index.json")
+                                .exists()
+                            {
+                                super::hub_load_local_safetensors(
+                                    path,
+                                    "model.safetensors.index.json",
+                                )?
+                            } else {
+                                //a single weight file case
+                                let mut safetensors_files = Vec::<std::path::PathBuf>::new();
+                                safetensors_files
+                                    .insert(0, Path::new(path).join("model.safetensors"));
+                                safetensors_files
+                            },
+                            generation_config_filename: if Path::new(path)
+                                .join("generation_config.json")
+                                .exists()
+                            {
+                                Path::new(path).join("generation_config.json")
+                            } else {
+                                "".into()
+                            },
+                        },
+                        false,
+                    )
+                }
+            }
             //model in a quantized file (gguf/ggml format)
             (None, path, Some(file)) => (
                 ModelPaths {

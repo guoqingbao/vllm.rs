@@ -296,7 +296,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 
 | 参数          | 描述                                     |       |
 | ----------- | -------------------------------------- | ----- |
-| `--w`       | 模型路径（Safetensor 目录或 GGUF 文件）           |       |
+| `--m`       | Hugginface模型ID (用于下载)               |    |
+| `--w`       | Safetensor模型路径           |       |
+| `--f`       | 当指定Model ID时为GGUF文件名，或未指定时为GGUF本地文件路径                 |    |
 | `--d`       | 设备 ID，例如 `--d 0`                       |       |
 | `--max-num-seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |       |
 | `--max-tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |

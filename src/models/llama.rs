@@ -4,7 +4,7 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm};
-use crate::models::layers::rotary_emb::RotaryEmbedding;
+use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
@@ -28,7 +28,7 @@ impl LLaMaDecoderLayer {
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
-        rotary_emb: Arc<RotaryEmbedding>,
+        rotary_emb: Arc<ScalingRotaryEmbedding>,
         config: &Config,
         dtype: DType,
     ) -> Result<Self> {
@@ -161,7 +161,7 @@ impl LLaMaForCausalLM {
             dtype,
         )?;
 
-        let rotary_emb = Arc::new(RotaryEmbedding::new(
+        let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
             dtype,
             config,
             &vb.device(),

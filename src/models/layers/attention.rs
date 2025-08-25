@@ -2,7 +2,7 @@ use crate::models::layers::distributed::{
     Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::rms_norm;
-use crate::models::layers::rotary_emb::RotaryEmbedding;
+use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
@@ -23,7 +23,7 @@ pub struct Attention {
     num_kv_heads: usize,
     head_dim: usize,
     attn: PagedAttention,
-    rotary_emb: Arc<RotaryEmbedding>,
+    rotary_emb: Arc<ScalingRotaryEmbedding>,
     dtype: DType,
 }
 
@@ -31,7 +31,7 @@ impl Attention {
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
-        rotary_emb: Arc<RotaryEmbedding>,
+        rotary_emb: Arc<ScalingRotaryEmbedding>,
         config: &Config,
         dtype: DType,
     ) -> Result<Self> {

@@ -1,9 +1,11 @@
 // src/utils/config.rs
+use either::Either;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -97,6 +99,12 @@ pub struct MoEConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ScalingValue(#[serde(with = "either::serde_untagged")] pub Either<f64, Vec<f64>>);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RopeScaling(#[serde(with = "either::serde_untagged")] pub Either<ScalingValue, String>);
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
     pub architectures: Vec<String>,
     pub head_dim: Option<usize>,
@@ -119,6 +127,7 @@ pub struct Config {
     pub max_window_layers: Option<usize>,
     pub partial_rotary_factor: Option<f32>,
     pub hidden_act: candle_nn::Activation,
+    pub rope_scaling: Option<HashMap<String, RopeScaling>>,
     pub quant: Option<String>,
     pub moe_cfg: Option<MoEConfig>,
 }
