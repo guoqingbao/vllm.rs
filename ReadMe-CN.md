@@ -117,14 +117,21 @@ pip install fastapi uvicorn
 # 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-# 或多GPU推理
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-# 或多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
+
+# 本地GGUF模型文件 (`--f`)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+
+# 使用Model ID加载 (`--m`: model_id, `--f`: GGUF文件名)
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+
+# 多GPU推理 (`--d`)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+
+# Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
-# 或多GPU推理+上下文缓存 (缓存上下文，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置)
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 64000 --max-num-seqs 8 
+# GGUF模型多GPU推理+上下文缓存 (缓存上下文，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置)
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 
 ```
 
 ### 🤖 客户端使用上下文缓存特性
@@ -137,7 +144,7 @@ import openai
 use_context_cache = True #是否启用上下文缓存特性
 # 为每一个新对话创建一个session_id，并在此对话中一直使用（当客户端主动中断对话时，此对话缓存会被立即清理）
 session_id = str(uuid.uuid4())
-extra_body = {"top_k": top_k, "thinking": thinking, "session_id": session_id if use_context_cache else None }
+extra_body = {"session_id": session_id if use_context_cache else None }
 
 # vllm.rs服务地址
 openai.api_key = "EMPTY"
@@ -160,7 +167,11 @@ response = openai.chat.completions.create(
 
 ```bash
 # 交互式聊天
-python -m vllm_rs.chat --i --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+# 使用model id加载
+python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
+# 本地GGUF文件
+python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # 指定设备2 (设备序号为1，`--d 1`)
 python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
@@ -169,10 +180,10 @@ python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # 启用上下文缓存（快速响应请求）
-python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --context-cache
+python -m vllm_rs.chat --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # 批量同步示例
-python -m vllm_rs.completion --w /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
 
 # 批量同步示例 (多GPU)
 python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
@@ -181,7 +192,7 @@ python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-mod
 ### 🐍 Python API
 ```python
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(model_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature=0.6, max_tokens=256)
 prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
@@ -246,23 +257,23 @@ pip install fastapi uvicorn
 ## 📘 使用方法（Rust）
 ### 🤖✨ Rust CLI 模式
 
-使用 `--i` 启用交互模式，`--w` 指定模型路径：
+使用 `--i` 启用交互模式，`--w` 指定Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
 ```bash
 # CUDA（短上下文）
-cargo run --release --features cuda -- --i --w /path/qwq-32b-q4_k_m.gguf
+cargo run --release --features cuda -- --i --f /path/qwq-32b-q4_k_m.gguf
 
 # 使用第三个设备 (设备序号2，`--d 2`)
-cargo run --release --features cuda -- --i --d 2 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+cargo run --release --features cuda -- --i --d 2 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # CUDA + Flash Attention（超长上下文，如 256k tokens）
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
 
 # CUDA + Context Cache
-./run.sh --release --features cuda,nccl,flash-context -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+./run.sh --release --features cuda,nccl,flash-context -- --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # macOS（Metal）
-cargo run --release --features metal -- --i --w /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 ```
 
 Safetensor 模型（未量化）
@@ -330,10 +341,12 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] CUDA Graph
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
-* [x] 多卡并行推理
+* [x] 多卡并行推理（未量化Safetensors模型、GGUF量化模型）
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
 * [x] 上下文缓存 (当`flash-context`特性启用时生效)
+* [x] 从Hugginface Hub下载并加载模型
+* [ ] 从ModelScope下载并加载 (中国大陆地区)
 * [ ] 支持更多模型类型
 
 

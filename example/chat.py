@@ -16,7 +16,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="vllm.rs Python CLI")
     parser.add_argument("--max-num-seqs", type=int, default=1)
     parser.add_argument("--max-model-len", type=int, default=None)
-    parser.add_argument("--w", type=str, required=True)
+    parser.add_argument("--m", help="huggingface model id", type=str, default=None)
+    parser.add_argument("--w", help="safetensor weight path", type=str, default=None)
+    parser.add_argument("--f", help="gguf file path or gguf file name when model_id is given", type=str, default=None)
     parser.add_argument("--dtype", type=str,
                         choices=["f16", "bf16", "f32"], default="bf16")
     parser.add_argument("--d", type=str, default="0")
@@ -51,8 +53,11 @@ def build_engine_config(args, num_of_prompts):
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.penalty != None:
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.penalty)
 
+    assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
     return EngineConfig(
-        model_path=args.w,
+        model_id=args.m,
+        weight_path=args.w,
+        weight_file=args.f,
         max_num_seqs=args.max_num_seqs,
         max_model_len=max_model_len,
         isq=args.isq,

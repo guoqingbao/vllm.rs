@@ -169,9 +169,15 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_path, max_num_seqs=Some(32), max_model_len=Some(1024), isq=None, num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None))]
+    #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None, hf_token=None, hf_token_path=None,
+        max_num_seqs=Some(32), max_model_len=Some(1024), isq=None,
+        num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None))]
     pub fn new(
-        model_path: String,
+        model_id: Option<String>,
+        weight_path: Option<String>,
+        weight_file: Option<String>,
+        hf_token: Option<String>,
+        hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
         isq: Option<String>,
@@ -184,14 +190,16 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
+        // #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        let block_size = 32;
+        // #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
+        // let block_size = 32;
         Self {
-            model_path,
-            tokenizer: None,
-            tokenizer_config: None,
+            model_id,
+            weight_path,
+            weight_file,
+            hf_token,
+            hf_token_path,
             num_blocks: 128, //placeholder
             block_size,
             max_num_seqs: max_num_seqs.unwrap_or(32),

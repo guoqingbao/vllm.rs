@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2021"
 default-run = "vllm-rs"
 
@@ -42,6 +42,7 @@ tqdm = "0.8.0"
 futures = "0.3.31"
 crossbeam = "0.8.4"
 ctrlc = "3.4.7"
+dirs = "5.0.1"
 uuid = { version = "1.5.0", features = ["v4"] }
 
 [lib]

@@ -1,6 +1,7 @@
 use crate::core::sequence::{DecodeSequence, Sequence};
 use crate::models::layers::distributed::Id;
 use crate::utils::config::{Config, EngineConfig, ModelType};
+use crate::utils::downloader::ModelPaths;
 use candle_core::DType;
 use interprocess::local_socket::Stream as LocalStream;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ pub struct RunnerInitRequest {
     pub model_type: ModelType,
     pub config: Config,
     pub econfig: EngineConfig,
+    pub model_pathes: ModelPaths,
+    pub is_gguf: bool,
     pub dtype: SerializableDType,
     pub is_rope_i: bool,
     #[cfg(feature = "nccl")]

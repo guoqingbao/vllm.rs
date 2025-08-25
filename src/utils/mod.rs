@@ -1,5 +1,6 @@
 pub mod chat_template;
 pub mod config;
+pub mod downloader;
 pub mod gguf_helper;
 pub mod gguf_varbuilder;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -7,6 +8,8 @@ pub mod graph;
 pub mod logits_processor;
 pub mod progress;
 use crate::utils::config::MoEConfig;
+use crate::utils::config::ModelType;
+use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
@@ -229,9 +232,23 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
 pub fn init_config_tokenizer(
     econfig: &EngineConfig,
-) -> Result<(Config, TokenizerConfig, Tokenizer, Option<GenerationConfig>)> {
-    let config_path = format!("{}/config.json", econfig.model_path);
-    if Path::new(&config_path).exists() {
+) -> Result<(
+    ModelPaths,
+    bool,
+    Config,
+    TokenizerConfig,
+    Tokenizer,
+    Option<GenerationConfig>,
+)> {
+    let loader = crate::utils::downloader::Downloader::new(
+        econfig.model_id.clone(),
+        econfig.weight_path.clone(),
+        econfig.weight_file.clone(),
+    );
+    let (model_pathes, is_gguf) =
+        loader.prepare_model_weights(econfig.hf_token.clone(), econfig.hf_token_path.clone())?;
+    if !is_gguf {
+        let config_path = model_pathes.get_config_filename();
         let mut config: Config =
             serde_json::from_slice(&std::fs::read(&config_path).map_err(candle_core::Error::wrap)?)
                 .map_err(candle_core::Error::wrap)?;
@@ -243,7 +260,7 @@ pub fn init_config_tokenizer(
             config.moe_cfg = Some(moe_cfg);
         }
         config.quant = econfig.isq.clone();
-        let tokenizer_config_path = format!("{}/tokenizer_config.json", econfig.model_path);
+        let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
         let config_tokenizer: TokenizerConfig = {
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
                 Ok(f) => serde_json::from_slice(&f).map_err(candle_core::Error::wrap)?,
@@ -262,16 +279,12 @@ pub fn init_config_tokenizer(
                 }
             }
         };
-        let tokenizer_file = if econfig.tokenizer.is_some() {
-            econfig.tokenizer.clone().unwrap()
-        } else {
-            econfig.model_path.clone() + "/tokenizer.json"
-        };
+        let tokenizer_file = model_pathes.get_tokenizer_filename();
 
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
 
-        let generation_config_path = format!("{}/generation_config.json", econfig.model_path);
-        let generation_cfg = if generation_config_path != ""
+        let generation_config_path = model_pathes.get_generation_config_filename();
+        let generation_cfg = if generation_config_path.display().to_string() != ""
             && Path::new(&generation_config_path).exists()
         {
             let str_cfg: Option<String> = std::fs::read_to_string(generation_config_path).ok();
@@ -281,8 +294,17 @@ pub fn init_config_tokenizer(
             None
         };
 
-        Ok((config, config_tokenizer, tokenizer, generation_cfg))
-    } else if Path::new(&econfig.model_path).exists() {
+        Ok((
+            model_pathes,
+            is_gguf,
+            config,
+            config_tokenizer,
+            tokenizer,
+            generation_cfg,
+        ))
+    } else if !model_pathes.get_weight_filenames().is_empty()
+        && model_pathes.get_weight_filenames()[0].exists()
+    {
         assert!(econfig.isq.is_none(), "GGUF model does not support ISQ!");
         let GGUFInfo {
             tokenizer,
@@ -292,7 +314,7 @@ pub fn init_config_tokenizer(
             context_length,
             chat_template,
         } = {
-            let file = std::fs::File::open(&econfig.model_path.clone()).unwrap();
+            let file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let mut readers = vec![file];
             let mut readers = readers.iter_mut().collect::<Vec<_>>();
             let content = crate::utils::gguf_helper::Content::from_readers(&mut readers).unwrap();
@@ -300,7 +322,7 @@ pub fn init_config_tokenizer(
         };
 
         let config = {
-            let mut file = std::fs::File::open(econfig.model_path.clone()).unwrap();
+            let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
             config_from_gguf(&content, &mut file)?
         };
@@ -313,7 +335,14 @@ pub fn init_config_tokenizer(
             eos_token: eos,
         };
 
-        Ok((config, config_tokenizer, tokenizer, None))
+        Ok((
+            model_pathes,
+            is_gguf,
+            config,
+            config_tokenizer,
+            tokenizer,
+            None,
+        ))
     } else {
         candle_core::bail!("Model file(s) not found!");
     }
@@ -397,4 +426,84 @@ pub fn spawn_runner(
             .map_err(|e| e.into())
             .map(|_child| ())
     }
+}
+
+pub fn get_arch_rope(
+    tokenizer: &Tokenizer,
+    generation_cfg: &mut Option<GenerationConfig>,
+    architectures: String,
+) -> Result<(ModelType, String, bool)> {
+    let rope_key_map: HashMap<&str, bool> = [
+        ("Qwen2ForCausalLM", false),
+        ("Qwen3ForCausalLM", false),
+        ("MistralForCausalLM", false),
+        ("LlamaForCausalLM", false),
+        ("Glm4ForCausalLM", true),
+        ("glm4", true),
+        ("qwen2", false),
+        ("qwen3", false),
+        ("llama", true),
+        ("mistral", true),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
+    let arch = architectures.as_str();
+    let (model_type, default_chat_template) = match arch {
+        "Qwen2ForCausalLM"
+        | "Qwen2ForConditionalGeneration"
+        | "Qwen3ForCausalLM"
+        | "Qwen3ForConditionalGeneration"
+        | "qwen2"
+        | "qwen3" => (
+            ModelType::Qwen3,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "qwen3moe" | "Qwen3MoeForCausalLM" => (
+            ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "LlamaForCausalLM"
+        | "MistralForCausalLM"
+        | "LlamaForConditionalGeneration"
+        | "llama"
+        | "mistral"
+        | "llama2"
+        | "llama3" => {
+            if let Some(_) = tokenizer
+                .get_vocab(true)
+                .get("<|start_header_id|>")
+                .copied()
+            {
+                //llama3
+                (
+                    ModelType::LLaMa,
+                    "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+                )
+            } else {
+                //llama2
+                (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
+            }
+        }
+        "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => {
+            if let Some(ref mut gen_cfg) = generation_cfg {
+                if gen_cfg.penalty.is_none() {
+                    gen_cfg.penalty = Some(1.2); //default repetition penalty for glm4 models
+                }
+            }
+            (
+                ModelType::GLM4,
+                "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+            )
+        }
+        _ => candle_core::bail!("Unsupported architecture: {}", architectures),
+    };
+
+    let is_rope_i = if rope_key_map.contains_key(arch) {
+        rope_key_map[arch]
+    } else {
+        false
+    };
+    Ok((model_type, default_chat_template, is_rope_i))
 }

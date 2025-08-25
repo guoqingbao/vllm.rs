@@ -126,9 +126,11 @@ pub struct Config {
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
-    pub model_path: String,
-    pub tokenizer: Option<String>,
-    pub tokenizer_config: Option<String>,
+    pub model_id: Option<String>,
+    pub weight_path: Option<String>,
+    pub weight_file: Option<String>,
+    pub hf_token: Option<String>,
+    pub hf_token_path: Option<String>,
     pub num_blocks: usize,
     pub block_size: usize,
     pub max_num_seqs: usize,
@@ -147,11 +149,15 @@ pub struct EngineConfig {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
     #[pyo3(get, set)]
-    pub model_path: String,
+    pub model_id: Option<String>,
     #[pyo3(get, set)]
-    pub tokenizer: Option<String>,
+    pub weight_path: Option<String>,
     #[pyo3(get, set)]
-    pub tokenizer_config: Option<String>,
+    pub weight_file: Option<String>,
+    #[pyo3(get, set)]
+    pub hf_token: Option<String>,
+    #[pyo3(get, set)]
+    pub hf_token_path: Option<String>,
     #[pyo3(get, set)]
     pub num_blocks: usize,
     pub block_size: usize,
@@ -176,7 +182,11 @@ pub struct EngineConfig {
 #[cfg(not(feature = "python"))]
 impl EngineConfig {
     pub fn new(
-        model_path: String,
+        model_id: Option<String>,
+        weight_path: Option<String>,
+        weight_file: Option<String>,
+        hf_token: Option<String>,
+        hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
         isq: Option<String>,
@@ -190,15 +200,17 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
+        // #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        let block_size = 32;
+        // #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
+        // let block_size = 32;
 
         Self {
-            model_path,
-            tokenizer: None,
-            tokenizer_config: None,
+            model_id,
+            weight_path,
+            weight_file,
+            hf_token,
+            hf_token_path,
             num_blocks: 128, //placeholder
             block_size,
             max_num_seqs: max_num_seqs.unwrap_or(32),

@@ -8,7 +8,7 @@ use crate::models::layers::distributed::{Comm, Id};
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
+use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
@@ -84,7 +84,7 @@ pub struct LLMEngine {
 impl LLMEngine {
     #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
-        let (config, config_tokenizer, tokenizer, mut generation_cfg) =
+        let (model_pathes, is_gguf, config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
         log_info!("{:?}\n", config);
 
@@ -115,79 +115,11 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
 
-        let rope_key_map: HashMap<&str, bool> = [
-            ("Qwen2ForCausalLM", false),
-            ("Qwen3ForCausalLM", false),
-            ("MistralForCausalLM", false),
-            ("LlamaForCausalLM", false),
-            ("Glm4ForCausalLM", true),
-            ("glm4", true),
-            ("qwen2", false),
-            ("qwen3", false),
-            ("llama", true),
-            ("mistral", true),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-
-        let arch = config.architectures[0].as_str();
-        let (model_type, default_chat_template) = match arch {
-            "Qwen2ForCausalLM"
-            | "Qwen2ForConditionalGeneration"
-            | "Qwen3ForCausalLM"
-            | "Qwen3ForConditionalGeneration"
-            | "qwen2"
-            | "qwen3" => (
-                ModelType::Qwen3,
-                "<|im_start|>user\n {} <|im_end|>".to_string(),
-            ),
-            "qwen3moe" | "Qwen3MoeForCausalLM" => (
-                ModelType::Qwen3MoE,
-                "<|im_start|>user\n {} <|im_end|>".to_string(),
-            ),
-            "LlamaForCausalLM"
-            | "MistralForCausalLM"
-            | "LlamaForConditionalGeneration"
-            | "llama"
-            | "mistral"
-            | "llama2"
-            | "llama3" => {
-                if let Some(_) = tokenizer
-                    .get_vocab(true)
-                    .get("<|start_header_id|>")
-                    .copied()
-                {
-                    //llama3
-                    (
-                        ModelType::LLaMa,
-                        "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
-                    )
-                } else {
-                    //llama2
-                    (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
-                }
-            }
-            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => {
-                if let Some(ref mut gen_cfg) = generation_cfg {
-                    if gen_cfg.penalty.is_none() {
-                        gen_cfg.penalty = Some(1.2); //default repetition penalty for glm4 models
-                    }
-                }
-                (
-                    ModelType::GLM4,
-                    "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
-                )
-            }
-            _ => candle_core::bail!("Unsupported architecture: {}", config.architectures[0]),
-        };
-
-        let is_rope_i = if rope_key_map.contains_key(arch) {
-            rope_key_map[arch]
-        } else {
-            false
-        };
-
+        let (model_type, default_chat_template, is_rope_i) = crate::utils::get_arch_rope(
+            &tokenizer,
+            &mut generation_cfg,
+            config.architectures[0].clone(),
+        )?;
         log_info!("Use ROPE interleaved {is_rope_i}");
 
         match (&generation_cfg, &mut econfig.generation_cfg) {
@@ -243,13 +175,19 @@ impl LLMEngine {
             "Multi-rank inference is only available when `nccl` feature is enabled!"
         );
 
-        let runners = if device_ids.len() == 1 {
+        #[cfg(all(feature = "nccl", feature = "flash-decoding"))]
+        let use_runner = true;
+
+        #[cfg(not(all(feature = "nccl", feature = "flash-decoding")))]
+        let use_runner = num_shards > 1;
+
+        let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
             let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
                 Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
             let handle = progress_worker(1, config.num_hidden_layers, &reporter);
-            let vb = VarBuilderX::new(&econfig.model_path, dtype, &device)?;
+            let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -357,6 +295,8 @@ impl LLMEngine {
                         model_type,
                         config,
                         econfig,
+                        model_pathes: model_pathes.clone(),
+                        is_gguf,
                         dtype: dtype.into(),
                         is_rope_i,
                         #[cfg(feature = "nccl")]
