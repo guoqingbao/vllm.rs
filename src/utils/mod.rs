@@ -110,33 +110,29 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None => candle_core::bail!("cannot find {s} in metadata"),
         Some(v) => Ok(v),
     };
-    let architecture = md_get("general.architecture")?.to_string()?;
+    let arch = md_get("general.architecture")?.to_string()?;
 
-    let head_count =
-        md_get(format!("{}.attention.head_count", architecture).as_str())?.to_u32()? as usize;
+    let head_count = md_get(format!("{arch}.attention.head_count").as_str())?.to_u32()? as usize;
     let head_count_kv =
-        md_get(format!("{}.attention.head_count_kv", architecture).as_str())?.to_u32()? as usize;
+        md_get(format!("{arch}.attention.head_count_kv").as_str())?.to_u32()? as usize;
 
-    let head_dim = md_get(format!("{}.attention.key_length", architecture).as_str());
+    let head_dim = md_get(format!("{arch}.attention.key_length").as_str());
     let head_dim = if head_dim.is_ok() {
         Some(head_dim.unwrap().to_u32()? as usize)
     } else {
         None
     };
-    let embedding_length =
-        md_get(format!("{}.embedding_length", architecture).as_str())?.to_u32()? as usize;
+    let embedding_length = md_get(format!("{arch}.embedding_length").as_str())?.to_u32()? as usize;
     let feed_forward_length =
-        md_get(format!("{}.feed_forward_length", architecture).as_str())?.to_u32()? as usize;
-    let context_length =
-        md_get(format!("{}.context_length", architecture).as_str())?.to_u32()? as usize;
-    let block_count = md_get(format!("{}.block_count", architecture).as_str())?.to_u32()? as usize;
+        md_get(format!("{arch}.feed_forward_length").as_str())?.to_u32()? as usize;
+    let context_length = md_get(format!("{arch}.context_length").as_str())?.to_u32()? as usize;
+    let block_count = md_get(format!("{arch}.block_count").as_str())?.to_u32()? as usize;
     let rms_norm_eps =
-        md_get(format!("{}.attention.layer_norm_rms_epsilon", architecture).as_str())?.to_f32()?
-            as f64;
-    let rope_freq_base = md_get(format!("{}.rope.freq_base", architecture).as_str())
+        md_get(format!("{arch}.attention.layer_norm_rms_epsilon").as_str())?.to_f32()? as f64;
+    let rope_freq_base = md_get(format!("{arch}.rope.freq_base").as_str())
         .and_then(|m| m.to_f32())
         .unwrap_or(10000f32);
-    let vocab_size = md_get(format!("{}.vocab_size", architecture).as_str());
+    let vocab_size = md_get(format!("{arch}.vocab_size").as_str());
 
     let vocab_size = if vocab_size.is_ok() {
         Some(vocab_size.unwrap().to_u32()? as usize)
@@ -170,12 +166,12 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         EosTokenId::Multiple(vec![])
     };
 
-    let rope_scaling_type = md_get(format!("{}.rope.scaling.type", architecture).as_str());
+    let rope_scaling_type = md_get(format!("{arch}.rope.scaling.type").as_str());
     let rope_scaling = if rope_scaling_type.is_ok() {
         let scaling_type = rope_scaling_type.unwrap().to_string()?;
         crate::log_info!("Rope scaling type: {}", scaling_type);
         let mut scaling_map = HashMap::<String, RopeScaling>::new();
-        let scaling_factor = md_get(format!("{}.rope.scaling.alpha", architecture).as_str());
+        let scaling_factor = md_get(format!("{arch}.rope.scaling.alpha").as_str());
         if scaling_factor.is_ok() {
             scaling_map.insert(
                 "alpha".to_string(),
@@ -184,7 +180,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 )))),
             );
         } else {
-            let factor = md_get(format!("{}.rope.scaling.factor", architecture).as_str());
+            let factor = md_get(format!("{arch}.rope.scaling.factor").as_str());
             if factor.is_ok() {
                 scaling_map.insert(
                     "factor".to_string(),
@@ -195,7 +191,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             }
         };
         let original_max_position_embeddings =
-            md_get(format!("{}.rope.scaling.original_context_length", architecture).as_str());
+            md_get(format!("{arch}.rope.scaling.original_context_length").as_str());
         if original_max_position_embeddings.is_ok() {
             scaling_map.insert(
                 "original_max_position_embeddings".to_string(),
@@ -206,8 +202,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         }
 
         if scaling_type == "llama3" {
-            let low_freq_factor =
-                md_get(format!("{}.rope.scaling.low_freq_factor", architecture).as_str());
+            let low_freq_factor = md_get(format!("{arch}.rope.scaling.low_freq_factor").as_str());
             if low_freq_factor.is_ok() {
                 scaling_map.insert(
                     "low_freq_factor".to_string(),
@@ -216,8 +211,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     )))),
                 );
             }
-            let high_freq_factor =
-                md_get(format!("{}.rope.scaling.high_freq_factor", architecture).as_str());
+            let high_freq_factor = md_get(format!("{arch}.rope.scaling.high_freq_factor").as_str());
             if high_freq_factor.is_ok() {
                 scaling_map.insert(
                     "high_freq_factor".to_string(),
@@ -230,7 +224,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
         if scaling_type == "yarn" {
             let extrapolation_factor =
-                md_get(format!("{}.rope.scaling.extrapolation_factor", architecture).as_str());
+                md_get(format!("{arch}.rope.scaling.extrapolation_factor").as_str());
             if extrapolation_factor.is_ok() {
                 scaling_map.insert(
                     "extrapolation_factor".to_string(),
@@ -245,7 +239,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let attn_factor = md_get(format!("{}.rope.scaling.attn_factor", architecture).as_str());
+            let attn_factor = md_get(format!("{arch}.rope.scaling.attn_factor").as_str());
             if attn_factor.is_ok() {
                 scaling_map.insert(
                     "attn_factor".to_string(),
@@ -260,7 +254,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_fast = md_get(format!("{}.rope.scaling.beta_fast", architecture).as_str());
+            let beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
             if beta_fast.is_ok() {
                 scaling_map.insert(
                     "beta_fast".to_string(),
@@ -275,7 +269,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_slow = md_get(format!("{}.rope.scaling.beta_slow", architecture).as_str());
+            let beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
             if beta_slow.is_ok() {
                 scaling_map.insert(
                     "beta_slow".to_string(),
@@ -305,26 +299,28 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
     let has_output_weight = ct.tensor(reader, "output.weight", &Device::Cpu).is_ok();
 
-    //no partial rotary factor info in gguf file
-    let partial_rot_arch_map: HashMap<String, bool> =
-        [("glm4".to_string(), true)].iter().cloned().collect();
+    let rope_dim = md_get(format!("{arch}.rope.dimension_count").as_str());
+    let partial_rotary_factor = if rope_dim.is_ok() {
+        let rope_dim = rope_dim.unwrap().to_u32()? as usize;
+        if rope_dim != head_dim {
+            Some(rope_dim as f32 / head_dim as f32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
-    let arch = architecture.to_string();
-
-    let mod_cfg = if arch == "qwen3moe" {
+    let mod_cfg = if arch.to_string() == "qwen3moe" {
         Some(MoEConfig {
-            moe_intermediate_size: md_get(
-                format!("{}.expert_feed_forward_length", architecture).as_str(),
-            )?
-            .to_u32()? as usize,
-            num_experts: Some(
-                md_get(format!("{}.expert_count", architecture).as_str())?.to_u32()? as usize,
-            ),
+            moe_intermediate_size: md_get(format!("{arch}.expert_feed_forward_length").as_str())?
+                .to_u32()? as usize,
+            num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
             norm_topk_prob: true,
-            num_experts_per_tok: md_get(format!("{}.expert_used_count", architecture).as_str())?
-                .to_u32()? as usize,
+            num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
+                as usize,
         })
     } else {
         None
@@ -350,11 +346,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
-        partial_rotary_factor: if partial_rot_arch_map.contains_key(&arch) {
-            Some(0.5f32)
-        } else {
-            None
-        },
+        partial_rotary_factor,
         hidden_act: candle_nn::Activation::Silu,
         rope_scaling,
         quant: None,
