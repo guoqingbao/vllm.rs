@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     stream.flush()?;
 
     vllm_rs::log_info!("Runner connected to socket: {}", sock);
-    let msg = receive_local(&mut stream)?;
+    let msg = receive_local(&mut stream, true)?;
     let runner = match msg {
         MessageType::Init(init_req) => {
             vllm_rs::log_info!("Received init request: {:?}", init_req);
@@ -118,7 +118,11 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => eprintln!("Graph capture failed: {:?}", e),
             }
 
-            send_local(&mut vec![stream.try_clone()?], &MessageType::InitAck(true))?;
+            send_local(
+                &mut vec![stream.try_clone()?],
+                &MessageType::InitAck(true),
+                false,
+            )?;
             runner
         }
         _ => {
@@ -128,7 +132,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     loop {
-        match receive_local(&mut stream) {
+        match receive_local(&mut stream, false) {
             Ok(MessageType::Shutdown) => {
                 vllm_rs::log_info!("Runner exit");
                 break;
@@ -141,6 +145,7 @@ fn main() -> anyhow::Result<()> {
                 send_local(
                     &mut vec![stream.try_clone()?],
                     &MessageType::RunResponse(outputs),
+                    false,
                 )?;
             }
             Ok(MessageType::RunDecode((sequences, is_prefill))) => {
@@ -148,6 +153,7 @@ fn main() -> anyhow::Result<()> {
                 send_local(
                     &mut vec![stream.try_clone()?],
                     &MessageType::RunResponse(outputs),
+                    false,
                 )?;
             }
             Ok(MessageType::LoadingProgress(_)) => {

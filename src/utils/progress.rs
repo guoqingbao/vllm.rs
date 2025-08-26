@@ -94,7 +94,7 @@ impl ProgressLike for RemoteProgressReporter {
     fn get_progress(&mut self) -> Vec<(usize, usize)> {
         let mut progress_values = Vec::with_capacity(self.streams.len());
         for mut stream in &mut self.streams {
-            if let Ok(msg) = receive_local(&mut stream) {
+            if let Ok(msg) = receive_local(&mut stream, false) {
                 if let MessageType::LoadingProgress((rank, progress)) = msg {
                     progress_values.push((rank, progress));
                 }
@@ -107,6 +107,7 @@ impl ProgressLike for RemoteProgressReporter {
         let _ = send_local(
             &mut self.streams,
             &MessageType::LoadingProgress((self.rank, p)),
+            false,
         );
     }
 }

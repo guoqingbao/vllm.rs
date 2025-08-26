@@ -100,6 +100,12 @@ impl ScalingRotaryEmbedding {
             .map(|factor| (factor * dim as f32) as usize)
             .unwrap_or(dim);
         if let Some(rope_scaling) = &cfg.rope_scaling {
+            let mut rope_scaling = rope_scaling.clone();
+            if !rope_scaling.contains_key("rope_type") && rope_scaling.contains_key("type") {
+                //for non-standard models that use "type" instead of "rope_type"
+                let value = rope_scaling.remove("type").unwrap();
+                rope_scaling.insert("rope_type".to_string(), value);
+            }
             if let RopeScaling(Either::Right(rope_type)) = &rope_scaling["rope_type"] {
                 let rope_result = if rope_type == "linear" {
                     if let RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))) =
@@ -260,7 +266,7 @@ impl ScalingRotaryEmbedding {
                         );
                     }
                     if !ropescaling.contains_key("attn_factor") {
-                        ropescaling.insert( 
+                        ropescaling.insert(
                             "attn_factor".to_string(),
                             RopeScaling(Either::Left(ScalingValue(Either::Left(1.0)))),
                         );

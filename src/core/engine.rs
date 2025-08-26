@@ -303,11 +303,11 @@ impl LLMEngine {
                         nccl_id: crate::runner::NcclId(nccl_id.clone()),
                     });
 
-                    send_local(&mut vec![stream.try_clone()?], &init_msg)?;
+                    send_local(&mut vec![stream.try_clone()?], &init_msg, true)?;
 
                     crate::log_info!("Waiting runner {} response...", rank);
 
-                    if let MessageType::InitAck(ack) = receive_local(&mut stream)? {
+                    if let MessageType::InitAck(ack) = receive_local(&mut stream, false)? {
                         if !ack {
                             candle_core::bail!("Runner {} failed to initialize", rank);
                         }
@@ -514,8 +514,8 @@ impl LLMEngine {
                         .into_par_iter()
                         .map(|mut stream| {
                             let msg = request.clone();
-                            send_local(&mut vec![stream.try_clone()?], &msg)?;
-                            let response = receive_local(&mut stream)?;
+                            send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                            let response = receive_local(&mut stream, false)?;
 
                             match response {
                                 MessageType::RunResponse(output_ids) => Ok(output_ids),

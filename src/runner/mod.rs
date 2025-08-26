@@ -2,6 +2,8 @@ use crate::core::sequence::{DecodeSequence, Sequence};
 use crate::models::layers::distributed::Id;
 use crate::utils::config::{Config, EngineConfig, ModelType};
 use crate::utils::downloader::ModelPaths;
+#[cfg(feature = "nccl")]
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use candle_core::DType;
 use interprocess::local_socket::Stream as LocalStream;
 use serde::{Deserialize, Serialize};
@@ -31,13 +33,25 @@ impl Serialize for NcclId {
     where
         S: serde::Serializer,
     {
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(
-                self.0.internal().as_ptr() as *const u8,
-                self.0.internal().len(),
-            )
-        };
-        serializer.serialize_bytes(bytes)
+        // Detect if JSON serializer
+        if serializer.is_human_readable() {
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    self.0.internal().as_ptr() as *const u8,
+                    self.0.internal().len(),
+                )
+            };
+            let encoded = STANDARD_NO_PAD.encode(bytes);
+            serializer.serialize_str(&encoded)
+        } else {
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    self.0.internal().as_ptr() as *const u8,
+                    self.0.internal().len(),
+                )
+            };
+            serializer.serialize_bytes(bytes)
+        }
     }
 }
 
@@ -47,37 +61,48 @@ impl<'de> Deserialize<'de> for NcclId {
     where
         D: serde::Deserializer<'de>,
     {
-        struct Visitor;
-
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = NcclId;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "128-byte NCCL ID")
+        if deserializer.is_human_readable() {
+            let s: &str = Deserialize::deserialize(deserializer)?;
+            let bytes = STANDARD_NO_PAD
+                .decode(s)
+                .map_err(serde::de::Error::custom)?;
+            if bytes.len() != 128 {
+                return Err(serde::de::Error::custom(format!(
+                    "Expected 128 bytes but got {}",
+                    bytes.len()
+                )));
             }
+            let mut arr = [0i8; 128];
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), arr.as_mut_ptr() as *mut u8, 128);
+            }
+            Ok(NcclId(Id::uninit(arr)))
+        } else {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = NcclId;
 
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: serde::de::Error,
-            {
-                // Check length before converting:
-                if v.len() != 128 {
-                    return Err(E::custom(format!("Expected 128 bytes but got {}", v.len())));
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    write!(f, "128-byte NCCL ID")
                 }
 
-                // Create uninitialized array (or zeroed)
-                let mut arr = [0i8; 128];
-
-                // Copy and reinterpret u8 bytes as i8
-                unsafe {
-                    std::ptr::copy_nonoverlapping(v.as_ptr(), arr.as_mut_ptr() as *mut u8, 128);
+                fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+                where
+                    E: serde::de::Error,
+                {
+                    if v.len() != 128 {
+                        return Err(E::custom(format!("Expected 128 bytes but got {}", v.len())));
+                    }
+                    let mut arr = [0i8; 128];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(v.as_ptr(), arr.as_mut_ptr() as *mut u8, 128);
+                    }
+                    Ok(NcclId(Id::uninit(arr)))
                 }
-                let id = Id::uninit(arr);
-                Ok(NcclId(id))
             }
+
+            deserializer.deserialize_bytes(Visitor)
         }
-
-        deserializer.deserialize_bytes(Visitor)
     }
 }
 
@@ -153,8 +178,17 @@ pub enum MessageType {
 }
 
 //inter-node communication
-pub fn send_local(streams: &mut Vec<LocalStream>, message: &MessageType) -> std::io::Result<()> {
-    let serialized = bincode::serialize(message).expect("Serialization failed");
+pub fn send_local(
+    streams: &mut Vec<LocalStream>,
+    message: &MessageType,
+    use_json: bool,
+) -> std::io::Result<()> {
+    let serialized = if use_json {
+        serde_json::to_vec(message).expect("JSON serialization failed")
+    } else {
+        bincode::serialize(message).expect("Bincode serialization failed")
+    };
+
     for stream in streams.iter_mut() {
         stream.write_all(&(serialized.len() as u32).to_le_bytes())?;
         stream.write_all(&serialized)?;
@@ -173,15 +207,20 @@ pub fn send_local(streams: &mut Vec<LocalStream>, message: &MessageType) -> std:
     Ok(())
 }
 
-//inter-node communication
-pub fn receive_local(stream: &mut LocalStream) -> std::io::Result<MessageType> {
+pub fn receive_local(stream: &mut LocalStream, use_json: bool) -> std::io::Result<MessageType> {
     let mut length_buf = [0u8; 4];
     stream.read_exact(&mut length_buf)?;
     let length = u32::from_le_bytes(length_buf) as usize;
 
     let mut serialized = vec![0u8; length];
     stream.read_exact(&mut serialized)?;
-    let message: MessageType = bincode::deserialize(&serialized).expect("Deserialization failed");
+
+    let message: MessageType = if use_json {
+        serde_json::from_slice(&serialized).expect("JSON deserialization failed")
+    } else {
+        bincode::deserialize(&serialized).expect("Bincode deserialization failed")
+    };
+
     // Send acknowledgment
     stream.write_all(&[1])?;
     stream.flush()?;
