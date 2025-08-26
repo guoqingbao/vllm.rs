@@ -265,7 +265,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             } else {
                 scaling_map.insert(
                     "beta_fast".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(1.0f64)))),
+                    RopeScaling(Either::Left(ScalingValue(Either::Left(32.0f64)))),
                 );
             }
 
