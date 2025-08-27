@@ -232,11 +232,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                         extrapolation_factor.unwrap().to_f32()? as f64,
                     )))),
                 );
-            } else {
-                scaling_map.insert(
-                    "extrapolation_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(1.0f64)))),
-                );
             }
 
             let attn_factor = md_get(format!("{arch}.rope.scaling.attn_factor").as_str());
@@ -246,11 +241,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     RopeScaling(Either::Left(ScalingValue(Either::Left(
                         attn_factor.unwrap().to_f32()? as f64,
                     )))),
-                );
-            } else {
-                scaling_map.insert(
-                    "attn_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(1.0f64)))),
                 );
             }
 
@@ -262,11 +252,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                         beta_fast.unwrap().to_f32()? as f64,
                     )))),
                 );
-            } else {
-                scaling_map.insert(
-                    "beta_fast".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(32.0f64)))),
-                );
             }
 
             let beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
@@ -276,11 +261,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     RopeScaling(Either::Left(ScalingValue(Either::Left(
                         beta_slow.unwrap().to_f32()? as f64,
                     )))),
-                );
-            } else {
-                scaling_map.insert(
-                    "beta_slow".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(1.0f64)))),
                 );
             }
         }

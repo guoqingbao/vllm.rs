@@ -106,15 +106,14 @@ impl ScalingRotaryEmbedding {
                 let value = rope_scaling.remove("type").unwrap();
                 rope_scaling.insert("rope_type".to_string(), value);
             }
-
-            let original_max_position_embeddings = if let RopeScaling(Either::Left(ScalingValue(
-                Either::Left(original_max_position_embeddings),
+            let original_max_position_embeddings = if let Some(RopeScaling(Either::Left(
+                ScalingValue(Either::Left(original_max_position_embeddings)),
             ))) =
-                &rope_scaling["original_max_position_embeddings"]
+                rope_scaling.get("original_max_position_embeddings")
             {
                 *original_max_position_embeddings
-            } else if let RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))) =
-                &rope_scaling["factor"]
+            } else if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))) =
+                rope_scaling.get("factor")
             {
                 //for missing original_max_position_embeddings, we assume the original was max_position_embeddings / factor
                 cfg.max_position_embeddings as f64 / *factor
@@ -124,22 +123,24 @@ impl ScalingRotaryEmbedding {
                 );
             };
 
-            if let RopeScaling(Either::Right(rope_type)) = &rope_scaling["rope_type"] {
+            if let Some(RopeScaling(Either::Right(rope_type))) = rope_scaling.get("rope_type") {
                 let rope_result = if rope_type == "linear" {
-                    if let RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))) =
-                        &rope_scaling["factor"]
+                    if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))) =
+                        rope_scaling.get("factor")
                     {
                         let inv_freq: Vec<_> =
                             calculate_default_inv_freq(cfg.rope_theta, rotary_dim);
                         let inv_freq = Tensor::new(inv_freq.as_slice(), dev)?;
                         let idx_theta = (Tensor::arange(
                             0,
-                            (original_max_position_embeddings * *factor) as u32,
+                            (original_max_position_embeddings as f64 * *factor) as u32,
                             &dev,
                         )?
                         .to_dtype(DType::F32)?
-                        .reshape(((original_max_position_embeddings * *factor) as usize, 1))?
-                            / (*factor as f64))?
+                        .reshape((
+                            (original_max_position_embeddings as f64 * *factor) as usize,
+                            1,
+                        ))? / (*factor as f64))?
                             .matmul(&inv_freq.reshape((1, inv_freq.elem_count()))?)?;
                         let cos = idx_theta.cos()?.to_dtype(dtype)?;
                         let sin = idx_theta.sin()?.to_dtype(dtype)?;
@@ -158,14 +159,18 @@ impl ScalingRotaryEmbedding {
                     }
                 } else if rope_type == "llama3" {
                     match (
-                        &rope_scaling["factor"],
-                        &rope_scaling["low_freq_factor"],
-                        &rope_scaling["high_freq_factor"],
+                        rope_scaling.get("factor"),
+                        rope_scaling.get("low_freq_factor"),
+                        rope_scaling.get("high_freq_factor"),
                     ) {
                         (
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(low_freq_factor)))),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(high_freq_factor)))),
+                            Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))),
+                            Some(RopeScaling(Either::Left(ScalingValue(Either::Left(
+                                low_freq_factor,
+                            ))))),
+                            Some(RopeScaling(Either::Left(ScalingValue(Either::Left(
+                                high_freq_factor,
+                            ))))),
                         ) => {
                             let low_freq_wavelen =
                                 (original_max_position_embeddings / low_freq_factor) as f32;
@@ -209,28 +214,22 @@ impl ScalingRotaryEmbedding {
                             })
                         }
                         _ => {
-                            candle_core::bail!("Llama3 rope_type requires factor, low_freq_factor, high_freq_factor and original_max_position_embeddings to be set");
+                            candle_core::bail!("Llama3 rope_type requires factor, low_freq_factor, high_freq_factor to be set");
                         }
                     }
                 } else if rope_type == "default" {
                     Self(RotaryEmbedding::new(dtype, cfg, dev, is_rope_i)?)
                 } else if rope_type == "dynamic" {
-                    let scaling_factor = if rope_scaling.contains_key("alpha") {
-                        if let RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))) =
-                            &rope_scaling["alpha"]
-                        {
-                            *factor as f32
-                        } else {
-                            candle_core::bail!("Dynamic rope_type requires alpha to be set")
-                        }
-                    } else if rope_scaling.contains_key("factor") {
-                        if let RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))) =
-                            &rope_scaling["factor"]
-                        {
-                            *factor as f32
-                        } else {
-                            candle_core::bail!("Dynamic rope_type requires factor to be set")
-                        }
+                    let scaling_factor = if let Some(RopeScaling(Either::Left(ScalingValue(
+                        Either::Left(factor),
+                    )))) = rope_scaling.get("alpha")
+                    {
+                        *factor as f64
+                    } else if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(
+                        factor,
+                    ))))) = rope_scaling.get("factor")
+                    {
+                        *factor as f64
                     } else {
                         candle_core::bail!(
                             "Dynamic rope_type requires either alpha or factor to be set"
@@ -243,12 +242,11 @@ impl ScalingRotaryEmbedding {
                             .powf(rotary_dim as f64 / (rotary_dim - 2) as f64);
                         (rope_theta, max_len)
                     } else {
-                        let max_len =
-                            (original_max_position_embeddings as f32 * scaling_factor) as u32;
+                        let max_len = (original_max_position_embeddings * scaling_factor) as u32;
                         let rope_theta = (cfg.rope_theta
-                            * ((scaling_factor as f64 * max_len as f64
+                            * ((scaling_factor * max_len as f64
                                 / original_max_position_embeddings)
-                                - (scaling_factor as f64 - 1f64)))
+                                - (scaling_factor - 1f64)))
                             .powf(rotary_dim as f64 / (rotary_dim - 2) as f64);
                         (rope_theta, max_len)
                     };
@@ -273,38 +271,16 @@ impl ScalingRotaryEmbedding {
                         },
                     })
                 } else if rope_type == "yarn" {
-                    let mut ropescaling = rope_scaling.clone();
-                    if !ropescaling.contains_key("extrapolation_factor") {
-                        ropescaling.insert(
-                            "extrapolation_factor".to_string(),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(1.0)))),
-                        );
-                    }
-                    if !ropescaling.contains_key("attn_factor") {
-                        ropescaling.insert(
-                            "attn_factor".to_string(),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(1.0)))),
-                        );
-                    }
-                    if !ropescaling.contains_key("beta_fast") {
-                        ropescaling.insert(
-                            "beta_fast".to_string(),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(32.0)))),
-                        );
-                    }
-                    if !ropescaling.contains_key("beta_slow") {
-                        ropescaling.insert(
-                            "beta_slow".to_string(),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(1.0)))),
-                        );
-                    }
-
+                    let default_one = RopeScaling(Either::Left(ScalingValue(Either::Left(1.0))));
+                    let default_fast = RopeScaling(Either::Left(ScalingValue(Either::Left(32.0))));
                     match (
-                        &ropescaling["extrapolation_factor"],
-                        &ropescaling["attn_factor"],
-                        &ropescaling["beta_fast"],
-                        &ropescaling["beta_slow"],
-                        &ropescaling["factor"],
+                        rope_scaling
+                            .get("extrapolation_factor")
+                            .unwrap_or(&default_one),
+                        rope_scaling.get("attn_factor").unwrap_or(&default_one),
+                        rope_scaling.get("beta_fast").unwrap_or(&default_fast),
+                        rope_scaling.get("beta_slow").unwrap_or(&default_one),
+                        rope_scaling.get("factor"),
                     ) {
                         (
                             RopeScaling(Either::Left(ScalingValue(Either::Left(
@@ -313,7 +289,7 @@ impl ScalingRotaryEmbedding {
                             RopeScaling(Either::Left(ScalingValue(Either::Left(attn_factor)))),
                             RopeScaling(Either::Left(ScalingValue(Either::Left(beta_fast)))),
                             RopeScaling(Either::Left(ScalingValue(Either::Left(beta_slow)))),
-                            RopeScaling(Either::Left(ScalingValue(Either::Left(factor)))),
+                            Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))),
                         ) => {
                             let embed = YarnRotaryEmbedding::new_yarn(
                                 dtype,
@@ -340,7 +316,7 @@ impl ScalingRotaryEmbedding {
                             })
                         }
                         _ => {
-                            candle_core::bail!("Llama3 rope_type requires factor, low_freq_factor, high_freq_factor and original_max_position_embeddings to be set");
+                            candle_core::bail!("yarn rope_type requires factor to be set");
                         }
                     }
                 } else {
