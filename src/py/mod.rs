@@ -190,10 +190,10 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        // #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
+        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
         let block_size = 256;
-        // #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        // let block_size = 32;
+        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
+        let block_size = 32;
         Self {
             model_id,
             weight_path,
