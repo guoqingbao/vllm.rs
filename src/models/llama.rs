@@ -162,7 +162,7 @@ impl LLaMaForCausalLM {
         )?;
 
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            dtype,
+            if is_qvar_builder { DType::F32} else { dtype },
             config,
             &vb.device(),
             is_rope_i,

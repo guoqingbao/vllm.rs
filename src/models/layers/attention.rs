@@ -120,7 +120,7 @@ impl Attention {
             } else {
                 vb.pp("q_norm")
             },
-            dtype,
+            if config.quant.is_some() { DType::F32 } else { dtype },
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -136,7 +136,7 @@ impl Attention {
             } else {
                 vb.pp("k_norm")
             },
-            dtype,
+            if config.quant.is_some() { DType::F32 } else { dtype },
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
@@ -211,6 +211,9 @@ impl Attention {
             (q, k)
         };
 
+        // Apply rotary embeddings
+        let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
+
         let (q, k, v) = if q.dtype() != self.dtype {
             let q = q.to_dtype(self.dtype)?;
             let k = k.to_dtype(self.dtype)?;
@@ -219,8 +222,6 @@ impl Attention {
         } else {
             (q, k, v)
         };
-        // Apply rotary embeddings
-        let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
 
         let y = self
             .attn

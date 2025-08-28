@@ -75,7 +75,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            if config.quant.is_some() { DType::F32} else { dtype },
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -86,7 +86,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            if config.quant.is_some() { DType::F32} else { dtype },
         )?;
 
         Ok(Self {
@@ -160,10 +160,10 @@ impl Qwen3ForCausalLM {
             } else {
                 vb.pp("model.embed_tokens")
             },
-            dtype,
+            if config.quant.is_some() { DType::F32} else { dtype },
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            dtype,
+            if is_qvar_builder || config.quant.is_some() { DType::F32} else { dtype },
             config,
             &vb.device(),
             is_rope_i,
@@ -199,7 +199,7 @@ impl Qwen3ForCausalLM {
             } else {
                 vb.pp("model.norm")
             },
-            dtype,
+            if config.quant.is_some() { DType::F32} else { dtype },
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(
@@ -289,7 +289,7 @@ impl Qwen3ForCausalLM {
             let batch = indices.len();
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
-        let xs = self.norm.forward(&xs)?;
+        let xs = self.norm.forward(&xs)?.to_dtype(self.dtype)?;
         self.lm_head.forward(&xs)?.to_dtype(DType::F32)
     }
 

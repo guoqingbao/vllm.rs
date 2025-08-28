@@ -7,10 +7,10 @@ use candle_nn::{Embedding, LayerNorm, RmsNorm};
 
 pub fn rms_norm(size: usize, eps: f64, vb: VarBuilderX, dtype: DType) -> Result<RmsNorm> {
     let weight = match &vb.0 {
-        Either::Left(vb) => vb.get_with_hints(size, "weight", Shard::default())?,
+        Either::Left(vb) => vb.get_with_hints(size, "weight", Shard::default())?.to_dtype(dtype)?,
         Either::Right(vb) => vb.get(size, "weight")?.dequantize(vb.device())?,
     };
-    Ok(RmsNorm::new(weight.to_dtype(dtype)?, eps))
+    Ok(RmsNorm::new(weight, eps))
 }
 
 pub fn layer_norm(
@@ -21,21 +21,21 @@ pub fn layer_norm(
     dtype: DType,
 ) -> Result<LayerNorm> {
     let weight = match &vb.0 {
-        Either::Left(vb) => vb.get_with_hints(size, "weight", Shard::default())?,
+        Either::Left(vb) => vb.get_with_hints(size, "weight", Shard::default())?.to_dtype(dtype)?,
         Either::Right(vb) => vb.get(size, "weight")?.dequantize(vb.device())?,
     };
     if affine {
         let bias = match &vb.0 {
-            Either::Left(vb) => vb.get(size, "bias")?,
+            Either::Left(vb) => vb.get(size, "bias")?.to_dtype(dtype)?,
             Either::Right(vb) => vb.get(size, "bias")?.dequantize(vb.device())?,
         };
         Ok(LayerNorm::new(
-            weight.to_dtype(dtype)?,
-            bias.to_dtype(dtype)?,
+            weight,
+            bias,
             eps,
         ))
     } else {
-        Ok(LayerNorm::new_no_bias(weight.to_dtype(dtype)?, eps))
+        Ok(LayerNorm::new_no_bias(weight, eps))
     }
 }
 
@@ -52,7 +52,7 @@ pub fn embedding(
                 "vocab_size must be specified for safetensor models"
             );
             (
-                vb.get((vocab_size.unwrap(), hidden_size), "weight")?,
+                vb.get((vocab_size.unwrap(), hidden_size), "weight")?.to_dtype(dtype)?,
                 vocab_size.unwrap(),
             )
         }
@@ -64,7 +64,7 @@ pub fn embedding(
             }
             .dequantize(vb.device())?;
             let vocab_size = vocab_size.unwrap_or(weight.dim(0)?);
-            (weight.to_dtype(dtype)?, vocab_size)
+            (weight, vocab_size)
         }
     };
     Ok((Embedding::new(embeddings, hidden_size), vocab_size))

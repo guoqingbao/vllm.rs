@@ -4,7 +4,9 @@ use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
-use crate::models::layers::distributed::{Comm, Id};
+use crate::models::layers::distributed::Comm;
+#[cfg(feature = "nccl")]
+use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
