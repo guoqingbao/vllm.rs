@@ -34,22 +34,28 @@ echo "Building with profile: $PROFILE"
 echo "Features: $FEATURES"
 echo "Publish: $PUBLISH"
 
-# Step 1: Build runner binary
-FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
-echo "Building runner binary..."
-cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
-
-# Step 2: Copy runner binary into vllm_rs/
-echo "Copying runner binary..."
-BIN_NAME="runner"
-[[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && BIN_NAME="runner.exe"
-
-RUNNER_BINARY="target/$PROFILE/$BIN_NAME"
 DEST_DIR="vllm_rs"
-
 mkdir -p "$DEST_DIR"
-cp "$RUNNER_BINARY" "$DEST_DIR"
-chmod 755 "$DEST_DIR/runner"
+
+if [[ "$FEATURES" == *"metal"* ]]; then
+  echo "Metal feature detected. Skipping runner build and copy."
+else
+  # Step 1: Build runner binary
+  FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
+  echo "Building runner binary..."
+  cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
+
+  # Step 2: Copy runner binary into vllm_rs/
+  echo "Copying runner binary..."
+  BIN_NAME="runner"
+  [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]] && BIN_NAME="runner.exe"
+
+  RUNNER_BINARY="target/$PROFILE/$BIN_NAME"
+  cp "$RUNNER_BINARY" "$DEST_DIR"
+  chmod 755 "$DEST_DIR/runner"
+  echo "✅ Done. Runner binary copied to $DEST_DIR/"
+fi
+
 cp "vllm_rs.pyi" "$DEST_DIR/__init__.pyi"
 chmod 755 "$DEST_DIR/__init__.pyi"
 touch "$DEST_DIR/py.typed"
@@ -64,8 +70,6 @@ cp "example/chat.py" "$DEST_DIR/chat.py"
 chmod 755 "$DEST_DIR/chat.py"
 cp "example/completion.py" "$DEST_DIR/completion.py"
 chmod 755 "$DEST_DIR/completion.py"
-
-echo "✅ Done. Runner binary copied to $DEST_DIR/"
 
 # Step 3: Build or publish Python package with maturin
 echo "Building Python extension with maturin..."
@@ -84,7 +88,9 @@ fi
 
 # Step 4: Clean up
 echo "Cleaning up temporary files..."
-rm "$DEST_DIR/runner"
+if [[ "$FEATURES" != *"metal"* ]]; then
+  rm "$DEST_DIR/runner"
+fi
 rm "$DEST_DIR/__init__.py"
 rm "$DEST_DIR/__init__.pyi"
 rm "$DEST_DIR/py.typed"

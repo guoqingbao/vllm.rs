@@ -173,6 +173,9 @@ python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen
 # 本地GGUF文件
 python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
+# ISQ q6k (macOS/Metal推荐)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
+
 # 指定设备2 (设备序号为1，`--d 1`)
 python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
 
@@ -274,6 +277,9 @@ cargo run --release --features cuda -- --i --d 2 --f /path/GLM-4-9B-0414-Q4_K_M.
 
 # macOS（Metal）
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+#macOS (Metal, ISQ)
+cargo run --features metal --release -- --i --w /path/Qwen3-0.6B --isq q6k
 ```
 
 Safetensor 模型（未量化）

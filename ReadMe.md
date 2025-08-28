@@ -174,19 +174,22 @@ python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen
 # local gguf file
 python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
+# ISQ q6k (macOS/Metal recommended)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
+
 # Use the second device (device order 1，`--d 1`)
 python -m vllm_rs.chat --i --d 1 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
 
 # Load unquantized safetensors model as GGUF quantized (e.g., q4k), with maximum model context length
 python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
-# Enable context cache for fast response
+# Enable context cache for fast response (CUDA)
 python -m vllm_rs.chat --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # Chat completion
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 
-# Chat completion (Multi-GPU)
+# Chat completion (Multi-GPU, CUDA)
 python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
 ```
 
@@ -286,6 +289,9 @@ cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+#macOS (Metal, ISQ)
+cargo run --features metal --release -- --i --w /path/Qwen3-0.6B --isq q6k
 ```
 
 
