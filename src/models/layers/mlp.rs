@@ -21,9 +21,9 @@ impl MLP {
         intermediate_size: usize,
         gate_up_merged: bool,
         dtype: DType,
+        suffix: &str,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
-        // let intermediate_size = config.intermediate_size;
         let key_map: HashMap<&str, &str> = [
             ("gate_proj", "ffn_gate"),
             ("up_proj", "ffn_up"),
@@ -44,11 +44,14 @@ impl MLP {
             },
             false,
             if is_qvar_builder {
-                vb.pp(key_map[if gate_up_merged {
+                vb.pp((key_map[if gate_up_merged {
                     "up_proj"
                 } else {
                     "gate_proj"
-                }])
+                }]
+                .to_string()
+                    + suffix)
+                    .as_str())
             } else {
                 vb.pp(if gate_up_merged {
                     "gate_up_proj"
@@ -74,7 +77,7 @@ impl MLP {
             },
             false,
             if is_qvar_builder {
-                vb.pp(key_map["up_proj"])
+                vb.pp((key_map["up_proj"].to_string() + suffix).as_str())
             } else {
                 vb.pp(if gate_up_merged {
                     "gate_up_proj"
@@ -95,7 +98,7 @@ impl MLP {
             intermediate_size,
             hidden_size,
             if is_qvar_builder {
-                vb.pp(key_map["down_proj"])
+                vb.pp((key_map["down_proj"].to_string() + suffix).as_str())
             } else {
                 vb.pp("down_proj")
             },

@@ -291,10 +291,19 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mod_cfg = if arch.to_string() == "qwen3moe" {
+    let mod_cfg = if arch.to_string() == "qwen3moe" || arch.to_string() == "qwen2moe" {
+        let shared_expert_intermediate_size = if arch.to_string() == "qwen2moe" {
+            Some(
+                md_get(format!("{arch}.expert_shared_feed_forward_length").as_str())?.to_u32()?
+                    as usize,
+            )
+        } else {
+            None //qwen3 moe has no shared experts
+        };
         Some(MoEConfig {
             moe_intermediate_size: md_get(format!("{arch}.expert_feed_forward_length").as_str())?
                 .to_u32()? as usize,
+            shared_expert_intermediate_size,
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
@@ -566,7 +575,7 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "qwen3moe" | "Qwen3MoeForCausalLM" => (
+        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
             ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),

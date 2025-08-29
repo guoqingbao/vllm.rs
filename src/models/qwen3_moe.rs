@@ -1,6 +1,7 @@
 // src/models/qwen3_moe.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
+use crate::models::layers::linear::LinearX as Linear;
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::moe::{FusedMoeGGUF, FusedMoeISQ, MoeNaive};
@@ -12,6 +13,7 @@ use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
+use either::Either;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::iter::zip;
@@ -39,6 +41,8 @@ impl MoeOrMlp {
 pub struct Qwen3DecoderLayer {
     self_attn: Attention,
     mlp: MoeOrMlp,
+    shared_gate: Option<Linear>,
+    shared_expert: Option<MLP>,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
 }
@@ -107,10 +111,48 @@ impl Qwen3DecoderLayer {
                 config.intermediate_size,
                 false,
                 dtype,
+                "",
             )?;
 
             MoeOrMlp::Mlp(mlp)
         };
+
+        //shared experts weights in Qwen2 MoE models
+        let (shared_gate, shared_expert) =
+            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
+                let ws = match &vb.0 {
+                    Either::Left(vb) => vb
+                        .pp("mlp.shared_expert_gate")
+                        .get((config.hidden_size,), "weight")?,
+                    Either::Right(vb) => {
+                        let ws = vb
+                            .pp("ffn_gate_inp_shexp")
+                            .get((config.hidden_size,), "weight")?;
+                        ws.dequantize(&vb.device())?
+                    }
+                }
+                .reshape((1, config.hidden_size))?
+                .to_dtype(dtype)?; //weight must be 2d+
+
+                let shared_gate = Linear::new(ws, None, &None);
+
+                let mlp = MLP::new(
+                    if is_qvar_builder {
+                        vb.clone()
+                    } else {
+                        vb.pp("mlp.shared_expert").clone()
+                    },
+                    comm.clone(),
+                    config,
+                    intermediate_size,
+                    false,
+                    dtype,
+                    if is_qvar_builder { "_shexp" } else { "" },
+                )?;
+                (Some(shared_gate), Some(mlp))
+            } else {
+                (None, None)
+            };
 
         let key_map: HashMap<&str, &str> = [
             ("input_layernorm", "attn_norm"),
@@ -145,6 +187,8 @@ impl Qwen3DecoderLayer {
         Ok(Self {
             self_attn,
             mlp,
+            shared_gate,
+            shared_expert,
             input_layernorm,
             post_attention_layernorm,
         })
@@ -166,8 +210,22 @@ impl Qwen3DecoderLayer {
         let xs = (attn_output + residual)?;
         let residual = &xs;
         let xs = self.post_attention_layernorm.forward(&xs)?;
+
+        //shared experts for Qwen2 MoE models
+        let shared_output = match (&self.shared_gate, &self.shared_expert) {
+            (Some(shared_gate), Some(shared_expert)) => {
+                let gate = candle_nn::ops::sigmoid(&shared_gate.forward(&xs)?)?;
+                let shared_output = shared_expert.forward(&xs)?;
+                Some(gate.broadcast_mul(&shared_output)?)
+            }
+            _ => None,
+        };
         let mlp_output = self.mlp.forward(&xs)?;
-        residual + mlp_output
+        if let Some(shared_output) = shared_output {
+            residual + (mlp_output + shared_output)?
+        } else {
+            residual + mlp_output
+        }
     }
 }
 

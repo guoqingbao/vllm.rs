@@ -94,6 +94,7 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 
 * ✅ LLaMa (LLaMa2, LLaMa3)
 * ✅ Qwen (Qwen2, Qwen3)
+* ✅ Qwen2 Moe
 * ✅ Qwen3 Moe
 * ✅ Mistral
 * ✅ GLM4 (0414, **Not ChatGLM**)

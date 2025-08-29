@@ -92,6 +92,7 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 
 * ✅ LLaMa 系列（LLaMa2、LLaMa3）
 * ✅ Qwen 系列（Qwen2、Qwen3）
+* ✅ Qwen2 Moe 系列（使用Qwen3 MoE流程+共享专家层）
 * ✅ Qwen3 MoE 系列
 * ✅ Mistral
 * ✅ GLM4 (0414版本, **非ChatGLM**)

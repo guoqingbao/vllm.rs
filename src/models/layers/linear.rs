@@ -322,7 +322,7 @@ impl QLinear {
         }
     }
     //in-situ quantization
-    pub fn from_linear_x(linear: Linear, quant: String, dtype: DType) -> Self {
+    pub fn from_linear_x(linear: Linear, quant: String, dtype: DType) -> Result<Self> {
         use quantized::GgmlDType;
         let ggml_dtype = match quant.as_str() {
             "q4_0" => GgmlDType::Q4_0,
@@ -339,8 +339,18 @@ impl QLinear {
         };
         let weight = linear.weight();
         let qbias = linear.bias().cloned();
-        let qtensor = QTensor::quantize(weight, ggml_dtype).unwrap();
-        QLinear::from_qparts_x(qtensor, qbias, dtype)
+        if weight.dim(candle_core::D::Minus1)? % ggml_dtype.block_size() != 0 {
+            crate::log_error!(
+                "Unable to quantize weight {:?} into gguf dtype {:?} \
+                because the last dim is not divisible to block size {}! \
+                \n\n\t***Tips: use '--isq q8_0' instead since it has smaller block size of 32!",
+                weight.shape(),
+                ggml_dtype,
+                ggml_dtype.block_size()
+            );
+        }
+        let qtensor = QTensor::quantize(weight, ggml_dtype)?;
+        Ok(QLinear::from_qparts_x(qtensor, qbias, dtype))
     }
 
     pub fn inner(&mut self) -> &mut QMatMul {
@@ -444,11 +454,9 @@ impl LinearX {
         let dtype = weight.dtype();
         let ln = Linear::new(weight, bias);
         if let Some(quantized_type) = quant {
-            LinearX(Either::Right(QLinear::from_linear_x(
-                ln,
-                quantized_type.clone(),
-                dtype,
-            )))
+            LinearX(Either::Right(
+                QLinear::from_linear_x(ln, quantized_type.clone(), dtype).unwrap(),
+            ))
         } else {
             LinearX(Either::Left(ln))
         }
@@ -487,7 +495,7 @@ pub fn linear_x(
                     ln,
                     quantized_type.clone(),
                     dtype,
-                ))))
+                )?)))
             } else {
                 Ok(LinearX(Either::Left(ln)))
             }
@@ -518,7 +526,7 @@ pub fn linear_no_bias_x(
                     ln,
                     quantized_type.clone(),
                     dtype,
-                ))))
+                )?)))
             } else {
                 Ok(LinearX(Either::Left(ln)))
             }
@@ -551,7 +559,7 @@ pub fn linear_no_bias_merged_x(
                     ln,
                     quantized_type.clone(),
                     dtype,
-                ))))
+                )?)))
             } else {
                 Ok(LinearX(Either::Left(ln)))
             }

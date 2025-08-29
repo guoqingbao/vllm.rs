@@ -56,6 +56,7 @@ impl Qwen3DecoderLayer {
             config.intermediate_size,
             false,
             dtype,
+            "",
         )?;
 
         let key_map: HashMap<&str, &str> = [

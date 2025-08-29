@@ -58,6 +58,7 @@ impl GLM4DecoderLayer {
             config.intermediate_size,
             true, //gate and up merged
             dtype,
+            "",
         )?;
 
         let key_map: HashMap<&str, &str> = [

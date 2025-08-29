@@ -44,6 +44,7 @@ impl MoeNaive {
                 moe_cfg.moe_intermediate_size,
                 false,
                 dtype,
+                "",
             )?);
         }
 

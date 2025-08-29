@@ -91,6 +91,7 @@ enum BincodeEosTokenId {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MoEConfig {
     pub moe_intermediate_size: usize,
+    pub shared_expert_intermediate_size: Option<usize>,
     pub num_experts: Option<usize>,
     pub mlp_only_layers: Option<Vec<usize>>,
     pub decoder_sparse_step: Option<usize>,
