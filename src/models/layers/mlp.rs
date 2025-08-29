@@ -114,7 +114,13 @@ impl MLP {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let gate = self.gate_proj.forward(xs)?;
         let up = self.up_proj.forward(xs)?;
-        self.down_proj
-            .forward(&(candle_nn::ops::silu(&gate)? * up)?)
+        let out = self
+            .down_proj
+            .forward(&(candle_nn::ops::silu(&gate)? * up)?)?;
+        if out.dtype() != xs.dtype() {
+            out.to_dtype(xs.dtype())
+        } else {
+            Ok(out)
+        }
     }
 }

@@ -193,7 +193,6 @@ impl ModelRunner {
     }
 
     //[num_blocks, block_size, num_kv_heads, head_size]
-    #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
     fn calculate_flash_key_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -206,7 +205,6 @@ impl ModelRunner {
         (block_size, cfg.num_key_value_heads / num_shards, head_dim)
     }
 
-    #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
     fn calculate_key_block_shape(
         cfg: &Config,
         dtype: DType,
@@ -227,7 +225,6 @@ impl ModelRunner {
         )
     }
 
-    #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
     fn calculate_value_block_shape(
         cfg: &Config,
         block_size: usize,
@@ -247,8 +244,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
-        {
+        if econfig.flash_context.unwrap_or(false) {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,
@@ -270,10 +266,7 @@ impl ModelRunner {
                 gpu_cache.push((key_blocks, value_blocks));
             }
             Ok(gpu_cache)
-        }
-
-        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        {
+        } else {
             let kshape = Self::calculate_key_block_shape(
                 config,
                 dtype,
@@ -416,7 +409,11 @@ impl ModelRunner {
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
-            let seqlen_k = seq.num_cached_tokens + num_tokens;
+            let seqlen_k = if self.config.flash_context.unwrap_or(false) {
+                seq.num_cached_tokens + num_tokens
+            } else {
+                num_tokens
+            };
             #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
             let seqlen_k = num_tokens;
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
@@ -548,14 +545,28 @@ impl ModelRunner {
     }
 
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        if let Seqs::SeqRefs(seqs) = seqs {
-            if is_prefill {
-                *self.sampling_params.write() = seqs[0].sampling_params.clone();
+        match seqs {
+            Seqs::SeqRefs(seqs) => {
+                if is_prefill {
+                    *self.sampling_params.write() = seqs[0].sampling_params.clone();
+                }
+                if seqs.len() == 1 {
+                    self.logit_processor
+                        .sample(logits, &Some(seqs[0].sampling_params.clone()))
+                } else {
+                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()
+                }
+            }
+            Seqs::DecodeVec(v) => {
+                if v.len() == 1 {
+                    let sampling_params = self.sampling_params.read();
+                    self.logit_processor
+                        .sample(logits, &Some(sampling_params.clone()))
+                } else {
+                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()
+                }
             }
         }
-        let sampling_params = self.sampling_params.read();
-        self.logit_processor
-            .sample(logits, &Some(sampling_params.clone()))
     }
 
     pub fn get_model_vocab_size(&self) -> usize {

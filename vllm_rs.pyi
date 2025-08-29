@@ -45,6 +45,7 @@ class EngineConfig:
     device_id: Optional[int]
     generation_cfg: Optional[GenerationConfig]
     seed: Optional[int]
+    flash_context: Optional[bool]
 
 @dataclass
 class SamplingParams:

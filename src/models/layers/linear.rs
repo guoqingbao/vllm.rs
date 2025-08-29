@@ -224,7 +224,7 @@ impl QLinear {
         let inner = candle_core::quantized::QMatMul::from_arc(ws)?;
         let b = vb.get(out_dim, "bias");
         let bias = if b.is_ok() {
-            let bw = b.unwrap().dequantize(vb.device())?.to_dtype(dtype)?;
+            let bw = b.unwrap().dequantize(vb.device())?;
             if shards.world_size > 1 {
                 let bw_chunk = bw.dim(0)? / shards.world_size;
                 Some(
@@ -240,8 +240,8 @@ impl QLinear {
         Ok(Self {
             inner,
             bias,
-            dtype,
             wdtype,
+            dtype,
         })
     }
 
@@ -277,7 +277,7 @@ impl QLinear {
         let inner = candle_core::quantized::QMatMul::from_arc(ws)?;
         let b = vb.get(out_dim, "bias");
         let bias = if b.is_ok() {
-            let bw = b.unwrap().dequantize(vb.device())?.to_dtype(dtype)?;
+            let bw = b.unwrap().dequantize(vb.device())?;
             if shards.world_size > 1 {
                 let bw_chunk = bw.dim(0)? / shards.world_size;
                 Some(
@@ -300,13 +300,7 @@ impl QLinear {
 
     pub fn from_qparts_x(w: QTensor, b: Option<Tensor>, dtype: DType) -> Self {
         let bx = match b {
-            Some(b_) => {
-                if b_.dtype() != dtype {
-                    Some(b_.to_dtype(dtype).unwrap())
-                } else {
-                    Some(b_)
-                }
-            }
+            Some(b_) => Some(b_.to_dtype(DType::F32).unwrap()),
             _ => None,
         };
         let wdtype = w.dtype();
@@ -376,42 +370,31 @@ impl QLinear {
 
 impl Module for QLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let xs = if x.dtype() != DType::F32 {
+            x.to_dtype(DType::F32)?
+        } else {
+            x.to_owned()
+        };
         let xs = match *x.dims() {
             [bsize, seq_len, dim1, dim2] => {
                 if seq_len > 1 {
-                    x.to_dtype(DType::F32)?
+                    QMatMul::forward(&self.inner, &xs)?
                 } else {
-                    x.reshape((bsize, dim1, dim2))?.to_dtype(DType::F32)?
+                    let xs = xs.reshape((bsize, dim1, dim2))?;
+                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, dim1, ()))?
                 }
             }
             [bsize, seq_len, dim] => {
                 if seq_len > 1 {
-                    x.to_dtype(DType::F32)?
-                } else {
-                    x.reshape((bsize, dim))?.to_dtype(DType::F32)?
-                }
-            }
-            _ => x.to_dtype(DType::F32)?,
-        };
-        let xs = match *x.dims() {
-            [bsize, seq_len, dim1, _] => {
-                if seq_len > 1 {
                     QMatMul::forward(&self.inner, &xs)?
                 } else {
-                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, dim1, ()))?
-                }
-            }
-            [bsize, seq_len, _] => {
-                if seq_len > 1 {
-                    QMatMul::forward(&self.inner, &xs)?
-                } else {
+                    let xs = xs.reshape((bsize, dim))?;
                     QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, ()))?
                 }
             }
             _ => QMatMul::forward(&self.inner, &xs)?,
         };
 
-        let xs = xs.to_dtype(self.dtype)?;
         if let Some(bias) = &self.bias {
             xs.broadcast_add(bias)
         } else {
@@ -425,11 +408,10 @@ impl QLinear {
         let xs = self
             .inner
             .indexed_moe_forward(&x.to_dtype(DType::F32)?, ids)?;
-        let xs = xs.to_dtype(self.dtype)?;
         if let Some(bias) = &self.bias {
-            xs.broadcast_add(bias)
+            xs.broadcast_add(bias)?.to_dtype(self.dtype)
         } else {
-            Ok(xs)
+            xs.to_dtype(self.dtype)
         }
     }
 }

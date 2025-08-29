@@ -90,6 +90,7 @@ pub struct TensorParallelRowLinear {
     #[cfg(feature = "nccl")]
     all_reduce: Option<AllReduce>,
     bias: Option<Tensor>,
+    dtype: DType,
 }
 
 #[allow(dead_code)]
@@ -166,7 +167,7 @@ impl CustomOp1 for AllReduce {
 
 impl TensorParallelRowLinear {
     #[allow(unused_variables)]
-    pub fn new(linear: Linear, comm: Rc<Comm>) -> Self {
+    pub fn new(linear: Linear, comm: Rc<Comm>, dtype: DType) -> Self {
         #[cfg(feature = "nccl")]
         let all_reduce = if comm.world_size() > 1 {
             Some(AllReduce { comm })
@@ -178,11 +179,17 @@ impl TensorParallelRowLinear {
             #[cfg(feature = "nccl")]
             all_reduce,
             bias: None,
+            dtype,
         }
     }
 
     #[allow(unused_variables)]
-    pub fn new_with_bias(linear: Linear, bias: Option<Tensor>, comm: Rc<Comm>) -> Self {
+    pub fn new_with_bias(
+        linear: Linear,
+        bias: Option<Tensor>,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Self {
         #[cfg(feature = "nccl")]
         let all_reduce = if comm.world_size() > 1 {
             Some(AllReduce { comm })
@@ -194,17 +201,21 @@ impl TensorParallelRowLinear {
             #[cfg(feature = "nccl")]
             all_reduce,
             bias,
+            dtype,
         }
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let mut xs = self.linear.forward(x)?;
+        if xs.dtype() != self.dtype {
+            xs = xs.to_dtype(self.dtype)?;
+        }
         #[cfg(feature = "nccl")]
         if let Some(all_reduce) = &self.all_reduce {
             xs = xs.apply_op1_no_bwd(all_reduce)?;
         }
         if let Some(bias) = &self.bias {
-            xs = xs.broadcast_add(bias)?;
+            xs = xs.broadcast_add(&bias.to_dtype(self.dtype)?)?;
         }
         Ok(xs)
     }
@@ -310,7 +321,7 @@ impl TensorParallelRowLinear {
             quant,
             dtype,
         )?;
-        Ok(Self::new(linear, comm))
+        Ok(Self::new(linear, comm, dtype))
     }
 }
 

@@ -171,7 +171,7 @@ impl EngineConfig {
     #[new]
     #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None, hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), max_model_len=Some(1024), isq=None,
-        num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None))]
+        num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None, flash_context = None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -185,15 +185,18 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
+        flash_context: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
-        let block_size = 256;
         #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        let block_size = 32;
+        assert!(
+            !flash_context.unwrap_or(false),
+            "Flash decoding and flash-context was not enabled at the current build!"
+        );
+
         Self {
             model_id,
             weight_path,
@@ -201,7 +204,11 @@ impl EngineConfig {
             hf_token,
             hf_token_path,
             num_blocks: 128, //placeholder
-            block_size,
+            block_size: if flash_context.unwrap_or(false) {
+                256
+            } else {
+                32
+            },
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             max_model_len,                 //placeholder
@@ -210,6 +217,7 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
+            flash_context,
         }
     }
 }

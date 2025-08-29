@@ -4,14 +4,14 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_casual_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::moe::{FusedMoeGGUF, FusedMoeISQ, MoeNaive};
-use crate::models::layers::others::{embedding, rms_norm};
+use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Module, RmsNorm};
+use candle_nn::Module;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::iter::zip;
@@ -39,8 +39,8 @@ impl MoeOrMlp {
 pub struct Qwen3DecoderLayer {
     self_attn: Attention,
     mlp: MoeOrMlp,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
+    input_layernorm: NormX,
+    post_attention_layernorm: NormX,
 }
 
 impl Qwen3DecoderLayer {
@@ -80,13 +80,12 @@ impl Qwen3DecoderLayer {
         {
             if is_qvar_builder {
                 //experts weights packed
-                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
+                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone())?)
             } else if config.quant.is_some() {
                 MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
                     config,
                     vb.pp("mlp").clone(),
                     comm.clone(),
-                    dtype,
                 )?)
             } else {
                 MoeOrMlp::MoeNaive(MoeNaive::new(
@@ -112,8 +111,6 @@ impl Qwen3DecoderLayer {
 
             MoeOrMlp::Mlp(mlp)
         };
-
-        let is_qvar_builder = vb.is_qvar_builder();
 
         let key_map: HashMap<&str, &str> = [
             ("input_layernorm", "attn_norm"),
@@ -170,7 +167,6 @@ impl Qwen3DecoderLayer {
         let residual = &xs;
         let xs = self.post_attention_layernorm.forward(&xs)?;
         let mlp_output = self.mlp.forward(&xs)?;
-
         residual + mlp_output
     }
 }
@@ -178,7 +174,7 @@ impl Qwen3DecoderLayer {
 pub struct Qwen3MoEForCausalLM {
     embed_tokens: candle_nn::Embedding,
     layers: Vec<Qwen3DecoderLayer>,
-    norm: RmsNorm,
+    norm: NormX,
     lm_head: ReplicatedLinear,
     device: Device,
     config: Config,
@@ -219,7 +215,11 @@ impl Qwen3MoEForCausalLM {
             dtype,
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            dtype,
+            if is_qvar_builder || config.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             config,
             &vb.device(),
             is_rope_i,
@@ -342,7 +342,7 @@ impl Qwen3MoEForCausalLM {
         }
 
         if !seqlens.is_empty() {
-            let indices: Vec<_> = seqlens.iter().map(|x| x - 1).collect();
+            let indices: Vec<_> = seqlens.iter().map(|x| x - 1 as u32).collect();
             let batch = indices.len();
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }

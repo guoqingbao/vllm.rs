@@ -4,7 +4,9 @@ use super::scheduler::Scheduler;
 use super::sequence::Sequence;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
-use crate::models::layers::distributed::{Comm, Id};
+use crate::models::layers::distributed::Comm;
+#[cfg(feature = "nccl")]
+use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
@@ -176,7 +178,15 @@ impl LLMEngine {
         );
 
         #[cfg(all(feature = "nccl", feature = "flash-decoding"))]
-        let use_runner = true;
+        let use_runner = if num_shards > 1 {
+            if !econfig.flash_context.unwrap_or(false) {
+                crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if flash-decoding/flash-context feature built-in!");
+                econfig.flash_context = Some(true);
+            }
+            true
+        } else {
+            econfig.flash_context.unwrap_or(false)
+        };
 
         #[cfg(not(all(feature = "nccl", feature = "flash-decoding")))]
         let use_runner = num_shards > 1;

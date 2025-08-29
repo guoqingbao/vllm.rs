@@ -28,7 +28,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 |------------------|---------------|----------|------------------------|
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
-| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **82.14** tokens/s |
+| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **95** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **75.91** tokens/s  |
@@ -216,6 +216,9 @@ for token in stream:
 ## 🔨 Build Python Package from source (Optional)
 
 > ⚠️ The first build may take time if `Flash Attention` is enabled.
+
+> ⚠️ When enabling context caching or multi-GPU inference, you also need to compile `Runner` (using `build.sh` or `run.sh`).
+
 
 ### 🛠️ Prerequisites
 
