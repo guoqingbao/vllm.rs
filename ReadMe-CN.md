@@ -28,7 +28,7 @@
 |------------------|---------------|----------|------------------------|
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
-| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **82.14** tokens/s |
+| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **95** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)** | **75.91** tokens/s  |
@@ -131,7 +131,7 @@ python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # GGUF模型多GPU推理+上下文缓存 (缓存上下文，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置)
-python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
 ### 🤖 客户端使用上下文缓存特性
@@ -215,6 +215,8 @@ for token in stream:
 ## 🔨 从源代码编译安装（可选）
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
+
+> ⚠️ 启用 上下文缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh` 或 `run.sh`）
 
 ### 🛠️ 环境要求
 

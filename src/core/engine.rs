@@ -178,7 +178,15 @@ impl LLMEngine {
         );
 
         #[cfg(all(feature = "nccl", feature = "flash-decoding"))]
-        let use_runner = true;
+        let use_runner = if num_shards > 1 {
+            if !econfig.flash_context.unwrap_or(false) {
+                crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if flash-decoding/flash-context feature built-in!");
+                econfig.flash_context = Some(true);
+            }
+            true
+        } else {
+            econfig.flash_context.unwrap_or(false)
+        };
 
         #[cfg(not(all(feature = "nccl", feature = "flash-decoding")))]
         let use_runner = num_shards > 1;

@@ -193,6 +193,7 @@ async fn main() -> Result<()> {
         args.device_ids.clone(),
         generation_cfg,
         args.seed,
+        Some(args.context_cache),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

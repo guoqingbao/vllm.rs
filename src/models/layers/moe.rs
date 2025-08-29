@@ -31,7 +31,7 @@ impl MoeNaive {
             vb.pp("gate"),
             Shard::default(),
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let experts_vb = vb.pp("experts");
@@ -57,7 +57,7 @@ impl MoeNaive {
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (_, hidden_dim) = xs.dims2()?;
-        let router_logits = xs.apply(&self.gate)?;
+        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
         let experts_per_tok = routing_weights
@@ -67,7 +67,7 @@ impl MoeNaive {
 
         let routing_weights = routing_weights.gather(&experts_per_tok, D::Minus1)?;
 
-        let routing_weights = routing_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+        let routing_weights = routing_weights.to_vec2::<f32>()?;
         let experts_per_tok = experts_per_tok.to_vec2::<u32>()?;
         let mut top_x = vec![vec![]; self.experts.len()];
         let mut selected_experts = vec![vec![]; self.experts.len()];
@@ -119,7 +119,7 @@ pub struct FusedMoeGGUF {
 }
 
 impl FusedMoeGGUF {
-    pub fn new_repack(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+    pub fn new_repack(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
         let gate = linear_no_bias(
@@ -128,7 +128,7 @@ impl FusedMoeGGUF {
             vb.pp("ffn_gate_inp"),
             Shard::default(),
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
@@ -218,9 +218,9 @@ impl FusedMoeGGUF {
         })
     }
 
-    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
         if comm.world_size() > 1 {
-            return Self::new_repack(cfg, vb, comm.clone(), dtype);
+            return Self::new_repack(cfg, vb, comm.clone());
         }
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
@@ -230,7 +230,7 @@ impl FusedMoeGGUF {
             vb.pp("ffn_gate_inp"),
             Shard::default(),
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
@@ -274,7 +274,7 @@ impl FusedMoeGGUF {
         let original_dtype = xs.dtype();
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let xs = xs.to_dtype(DType::F32)?;
-        let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
+        let router_logits = self.gate.forward(&xs)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
         let indices = routing_weights
@@ -322,7 +322,7 @@ pub struct FusedMoeISQ {
 }
 
 impl FusedMoeISQ {
-    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
@@ -347,7 +347,7 @@ impl FusedMoeISQ {
             vb.pp("gate"),
             Shard::default(),
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let experts_vb = vb.pp("experts");
@@ -499,8 +499,8 @@ impl FusedMoeISQ {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let original_dtype = xs.dtype();
-        let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
         let xs = xs.to_dtype(DType::F32)?;
+        let router_logits = self.gate.forward(&xs)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
         let indices = routing_weights

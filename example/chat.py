@@ -63,6 +63,7 @@ def build_engine_config(args, num_of_prompts):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
+        flash_context=args.context_cache,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):

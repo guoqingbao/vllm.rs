@@ -1,13 +1,12 @@
 use crate::models::layers::distributed::{
     Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
-use crate::models::layers::others::rms_norm;
+use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
-use candle_core::{DType, Module, Result, Tensor};
-use candle_nn::RmsNorm;
+use candle_core::{DType, Result, Tensor};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -17,8 +16,8 @@ pub struct Attention {
     k_proj: TensorParallelColumnLinear,
     v_proj: TensorParallelColumnLinear,
     o_proj: TensorParallelRowLinear,
-    q_norm: Option<RmsNorm>,
-    k_norm: Option<RmsNorm>,
+    q_norm: Option<NormX>,
+    k_norm: Option<NormX>,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -120,7 +119,7 @@ impl Attention {
             } else {
                 vb.pp("q_norm")
             },
-            if config.quant.is_some() { DType::F32 } else { dtype },
+            dtype,
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -136,7 +135,7 @@ impl Attention {
             } else {
                 vb.pp("k_norm")
             },
-            if config.quant.is_some() { DType::F32 } else { dtype },
+            dtype,
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
@@ -214,13 +213,18 @@ impl Attention {
         // Apply rotary embeddings
         let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
 
-        let (q, k, v) = if q.dtype() != self.dtype {
+        let (q, k) = if q.dtype() != self.dtype {
             let q = q.to_dtype(self.dtype)?;
             let k = k.to_dtype(self.dtype)?;
-            let v = v.to_dtype(self.dtype)?;
-            (q, k, v)
+            (q, k)
         } else {
-            (q, k, v)
+            (q, k)
+        };
+
+        let v = if v.dtype() != self.dtype {
+            v.to_dtype(self.dtype)?
+        } else {
+            v
         };
 
         let y = self
@@ -237,6 +241,6 @@ impl Attention {
             )?
             .reshape((seq_len, ()))?;
 
-        self.o_proj.forward(&y.to_dtype(xs.dtype())?)
+        self.o_proj.forward(&y)?.to_dtype(self.dtype)
     }
 }

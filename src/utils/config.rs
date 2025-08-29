@@ -150,6 +150,7 @@ pub struct EngineConfig {
     pub device_ids: Option<Vec<usize>>,
     pub generation_cfg: Option<GenerationConfig>,
     pub seed: Option<u64>,
+    pub flash_context: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -186,6 +187,8 @@ pub struct EngineConfig {
     pub generation_cfg: Option<GenerationConfig>,
     #[pyo3(get, set)]
     pub seed: Option<u64>,
+    #[pyo3(get, set)]
+    pub flash_context: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -203,16 +206,18 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
+        flash_context: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
         }
 
-        #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
-        let block_size = 256;
         #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        let block_size = 32;
+        assert!(
+            !flash_context.unwrap_or(false),
+            "Flash decoding and flash-context was not enabled at the current build!"
+        );
 
         Self {
             model_id,
@@ -221,7 +226,11 @@ impl EngineConfig {
             hf_token,
             hf_token_path,
             num_blocks: 128, //placeholder
-            block_size,
+            block_size: if flash_context.unwrap_or(false) {
+                256
+            } else {
+                32
+            },
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder
             max_model_len,                                             //placeholder
@@ -230,6 +239,7 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
+            flash_context,
         }
     }
 }

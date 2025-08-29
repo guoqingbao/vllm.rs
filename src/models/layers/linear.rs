@@ -300,9 +300,7 @@ impl QLinear {
 
     pub fn from_qparts_x(w: QTensor, b: Option<Tensor>, dtype: DType) -> Self {
         let bx = match b {
-            Some(b_) => {
-                Some(b_.to_dtype(DType::F32).unwrap())
-            }
+            Some(b_) => Some(b_.to_dtype(DType::F32).unwrap()),
             _ => None,
         };
         let wdtype = w.dtype();
@@ -372,35 +370,25 @@ impl QLinear {
 
 impl Module for QLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let xs = if x.dtype() != DType::F32 {
+            x.to_dtype(DType::F32)?
+        } else {
+            x.to_owned()
+        };
         let xs = match *x.dims() {
             [bsize, seq_len, dim1, dim2] => {
                 if seq_len > 1 {
-                    x.to_dtype(DType::F32)?
+                    QMatMul::forward(&self.inner, &xs)?
                 } else {
-                    x.reshape((bsize, dim1, dim2))?.to_dtype(DType::F32)?
+                    let xs = xs.reshape((bsize, dim1, dim2))?;
+                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, dim1, ()))?
                 }
             }
             [bsize, seq_len, dim] => {
                 if seq_len > 1 {
-                    x.to_dtype(DType::F32)?
-                } else {
-                    x.reshape((bsize, dim))?.to_dtype(DType::F32)?
-                }
-            }
-            _ => x.to_dtype(DType::F32)?,
-        };
-        let xs = match *x.dims() {
-            [bsize, seq_len, dim1, _] => {
-                if seq_len > 1 {
                     QMatMul::forward(&self.inner, &xs)?
                 } else {
-                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, dim1, ()))?
-                }
-            }
-            [bsize, seq_len, _] => {
-                if seq_len > 1 {
-                    QMatMul::forward(&self.inner, &xs)?
-                } else {
+                    let xs = xs.reshape((bsize, dim))?;
                     QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, ()))?
                 }
             }

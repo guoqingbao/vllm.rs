@@ -160,6 +160,7 @@ def parse_args():
     parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--penalty", type=float, default=None)
+    parser.add_argument("--context-cache", action="store_true")
 
     return parser.parse_args()
 
@@ -192,6 +193,7 @@ def main():
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
+        flash_context=args.context_cache,
     )
 
     app = create_app(cfg, args.dtype)
