@@ -307,7 +307,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
-            norm_topk_prob: true,
+            norm_topk_prob: shared_expert_intermediate_size.is_none(),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
                 as usize,
         })
@@ -367,7 +367,10 @@ pub fn init_config_tokenizer(
         let mut config: Config =
             serde_json::from_slice(&std::fs::read(&config_path).map_err(candle_core::Error::wrap)?)
                 .map_err(candle_core::Error::wrap)?;
-        if config.architectures[0] == "Qwen3MoeForCausalLM" {
+        if matches!(
+            config.architectures[0].as_str(),
+            "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM"
+        ) {
             let moe_cfg: MoEConfig = serde_json::from_slice(
                 &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
             )
