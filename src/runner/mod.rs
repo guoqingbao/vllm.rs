@@ -170,6 +170,9 @@ pub enum MessageType {
     /// Sent by runner in response to `Run` with generated token IDs.
     RunResponse(Vec<u32>),
 
+    /// Sent by main process to notify the finished decoding sequences.
+    FinishDecode(usize),
+
     /// Optional: runner can send back an error message.
     Error(String),
 

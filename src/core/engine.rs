@@ -117,11 +117,8 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
 
-        let (model_type, default_chat_template, is_rope_i) = crate::utils::get_arch_rope(
-            &tokenizer,
-            &mut generation_cfg,
-            config.architectures[0].clone(),
-        )?;
+        let (model_type, default_chat_template, is_rope_i) =
+            crate::utils::get_arch_rope(&tokenizer, config.architectures[0].clone())?;
         log_info!("Use ROPE interleaved {is_rope_i}");
 
         match (&generation_cfg, &mut econfig.generation_cfg) {
@@ -129,8 +126,11 @@ impl LLMEngine {
                 econfig.generation_cfg = Some(gen_cfg.clone());
             }
             (Some(gen_cfg), Some(egen_cfg)) => {
-                if egen_cfg.penalty.is_none() {
-                    egen_cfg.penalty = gen_cfg.penalty;
+                if egen_cfg.frequency_penalty.is_none() {
+                    egen_cfg.frequency_penalty = gen_cfg.frequency_penalty;
+                }
+                if egen_cfg.presence_penalty.is_none() {
+                    egen_cfg.presence_penalty = gen_cfg.presence_penalty;
                 }
                 if egen_cfg.temperature.is_none() {
                     egen_cfg.temperature = gen_cfg.temperature;
@@ -177,18 +177,27 @@ impl LLMEngine {
             "Multi-rank inference is only available when `nccl` feature is enabled!"
         );
 
-        #[cfg(all(feature = "nccl", feature = "flash-decoding"))]
+        #[cfg(feature = "nccl")]
         let use_runner = if num_shards > 1 {
-            if !econfig.flash_context.unwrap_or(false) {
-                crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if flash-decoding/flash-context feature built-in!");
-                econfig.flash_context = Some(true);
-            }
+            // if !econfig.flash_context.unwrap_or(false) {
+            //     crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if context-cache or flash-context feature built-in!");
+            //     econfig.flash_context = Some(true);
+            // }
             true
         } else {
-            econfig.flash_context.unwrap_or(false)
+            if cfg!(feature = "flash-attn") || cfg!(feature = "python") {
+                econfig.flash_context.unwrap_or(false)
+            } else {
+                false
+            }
         };
 
-        #[cfg(not(all(feature = "nccl", feature = "flash-decoding")))]
+        #[cfg(not(feature = "nccl"))]
+        assert!(
+            num_shards == 1,
+            "Multi-gpu inference is only available when `cuda` and `nccl` features enabled!"
+        );
+        #[cfg(not(feature = "nccl"))]
         let use_runner = num_shards > 1;
 
         let runners = if !use_runner {
@@ -244,7 +253,7 @@ impl LLMEngine {
                 for (rank, _) in device_ids.iter().enumerate() {
                     let sock_name = format!("@vllm-rs-runner-{}", rank);
                     spawn_runner(py, &runner_path.display().to_string(), &sock_name)
-                        .expect("Failed to spawn runner");
+                        .expect("Failed to spawn runner. \n\r*****Tips: runner is not built within this package, use 'build.sh' script to build package with runner!");
                 }
             });
 
@@ -252,7 +261,7 @@ impl LLMEngine {
             for (rank, _) in device_ids.iter().enumerate() {
                 let sock_name = format!("@vllm-rs-runner-{}", rank);
                 spawn_runner(&runner_path.display().to_string(), &sock_name)
-                    .expect("Failed to spawn runner");
+                    .expect("Failed to spawn runner. \n\r*****Tips: runner is not built, use 'run.sh' script instead of 'cargo run'!");
             }
 
             let progress_sock_name = "@vllm-rs-progress".to_string();
@@ -408,12 +417,13 @@ impl LLMEngine {
         }
         let session_id = params.session_id.clone();
 
-        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-        if session_id.is_some() {
-            candle_core::bail!(
-                "Context cache is only available when `flash-context` feature is enabled!"
-            );
-        }
+        let session_id = if session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
+            crate::log_error!("`session_id` detected but `context-cache` is not enabled!");
+            None
+        } else {
+            session_id.clone()
+        };
+
         let seq_id = if let Some(session_id) = session_id {
             crate::log_warn!(
                 "Cached {} sessions: {:?} ({} tokens cached).",
@@ -477,6 +487,22 @@ impl LLMEngine {
 
     pub fn get_num_cached_tokens(&self) -> usize {
         self.scheduler.get_num_cached_tokens()
+    }
+
+    pub fn notify_runner_finished(&mut self, id: usize) -> Result<()> {
+        match &mut self.runners {
+            RunnerType::Thread(model_runner) => Ok(model_runner.finished(id)),
+            RunnerType::Process(ref mut runner_streams) => {
+                for stream in runner_streams {
+                    send_local(
+                        &mut vec![stream.try_clone()?],
+                        &MessageType::FinishDecode(id),
+                        false,
+                    )?;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub fn step(&mut self) -> Result<()> {
@@ -633,6 +659,7 @@ impl LLMEngine {
                     }
                     self.prompt_start_times.remove(&seq_id);
                     self.decode_start_times.remove(&seq_id);
+                    let _ = self.notify_runner_finished(seq_id);
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
                         self.decode_start_times.insert(seq_id, cur_time);

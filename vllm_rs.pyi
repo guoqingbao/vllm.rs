@@ -25,7 +25,8 @@ class GenerationConfig:
     temperature: Optional[float]
     top_p: Optional[float]
     top_k: Optional[int]
-    penalty: Optional[float]
+    frequency_penalty: Optional[float]
+    presence_penalty: Optional[float]
 
 @dataclass
 class EngineConfig:
@@ -55,6 +56,8 @@ class SamplingParams:
     top_k: Optional[int]
     top_p: Optional[float]
     session_id: Optional[str]
+    frequency_penalty: Optional[float]
+    presence_penalty: Optional[float]
 
 @dataclass
 class Message:

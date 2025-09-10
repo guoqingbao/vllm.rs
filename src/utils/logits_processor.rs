@@ -218,35 +218,57 @@ impl LogitsProcessor {
         Ok(next_tokens)
     }
 
+    fn apply_penalties(
+        &self,
+        logits: &mut [f32],
+        context: &[u32],
+        frequency_penalty: f32,
+        presence_penalty: f32,
+    ) {
+        let mut counts = vec![0.0f32; logits.len()];
+        for ctx in context.iter() {
+            if *ctx as usize >= logits.len() {
+                continue;
+            }
+            counts[*ctx as usize] += 1.0;
+        }
+        for (token_id, logit) in logits.iter_mut().enumerate() {
+            let count = counts[token_id];
+            *logit = *logit
+                - count * frequency_penalty
+                - if count > 0.0 { 1. } else { 0. } * presence_penalty;
+        }
+    }
+
     pub fn apply_batch_repeat_penalty(
         &self,
         logits: &Tensor,
-        penalties: Vec<f32>,
+        frequency_penalties: Vec<f32>,
+        presence_penalties: Vec<f32>,
         context: Vec<Vec<u32>>,
     ) -> Result<Tensor> {
         let device = logits.device();
         let batch = logits.layout().dims()[0];
         let logits_len = logits.layout().dims()[1];
-        let logits: Vec<Vec<f32>> = logits.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>()?;
+        let logits: Vec<Vec<f32>> = if logits.dtype() != candle_core::DType::F32 {
+            logits.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>()?
+        } else {
+            logits.to_vec2::<f32>()?
+        };
         let vec_ret: Vec<Vec<f32>> = (0..batch)
             .into_par_iter()
             .map(|b| {
                 let mut logits = logits[b].to_vec();
-                let mut already_seen = std::collections::HashSet::new();
-                if penalties[b] != 1.0 && penalties[b] != 0. && context[b].len() > 1 {
-                    for token_id in &context[b] {
-                        if already_seen.contains(&token_id) {
-                            continue;
-                        }
-                        already_seen.insert(token_id);
-                        if let Some(logit) = logits.get_mut(*token_id as usize) {
-                            if *logit >= 0. {
-                                *logit /= penalties[b]
-                            } else {
-                                *logit *= penalties[b]
-                            }
-                        }
-                    }
+                if context[b].len() > 1
+                    && ((frequency_penalties[b] != 1.0 && frequency_penalties[b] != 0.)
+                        || (presence_penalties[b] != 1.0 && presence_penalties[b] != 0.))
+                {
+                    self.apply_penalties(
+                        &mut logits,
+                        &context[b],
+                        frequency_penalties[b],
+                        presence_penalties[b],
+                    );
                 }
                 logits
             })

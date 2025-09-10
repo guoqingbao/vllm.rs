@@ -39,8 +39,8 @@ def run(args):
         max_model_len = args.max_model_len
 
     generation_cfg = None
-    if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.penalty != None:
-         generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.penalty)
+    if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
+         generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)
 
     assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
     cfg = EngineConfig(
@@ -115,7 +115,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
     parser.add_argument("--top-k", type=int, default=None)
-    parser.add_argument("--penalty", type=float, default=None)
+    parser.add_argument("--frequency-penalty", type=float, default=None)
+    parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
 
     args = parser.parse_args()

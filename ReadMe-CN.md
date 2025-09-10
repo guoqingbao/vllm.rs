@@ -171,20 +171,17 @@ response = openai.chat.completions.create(
 # 使用model id加载
 python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
-# 本地GGUF文件
-python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-
-# ISQ q6k (macOS/Metal推荐)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
-
-# 指定设备2 (设备序号为1，`--d 1`)
-python -m vllm_rs.chat --i --d 1 --w /path/GLM-4-9B-0414-Q4_K_M.gguf
+# 本地GGUF文件加载到设备2 (设备序号为1，`--d 1`)
+python -m vllm_rs.chat --i --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
 python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # 启用上下文缓存（快速响应请求）
 python -m vllm_rs.chat --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
+
+# ISQ q6k (macOS/Metal推荐)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
 
 # 批量同步示例
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
@@ -237,20 +234,21 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 2. **构建 Python 包**
 
 ```bash
-# CUDA（较短上下文）
-maturin build --release --features cuda,python
+# CUDA (不使用Flash Attention)
+maturin build --release --features cuda,nccl,python
 
-# CUDA + Flash Attention (超长上下文 (>32k时) 推荐启用）
-maturin build --release --features cuda,flash-attn,python
+# CUDA + 启用Flash Attention
+maturin build --release --features cuda,nccl,flash-attn,python
+
+# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程) 
+./build.sh --release --features cuda,nccl,python
+
+# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程，同时启用flash-attn)
+./build.sh --release --features cuda,nccl,flash-attn,python
 
 # macOS（Metal）
 maturin build --release --features metal,python
 
-# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程)
-./build.sh --release --features cuda,nccl,flash-attn,python
-
-# 多GPU推理 + 上下文缓存
-./build.sh --release --features cuda,nccl,flash-decoding,flash-context,python
 ```
 
 3. **安装构建好的包与依赖**
@@ -266,17 +264,14 @@ pip install fastapi uvicorn
 使用 `--i` 启用交互模式，`--w` 指定Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
 ```bash
-# CUDA（短上下文）
-cargo run --release --features cuda -- --i --f /path/qwq-32b-q4_k_m.gguf
+# 单卡推理 CUDA + Built-in Context Cache
+cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
-# 使用第三个设备 (设备序号2，`--d 2`)
-cargo run --release --features cuda -- --i --d 2 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
+# 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
-# CUDA + Flash Attention（超长上下文，如 256k tokens）
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144
-
-# CUDA + Context Cache
-./run.sh --release --features cuda,nccl,flash-context -- --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+# CUDA Graph和输出惩罚项
+cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
 
 # macOS（Metal）
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -318,7 +313,8 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--temperature`   | 采样温度 (sampling temperature)，控制输出“随机性/创造性”的一个超参数，介于0-1之间  |       |
 | `--top-k`   | top-k 控制模型在每一步只从前 k 个最高概率的词里挑选，k 越小 → 越稳定；k 越大 → 越随机   |       |
 | `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |       |
-| `--penalty`   | repetition Penalty 控制模型避免重复，值为 ≥ 1.0，通常取 1.1 ~ 2.0。数值越大，惩罚越强，输出越多样化   |       |
+| `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
+| `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 
 ## 📽️ 演示视频
 
@@ -355,9 +351,10 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] 多卡并行推理（未量化Safetensors模型、GGUF量化模型）
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
-* [x] 上下文缓存 (当`flash-context`特性启用时生效)
+* [x] 上下文缓存 (`CUDA`平台使用`context-cache`参数)
 * [x] 从Hugginface Hub下载并加载模型
 * [ ] 从ModelScope下载并加载 (中国大陆地区)
+* [ ] Metal/macOS平台上下文缓存
 * [ ] 支持更多模型类型
 
 

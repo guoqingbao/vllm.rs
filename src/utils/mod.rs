@@ -453,13 +453,29 @@ pub fn init_config_tokenizer(
             eos_token: eos,
         };
 
+        let generation_cfg = if matches!(
+            config.architectures[0].as_str(),
+            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4"
+        ) {
+            //default repetition penalty for glm4 models
+            Some(GenerationConfig {
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                frequency_penalty: Some(1.2),
+                presence_penalty: Some(1.2),
+            })
+        } else {
+            None
+        };
+
         Ok((
             model_pathes,
             is_gguf,
             config,
             config_tokenizer,
             tokenizer,
-            None,
+            generation_cfg,
         ))
     } else {
         candle_core::bail!("Model file(s) not found!");
@@ -548,7 +564,6 @@ pub fn spawn_runner(
 
 pub fn get_arch_rope(
     tokenizer: &Tokenizer,
-    generation_cfg: &mut Option<GenerationConfig>,
     architectures: String,
 ) -> Result<(ModelType, String, bool)> {
     let rope_key_map: HashMap<&str, bool> = [
@@ -604,17 +619,10 @@ pub fn get_arch_rope(
                 (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
             }
         }
-        "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => {
-            if let Some(ref mut gen_cfg) = generation_cfg {
-                if gen_cfg.penalty.is_none() {
-                    gen_cfg.penalty = Some(1.2); //default repetition penalty for glm4 models
-                }
-            }
-            (
-                ModelType::GLM4,
-                "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
-            )
-        }
+        "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
+            ModelType::GLM4,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
     };
 

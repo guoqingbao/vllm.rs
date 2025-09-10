@@ -191,10 +191,10 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
+        #[cfg(not(any(feature = "cuda", feature = "flash-attn")))]
         assert!(
             !flash_context.unwrap_or(false),
-            "Flash decoding and flash-context was not enabled at the current build!"
+            "Context-cache is only available on CUDA paltform!"
         );
 
         Self {
@@ -205,9 +205,13 @@ impl EngineConfig {
             hf_token_path,
             num_blocks: 128, //placeholder
             block_size: if flash_context.unwrap_or(false) {
-                256
+                if cfg!(feature = "flash-attn") {
+                    256
+                } else {
+                    64
+                }
             } else {
-                32
+                64
             },
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
@@ -225,7 +229,9 @@ impl EngineConfig {
 #[pymethods]
 impl SamplingParams {
     #[new]
-    #[pyo3(signature = (temperature=None, max_tokens=Some(4096), ignore_eos=Some(false), top_k=None, top_p=None, session_id=None))]
+    #[pyo3(signature = (temperature=None, max_tokens=Some(4096),
+        ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
+        frequency_penalty=None, presence_penalty=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
@@ -233,6 +239,8 @@ impl SamplingParams {
         top_k: Option<isize>,
         top_p: Option<f32>,
         session_id: Option<String>,
+        frequency_penalty: Option<f32>,
+        presence_penalty: Option<f32>,
     ) -> Self {
         Self {
             temperature,
@@ -241,6 +249,8 @@ impl SamplingParams {
             top_k,
             top_p,
             session_id,
+            frequency_penalty,
+            presence_penalty,
         }
     }
 }
@@ -248,18 +258,20 @@ impl SamplingParams {
 #[pymethods]
 impl GenerationConfig {
     #[new]
-    #[pyo3(signature = (temperature=None, top_p=None, top_k=None, penalty=None))]
+    #[pyo3(signature = (temperature=None, top_p=None, top_k=None, frequency_penalty=None, presence_penalty=None))]
     pub fn new(
         temperature: Option<f32>,
         top_p: Option<f32>,
         top_k: Option<isize>,
-        penalty: Option<f32>,
+        frequency_penalty: Option<f32>,
+        presence_penalty: Option<f32>,
     ) -> Self {
         Self {
             temperature,
             top_p,
             top_k,
-            penalty,
+            frequency_penalty,
+            presence_penalty,
         }
     }
 }

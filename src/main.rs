@@ -86,7 +86,10 @@ struct Args {
     top_p: Option<f32>,
 
     #[arg(long, default_value = None)]
-    penalty: Option<f32>,
+    frequency_penalty: Option<f32>,
+
+    #[arg(long, default_value = None)]
+    presence_penalty: Option<f32>,
 
     #[arg(long, default_value = None)]
     seed: Option<u64>, //seed for reproduce the results
@@ -168,13 +171,15 @@ async fn main() -> Result<()> {
 
     let generation_cfg = if (args.temperature.is_some()
         && (args.top_k.is_some() && args.top_p.is_some()))
-        || args.penalty.is_some()
+        || args.frequency_penalty.is_some()
+        || args.presence_penalty.is_some()
     {
         Some(GenerationConfig {
             temperature: args.temperature,
             top_p: args.top_p,
             top_k: args.top_k,
-            penalty: args.penalty,
+            frequency_penalty: args.frequency_penalty,
+            presence_penalty: args.presence_penalty,
         })
     } else {
         None

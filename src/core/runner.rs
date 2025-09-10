@@ -17,9 +17,9 @@ use crate::{
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
     DecodeVec(&'a Vec<DecodeSequence>),
@@ -47,6 +47,7 @@ pub struct ModelRunner {
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
     logit_processor: LogitsProcessor,
     sampling_params: RwLock<SamplingParams>,
+    seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
 }
 
 impl ModelRunner {
@@ -189,6 +190,7 @@ impl ModelRunner {
             ),
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             sampling_params: RwLock::new(SamplingParams::default()),
+            seq_tokens: RwLock::new(HashMap::new()),
         })
     }
 
@@ -244,7 +246,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        if econfig.flash_context.unwrap_or(false) {
+        if cfg!(feature = "flash-attn") {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,
@@ -408,14 +410,11 @@ impl ModelRunner {
             );
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            #[cfg(any(feature = "flash-decoding", feature = "flash-context"))]
             let seqlen_k = if self.config.flash_context.unwrap_or(false) {
                 seq.num_cached_tokens + num_tokens
             } else {
                 num_tokens
             };
-            #[cfg(not(any(feature = "flash-decoding", feature = "flash-context")))]
-            let seqlen_k = num_tokens;
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
             cu_seqlens_k.push(cu_seqlens_k.last().unwrap() + seqlen_k as u32);
             max_seqlen_q = std::cmp::max(max_seqlen_q, seqlen_q);
@@ -545,28 +544,88 @@ impl ModelRunner {
     }
 
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        match seqs {
+        let seq_ids: Vec<usize> = match seqs {
+            Seqs::SeqRefs(seqs) => seqs.into_iter().map(|s| s.id()).collect(),
+            Seqs::DecodeVec(v) => v.into_iter().map(|s| s.id()).collect(),
+        };
+
+        let logits = if let Some(cfg) = &self.config.generation_cfg {
+            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
+                let frequency_penalty = cfg.frequency_penalty.unwrap_or(0.);
+                let presence_penalty = cfg.presence_penalty.unwrap_or(0.);
+                let seq_tokens = self.seq_tokens.write();
+                let reference_tokens: Vec<Vec<u32>> = seq_ids
+                    .iter()
+                    .map(|id| {
+                        if let Some(tokens) = seq_tokens.get(&id) {
+                            if tokens.len() > 128 {
+                                tokens[tokens.len().saturating_sub(128)..].to_vec()
+                            } else {
+                                vec![]
+                            }
+                        } else {
+                            vec![]
+                        }
+                    })
+                    .collect();
+
+                self.logit_processor.apply_batch_repeat_penalty(
+                    logits,
+                    vec![frequency_penalty; reference_tokens.len()],
+                    vec![presence_penalty; reference_tokens.len()],
+                    reference_tokens,
+                )?
+            } else {
+                logits.to_owned()
+            }
+        } else {
+            logits.to_owned()
+        };
+
+        let tokens = match seqs {
             Seqs::SeqRefs(seqs) => {
                 if is_prefill {
                     *self.sampling_params.write() = seqs[0].sampling_params.clone();
                 }
                 if seqs.len() == 1 {
                     self.logit_processor
-                        .sample(logits, &Some(seqs[0].sampling_params.clone()))
+                        .sample(&logits, &Some(seqs[0].sampling_params.clone()))?
                 } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()
+                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
                 }
             }
             Seqs::DecodeVec(v) => {
                 if v.len() == 1 {
                     let sampling_params = self.sampling_params.read();
                     self.logit_processor
-                        .sample(logits, &Some(sampling_params.clone()))
+                        .sample(&logits, &Some(sampling_params.clone()))?
                 } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()
+                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
+                }
+            }
+        };
+
+        if let Some(cfg) = &self.config.generation_cfg {
+            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
+                let mut seq_tokens = self.seq_tokens.write();
+                for i in 0..seq_ids.len() {
+                    if seq_tokens.contains_key(&seq_ids[i]) {
+                        seq_tokens
+                            .get_mut(&seq_ids[i])
+                            .expect("no entry")
+                            .push(tokens[i]);
+                    } else {
+                        seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
+                    }
                 }
             }
         }
+        Ok(tokens)
+    }
+
+    pub fn finished(&self, id: usize) {
+        let mut seq_tokens = self.seq_tokens.write();
+        let _ = seq_tokens.remove(&id);
     }
 
     pub fn get_model_vocab_size(&self) -> usize {

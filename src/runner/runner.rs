@@ -159,6 +159,9 @@ fn main() -> anyhow::Result<()> {
             Ok(MessageType::LoadingProgress(_)) => {
                 vllm_rs::log_info!("Received loading progress message");
             }
+            Ok(MessageType::FinishDecode(id)) => {
+                runner.finished(id);
+            }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {
                     vllm_rs::log_error!("Runner exit with error: {:?}", e);

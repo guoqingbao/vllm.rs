@@ -24,6 +24,7 @@ pub struct Sequence {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DecodeSequence {
+    pub id: usize,
     pub last_token: u32,
     pub len: usize,
     pub last_block_tokens: usize,
@@ -38,6 +39,7 @@ impl DecodeSequence {
         let last_block_tokens = sequence.last_block_num_tokens();
         let block_table_last = *sequence.block_table.last().unwrap();
         DecodeSequence {
+            id: sequence.id,
             last_token,
             len,
             last_block_tokens,
@@ -57,6 +59,7 @@ pub trait ToDecodeInput {
     fn last_block_tokens(&self) -> usize;
     fn block_table_last(&self) -> u32;
     fn block_table(&self) -> &Vec<u32>;
+    fn id(&self) -> usize;
 }
 
 impl ToDecodeInput for DecodeSequence {
@@ -79,6 +82,10 @@ impl ToDecodeInput for DecodeSequence {
     fn block_table(&self) -> &Vec<u32> {
         &self.block_tables
     }
+
+    fn id(&self) -> usize {
+        self.id
+    }
 }
 
 impl ToDecodeInput for &Sequence {
@@ -100,6 +107,10 @@ impl ToDecodeInput for &Sequence {
 
     fn block_table(&self) -> &Vec<u32> {
         &self.block_table
+    }
+
+    fn id(&self) -> usize {
+        self.id
     }
 }
 

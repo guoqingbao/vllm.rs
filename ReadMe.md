@@ -172,20 +172,17 @@ response = openai.chat.completions.create(
 # Load with model id
 python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
-# local gguf file
-python -m vllm_rs.chat --i --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-
-# ISQ q6k (macOS/Metal recommended)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
-
-# Use the second device (device order 1，`--d 1`)
-python -m vllm_rs.chat --i --d 1 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
+# local gguf file on second device (device order 1，`--d 1`)
+python -m vllm_rs.chat --i --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # Load unquantized safetensors model as GGUF quantized (e.g., q4k), with maximum model context length
 python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
 
 # Enable context cache for fast response (CUDA)
 python -m vllm_rs.chat --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
+
+# ISQ q6k (macOS/Metal recommended)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
 
 # Chat completion
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -240,26 +237,23 @@ pip install maturin[patchelf]  # For Linux/Windows
 2. **Build the Python package**
 
 ```bash
-# CUDA (normal context)
-maturin build --release --features cuda,python
-
-# CUDA (with CUDA Graph)
-maturin build --release --features cuda,graph,python
+# CUDA (No Flash Attention)
+maturin build --release --features cuda,nccl,python
 
 # CUDA with Flash Attention
-maturin build --release --features cuda,flash-attn,python
+maturin build --release --features cuda,nccl,flash-attn,python
 
-# CUDA with Context Cache features (takes time to build)
-maturin build --release --features cuda,flash-context,python
+# Multi-GPU CUDA (No Flash Attention, standalone runner)
+./build.sh --release --features cuda,nccl,python
+
+# Multi-GPU CUDA with Flash Attention (standalone runner)
+./build.sh --release --features cuda,nccl,flash-attn,python
+
+# CUDA (with CUDA Graph, experimental)
+maturin build --release --features cuda,graph,python
 
 # macOS (Metal)
 maturin build --release --features metal,python
-
-# build for multi-gpu inference (CUDA, also build and pack the runner)
-./build.sh --release --features cuda,nccl,flash-attn,python
-
-# build for multi-gpu inference with Context Cache
-./build.sh --release --features cuda,nccl,flash-decoding,flash-context,python
 ```
 
 3. **Install packages**
@@ -276,20 +270,14 @@ pip install fastapi uvicorn
 Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
 
 ```bash
-# CUDA (normal context)
-cargo run --release --features cuda -- --i --f /path/qwq-32b-q4_k_m.gguf
+# CUDA + Built-in Context Cache
+cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
-# Use the third device (device order 2，`--d 2`)
-cargo run --release --features cuda -- --i --d 2 --f /path/GLM-4-9B-0414-Q4_K_M.gguf
+# Multi-GPU: CUDA with Flash Attention (this scirpt help build the runner)
+./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --context-cache
 
-# CUDA (with CUDA Graph)
-cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf
-
-# CUDA with Flash Attention (extra-long context, e.g., 256k tokens) (this scirpt help build the runner)
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
-
-# CUDA with Context Cache
-./run --release --features cuda,nccl,flash-context -- --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+# CUDA (with CUDA Graph, experimental)
+cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
 
 # macOS (Metal)
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
@@ -332,7 +320,8 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--temperature`   | Controls randomness: lower (0.) → deterministic, higher (1.0) → creative/random.  |       |
 | `--top-k`   | Limits choices to the top k highest-probability tokens. smaller k → more stable；larger k → more random   |       |
 | `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |       |
-| `--penalty`   | Penalizes previously used tokens to reduce repetition (≥ 1.0 ~ 2.0 = stronger penalty).   |       |
+| `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
+| `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 
 ## 📽️ Demo Video
 
@@ -370,9 +359,10 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Multi-gpu inference (Unquantized safetensors, GGUF)
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
-* [x] Session-based context cache (available when `flash-context` feature enabled)
+* [x] Session-based context cache (available on `CUDA` when `context-cache` enabled)
 * [x] Model loading from hugginface hub
 * [ ] Model loading from ModelScope (China)
+* [ ] Context cache for Metal/macOS
 * [ ] Additional model support
 ---
 
