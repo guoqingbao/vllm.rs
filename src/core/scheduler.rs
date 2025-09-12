@@ -77,22 +77,13 @@ impl Scheduler {
 
         // Decode phase: pick sequences from running for decoding (up to max_num_seqs)
         let mut decode_ids = Vec::new();
-        let mut preempt_ids = Vec::new();
-
-        for (idx, seq) in self.running.iter().enumerate() {
-            if !self.block_manager.can_append(seq) {
-                preempt_ids.push(idx);
-            }
-        }
-
-        for idx in preempt_ids.into_iter().rev() {
-            let seq = self.running.remove(idx);
-            self.waiting.push_back(seq);
-        }
-
         for (idx, seq) in self.running.iter_mut().enumerate() {
             if decode_ids.len() >= self.cfg.max_num_seqs {
                 break;
+            }
+            // Skip the sequence if resources (KV blocks) are not enough
+            if !self.block_manager.can_append(seq) {
+                continue;
             }
             self.block_manager.may_append(seq)?;
             decode_ids.push(idx);
