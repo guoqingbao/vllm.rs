@@ -385,25 +385,8 @@ impl Module for QLinear {
         } else {
             x.to_owned()
         };
-        let xs = match *x.dims() {
-            [bsize, seq_len, dim1, dim2] => {
-                if seq_len > 1 {
-                    QMatMul::forward(&self.inner, &xs)?
-                } else {
-                    let xs = xs.reshape((bsize, dim1, dim2))?;
-                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, dim1, ()))?
-                }
-            }
-            [bsize, seq_len, dim] => {
-                if seq_len > 1 {
-                    QMatMul::forward(&self.inner, &xs)?
-                } else {
-                    let xs = xs.reshape((bsize, dim))?;
-                    QMatMul::forward(&self.inner, &xs)?.reshape((bsize, seq_len, ()))?
-                }
-            }
-            _ => QMatMul::forward(&self.inner, &xs)?,
-        };
+
+        let xs = QMatMul::forward(&self.inner, &xs)?;
 
         if let Some(bias) = &self.bias {
             xs.broadcast_add(bias)

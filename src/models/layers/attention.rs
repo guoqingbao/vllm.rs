@@ -119,7 +119,11 @@ impl Attention {
             } else {
                 vb.pp("q_norm")
             },
-            dtype,
+            if is_qvar_builder || config.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -135,7 +139,11 @@ impl Attention {
             } else {
                 vb.pp("k_norm")
             },
-            dtype,
+            if is_qvar_builder || config.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
@@ -241,6 +249,6 @@ impl Attention {
             )?
             .reshape((seq_len, ()))?;
 
-        self.o_proj.forward(&y)?.to_dtype(self.dtype)
+        self.o_proj.forward(&y.to_dtype(xs.dtype())?)
     }
 }
