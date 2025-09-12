@@ -633,3 +633,53 @@ pub fn get_arch_rope(
     };
     Ok((model_type, default_chat_template, is_rope_i))
 }
+
+pub fn get_dtype(dtype: Option<String>) -> DType {
+    let dtype = match dtype.as_deref() {
+        Some("f16") => DType::F16,
+        Some("bf16") => DType::BF16,
+        Some("f32") => DType::F32,
+        Some(dtype) => panic!("Unsupported dtype {dtype}"),
+        None => DType::BF16,
+    };
+
+    #[cfg(feature = "cuda")]
+    let dtype = {
+        use candle_core::cuda_backend::cudarc::driver::result::{device, init};
+        use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
+        match (init(), device::get(0)) {
+            (Ok(_), Ok(d)) => {
+                let (compute_major, compute_minor) = unsafe {
+                    (
+                        device::get_attribute(
+                            d,
+                            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                        )
+                        .unwrap_or(8),
+                        device::get_attribute(
+                            d,
+                            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                        )
+                        .unwrap_or(8),
+                    )
+                };
+                crate::log_info!(
+                    "CUDA compute capability: {}.{}",
+                    compute_major,
+                    compute_minor,
+                );
+                if dtype != DType::F32 && compute_major < 8 {
+                    crate::log_warn!(
+                        "CUDA compute capability: {} (<8), switched to F16 cause no BF16 support.",
+                        compute_major
+                    );
+                    DType::F16
+                } else {
+                    dtype
+                }
+            }
+            _ => dtype,
+        }
+    };
+    dtype
+}

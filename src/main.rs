@@ -1,4 +1,4 @@
-use candle_core::{DType, Result};
+use candle_core::Result;
 use clap::Parser;
 // use rand::Rng;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
@@ -11,6 +11,7 @@ use vllm_rs::log_error;
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
+use vllm_rs::utils::get_dtype;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -109,13 +110,7 @@ async fn main() -> Result<()> {
         candle_core::bail!("Must provide model_id or weight_path or weight_file!");
     }
 
-    let dtype = match args.dtype.as_deref() {
-        Some("f16") => DType::F16,
-        Some("bf16") => DType::BF16,
-        Some("f32") => DType::F32,
-        Some(dtype) => panic!("Unsupported dtype {dtype}"),
-        None => DType::BF16,
-    };
+    let dtype = get_dtype(args.dtype);
 
     let (max_num_seqs, interactive) = if args.batch.is_some() {
         tracing::warn!("max_num_seqs is ignored in batch performance test.");

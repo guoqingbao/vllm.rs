@@ -102,7 +102,7 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 Supports both **Safetensor** and **GGUF** formats.
 
 ## 📦 Install with pip
-
+   💡 Manual build required for CUDA compute capability < 8.0 (e.g., V100)
 ```shell
 # built-in `context cache` feature for fast prefill and response
 python3 -m pip install vllm_rs

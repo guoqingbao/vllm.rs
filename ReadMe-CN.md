@@ -100,7 +100,7 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 支持 **Safetensor** 和 **GGUF** 格式。
 
 ## 📦 从pip安装
-
+   💡 CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
 ```shell
 # 默认支持上下文缓存（快速响应功能）
 python3 -m pip install vllm_rs

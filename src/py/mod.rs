@@ -4,7 +4,7 @@ use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
-use candle_core::DType;
+use crate::utils::get_dtype;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
@@ -25,9 +25,7 @@ impl Engine {
     #[pyo3(text_signature = "(econfig, dtype)")]
     pub fn new(econfig: EngineConfig, dtype: String) -> PyResult<Self> {
         let dtype_parsed = match dtype.as_str() {
-            "f16" => DType::F16,
-            "bf16" => DType::BF16,
-            "f32" => DType::F32,
+            "f16" | "bf16" | "f32" => get_dtype(Some(dtype)),
             _ => {
                 return Err(PyValueError::new_err(
                     "Invalid data type (only f16, bf16 and f32 are supported)",
