@@ -101,7 +101,7 @@ pub fn embedding(
             }
             .dequantize(vb.device())?;
             let vocab_size = vocab_size.unwrap_or(weight.dim(0)?);
-            (weight.to_dtype(dtype)?, vocab_size)
+            (weight, vocab_size)
         }
     };
     Ok((Embedding::new(embeddings, hidden_size), vocab_size))
