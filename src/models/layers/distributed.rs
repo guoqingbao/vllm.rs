@@ -85,6 +85,7 @@ impl MergedParallelColumnLinear {
     }
 }
 
+#[allow(dead_code)]
 pub struct TensorParallelRowLinear {
     linear: Linear,
     #[cfg(feature = "nccl")]
@@ -207,15 +208,18 @@ impl TensorParallelRowLinear {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let mut xs = self.linear.forward(x)?;
-        if xs.dtype() != self.dtype {
-            xs = xs.to_dtype(self.dtype)?;
-        }
         #[cfg(feature = "nccl")]
         if let Some(all_reduce) = &self.all_reduce {
-            xs = xs.apply_op1_no_bwd(all_reduce)?;
+            if xs.dtype() != self.dtype {
+                //only bf16/fp16 supported in all reduce
+                let xs_reduce = xs.to_dtype(self.dtype)?.apply_op1_no_bwd(all_reduce)?;
+                xs = xs_reduce.to_dtype(xs.dtype())?
+            } else {
+                xs = xs.apply_op1_no_bwd(all_reduce)?;
+            }
         }
         if let Some(bias) = &self.bias {
-            xs = xs.broadcast_add(&bias.to_dtype(self.dtype)?)?;
+            xs = xs.broadcast_add(&bias)?;
         }
         Ok(xs)
     }

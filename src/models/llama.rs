@@ -126,6 +126,7 @@ pub struct LLaMaForCausalLM {
     config: Config,
     dtype: DType,
     vocab_size: usize,
+    is_qvar_builder: bool,
 }
 
 impl LLaMaForCausalLM {
@@ -158,7 +159,11 @@ impl LLaMaForCausalLM {
             } else {
                 vb.pp("model.embed_tokens").clone()
             },
-            dtype,
+            if is_qvar_builder || config.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
         )?;
 
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
@@ -235,6 +240,7 @@ impl LLaMaForCausalLM {
             config: config.clone(),
             dtype,
             vocab_size,
+            is_qvar_builder,
         })
     }
 
@@ -293,7 +299,13 @@ impl LLaMaForCausalLM {
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
-        self.lm_head.forward(&xs)?.to_dtype(DType::F32)
+        if self.is_qvar_builder {
+            self.lm_head.forward(&xs)
+        } else {
+            self.lm_head
+                .forward(&xs.to_dtype(self.dtype)?)?
+                .to_dtype(DType::F32)
+        }
     }
 
     pub fn get_vocab_size(&self) -> usize {
