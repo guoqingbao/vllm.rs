@@ -85,11 +85,13 @@ impl MergedParallelColumnLinear {
     }
 }
 
+#[allow(dead_code)]
 pub struct TensorParallelRowLinear {
     linear: Linear,
     #[cfg(feature = "nccl")]
     all_reduce: Option<AllReduce>,
     bias: Option<Tensor>,
+    dtype: DType,
 }
 
 #[allow(dead_code)]
@@ -166,7 +168,7 @@ impl CustomOp1 for AllReduce {
 
 impl TensorParallelRowLinear {
     #[allow(unused_variables)]
-    pub fn new(linear: Linear, comm: Rc<Comm>) -> Self {
+    pub fn new(linear: Linear, comm: Rc<Comm>, dtype: DType) -> Self {
         #[cfg(feature = "nccl")]
         let all_reduce = if comm.world_size() > 1 {
             Some(AllReduce { comm })
@@ -178,6 +180,7 @@ impl TensorParallelRowLinear {
             #[cfg(feature = "nccl")]
             all_reduce,
             bias: None,
+            dtype,
         }
     }
 
@@ -199,6 +202,7 @@ impl TensorParallelRowLinear {
             #[cfg(feature = "nccl")]
             all_reduce,
             bias,
+            dtype,
         }
     }
 
@@ -206,7 +210,13 @@ impl TensorParallelRowLinear {
         let mut xs = self.linear.forward(x)?;
         #[cfg(feature = "nccl")]
         if let Some(all_reduce) = &self.all_reduce {
-            xs = xs.apply_op1_no_bwd(all_reduce)?;
+            if xs.dtype() != self.dtype {
+                //only bf16/fp16 supported in all reduce
+                let xs_reduce = xs.to_dtype(self.dtype)?.apply_op1_no_bwd(all_reduce)?;
+                xs = xs_reduce.to_dtype(xs.dtype())?
+            } else {
+                xs = xs.apply_op1_no_bwd(all_reduce)?;
+            }
         }
         if let Some(bias) = &self.bias {
             xs = xs.broadcast_add(&bias)?;
@@ -315,7 +325,7 @@ impl TensorParallelRowLinear {
             quant,
             dtype,
         )?;
-        Ok(Self::new(linear, comm))
+        Ok(Self::new(linear, comm, dtype))
     }
 }
 
