@@ -87,6 +87,7 @@ impl Scheduler {
 
         for idx in preempt_ids.into_iter().rev() {
             let seq = self.running.remove(idx);
+            self.block_manager.deallocate(&seq);
             self.waiting.push_back(seq);
         }
 
