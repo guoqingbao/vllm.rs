@@ -189,11 +189,6 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        #[cfg(not(any(feature = "cuda", feature = "flash-attn")))]
-        assert!(
-            !flash_context.unwrap_or(false),
-            "Context-cache is only available on CUDA paltform!"
-        );
 
         Self {
             model_id,

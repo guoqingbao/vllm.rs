@@ -180,8 +180,8 @@ python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q
 # 启用上下文缓存（快速响应请求）
 python -m vllm_rs.chat --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
-# ISQ q6k (macOS/Metal推荐)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
+# ISQ q4k (macOS/Metal推荐)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q4k --context-cache
 
 # 批量同步示例
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
@@ -276,8 +276,8 @@ cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf -
 # macOS（Metal）
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
-#macOS (Metal, ISQ)
-cargo run --features metal --release -- --i --w /path/Qwen3-0.6B --isq q6k
+#macOS (Metal, ISQ) with context cache
+cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k --context-cache
 ```
 
 Safetensor 模型（未量化）
@@ -351,10 +351,10 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] 多卡并行推理（未量化Safetensors模型、GGUF量化模型）
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
-* [x] 上下文缓存 (`CUDA`平台使用`context-cache`参数)
+* [x] 上下文缓存 (使用`context-cache`参数)
 * [x] 从Hugginface Hub下载并加载模型
 * [ ] 从ModelScope下载并加载 (中国大陆地区)
-* [ ] Metal/macOS平台上下文缓存
+* [x] Metal/macOS平台上下文缓存
 * [ ] 支持更多模型类型
 
 

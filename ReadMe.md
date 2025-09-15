@@ -181,8 +181,8 @@ python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k
 # Enable context cache for fast response (CUDA)
 python -m vllm_rs.chat --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
-# ISQ q6k (macOS/Metal recommended)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q6k
+# ISQ q4k (macOS/Metal recommended)
+python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q4k --context-cache
 
 # Chat completion
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -283,7 +283,7 @@ cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf -
 cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
 
 #macOS (Metal, ISQ)
-cargo run --features metal --release -- --i --w /path/Qwen3-0.6B --isq q6k
+cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q4k --context-cache
 ```
 
 
@@ -362,7 +362,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Session-based context cache (available on `CUDA` when `context-cache` enabled)
 * [x] Model loading from hugginface hub
 * [ ] Model loading from ModelScope (China)
-* [ ] Context cache for Metal/macOS
+* [x] Context cache for Metal/macOS
 * [ ] Additional model support
 ---
 
