@@ -84,12 +84,13 @@ impl Qwen3DecoderLayer {
         {
             if is_qvar_builder {
                 //experts weights packed
-                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone())?)
+                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
             } else if config.quant.is_some() {
                 MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
                     config,
                     vb.pp("mlp").clone(),
                     comm.clone(),
+                    dtype,
                 )?)
             } else {
                 MoeOrMlp::MoeNaive(MoeNaive::new(

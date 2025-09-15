@@ -19,6 +19,8 @@ pub struct MoeNaive {
     experts: Vec<MLP>,
     norm_topk_prob: bool,
     num_experts_per_tok: usize,
+    all_reduce: AllReduce,
+    world_size: usize,
 }
 
 impl MoeNaive {
@@ -47,12 +49,14 @@ impl MoeNaive {
                 "",
             )?);
         }
-
+        let world_size = comm.world_size();
         Ok(Self {
             gate,
             experts,
             norm_topk_prob: moe_cfg.norm_topk_prob,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            all_reduce: AllReduce::new(comm),
+            world_size,
         })
     }
 
@@ -103,6 +107,9 @@ impl MoeNaive {
             let current_hidden_states = current_hidden_states.broadcast_mul(&selected_experts)?;
             ys = ys.index_add(&top_x, &current_hidden_states, 0)?;
         }
+        if self.world_size > 1 {
+            ys = self.all_reduce.apply(&ys)?;
+        }
         Ok(ys)
     }
 }
@@ -117,10 +124,11 @@ pub struct FusedMoeGGUF {
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
+    dtype: DType,
 }
 
 impl FusedMoeGGUF {
-    pub fn new_repack(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
+    pub fn new_repack(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
         let gate = linear_no_bias(
@@ -216,12 +224,13 @@ impl FusedMoeGGUF {
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
+            dtype,
         })
     }
 
-    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         if comm.world_size() > 1 {
-            return Self::new_repack(cfg, vb, comm.clone());
+            return Self::new_repack(cfg, vb, comm.clone(), dtype);
         }
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
@@ -268,13 +277,18 @@ impl FusedMoeGGUF {
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size: 1,
+            dtype,
         })
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let original_dtype = xs.dtype();
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let xs = xs.to_dtype(DType::F32)?;
+        let xs = if xs.dtype() != DType::F32 {
+            xs.to_dtype(DType::F32)?
+        } else {
+            xs.to_owned()
+        };
         let router_logits = self.gate.forward(&xs)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
@@ -301,12 +315,12 @@ impl FusedMoeGGUF {
             .broadcast_mul(&scores.unsqueeze(D::Minus1)?)?
             .sum(D::Minus2)?
             .reshape((num_tokens, hidden_dim))?
-            .to_dtype(original_dtype)?;
+            .to_dtype(self.dtype)?;
 
         if self.world_size > 1 {
             ys = self.all_reduce.apply(&ys)?;
         }
-        Ok(ys)
+        ys.to_dtype(original_dtype)
     }
 }
 
@@ -320,10 +334,11 @@ pub struct FusedMoeISQ {
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
+    dtype: DType,
 }
 
 impl FusedMoeISQ {
-    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
@@ -494,13 +509,18 @@ impl FusedMoeISQ {
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
+            dtype,
         })
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let original_dtype = xs.dtype();
-        let xs = xs.to_dtype(DType::F32)?;
+        let xs = if xs.dtype() != DType::F32 {
+            xs.to_dtype(DType::F32)?
+        } else {
+            xs.to_owned()
+        };
         let router_logits = self.gate.forward(&xs)?;
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
@@ -527,11 +547,11 @@ impl FusedMoeISQ {
             .broadcast_mul(&scores.unsqueeze(D::Minus1)?)?
             .sum(D::Minus2)?
             .reshape((num_tokens, hidden_dim))?
-            .to_dtype(original_dtype)?;
+            .to_dtype(self.dtype)?;
 
         if self.world_size > 1 {
             ys = self.all_reduce.apply(&ys)?;
         }
-        Ok(ys)
+        ys.to_dtype(original_dtype)
     }
 }
