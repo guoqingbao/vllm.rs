@@ -257,6 +257,7 @@ async fn main() -> Result<()> {
             let sig = line_editor.read_line(&prompt);
             if chat_context_left < 0 {
                 tracing::error!("No tokens left, press Ctrl+C to start a new chat session!");
+                chat_context_left = 0;
                 continue;
             }
             match sig {
@@ -315,6 +316,12 @@ async fn main() -> Result<()> {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
+                            print!("\n🌀 Chat history cleared. Start a new conversation.\n");
+                            chat_history.clear(); //start a new chat
+                            prompt.right_prompt = DefaultPromptSegment::Basic(format!(
+                                "Tokens left: {} (full)",
+                                total_available_tokens
+                            ));
                             continue;
                         }
                     }

@@ -407,6 +407,17 @@ impl LLMEngine {
             params.max_tokens = max_model_len - length;
         }
 
+        let remain_tokens = (self.econfig.max_num_seqs * max_model_len) as isize
+            - self.get_num_cached_tokens() as isize;
+
+        if remain_tokens < 1 || length as isize > remain_tokens {
+            candle_core::bail!(
+                "Remaining {} kvcache tokens, but your prompt length is {}, please request later!",
+                remain_tokens,
+                length
+            );
+        }
+
         if let Some(gen_cfg) = &self.econfig.generation_cfg {
             let temperature = params.temperature.or(gen_cfg.temperature);
             let top_k = params.top_k.or(gen_cfg.top_k);
@@ -704,7 +715,11 @@ impl LLMEngine {
     }
 
     pub fn check_cache(&mut self) {
-        if self.active_sessions.len() > self.econfig.max_num_seqs {
+        let has_tokens_left = self.econfig.max_num_seqs * self.econfig.max_model_len.unwrap()
+            > self.get_num_cached_tokens();
+        if self.active_sessions.len() > 0
+            && (self.active_sessions.len() > self.econfig.max_num_seqs || !has_tokens_left)
+        {
             if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
                 self.scheduler.release_cache(seq_id);
                 crate::log_warn!(
