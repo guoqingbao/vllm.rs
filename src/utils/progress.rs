@@ -98,6 +98,8 @@ impl ProgressLike for RemoteProgressReporter {
                 if let MessageType::LoadingProgress((rank, progress)) = msg {
                     progress_values.push((rank, progress));
                 }
+            } else {
+                panic!("Error when loading model!");
             }
         }
         progress_values

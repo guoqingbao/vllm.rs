@@ -73,12 +73,13 @@ def create_app(cfg, dtype):
                                 body.get("top_k", None),
                                 body.get("top_p", None),
                                 body.get("session_id", None))
-        stream = body.get("stream", False)
-        if stream:
+        use_stream = body.get("stream", False)
+        if use_stream:
             start_time = current_millis()
             prompt, engine = await chat_stream(params, body["messages"])
             print("session_id: ", params.session_id)
             async def streamer():
+                stream = None
                 try:
                     (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
                     decode_start_time = 0
@@ -125,12 +126,23 @@ def create_app(cfg, dtype):
                     performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
                 except asyncio.CancelledError:
                     print("⛔️ Client disconnected. Cancelling stream.")
-                    stream.cancel()
-                    raise
+                    if stream != None:
+                        stream.cancel()
+                    # Don’t yield error — client already disconnected
                 except Exception as e:
                     print(f"⛔️ Stream error: {e}")
-                    stream.cancel()
-                    raise
+                    if stream != None:
+                        stream.cancel()
+                    # Yield an assistant-style error message
+                    yield "data: " + json.dumps({
+                        "choices": [{
+                            "delta": {"content": f"[⛔️ Stream Error] {str(e)}"},
+                            "finish_reason": "error"
+                        }]
+                    }) + "\n\n"
+
+                    yield "data: [DONE]\n\n"
+                    return
 
             return StreamingResponse(streamer(), media_type="text/event-stream")
         else:

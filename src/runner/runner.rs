@@ -5,6 +5,7 @@ use interprocess::TryClone;
 use parking_lot::RwLock;
 use std::io::Write;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
@@ -27,11 +28,9 @@ fn main() -> anyhow::Result<()> {
         .expect("Socket name missing");
     let sock_name = sock.clone().to_ns_name::<GenericNamespaced>()?;
     let mut stream = LocalStream::connect(sock_name.clone());
-
-    ctrlc::set_handler(move || {
-        vllm_rs::log_info!("Runner start new session!");
-    })
-    .expect("Error setting Ctrl+C handler");
+    // shared flag for model loaded
+    let model_loaded = Arc::new(AtomicBool::new(false));
+    let model_loaded_ctrlc = model_loaded.clone();
 
     loop {
         if stream.is_ok() {
@@ -44,6 +43,16 @@ fn main() -> anyhow::Result<()> {
     let mut stream = stream.expect("Failed to connect to socket");
     stream.write_all(b"ready\n")?;
     stream.flush()?;
+
+    ctrlc::set_handler(move || {
+        if model_loaded_ctrlc.load(Ordering::SeqCst) {
+            vllm_rs::log_info!("Runner start new session!");
+        } else {
+            vllm_rs::log_warn!("Runner break model loading (Ctrl+C detected)!");
+            std::process::exit(0);
+        }
+    })
+    .expect("Error setting Ctrl+C handler");
 
     vllm_rs::log_info!("Runner connected to socket: {}", sock);
     let msg = receive_local(&mut stream, true)?;
@@ -131,6 +140,8 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // mark model as loaded
+    model_loaded.store(true, Ordering::SeqCst);
     loop {
         match receive_local(&mut stream, false) {
             Ok(MessageType::Shutdown) => {
