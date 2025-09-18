@@ -20,6 +20,8 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+const MAX_PARALLEL_SAMPLING: usize = 32;
+
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
     DecodeVec(&'a Vec<DecodeSequence>),
@@ -587,7 +589,7 @@ impl ModelRunner {
                 if is_prefill {
                     *self.sampling_params.write() = seqs[0].sampling_params.clone();
                 }
-                if seqs.len() == 1 {
+                if seqs.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
                     self.logit_processor
                         .sample(&logits, &Some(seqs[0].sampling_params.clone()))?
                 } else {
@@ -595,7 +597,7 @@ impl ModelRunner {
                 }
             }
             Seqs::DecodeVec(v) => {
-                if v.len() == 1 {
+                if v.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
                     let sampling_params = self.sampling_params.read();
                     self.logit_processor
                         .sample(&logits, &Some(sampling_params.clone()))?
