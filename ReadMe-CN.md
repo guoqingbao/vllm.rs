@@ -205,7 +205,7 @@ print(outputs)
 params.session_id = xxx #传入session_id以使用上下文缓存功能
 
 # 单请求流式生成
-stream = engine.generate_stream(params, prompt)
+(seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
 for token in stream:
     print(token)
 ```
@@ -270,6 +270,9 @@ cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-
 # 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
 ./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
+# 多卡推理 server 服务
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --context-cache --server --port 8000
+
 # CUDA Graph和输出惩罚项
 cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
 
@@ -291,6 +294,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 
 # 多GPU推理（交互模式）
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
+
+# 多GPU推理 (server 模式)
+./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --max-tokens 1024 --max-model-len 1024 --server
 
 # 多GPU推理+上下文缓存（交互模式）
 ./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
@@ -315,6 +321,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |       |
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
+| `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
 
 ## 📽️ 演示视频
 

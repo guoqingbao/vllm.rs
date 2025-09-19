@@ -206,7 +206,7 @@ print(outputs)
 
 params.session_id = xxx # pass session to use context cache
 # Streaming generation for single request
-stream = engine.generate_stream(params, prompt)
+(seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
 for token in stream:
     print(token)
 ```
@@ -270,11 +270,14 @@ pip install fastapi uvicorn
 Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
 
 ```bash
-# CUDA + Built-in Context Cache
+# CUDA + Built-in Context Cache (single card)
 cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # Multi-GPU: CUDA with Flash Attention (this scirpt help build the runner)
 ./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --context-cache
+
+# Multi-GPU server mode
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --context-cache --server --port 8000
 
 # CUDA (with CUDA Graph, experimental)
 cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
@@ -299,8 +302,11 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 # Multi-GPUs (interactive mode)
 ./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
 
+# Multi-GPUs (server mode)
+./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --max-tokens 1024 --max-model-len 1024 --server
+
 # Multi-GPUs with Context Cache (interactive mode)
-./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
+./run.sh --release --features cuda,nccl,flash-attn -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
 ## ⚙️ Command Line Arguments
@@ -322,6 +328,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |       |
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
+| `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
 
 ## 📽️ Demo Video
 

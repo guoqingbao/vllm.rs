@@ -412,7 +412,9 @@ impl ModelRunner {
             );
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            let seqlen_k = if self.config.flash_context.unwrap_or(false) {
+            let seqlen_k = if self.config.flash_context.unwrap_or(false)
+                || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-attn"))
+            {
                 seq.num_cached_tokens + num_tokens
             } else {
                 num_tokens

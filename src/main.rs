@@ -1,103 +1,22 @@
+use axum::routing::{get, post};
+use axum::Json;
+use axum::Router;
 use candle_core::Result;
 use clap::Parser;
-// use rand::Rng;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
+use vllm_rs::server::Args;
+use vllm_rs::server::{server::chat_completion, ServerData};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 use vllm_rs::utils::get_dtype;
-
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Maximum number of concurrent sequences to allow, default 1 for interactive chat
-    #[arg(long, default_value_t = 1)]
-    max_num_seqs: usize,
-
-    /// Size of a block
-    #[arg(long)]
-    max_model_len: Option<usize>,
-
-    /// if weight_path is passed, it will ignore the model_id
-    #[arg(long = "m")]
-    model_id: Option<String>,
-
-    /// The folder name that contains safetensor weights and json files
-    /// (same structure as huggingface online)
-    #[arg(long = "w")]
-    weight_path: Option<String>,
-
-    /// gguf file path or gguf file name when model_id is given
-    #[arg(long = "f")]
-    weight_file: Option<String>,
-
-    hf_token: Option<String>,
-
-    hf_token_path: Option<String>,
-
-    #[arg(long)]
-    dtype: Option<String>,
-
-    #[arg(long, default_value_t = false)]
-    cpu: bool,
-
-    #[arg(long = "d", value_delimiter = ',')]
-    device_ids: Option<Vec<usize>>,
-
-    //Whether the program running in multiprocess or multithread model for parallel inference
-    #[arg(long, default_value_t = false)]
-    multi_process: bool,
-
-    #[arg(long, default_value_t = false)]
-    log: bool,
-
-    #[arg(long, value_delimiter = '|')]
-    prompts: Option<Vec<String>>,
-
-    // in-site quantization, e.g. q4_k, q2_k, q8_0, etc.
-    // if not provided, it will not perform in-situ quantization for the original model
-    // do not use this option if you are using a gguf file
-    #[arg(long, default_value = None)]
-    isq: Option<String>,
-
-    #[arg(long = "i", default_value_t = false)]
-    interactive: bool,
-
-    /// max tokens for each request
-    #[arg(long, default_value_t = 4096)]
-    max_tokens: usize,
-
-    /// for batch performance tetst
-    #[arg(long, default_value = None)]
-    batch: Option<usize>,
-
-    #[arg(long, default_value = None)]
-    temperature: Option<f32>,
-
-    #[arg(long, default_value = None)]
-    top_k: Option<isize>,
-
-    #[arg(long, default_value = None)]
-    top_p: Option<f32>,
-
-    #[arg(long, default_value = None)]
-    frequency_penalty: Option<f32>,
-
-    #[arg(long, default_value = None)]
-    presence_penalty: Option<f32>,
-
-    #[arg(long, default_value = None)]
-    seed: Option<u64>, //seed for reproduce the results
-
-    #[arg(long, default_value_t = false)]
-    context_cache: bool,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -122,6 +41,11 @@ async fn main() -> Result<()> {
         (args.max_num_seqs, args.interactive)
     };
 
+    assert!(
+        !(interactive && args.server),
+        "You selected both interactive and server mode, which is not valid!"
+    );
+
     let max_model_len = if args.max_model_len.is_none() {
         let max_model_len = if args.interactive {
             32768
@@ -137,8 +61,13 @@ async fn main() -> Result<()> {
     let prompts = match (args.prompts, interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
-            println!("⛔️ No prompts provided, using default prompt.");
-            vec!["Please talk about China in more details.".to_string()]
+            if args.server {
+                tracing::warn!("Enter server mode.");
+                vec![]
+            } else {
+                println!("⛔️ No prompts provided, using default prompt.");
+                vec!["Please talk about China in more details.".to_string()]
+            }
         }
         (Some(_), true) => {
             tracing::warn!("Interactive mode does not support predefined prompts, these prompts will be ignored.");
@@ -197,7 +126,44 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
+    if args.server {
+        let server_data = ServerData {
+            engine: engine.clone(),
+        };
+        // Build axum app
+        let app = Router::new()
+            .route(
+                "/v1/models",
+                get(|| async {
+                    Json(json!({
+                        "object": "list",
+                        "data": [
+                            {
+                                "id": "default",
+                                "object": "model",
+                                "created": std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64,
+                                "owned_by": "vllm.rs",
+                                "permission": []
+                            }
+                        ]
+                    }))
+                }),
+            )
+            .route("/v1/chat/completions", post(chat_completion))
+            .with_state(Arc::new(server_data));
 
+        // Start server
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
+        vllm_rs::log_warn!(
+            "🚀 Chat server listening on http://0.0.0.0:{}/v1/",
+            args.port
+        );
+
+        return Ok(axum::serve(listener, app).await?);
+    }
     let mut params = Vec::new();
 
     let mut prompt_processed = Vec::new();
