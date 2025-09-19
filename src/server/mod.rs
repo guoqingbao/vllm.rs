@@ -183,7 +183,7 @@ pub struct Args {
     pub interactive: bool,
 
     /// max tokens for each request
-    #[arg(long, default_value_t = 4096)]
+    #[arg(long, default_value_t = 16384)]
     pub max_tokens: usize,
 
     /// for batch performance tetst
