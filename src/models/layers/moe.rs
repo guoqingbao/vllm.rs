@@ -342,7 +342,7 @@ impl FusedMoeISQ {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
-        let quant_type = match cfg.quant.as_ref().unwrap().as_str() {
+        let mut quant_type = match cfg.quant.as_ref().unwrap().as_str() {
             "q4_0" => GgmlDType::Q4_0,
             "q4_1" => GgmlDType::Q4_1,
             "q5_0" => GgmlDType::Q5_0,
@@ -356,7 +356,12 @@ impl FusedMoeISQ {
             _ => panic!("Unsupported GGML data type!"),
         };
 
-        let block_size = quant_type.block_size();
+        let mut block_size = quant_type.block_size();
+        //in case the experts unable to split under qkk format, switch to q8_0
+        if moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0 {
+            quant_type = GgmlDType::Q8_0;
+            block_size = quant_type.block_size();
+        }
         let gate = linear_no_bias(
             cfg.hidden_size,
             num_experts,
