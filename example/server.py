@@ -51,6 +51,22 @@ def create_app(cfg, dtype):
     engine = Engine(cfg, dtype)
     app = FastAPI()
 
+    @app.get("/v1/models")
+    async def list_models():
+        #dummy model name
+        return JSONResponse({
+            "object": "list",
+            "data": [
+                {
+                    "id": "default",
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "vllm.rs",
+                    "permission": []
+                }
+            ]
+        })
+
     # chat completion for single and batch requests
     def chat_complete(params, messages):
         prompts = [engine.apply_chat_template(params, [Message("user", m["content"])], True) for m in messages]
@@ -100,18 +116,45 @@ def create_app(cfg, dtype):
                             break
                         try:
                             yield "data: " + json.dumps({
+                                "id": "seq" + str(seq_id),
+                                "object": "chat.completion.chunk",
+                                "model": "default",
+                                "created": int(time.time()),
                                 "choices": [{
                                     "delta": {
                                         "content": token
                                     },
-                                    "finish_reason": None
-                                }]
+                                    "index": 0,
+                                }],
+                                "usage": {
+                                    "prompt_tokens": prompt_length,
+                                    "completion_tokens": decoded_length,
+                                    "total_tokens": prompt_length + decoded_length
+                                }
                             }) + "\n\n"
                         except Exception as send_err:
                             print(
                                 f"⛔️ Sending token to client failed: {send_err}")
                             stream.cancel()
                             return  # Stop streaming
+
+                    yield "data: " + json.dumps({
+                        "id": "seq" + str(seq_id),
+                        "object": "chat.completion.chunk",
+                        "model": "default",
+                        "created": int(time.time()),
+                        "choices": [{
+                            "delta": {},
+                            "index": 0,
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {
+                            "prompt_tokens": prompt_length,
+                            "completion_tokens": decoded_length,
+                            "total_tokens": prompt_length + decoded_length
+                        }
+                    }) + "\n\n"
+                        
                     yield "data: [DONE]\n\n"
                     decode_finish_time = current_millis()
                     output = type("GenerationOutput", (), {
@@ -135,9 +178,16 @@ def create_app(cfg, dtype):
                         stream.cancel()
                     # Yield an assistant-style error message
                     yield "data: " + json.dumps({
+                        "id": "seq" + str(seq_id),
+                        "object": "chat.completion.chunk",
+                        "model": "default",
+                        "created": int(time.time()),
                         "choices": [{
-                            "delta": {"content": f"[⛔️ Stream Error] {str(e)}"},
-                            "finish_reason": "error"
+                            "delta": {},
+                            "index": 0,
+                            "error": {
+                                "message": f"[⛔️ Stream Error] {str(e)}",
+                            },
                         }]
                     }) + "\n\n"
 
