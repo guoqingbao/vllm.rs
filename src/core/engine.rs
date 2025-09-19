@@ -200,6 +200,8 @@ impl LLMEngine {
         #[cfg(not(feature = "nccl"))]
         let use_runner = num_shards > 1;
 
+        log_info!("Check use_runner {:?}", use_runner);
+
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");

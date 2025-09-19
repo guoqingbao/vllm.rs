@@ -356,11 +356,26 @@ impl FusedMoeISQ {
             _ => panic!("Unsupported GGML data type!"),
         };
 
+        let get_moe_intermediate_chunk = |blk_size: usize| -> usize {
+            let base = moe_cfg.moe_intermediate_size / comm.world_size();
+            if base % blk_size != 0 {
+                ((base + blk_size - 1) / blk_size) * blk_size
+            } else {
+                base
+            }
+        };
+
         let mut block_size = quant_type.block_size();
-        //in case the experts unable to split under qkk format, switch to q8_0
-        if moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0 {
-            quant_type = GgmlDType::Q8_0;
-            block_size = quant_type.block_size();
+        if comm.world_size() > 1
+            && moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0
+        {
+            //in case of the experts unable to be split under qkk format,
+            //and asymetric split also not workable, switch to q8_0
+            let chunk = get_moe_intermediate_chunk(block_size);
+            if (moe_cfg.moe_intermediate_size - chunk) % (comm.world_size() - 1) != 0 {
+                quant_type = GgmlDType::Q8_0;
+                block_size = quant_type.block_size();
+            }
         }
         let gate = linear_no_bias(
             cfg.hidden_size,
@@ -376,13 +391,7 @@ impl FusedMoeISQ {
         let mut up_experts = Vec::with_capacity(num_experts);
         let mut down_experts = Vec::with_capacity(num_experts);
 
-        let moe_intermediate_chunk =
-            if moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0 {
-                ((moe_cfg.moe_intermediate_size / comm.world_size() + block_size - 1) / block_size)
-                    * block_size
-            } else {
-                moe_cfg.moe_intermediate_size / comm.world_size()
-            };
+        let moe_intermediate_chunk = get_moe_intermediate_chunk(block_size);
 
         //pack experts
         for i in 0..num_experts {
