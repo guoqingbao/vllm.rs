@@ -54,8 +54,8 @@ def create_app(cfg, dtype):
     # chat completion for single and batch requests
     def chat_complete(params, messages):
         prompts = [engine.apply_chat_template(params, [Message("user", m["content"])], True) for m in messages]
-        outputs = engine.generate_sync(params, prompts)
-        performance_metric(outputs, False)
+        outputs = engine.generate_sync([params] * len(prompts), prompts)
+        performance_metric(outputs, False, 0, False)
         return outputs
 
     # chat stream: stream response to single request

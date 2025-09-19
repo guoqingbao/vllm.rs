@@ -90,7 +90,7 @@ class Engine:
         """
 
     def generate_sync(self,
-        params: SamplingParams,
+        params: List[SamplingParams],
         prompts: List[str],
     ) -> List[GenerationOutput]:
         """
