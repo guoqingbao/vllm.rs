@@ -24,7 +24,7 @@ And includes:
 
 ## Available Tools
 
-### 1. `vllm-rs` – CLI Inference Tool
+### 1. `vllm-rs` – Rust CLI/REST API Inference Tool
 
 ```bash
 vllm-rs [OPTIONS] [HF_TOKEN] [HF_TOKEN_PATH]
@@ -33,7 +33,7 @@ vllm-rs [OPTIONS] [HF_TOKEN] [HF_TOKEN_PATH]
 **Usage Example:**
 
 ```bash
-vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 512 --temperature 0.7
+vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 512 --temperature 0.7 --server --port 8000
 ```
 
 **Common Options:**
@@ -48,12 +48,14 @@ vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 512 --temperature 0.7
 | `--cpu` | Run on CPU instead of GPU |
 | `--d <DEVICE_IDS>` | GPU device IDs to use |
 | `--context-cache` | Enable context caching for better performance |
+| `--server` | Enable serving native Rust chat API instead of interactive mode |
+| `--port` | Port on which to bind 0.0.0.0 serving the HTTP API |
 
 See `vllm-rs --help` for full list of options.
 
 ---
 
-### 2. `vllm-rs-server` – REST API Server
+### 2. `vllm-rs-server` – Python REST API Server
 
 ```bash
 vllm-rs-server --host 0.0.0.0 --port 80 --m meta-llama/Llama-3.2-1B
