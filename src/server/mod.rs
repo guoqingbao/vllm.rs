@@ -1,5 +1,6 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+#[cfg(not(feature = "python"))]
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;

@@ -91,40 +91,53 @@ def create_app(cfg, dtype):
                                 body.get("session_id", None))
         use_stream = body.get("stream", False)
         if use_stream:
-            start_time = current_millis()
             prompt, engine = await chat_stream(params, body["messages"])
             print("session_id: ", params.session_id)
+
             async def streamer():
                 stream = None
+                done_item = None
                 try:
                     (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-                    decode_start_time = 0
-                    decoded_length = 0
-                    output_text = ""
-                    for token in stream:
+                    for item in stream:
                         if await request.is_disconnected():
                             print(
                                 f"⛔️ Client has disconnected, stop streaming [seq_id {seq_id}].")
                             stream.cancel()
                             return
-
-                        if not decode_start_time:
-                            decode_start_time = current_millis()
-                        decoded_length += 1
-                        output_text += token
-                        if token == "[DONE]":
-                            break
-                        try:
+                        if item.datatype == "TOKEN":
+                            try:
+                                yield "data: " + json.dumps({
+                                    "id": "seq" + str(seq_id),
+                                    "object": "chat.completion.chunk",
+                                    "model": "default",
+                                    "created": int(time.time()),
+                                    "choices": [{
+                                        "delta": {
+                                            "content": item.data
+                                        },
+                                        "index": 0,
+                                    }],
+                                }) + "\n\n"
+                            except Exception as send_err:
+                                print(
+                                    f"⛔️ Sending token to client failed: {send_err}")
+                                stream.cancel()
+                                return  # Stop streaming
+                        elif item.datatype == "ERROR":
+                            raise Exception(item.data)
+                        elif item.datatype == "DONE":
+                            prompt_start_time, decode_start_time, decode_finish_time, decoded_length = item.data
+                            done_item = item.data
                             yield "data: " + json.dumps({
                                 "id": "seq" + str(seq_id),
                                 "object": "chat.completion.chunk",
                                 "model": "default",
                                 "created": int(time.time()),
                                 "choices": [{
-                                    "delta": {
-                                        "content": token
-                                    },
+                                    "delta": {},
                                     "index": 0,
+                                    "finish_reason": "length" if decoded_length >= params.max_tokens else "stop",
                                 }],
                                 "usage": {
                                     "prompt_tokens": prompt_length,
@@ -132,41 +145,20 @@ def create_app(cfg, dtype):
                                     "total_tokens": prompt_length + decoded_length
                                 }
                             }) + "\n\n"
-                        except Exception as send_err:
-                            print(
-                                f"⛔️ Sending token to client failed: {send_err}")
-                            stream.cancel()
-                            return  # Stop streaming
-
-                    yield "data: " + json.dumps({
-                        "id": "seq" + str(seq_id),
-                        "object": "chat.completion.chunk",
-                        "model": "default",
-                        "created": int(time.time()),
-                        "choices": [{
-                            "delta": {},
-                            "index": 0,
-                            "finish_reason": "stop",
-                        }],
-                        "usage": {
-                            "prompt_tokens": prompt_length,
-                            "completion_tokens": decoded_length,
-                            "total_tokens": prompt_length + decoded_length
-                        }
-                    }) + "\n\n"
                         
                     yield "data: [DONE]\n\n"
-                    decode_finish_time = current_millis()
-                    output = type("GenerationOutput", (), {
-                        "seq_id": seq_id,
-                        "decode_output": output_text,
-                        "prompt_length": prompt_length,
-                        "prompt_start_time":start_time,
-                        "decode_start_time": decode_start_time,
-                        "decode_finish_time": decode_finish_time,
-                        "decoded_length": decoded_length,
-                    })()
-                    performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
+                    if done_item != None:
+                        prompt_start_time, decode_start_time, decode_finish_time, decoded_length = done_item
+                        output = type("GenerationOutput", (), {
+                            "seq_id": seq_id,
+                            "decode_output": "",
+                            "prompt_length": prompt_length,
+                            "prompt_start_time": prompt_start_time,
+                            "decode_start_time": decode_start_time,
+                            "decode_finish_time": decode_finish_time,
+                            "decoded_length": decoded_length,
+                        })()
+                        performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
                 except asyncio.CancelledError:
                     print("⛔️ Client disconnected. Cancelling stream.")
                     if stream != None:
@@ -233,11 +225,10 @@ def main():
 
     # limit default max_num_seqs to 1 on MacOs (due to limited gpu memory)
     max_num_seqs = 1 if sys.platform == "darwin" else args.max_num_seqs
+    max_model_len = 32768 if sys.platform == "darwin" else 65536
     if args.max_model_len is None:
         if max_num_seqs > 0:
-            max_model_len = 65536 // max_num_seqs
-        else:
-            max_model_len = 65536
+            max_model_len =  max_model_len // max_num_seqs
         warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
     else:
         max_model_len = args.max_model_len
@@ -261,6 +252,7 @@ def main():
 
     app = create_app(cfg, args.dtype)
 
+    print("\nServer url: http://127.0.0.1:" + str(args.port) + "/v1")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

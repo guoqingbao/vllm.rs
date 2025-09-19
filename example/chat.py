@@ -164,39 +164,44 @@ def main():
                 print("\n👋 Exiting.")
                 break
 
-        start_time = current_millis()
         if interactive:
             try:
+                done_item = None
+                decoded_length = 0
+                output_text = ""
                 seq_id, prompt_length, stream = engine.generate_stream(
                     params, prompt_processed[0])
-                output_text = ""
-                decode_start_time = 0
-                decoded_length = 0
-                for token in stream:
-                    if not decode_start_time:
-                        decode_start_time = current_millis()
-                    decoded_length += 1
-                    output_text += token
-                    print(token, end="", flush=True)
+                for item in stream:
+                    if item.datatype == "TOKEN":
+                        print(item.data, end="", flush=True)
+                        output_text += item.data
+                        decoded_length += 1
+                    elif item.datatype == "ERROR":
+                        raise Exception(item.data)
+                    elif item.datatype == "DONE":
+                        done_item = item.data
 
                 print()  # newline after streaming ends
-                decode_finish_time = current_millis()
+                if done_item != None:
+                    prompt_start_time, decode_start_time, decode_finish_time, decoded_length = done_item
                 if args.context_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens - prompt_length - decoded_length
                 # Construct a GenerationOutput-like object manually
-                output = type("GenerationOutput", (), {
-                    "seq_id": seq_id,
-                    "decode_output": output_text,
-                    "prompt_length": prompt_length,
-                    "prompt_start_time": start_time,
-                    "decode_start_time": decode_start_time,
-                    "decode_finish_time": decode_finish_time,
-                    "decoded_length": decoded_length,
-                })()
-
-                outputs = [output]
+                if done_item != None:
+                    output = type("GenerationOutput", (), {
+                        "seq_id": seq_id,
+                        "decode_output": output_text,
+                        "prompt_length": prompt_length,
+                        "prompt_start_time": prompt_start_time,
+                        "decode_start_time": decode_start_time,
+                        "decode_finish_time": decode_finish_time,
+                        "decoded_length": decoded_length,
+                    })()
+                    outputs = [output]
+                else:
+                    outputs = []
             except KeyboardInterrupt:
                 stream.cancel()
                 if args.context_cache:
@@ -217,7 +222,8 @@ def main():
         else:
             outputs = engine.generate_sync(sampling_params, prompt_processed)
 
-        outputs.sort(key=lambda o: o.seq_id)
+        if len(outputs) > 0:
+            outputs.sort(key=lambda o: o.seq_id)
 
         decode_time_taken = 0.0
         prompt_time_taken = 0.0
@@ -245,15 +251,16 @@ def main():
                     role="assistant", content=output.decode_output)
                 chat_history.append(assistant_msg)
 
-        print("\n--- Performance Metrics ---")
-        print(
-            f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
-            f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
-        )
-        print(
-            f"⏱️ Decoded tokens: {total_decoded_tokens} in {decode_time_taken:.2f}s "
-            f"({total_decoded_tokens / max(decode_time_taken, 0.001):.2f} tokens/s)"
-        )
+        if len(outputs) > 0:
+            print("\n--- Performance Metrics ---")
+            print(
+                f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
+                f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
+            )
+            print(
+                f"⏱️ Decoded tokens: {total_decoded_tokens} in {decode_time_taken:.2f}s "
+                f"({total_decoded_tokens / max(decode_time_taken, 0.001):.2f} tokens/s)"
+            )
 
         if not interactive:
             break

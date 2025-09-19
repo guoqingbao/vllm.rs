@@ -69,14 +69,35 @@ class StepOutput(Enum):
     Token: int
     Tokens: List[int]
 
+@dataclass
+class StreamItem:
+    """
+    An item returned by the EngineStream iterator.
+    Check the `type` attribute to determine how to interpret the `data`.
+    """
+    @property
+    def datatype(self) -> Literal["TOKEN", "TOKEN_ID", "COMPLETION", "DONE", "ERROR"]:
+        """The type of the stream item."""
+        ...
+
+    @property
+    def data(self) -> Union[
+        str,                         # For TOKEN or ERROR
+        int,                         # For TOKEN_ID
+        Tuple[int, int, int, int],   # For DONE
+        Tuple[int, int, int, List[int]] # For COMPLETION
+    ]:
+        """The data payload of the stream item."""
+        ...
+
 class EngineStream:
     finished: bool
     seq_id: int
     prompt_length: int
     cancelled: bool
     def cancel(self): ...
-    def __iter__(self) -> Iterator[str]: ...
-    def __next__(self) -> str: ...
+    def __iter__(self) -> Iterator[StreamItem]: ...
+    def __next__(self) -> StreamItem: ...
 
 class Engine:
     def __init__(econfig: EngineConfig, dtype: DType) -> Engine:

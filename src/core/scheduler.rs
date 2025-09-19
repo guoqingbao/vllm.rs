@@ -17,6 +17,8 @@ pub struct Scheduler {
     cached_seqs: VecDeque<(usize, String)>,
 }
 
+const MIN_NUM_SCHEDULED_REQS: usize = 5;
+
 impl Scheduler {
     pub fn new(econfig: &EngineConfig, config: &Config) -> Self {
         Self {
@@ -53,8 +55,8 @@ impl Scheduler {
 
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
-            if scheduled_ids.len() >= self.cfg.max_num_seqs
-                || num_tokens + seq.len() - seq.num_cached_tokens > self.cfg.max_num_batched_tokens
+            if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+                || num_tokens + seq.len() >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
             {
                 // Put it back and break out if cannot schedule more
@@ -66,7 +68,7 @@ impl Scheduler {
                 self.block_manager.allocate(&mut seq)?;
             }
             seq.status = SequenceStatus::Running;
-            num_tokens += seq.len() - seq.num_cached_tokens;
+            num_tokens += seq.len();
             self.running.push(seq);
             scheduled_ids.push(self.running.len() - 1); // index of newly pushed seq
         }
@@ -91,7 +93,7 @@ impl Scheduler {
         }
 
         for (idx, seq) in self.running.iter_mut().enumerate() {
-            if decode_ids.len() >= self.cfg.max_num_seqs {
+            if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
                 break;
             }
             self.block_manager.may_append(seq)?;

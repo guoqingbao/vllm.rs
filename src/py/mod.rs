@@ -114,6 +114,51 @@ impl Engine {
     }
 }
 
+#[pyclass(name = "StreamItem")]
+#[derive(Clone)]
+pub struct PyStreamItem(StreamItem);
+use pyo3::IntoPyObjectExt;
+#[pymethods]
+impl PyStreamItem {
+    /// A string representing the type of the stream item.
+    /// e.g., "TOKEN", "DONE", "ERROR".
+    #[getter]
+    fn datatype(&self) -> &'static str {
+        match self.0 {
+            StreamItem::Token(_) => "TOKEN",
+            StreamItem::TokenID(_) => "TOKEN_ID",
+            StreamItem::Completion(_) => "COMPLETION",
+            StreamItem::Done(_) => "DONE",
+            StreamItem::Error(_) => "ERROR",
+        }
+    }
+
+    /// The data associated with the stream item. The Python type of this
+    /// data depends on the `type`.
+    /// - "TOKEN": str
+    /// - "DONE": tuple[int, int, int, int]
+    /// - "ERROR": str
+    /// etc.
+    #[getter]
+    fn data(&self, py: Python) -> PyResult<Py<PyAny>> {
+        match &self.0 {
+            StreamItem::Token(s) => s.into_py_any(py),
+            StreamItem::TokenID(id) => id.into_py_any(py),
+            StreamItem::Completion(c) => (c.0, c.1, c.2, c.3.clone()).into_py_any(py),
+            StreamItem::Done(d) => (d.0, d.1, d.2, d.3).into_py_any(py),
+            StreamItem::Error(e) => e.into_py_any(py),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<StreamItem type={}>", self.datatype())
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+}
+
 #[pyclass]
 #[allow(unused_variables)]
 pub struct EngineStream {
@@ -141,17 +186,47 @@ impl EngineStream {
         engine_guard.cancel(slf.seq_id);
     }
 
-    fn __next__(&self) -> PyResult<String> {
+    // fn __next__(&self) -> PyResult<String> {
+    //     let mut rx = self.rx.lock().unwrap();
+
+    //     match GLOBAL_RT.block_on(rx.recv()) {
+    //         Some(StreamItem::Token(token)) => Ok(token),
+    //         Some(StreamItem::Done(_)) | None => Err(PyStopIteration::new_err("[DONE]")),
+    //         Some(StreamItem::Error(e)) => Err(PyValueError::new_err(e)),
+    //         Some(StreamItem::TokenID(_)) => Err(PyValueError::new_err(
+    //             "We should not receive raw token id (used for completion) during streaming!",
+    //         )),
+    //         Some(_) => self.__next__(), // Skip over Completion/etc
+    //     }
+    // }
+
+    fn __next__(&mut self) -> PyResult<PyStreamItem> {
+        // If the stream was already marked as finished on the previous
+        // iteration, stop now.
+        if self.finished {
+            return Err(PyStopIteration::new_err(""));
+        }
+
         let mut rx = self.rx.lock().unwrap();
 
+        // Block and wait for the next item from the channel.
         match GLOBAL_RT.block_on(rx.recv()) {
-            Some(StreamItem::Token(token)) => Ok(token),
-            Some(StreamItem::Done(_)) | None => Err(PyStopIteration::new_err("[DONE]")),
-            Some(StreamItem::Error(e)) => Err(PyValueError::new_err(e)),
-            Some(StreamItem::TokenID(_)) => Err(PyValueError::new_err(
-                "We should not receive raw token id (used for completion) during streaming!",
-            )),
-            Some(_) => self.__next__(), // Skip over Completion/etc
+            Some(item) => {
+                // If this is a terminal item (Done or Error), we'll return it
+                // to the user this time, but set a flag so that the *next*
+                // call to __next__ raises StopIteration.
+                if matches!(item, StreamItem::Done(_) | StreamItem::Error(_)) {
+                    self.finished = true;
+                }
+
+                // Wrap the Rust enum in our PyO3 class and return it.
+                Ok(PyStreamItem(item))
+            }
+            // The channel is empty and disconnected, so the stream is finished.
+            _ => {
+                self.finished = true;
+                Err(PyStopIteration::new_err("[DONE]"))
+            }
         }
     }
 }

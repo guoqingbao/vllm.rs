@@ -46,7 +46,7 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to build global Tokio runtime")
 });
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StreamItem {
     Token(String),                               //streaming
     TokenID(u32),                                //completion
@@ -717,10 +717,11 @@ impl LLMEngine {
     }
 
     pub fn check_cache(&mut self) {
+        //kvcache approach 95%, we need release cached requests
         let has_tokens_left = self.econfig.max_num_seqs * self.econfig.max_model_len.unwrap()
-            > self.get_num_cached_tokens();
+            > (self.get_num_cached_tokens() as f32 * 1.05) as usize;
         if self.active_sessions.len() > 0
-            && (self.active_sessions.len() > self.econfig.max_num_seqs || !has_tokens_left)
+            && (self.active_sessions.len() > self.econfig.max_num_seqs && !has_tokens_left)
         {
             if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
                 self.scheduler.release_cache(seq_id);
