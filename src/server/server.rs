@@ -58,7 +58,7 @@ pub async fn chat_completion(
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as u64;
+        .as_millis() as u64;
 
     if use_stream {
         let session_id = params.session_id.clone();
@@ -82,10 +82,19 @@ pub async fn chat_completion(
         let mut stream = stream;
         let (response_tx, client_rx) = flume::unbounded();
         task::spawn(async move {
+            let mut decode_start_time = 0;
+            let mut decoded_length = 0;
             let engine_clone = data.engine.clone();
             while let Some(item) = stream.recv().await {
                 match item {
                     StreamItem::Token(token) => {
+                        if decode_start_time == 0 {
+                            decode_start_time = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as u64;
+                        }
+                        decoded_length += 1;
                         let chunk = ChatCompletionChunk {
                             id: format!("seq-{}", seq_id),
                             object: "chat.completion.chunk",
@@ -102,8 +111,42 @@ pub async fn chat_completion(
                         };
 
                         let result = response_tx.try_send(ChatResponse::Chunk(chunk));
-                        if result.is_err() {
-                            crate::log_info!("Stream send to client error {:?}", result);
+                        if let Err(e) = result {
+                            crate::log_error!(
+                                "[seq_id {}] Stream send to client error: {:?}",
+                                seq_id,
+                                e
+                            );
+
+                            if decoded_length > 0 {
+                                // Performance metrics
+                                let prompt_time_taken =
+                                    (decode_start_time - created) as f32 / 1000.0;
+                                let decode_time_taken = (std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis()
+                                    as u64
+                                    - decode_start_time)
+                                    as f32
+                                    / 1000.0;
+                                crate::log_info!("--- Performance Metrics ---");
+                                crate::log_info!(
+                                    "[Unfinished seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                                    seq_id,
+                                    prompt_length,
+                                    prompt_time_taken,
+                                    prompt_length as f32 / prompt_time_taken.max(0.001)
+                                );
+                                crate::log_info!(
+                                    "[Unfinished seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                                    seq_id,
+                                    decoded_length,
+                                    decode_time_taken,
+                                    decoded_length as f32 / decode_time_taken.max(0.001)
+                                );
+                            }
+
                             let mut e = engine_clone.write();
                             e.cancel(seq_id);
                             break;
@@ -144,14 +187,17 @@ pub async fn chat_completion(
                         let decode_time_taken =
                             (decode_finish_time - decode_start_time) as f32 / 1000.0;
 
+                        crate::log_info!("--- Performance Metrics ---");
                         crate::log_info!(
-                            "⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                            "[seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                            seq_id,
                             prompt_length,
                             prompt_time_taken,
                             prompt_length as f32 / prompt_time_taken.max(0.001)
                         );
                         crate::log_info!(
-                            "⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                            "[seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                            seq_id,
                             decoded_length,
                             decode_time_taken,
                             decoded_length as f32 / decode_time_taken.max(0.001)
@@ -160,7 +206,7 @@ pub async fn chat_completion(
                         break;
                     }
                     StreamItem::Error(e) => {
-                        crate::log_error!("Stream error: {}", e);
+                        crate::log_error!("[seq_id {}] Stream error: {}", seq_id, e);
                         let error_chunk = ChatCompletionChunk {
                             id: format!("seq{}", seq_id),
                             object: "chat.completion.chunk",
@@ -251,6 +297,7 @@ pub async fn chat_completion(
             });
         }
 
+        crate::log_info!("--- Performance Metrics ---");
         crate::log_info!(
             "⏱️ [{} requests] Prompt tokens: {} in {:.2}s ({:.2} t/s)",
             choices.len(),

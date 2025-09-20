@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
                                 "created": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
-                                    .as_secs() as i64,
+                                    .as_millis() as i64,
                                 "owned_by": "vllm.rs",
                                 "permission": []
                             }
