@@ -297,7 +297,7 @@ impl EngineConfig {
 #[pymethods]
 impl SamplingParams {
     #[new]
-    #[pyo3(signature = (temperature=None, max_tokens=Some(4096),
+    #[pyo3(signature = (temperature=None, max_tokens=Some(16384),
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
         frequency_penalty=None, presence_penalty=None))]
     pub fn new(
@@ -312,7 +312,7 @@ impl SamplingParams {
     ) -> Self {
         Self {
             temperature,
-            max_tokens: max_tokens.unwrap_or(4096),
+            max_tokens: max_tokens.unwrap_or(16384),
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,

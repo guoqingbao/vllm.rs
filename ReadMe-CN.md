@@ -206,8 +206,9 @@ params.session_id = xxx #传入session_id以使用上下文缓存功能
 
 # 单请求流式生成
 (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-for token in stream:
-    print(token)
+for item in stream:
+    # item.datatype == "TOKEN"
+    print(item.data)
 ```
 
 ## 🔨 从源代码编译安装（可选）

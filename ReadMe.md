@@ -207,8 +207,9 @@ print(outputs)
 params.session_id = xxx # pass session to use context cache
 # Streaming generation for single request
 (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-for token in stream:
-    print(token)
+for item in stream:
+    # item.datatype == "TOKEN"
+    print(item.data)
 ```
 
 ## 🔨 Build Python Package from source (Optional)

@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument("--prompts", type=str,
                         help="Use '|' to separate multiple prompts")
     parser.add_argument("--i", action="store_true")
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--isq", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)

@@ -84,7 +84,7 @@ def create_app(cfg, dtype):
     async def chat(request: Request):
         body = await request.json()
         params = SamplingParams(body.get("temperature", 1.0),
-                                body.get("max_tokens", 4096),
+                                body.get("max_tokens", 16384),
                                 body.get("ignore_eos", False),
                                 body.get("top_k", None),
                                 body.get("top_p", None),
