@@ -303,7 +303,7 @@ impl SamplingParams {
     ) -> Self {
         Self {
             temperature,
-            max_tokens: max_tokens.unwrap_or(4096),
+            max_tokens: max_tokens.unwrap_or(16384),
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
@@ -331,7 +331,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
-            max_tokens: 4096,
+            max_tokens: 16384,
             ignore_eos: false,
             top_k: None,
             top_p: None,
