@@ -6,6 +6,7 @@ use super::{
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use std::collections::VecDeque;
+use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
@@ -179,6 +180,11 @@ impl Scheduler {
                     seq.token_ids.extend(new_tokens_ids.clone());
                     seq.status = SequenceStatus::Waiting; //active ths sequence (from cached to waiting)
                     seq.output_ids.clear();
+                    //in context-cache, we dont' recreate sequences, so we need to update created_time
+                    seq.created_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_millis() as usize;
                     if let Err(e) = self.block_manager.ensure_allocate(&mut seq) {
                         seq.status = SequenceStatus::Finished;
                         self.block_manager.deallocate(&seq);
