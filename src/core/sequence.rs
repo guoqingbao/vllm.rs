@@ -1,6 +1,7 @@
 // src/core/sequence.rs
 use crate::utils::config::SamplingParams;
 use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SequenceStatus {
     Waiting,
@@ -12,6 +13,7 @@ pub enum SequenceStatus {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub id: usize,
+    pub created_time: usize,
     pub status: SequenceStatus,
     pub token_ids: Vec<u32>,
     pub output_ids: Vec<u32>,
@@ -118,6 +120,10 @@ impl Sequence {
     pub fn new(token_ids: Vec<u32>, block_size: usize, sampling_params: SamplingParams) -> Self {
         Self {
             id: 0, // Will be set by scheduler
+            created_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis() as usize,
             status: SequenceStatus::Waiting,
             token_ids: token_ids.clone(),
             output_ids: Vec::new(),
@@ -167,5 +173,9 @@ impl Sequence {
         let start = index * self.block_size;
         let end = (index + 1) * self.block_size;
         self.token_ids[start..end.min(self.token_ids.len())].to_vec()
+    }
+
+    pub fn created_time(&self) -> usize {
+        self.created_time
     }
 }

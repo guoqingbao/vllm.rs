@@ -77,7 +77,6 @@ pub struct LLMEngine {
     stream_senders: HashMap<usize, Sender<StreamItem>>,
     request_types: HashMap<usize, RequestType>,
     decode_start_times: HashMap<usize, usize>,
-    prompt_start_times: HashMap<usize, usize>,
     active_requests: HashSet<usize>,
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
@@ -371,7 +370,6 @@ impl LLMEngine {
             stream_decoders: HashMap::new(),
             stream_senders: HashMap::new(),
             request_types: HashMap::new(),
-            prompt_start_times: HashMap::new(),
             decode_start_times: HashMap::new(),
             active_requests: HashSet::new(),
             active_sessions: VecDeque::new(),
@@ -521,11 +519,6 @@ impl LLMEngine {
     pub fn step(&mut self) -> Result<()> {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as usize;
-
         // Get scheduled sequence indexes and prefill flag
         let (scheduled_ids, is_prefill) = match self.scheduler.schedule() {
             Ok((ids, prefill)) => (ids, prefill),
@@ -615,11 +608,6 @@ impl LLMEngine {
             Either::Right(indices) => (indices, false),
         };
 
-        let cur_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("Time went backwards")
-            .as_millis() as usize;
-
         for &idx in indices {
             let sq = if is_running {
                 self.scheduler.get_running(idx)
@@ -631,21 +619,19 @@ impl LLMEngine {
                 if s.is_finished() {
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
-                            let prompt_start_time = if let Some(prompt_start_time) =
-                                self.prompt_start_times.get(&seq_id)
-                            {
-                                *prompt_start_time
-                            } else {
-                                start_time
-                            };
+                            let prompt_start_time = s.created_time();
 
-                            let decode_finish_time = cur_time;
+                            let decode_finish_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis()
+                                as usize;
                             let decode_start_time = if let Some(decode_start_time) =
                                 self.decode_start_times.get(&seq_id)
                             {
                                 *decode_start_time
                             } else {
-                                cur_time
+                                decode_finish_time
                             };
 
                             if *request_type == RequestType::Stream {
@@ -670,15 +656,17 @@ impl LLMEngine {
                     if let Some(_) = self.active_requests.get(&seq_id) {
                         self.active_requests.remove(&seq_id);
                     }
-                    self.prompt_start_times.remove(&seq_id);
                     self.decode_start_times.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
-                        self.decode_start_times.insert(seq_id, cur_time);
-                    }
-                    if is_prefill && !self.prompt_start_times.contains_key(&seq_id) {
-                        self.prompt_start_times.insert(seq_id, start_time);
+                        self.decode_start_times.insert(
+                            seq_id,
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as usize,
+                        );
                     }
                     let token_id = s.last_token;
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
@@ -752,7 +740,6 @@ impl LLMEngine {
                 self.active_requests.remove(&seq_id);
             }
             self.stream_decoders.remove(&seq_id);
-            self.prompt_start_times.remove(&seq_id);
             self.decode_start_times.remove(&seq_id);
             self.stream_senders.remove(&seq_id);
         }
