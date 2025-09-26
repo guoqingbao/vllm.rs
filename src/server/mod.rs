@@ -5,6 +5,7 @@ pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
+use crate::utils::config::EngineConfig;
 use axum::extract::Json;
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
@@ -79,9 +80,7 @@ pub struct Delta {
 
 pub struct ServerData {
     pub engine: Arc<RwLock<LLMEngine>>,
-    // pub pipeline_config: PipelineConfig,
-    // pub record_conversation: bool,
-    // pub device: Device,
+    pub econfig: EngineConfig,
 }
 
 trait ErrorToResponse: Serialize {

@@ -401,10 +401,17 @@ impl LLMEngine {
             }
         }
         let mut params = params.clone();
-        let max_model_len = self.econfig.max_model_len.unwrap_or(params.max_tokens);
+        params.max_tokens = Some(
+            params
+                .max_tokens
+                .unwrap_or(self.econfig.max_tokens.unwrap_or(16384)),
+        );
+        let max_tokens = params.max_tokens.unwrap();
+
+        let max_model_len = self.econfig.max_model_len.unwrap_or(max_tokens);
         //we also need to consider prompt length
-        if length + params.max_tokens > max_model_len {
-            params.max_tokens = max_model_len - length;
+        if length + max_tokens > max_model_len {
+            params.max_tokens = Some(max_model_len - length);
         }
 
         let remain_tokens = (self.econfig.max_num_seqs * max_model_len) as isize
@@ -487,10 +494,11 @@ impl LLMEngine {
         self.request_types.insert(seq_id, request_type.clone());
         if request_type != RequestType::Completion {
             log_info!(
-                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference!\n",
+                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference! (session_id {:?})\n",
                 request_type,
                 seq_id,
-                prompt_length
+                prompt_length,
+                params.session_id,
             );
         }
         Ok((seq_id, prompt_length, rx))

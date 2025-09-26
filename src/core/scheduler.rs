@@ -138,7 +138,7 @@ impl Scheduler {
             seq.append_token(token);
 
             if self.eos_token_id.contains(&token)
-                || seq.output_len() >= seq.sampling_params.max_tokens
+                || seq.output_len() >= seq.sampling_params.max_tokens.unwrap_or(16384)
                 || seq.len() > self.cfg.max_num_batched_tokens
             {
                 if let Some((_, v)) = active_sessions.iter().find(|(k, _)| *k == seq.id) {

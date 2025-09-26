@@ -147,6 +147,7 @@ pub struct EngineConfig {
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
     pub max_model_len: Option<usize>,
+    pub max_tokens: Option<usize>,
     pub isq: Option<String>,
     pub num_shards: Option<usize>,
     pub device_ids: Option<Vec<usize>>,
@@ -180,6 +181,8 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub max_model_len: Option<usize>,
     #[pyo3(get, set)]
+    pub max_tokens: Option<usize>,
+    #[pyo3(get, set)]
     pub isq: Option<String>,
     #[pyo3(get, set)]
     pub num_shards: Option<usize>,
@@ -203,6 +206,7 @@ impl EngineConfig {
         hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
+        max_tokens: Option<usize>,
         isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
@@ -234,6 +238,7 @@ impl EngineConfig {
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder
             max_model_len,                                             //placeholder
+            max_tokens,
             isq,
             num_shards,
             device_ids: Some(device_ids),
@@ -258,7 +263,7 @@ pub struct TokenizerConfig {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SamplingParams {
     pub temperature: Option<f32>,
-    pub max_tokens: usize,
+    pub max_tokens: Option<usize>,
     pub ignore_eos: bool,
     pub top_k: Option<isize>,
     pub top_p: Option<f32>,
@@ -274,7 +279,7 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     pub temperature: Option<f32>,
     #[pyo3(get, set)]
-    pub max_tokens: usize,
+    pub max_tokens: Option<usize>,
     #[pyo3(get, set)]
     pub ignore_eos: bool,
     #[pyo3(get, set)]
@@ -303,7 +308,7 @@ impl SamplingParams {
     ) -> Self {
         Self {
             temperature,
-            max_tokens: max_tokens.unwrap_or(16384),
+            max_tokens,
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,
@@ -316,7 +321,7 @@ impl SamplingParams {
     pub fn new_with_max_tokens(max_tokens: usize) -> Self {
         Self {
             temperature: None,
-            max_tokens: max_tokens,
+            max_tokens: Some(max_tokens),
             ignore_eos: false,
             top_k: None,
             top_p: None,
@@ -331,7 +336,7 @@ impl Default for SamplingParams {
     fn default() -> Self {
         Self {
             temperature: None,
-            max_tokens: 16384,
+            max_tokens: Some(16384),
             ignore_eos: false,
             top_k: None,
             top_p: None,

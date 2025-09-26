@@ -120,8 +120,8 @@ pip install fastapi uvicorn
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 
-# Local gguf file (`--f`)
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+# Local gguf file (`--f`), default max output tokens for each request: 16384
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 16384
 
 # Use model weights from huggingface (`--m`: model_id, `--f`: gguf file)
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
@@ -170,19 +170,19 @@ response = openai.chat.completions.create(
 ```bash
 # Interactive chat
 # Load with model id
-python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # local gguf file on second device (device order 1，`--d 1`)
-python -m vllm_rs.chat --i --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # Load unquantized safetensors model as GGUF quantized (e.g., q4k), with maximum model context length
-python -m vllm_rs.chat --i --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+python -m vllm_rs.chat --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
 
 # Enable context cache for fast response (CUDA)
-python -m vllm_rs.chat --i --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
+python -m vllm_rs.chat --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # ISQ q4k (macOS/Metal recommended)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q4k --context-cache
+python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k --context-cache
 
 # Chat completion
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"

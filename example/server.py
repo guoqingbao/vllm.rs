@@ -84,7 +84,7 @@ def create_app(cfg, dtype):
     async def chat(request: Request):
         body = await request.json()
         params = SamplingParams(body.get("temperature", 1.0),
-                                body.get("max_tokens", 16384),
+                                body.get("max_tokens", cfg.max_tokens),
                                 body.get("ignore_eos", False),
                                 body.get("top_k", None),
                                 body.get("top_p", None),
@@ -92,7 +92,6 @@ def create_app(cfg, dtype):
         use_stream = body.get("stream", False)
         if use_stream:
             prompt, engine = await chat_stream(params, body["messages"])
-            print("session_id: ", params.session_id)
 
             async def streamer():
                 stream = None
@@ -208,6 +207,7 @@ def parse_args():
     parser.add_argument("--dtype", choices=["f16", "bf16", "f32"], default="bf16")
     parser.add_argument("--max-num-seqs", type=int, default=4)
     parser.add_argument("--max-model-len", type=int, default=None)
+    parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--d", type=str, default="0")
     parser.add_argument("--isq", type=str, default=None)
     parser.add_argument("--temperature", type=float, default=None)
@@ -238,12 +238,14 @@ def main():
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)
 
     assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
+    args.max_tokens = max_model_len if args.max_tokens > max_model_len else args.max_tokens
     cfg = EngineConfig(
         model_id=args.m,
         weight_path=args.w,
         weight_file=args.f,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
+        max_tokens=args.max_tokens,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,

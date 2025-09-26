@@ -34,7 +34,9 @@ pub async fn chat_completion(
     let use_stream = request.stream.unwrap_or(false);
 
     let model_id = request.model.clone().unwrap_or("default".to_string());
-    let max_tokens = request.max_tokens.unwrap_or(16384);
+    let max_tokens = request
+        .max_tokens
+        .unwrap_or(data.econfig.max_tokens.unwrap_or(16384));
 
     let mut params = SamplingParams::new_with_max_tokens(max_tokens);
     params.temperature = request.temperature;

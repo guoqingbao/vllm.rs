@@ -242,9 +242,11 @@ impl Message {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None, hf_token=None, hf_token_path=None,
-        max_num_seqs=Some(32), max_model_len=Some(1024), isq=None,
-        num_shards=Some(1), device_ids=None, generation_cfg=None, seed=None, flash_context = None))]
+    #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None,
+        hf_token=None, hf_token_path=None,
+        max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
+        isq=None, num_shards=Some(1), device_ids=None,
+        generation_cfg=None, seed=None, flash_context = None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -253,6 +255,7 @@ impl EngineConfig {
         hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
         max_model_len: Option<usize>,
+        max_tokens: Option<usize>,
         isq: Option<String>,
         num_shards: Option<usize>,
         device_ids: Option<Vec<usize>>,
@@ -284,6 +287,7 @@ impl EngineConfig {
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             max_model_len,                 //placeholder
+            max_tokens,
             isq,
             num_shards,
             device_ids: Some(device_ids),
@@ -297,7 +301,7 @@ impl EngineConfig {
 #[pymethods]
 impl SamplingParams {
     #[new]
-    #[pyo3(signature = (temperature=None, max_tokens=Some(16384),
+    #[pyo3(signature = (temperature=None, max_tokens=None,
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
         frequency_penalty=None, presence_penalty=None))]
     pub fn new(
@@ -312,7 +316,7 @@ impl SamplingParams {
     ) -> Self {
         Self {
             temperature,
-            max_tokens: max_tokens.unwrap_or(16384),
+            max_tokens,
             ignore_eos: ignore_eos.unwrap_or(false),
             top_k,
             top_p,

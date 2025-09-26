@@ -61,6 +61,7 @@ def build_engine_config(args, num_of_prompts):
         weight_file=args.f,
         max_num_seqs=args.max_num_seqs,
         max_model_len=max_model_len,
+        max_tokens=max_model_len if args.max_tokens > max_model_len else args.max_tokens,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
@@ -99,6 +100,7 @@ def remove_surrogates(s: str) -> str:
 def main():
     args = parse_args()
     interactive = args.i
+    interactive = True # disable non-interactive mode for now
     prompts = (
         args.prompts.split("|")
         if args.prompts and not interactive
@@ -115,7 +117,7 @@ def main():
     sampling_params = []
 
     prompt_processed = []
-    params = SamplingParams(max_tokens=args.max_tokens)
+    params = SamplingParams()
     if not interactive:
         for prompt in prompts:
             msg = Message(role="user", content=remove_surrogates(prompt))

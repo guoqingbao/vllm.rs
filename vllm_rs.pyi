@@ -40,6 +40,7 @@ class EngineConfig:
     num_blocks: Optional[int]
     max_num_seqs: Optional[int]
     max_model_len: Optional[int]
+    max_tokens: Optional[int]
     max_num_batched_tokens: Optional[int]
     isq: Optional[str]
     num_shards: Optional[int]

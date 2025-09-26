@@ -49,6 +49,7 @@ def run(args):
         weight_file=args.f,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
+        max_tokens=max_model_len if args.max_tokens > max_model_len else args.max_tokens,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
@@ -59,7 +60,7 @@ def run(args):
     engine = Engine(cfg, "bf16")
 
     sampling_params = []
-    params = SamplingParams(max_tokens=args.max_tokens)
+    params = SamplingParams()
     for i in range(len(prompts)):
         msg = Message("user", prompts[i])
         prompts[i] = engine.apply_chat_template(params, [msg], args.batch == 1)

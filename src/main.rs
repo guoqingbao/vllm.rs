@@ -117,6 +117,7 @@ async fn main() -> Result<()> {
         args.hf_token_path,
         Some(std::cmp::max(max_num_seqs, prompts.len())),
         max_model_len,
+        Some(args.max_tokens),
         args.isq.clone(),
         Some(1),
         args.device_ids.clone(),
@@ -129,6 +130,7 @@ async fn main() -> Result<()> {
     if args.server {
         let server_data = ServerData {
             engine: engine.clone(),
+            econfig: econfig.clone(),
         };
         // Build axum app
         let app = Router::new()
@@ -178,7 +180,6 @@ async fn main() -> Result<()> {
             let e = engine.read();
             let prompt = e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
             prompt_processed.push(prompt);
-            // let max_tokens = rng.random_range(100..=args.max_tokens);
             params.push(param);
         }
         if let Some(max_model_len) = args.max_model_len {

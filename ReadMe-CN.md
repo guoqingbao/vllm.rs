@@ -119,8 +119,8 @@ pip install fastapi uvicorn
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 
-# 本地GGUF模型文件 (`--f`)
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+# 本地GGUF模型文件 (`--f`)，每个请求默认最大输出tokens（max-tokens）数为：16384
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 16384
 
 # 使用Model ID加载 (`--m`: model_id, `--f`: GGUF文件名)
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
@@ -169,19 +169,19 @@ response = openai.chat.completions.create(
 ```bash
 # 交互式聊天
 # 使用model id加载
-python -m vllm_rs.chat --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # 本地GGUF文件加载到设备2 (设备序号为1，`--d 1`)
-python -m vllm_rs.chat --i --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 
 # 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
-python -m vllm_rs.chat --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1
+python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
 
 # 启用上下文缓存（快速响应请求）
-python -m vllm_rs.chat --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
+python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
 # ISQ q4k (macOS/Metal推荐)
-python -m vllm_rs.chat --i --w /path/Qwen3-0.6B --isq q4k --context-cache
+python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k --context-cache
 
 # 批量同步示例
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
