@@ -124,6 +124,7 @@ async fn main() -> Result<()> {
         generation_cfg,
         args.seed,
         Some(args.context_cache),
+        Some(args.fp8_kvcache),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

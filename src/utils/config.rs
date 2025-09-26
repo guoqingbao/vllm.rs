@@ -132,6 +132,7 @@ pub struct Config {
     pub rope_scaling: Option<HashMap<String, RopeScaling>>,
     pub quant: Option<String>,
     pub moe_cfg: Option<MoEConfig>,
+    pub fp8_kvcache: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -154,6 +155,7 @@ pub struct EngineConfig {
     pub generation_cfg: Option<GenerationConfig>,
     pub seed: Option<u64>,
     pub flash_context: Option<bool>,
+    pub fp8_kvcache: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -194,6 +196,8 @@ pub struct EngineConfig {
     pub seed: Option<u64>,
     #[pyo3(get, set)]
     pub flash_context: Option<bool>,
+    #[pyo3(get, set)]
+    pub fp8_kvcache: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -213,10 +217,26 @@ impl EngineConfig {
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
         flash_context: Option<bool>,
+        fp8_kvcache: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
+        }
+        let mut fp8_kvcache = fp8_kvcache.clone();
+        if cfg!(feature = "flash-attn") && fp8_kvcache.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under flash-attn feature enabled!");
+            fp8_kvcache = None;
+        }
+
+        if cfg!(feature = "no-fp8-kvcache") && fp8_kvcache.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under no-fp8-kvcache feature enabled!");
+            fp8_kvcache = None;
+        }
+
+        if flash_context.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under context-cache enabled!");
+            fp8_kvcache = None;
         }
 
         Self {
@@ -245,6 +265,7 @@ impl EngineConfig {
             generation_cfg,
             seed,
             flash_context,
+            fp8_kvcache,
         }
     }
 }

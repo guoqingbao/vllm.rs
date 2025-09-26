@@ -235,13 +235,13 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 2. **构建 Python 包**
 
 ```bash
-# CUDA (不使用Flash Attention)
+# CUDA (不使用Flash Attention, 支持FP8 KV Cache)
 maturin build --release --features cuda,nccl,python
 
-# CUDA + 启用Flash Attention
+# CUDA + 启用Flash Attention (暂不支持FP8 KV Cache)
 maturin build --release --features cuda,nccl,flash-attn,python
 
-# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程) 
+# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程, 支持FP8 KV Cache) 
 ./build.sh --release --features cuda,nccl,python
 
 # 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程，同时启用flash-attn)
@@ -265,7 +265,7 @@ pip install fastapi uvicorn
 使用 `--i` 启用交互模式，`--w` 指定Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
 ```bash
-# 单卡推理 CUDA + Built-in Context Cache
+# 单卡推理 CUDA + Built-in Context Cache (使用 `--fp8-kvcache` 启用 FP8 KV Cache)
 cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
@@ -323,6 +323,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
+| `--fp8-kvcache`       | 使用FP8 KV Cache (CUDA, 当flash-attn没有启用时生效)                 |    |
 
 ## 📽️ 演示视频
 
@@ -363,6 +364,9 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] 从Hugginface Hub下载并加载模型
 * [ ] 从ModelScope下载并加载 (中国大陆地区)
 * [x] Metal/macOS平台上下文缓存
+* [x] FP8 KV Cache (CUDA)
+* [ ] FP8 KV Cache (Metal)
+* [ ] FP8 KV Cache (with Flash-Attn)
 * [ ] 支持更多模型类型
 
 
