@@ -232,7 +232,7 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None))]
+        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
