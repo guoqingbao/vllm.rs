@@ -85,11 +85,8 @@ pub struct LLMEngine {
 impl LLMEngine {
     #[allow(unused_mut)]
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
-        let (model_pathes, is_gguf, config, config_tokenizer, tokenizer, mut generation_cfg) =
+        let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        log_info!("{:?}\n", config);
-
-        log_info!("{:?}\n", config_tokenizer);
 
         let mut econfig = econfig.clone();
         let config_model_len = config.max_model_len.unwrap_or(
@@ -155,13 +152,22 @@ impl LLMEngine {
             econfig.block_size,
             &config,
             num_shards,
-            dtype,
+            if econfig.fp8_kvcache.unwrap_or(false) {
+                DType::U8
+            } else {
+                dtype
+            },
         );
 
         econfig.num_blocks = num_blocks;
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
         econfig.num_shards = Some(num_shards);
+        config.fp8_kvcache = econfig.fp8_kvcache;
         log_info!("{:?}", econfig);
+
+        log_info!("{:?}\n", config_tokenizer);
+
+        log_info!("{:?}\n", config);
 
         log_info!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",

@@ -340,6 +340,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         rope_scaling,
         quant: None,
         moe_cfg: mod_cfg,
+        fp8_kvcache: None,
     };
 
     Ok(cfg)

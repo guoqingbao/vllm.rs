@@ -216,6 +216,7 @@ def parse_args():
     parser.add_argument("--frequency-penalty", type=float, default=None)
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
+    parser.add_argument("--fp8-kvcache", action="store_true")
 
     return parser.parse_args()
 
@@ -250,6 +251,7 @@ def main():
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
         flash_context=args.context_cache,
+        fp8_kvcache=args.fp8_kvcache,
     )
 
     app = create_app(cfg, args.dtype)

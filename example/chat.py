@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--frequency-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
+    parser.add_argument("--fp8-kvcache", action="store_true")
 
     return parser.parse_args()
 
@@ -66,6 +67,7 @@ def build_engine_config(args, num_of_prompts):
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
         flash_context=args.context_cache,
+        fp8_kvcache=args.fp8_kvcache,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):
@@ -167,9 +169,10 @@ def main():
                 break
 
         if interactive:
+            decoded_length = 0
+            decode_start_time = current_millis()
             try:
                 done_item = None
-                decoded_length = 0
                 output_text = ""
                 seq_id, prompt_length, stream = engine.generate_stream(
                     params, prompt_processed[0])
@@ -177,6 +180,8 @@ def main():
                     if item.datatype == "TOKEN":
                         print(item.data, end="", flush=True)
                         output_text += item.data
+                        if decoded_length == 0:
+                            decode_start_time = current_millis()
                         decoded_length += 1
                     elif item.datatype == "ERROR":
                         raise Exception(item.data)
@@ -211,6 +216,8 @@ def main():
                 else:
                     tokens_left = total_available_tokens
                 print("\n⛔️ Interrupted by user!")
+                if decoded_length > 0:
+                    print("\n⏱️ decode throughput: ", decoded_length * 1000 / (current_millis() - decode_start_time), " tokens/s")
                 continue
             except Exception as e:
                 session_id = str(uuid.uuid4())
