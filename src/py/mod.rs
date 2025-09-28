@@ -186,20 +186,6 @@ impl EngineStream {
         engine_guard.cancel(slf.seq_id);
     }
 
-    // fn __next__(&self) -> PyResult<String> {
-    //     let mut rx = self.rx.lock().unwrap();
-
-    //     match GLOBAL_RT.block_on(rx.recv()) {
-    //         Some(StreamItem::Token(token)) => Ok(token),
-    //         Some(StreamItem::Done(_)) | None => Err(PyStopIteration::new_err("[DONE]")),
-    //         Some(StreamItem::Error(e)) => Err(PyValueError::new_err(e)),
-    //         Some(StreamItem::TokenID(_)) => Err(PyValueError::new_err(
-    //             "We should not receive raw token id (used for completion) during streaming!",
-    //         )),
-    //         Some(_) => self.__next__(), // Skip over Completion/etc
-    //     }
-    // }
-
     fn __next__(&mut self) -> PyResult<PyStreamItem> {
         // If the stream was already marked as finished on the previous
         // iteration, stop now.
@@ -246,7 +232,7 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None))]
+        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -262,10 +248,27 @@ impl EngineConfig {
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
         flash_context: Option<bool>,
+        fp8_kvcache: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
+        }
+
+        let mut fp8_kvcache = fp8_kvcache.clone();
+        if cfg!(feature = "flash-attn") && fp8_kvcache.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under flash-attn feature enabled!");
+            fp8_kvcache = None;
+        }
+
+        if cfg!(feature = "no-fp8-kvcache") && fp8_kvcache.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under no-fp8-kvcache feature enabled!");
+            fp8_kvcache = None;
+        }
+
+        if flash_context.unwrap_or(false) {
+            crate::log_error!("fp8 kvcache is not supported under context-cache enabled!");
+            fp8_kvcache = None;
         }
 
         Self {
@@ -294,6 +297,7 @@ impl EngineConfig {
             generation_cfg,
             seed,
             flash_context,
+            fp8_kvcache,
         }
     }
 }

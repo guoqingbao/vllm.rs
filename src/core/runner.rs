@@ -271,9 +271,16 @@ impl ModelRunner {
             }
             Ok(gpu_cache)
         } else {
+            let fp8_kvcache = econfig.fp8_kvcache.unwrap_or(false);
+            let cache_dtype = if fp8_kvcache { DType::U8 } else { dtype };
+            crate::log_warn!(
+                "Using FP8 KV Cache? {}, cache dtype {:?}",
+                fp8_kvcache,
+                cache_dtype
+            );
             let kshape = Self::calculate_key_block_shape(
                 config,
-                dtype,
+                cache_dtype,
                 econfig.block_size,
                 econfig.num_shards.unwrap_or(1),
             );
@@ -286,12 +293,12 @@ impl ModelRunner {
             for _ in 0..config.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
-                    dtype,
+                    cache_dtype,
                     device,
                 )?;
                 let value_blocks = Tensor::zeros(
                     (num_gpu_blocks, vshape.0, vshape.1, vshape.2),
-                    dtype,
+                    cache_dtype,
                     device,
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));

@@ -48,6 +48,7 @@ class EngineConfig:
     generation_cfg: Optional[GenerationConfig]
     seed: Optional[int]
     flash_context: Optional[bool]
+    fp8_kvcache: Optional[bool]
 
 @dataclass
 class SamplingParams:

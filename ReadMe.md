@@ -238,13 +238,13 @@ pip install maturin[patchelf]  # For Linux/Windows
 2. **Build the Python package**
 
 ```bash
-# CUDA (No Flash Attention)
+# CUDA (No Flash Attention, Support FP8 kvcache)
 maturin build --release --features cuda,nccl,python
 
-# CUDA with Flash Attention
+# CUDA with Flash Attention (No FP8 kvcache support)
 maturin build --release --features cuda,nccl,flash-attn,python
 
-# Multi-GPU CUDA (No Flash Attention, standalone runner)
+# Multi-GPU CUDA (No Flash Attention, Support FP8 kvcache, standalone runner)
 ./build.sh --release --features cuda,nccl,python
 
 # Multi-GPU CUDA with Flash Attention (standalone runner)
@@ -253,7 +253,7 @@ maturin build --release --features cuda,nccl,flash-attn,python
 # CUDA (with CUDA Graph, experimental)
 maturin build --release --features cuda,graph,python
 
-# macOS (Metal)
+# macOS (Metal, Support FP8 kvcache)
 maturin build --release --features metal,python
 ```
 
@@ -271,7 +271,7 @@ pip install fastapi uvicorn
 Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
 
 ```bash
-# CUDA + Built-in Context Cache (single card)
+# CUDA + Built-in Context Cache (single card) (use `--fp8-kvcache` to enable fp8 kvcache)
 cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
 # Multi-GPU: CUDA with Flash Attention (this scirpt help build the runner)
@@ -330,6 +330,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
+| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-attn and context-cache are not enabled)                 |    |
 
 ## 📽️ Demo Video
 
@@ -371,6 +372,9 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] Model loading from hugginface hub
 * [ ] Model loading from ModelScope (China)
 * [x] Context cache for Metal/macOS
+* [x] FP8 KV Cache (CUDA)
+* [x] FP8 KV Cache (Metal)
+* [ ] FP8 KV Cache (with Flash-Attn)
 * [ ] Additional model support
 ---
 

@@ -24,6 +24,7 @@ pub struct Attention {
     attn: PagedAttention,
     rotary_emb: Arc<ScalingRotaryEmbedding>,
     dtype: DType,
+    fp8_kvcache: bool,
 }
 
 impl Attention {
@@ -175,6 +176,7 @@ impl Attention {
                 None,
             )?,
             dtype,
+            fp8_kvcache: config.fp8_kvcache.unwrap_or(false),
         })
     }
 
@@ -235,6 +237,20 @@ impl Attention {
             v
         };
 
+        let (k_scale, v_scale) = if self.fp8_kvcache {
+            // let k_max = f32::from(k.max_all()?.to_scalar::<bf16>()?);
+            // let k_min = f32::from(k.min_all()?.to_scalar::<bf16>()?);
+            // let k_scale = f32::max(f32::abs(k_max), f32::abs(k_min)) / 200f32;
+            // let v_max = f32::from(v.max_all()?.to_scalar::<bf16>()?);
+            // let v_min = f32::from(v.min_all()?.to_scalar::<bf16>()?);
+            // let v_scale = f32::max(f32::abs(v_max), f32::abs(v_min)) / 100f32;
+            // println!("kmax {:?}, k_min {:?}", k_scale, v_scale);
+            //TODO: calculate k_scale and v_scale from k and v tensors
+            (Some(0.999999f32), Some(0.999999f32))
+        } else {
+            (None, None)
+        };
+
         let y = self
             .attn
             .forward(
@@ -246,6 +262,8 @@ impl Attention {
                 cache.map(|(_, v_)| v_.clone()),
                 input_metadata,
                 None,
+                k_scale,
+                v_scale,
             )?
             .reshape((seq_len, ()))?;
 
