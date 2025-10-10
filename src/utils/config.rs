@@ -223,20 +223,12 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        let mut fp8_kvcache = fp8_kvcache.clone();
-        if cfg!(feature = "flash-attn") && fp8_kvcache.unwrap_or(false) {
-            crate::log_error!("fp8 kvcache is not supported under flash-attn feature enabled!");
-            fp8_kvcache = None;
+        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
+            panic!("Error: fp8 kvcache is not supported under flash-context feature enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context`).");
         }
 
         if cfg!(feature = "no-fp8-kvcache") && fp8_kvcache.unwrap_or(false) {
-            crate::log_error!("fp8 kvcache is not supported under no-fp8-kvcache feature enabled!");
-            fp8_kvcache = None;
-        }
-
-        if flash_context.unwrap_or(false) {
-            crate::log_error!("fp8 kvcache is not supported under context-cache enabled!");
-            fp8_kvcache = None;
+            panic!("Error: fp8 kvcache is not supported under no-fp8-kvcache feature enabled!\n\t***Tips: remove `--no-fp8-kvcache` feature.");
         }
 
         Self {
@@ -247,7 +239,7 @@ impl EngineConfig {
             hf_token_path,
             num_blocks: 128, //placeholder
             block_size: if flash_context.unwrap_or(false) {
-                if cfg!(feature = "flash-attn") {
+                if cfg!(feature = "flash-context") {
                     256
                 } else {
                     64

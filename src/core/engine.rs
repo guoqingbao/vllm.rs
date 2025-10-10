@@ -190,7 +190,7 @@ impl LLMEngine {
             // }
             true
         } else {
-            if cfg!(feature = "flash-attn") || cfg!(feature = "python") {
+            if cfg!(feature = "flash-context") || cfg!(feature = "python") {
                 econfig.flash_context.unwrap_or(false)
             } else {
                 false

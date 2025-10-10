@@ -436,8 +436,11 @@ pub fn init_config_tokenizer(
             let file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let mut readers = vec![file];
             let mut readers = readers.iter_mut().collect::<Vec<_>>();
-            let content = crate::utils::gguf_helper::Content::from_readers(&mut readers).unwrap();
-            get_gguf_info(&content).map_err(candle_core::Error::wrap)?
+            if let Ok(content) = crate::utils::gguf_helper::Content::from_readers(&mut readers) {
+                get_gguf_info(&content).map_err(candle_core::Error::wrap)?
+            } else {
+                panic!("Error: Unable to read {:?} as a GGUF file! \n\t***Tips: use `--w` to specify safetensor model directory!", model_pathes.get_weight_filenames()[0]);
+            }
         };
 
         let config = {

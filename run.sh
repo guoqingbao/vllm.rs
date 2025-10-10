@@ -43,6 +43,6 @@ FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
 echo "Building runner binary..."
 cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
 
-FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
+#FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
 # Step 2: Run the program with runtime args
 cargo run $RELEASE --features "$FEATURES" -- "${RUN_ARGS[@]}"

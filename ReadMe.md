@@ -12,7 +12,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** (with **session-based context cache**) – Superior than vLLM and Nano-vLLM
+* 🚀 **High Performance** (with **session-based context cache**) – Superior than Python counterparts
 * 🧠 **Minimalist Core** – Core logic written in **< 2000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
@@ -22,7 +22,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ---
 ### Chat Performace
 
-> A100 (Single Card, 40G)
+> **A100** (Single Card, 40G)
 
 | Model | Format | Size| Decoding Speed |
 |------------------|---------------|----------|------------------------|
@@ -32,6 +32,20 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **75.91** tokens/s  |
+
+#### Performance of vLLM.rs on **Metal (Apple Silicon, M4)**
+> Models: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
+> Concurrent Requests: 1 - 128；
+> Max Model Length: 512 - 2048；
+> Max Output Tokens / Request: 512 - 2048；
+
+| Model | Batch Size | Output Tokens | Time (s) | Throughput (tokens/s) |
+|------------------|--------|--------|---------|-------------|
+| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
+| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
+| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
+| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
+| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 ### Performance Comparison
 
@@ -47,47 +61,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**40%+ speedup**)               |
 | Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
 
-#### How to reproduce?
-**vLLM.rs**
-```shell
-pip install vllm_rs
-python -m vllm_rs.completion --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
+<a href="python/ReadMe.md">Reproducible steps</a>
 
-# Log
-Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
-Maximum batched tokens 262144 (8192 blocks x Block_Size 32 for KV cache).
-Start inference with 256 prompts
---- Performance Metrics ---
-⏱️ Prompt tokens: 4096 in 0.28s (14894.55 tokens/s)
-⏱️ Decoded tokens: 258048 in 23.60s (10944.62 tokens/s)
-```
-
-
-**Nano-vLLM** 
-
-   💡 To ensure a fair comparison, revise each request to have a maximum of 1024 output tokens, instead of a random number between 100 and 1024.
-```shell
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
-# with cuda graph, flash attention and model warmup
-python3 bench.py
-# log
-Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
-Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
-```
-
-### Performance of vLLM.rs on **Metal (Apple Silicon, M4)**
-> Models: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
-> Concurrent Requests: 1 - 128；
-> Max Model Length: 512 - 2048；
-> Max Output Tokens / Request: 512 - 2048；
-
-| Model | Batch Size | Output Tokens | Time (s) | Throughput (tokens/s) |
-|------------------|--------|--------|---------|-------------|
-| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
-| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
-| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
-| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
-| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 
 ## 🧠 Supported Architectures
@@ -102,9 +77,10 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 Supports both **Safetensor** and **GGUF** formats.
 
 ## 📦 Install with pip
-   💡 Manual build required for CUDA compute capability < 8.0 (e.g., V100)
+   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100)
+
+   💡 2. Prebuilt package has native `context cache` feature without relying on flash attention, manual build required to use `flash-context` feature.
 ```shell
-# built-in `context cache` feature for fast prefill and response
 python3 -m pip install vllm_rs
 ```
 
@@ -113,6 +89,8 @@ python3 -m pip install vllm_rs
 ### 🌐✨ API Server Mode
    💡 You can use any client compatible with the OpenAI API.
 
+   🤖 <a href="python/ReadMe.md">Here is the client usage of context cache</a>
+
 ```bash
 # install server dependency
 pip install fastapi uvicorn
@@ -120,8 +98,8 @@ pip install fastapi uvicorn
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 
-# Local gguf file (`--f`), default max output tokens for each request: 16384
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 16384
+# Local gguf file (`--f`), max output tokens for each request (`--max-tokens`), FP8 KV Cache (`--fp8-kvcache`, slight accuracy degradation)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
 
 # Use model weights from huggingface (`--m`: model_id, `--f`: gguf file)
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
@@ -136,41 +114,13 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
-### 🤖 Client Usage of Context Cache
-
-**Key changes for the client:**
-
-```python
-import uuid
-import openai
-use_context_cache = True #flag to use context_cache
-# create session_id for each new chat session and use it throughout that session (session cache will be cleared if the client aborted the connection)
-session_id = str(uuid.uuid4())
-extra_body = {"session_id": session_id if use_context_cache else None }
-
-# vllm.rs service url
-openai.api_key = "EMPTY"
-openai.base_url = "http://localhost:8000/v1/"
-
-response = openai.chat.completions.create(
-   model="",
-   messages=messages + [user_msg],
-   stream=True,
-   max_tokens = max_tokens,
-   temperature = temperature,
-   top_p = top_p,
-   extra_body = extra_body, #pass session_id through extra_body
-)
-
-```
----
 
 ### Interactive Chat and completion
 
 ```bash
 # Interactive chat
 # Load with model id
-python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
 
 # local gguf file on second device (device order 1，`--d 1`)
 python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
@@ -181,8 +131,8 @@ python -m vllm_rs.chat --d 0 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --m
 # Enable context cache for fast response (CUDA)
 python -m vllm_rs.chat --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
-# ISQ q4k (macOS/Metal recommended)
-python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k --context-cache
+# ISQ q4k (macOS/Metal recommended, optional `--context-cache`)
+python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k
 
 # Chat completion
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
@@ -238,22 +188,22 @@ pip install maturin[patchelf]  # For Linux/Windows
 2. **Build the Python package**
 
 ```bash
-# CUDA (No Flash Attention, Support FP8 kvcache)
-maturin build --release --features cuda,nccl,python
+# Naive CUDA (single GPU only) 
+maturin build --release --features cuda,python
 
-# CUDA with Flash Attention (No FP8 kvcache support)
-maturin build --release --features cuda,nccl,flash-attn,python
+# Naive CUDA (+CUDA Graph, experimental)
+./build.sh --release --features cuda,graph,python
 
-# Multi-GPU CUDA (No Flash Attention, Support FP8 kvcache, standalone runner)
+# CUDA (with context-cache and FP8 KV Cache, no Flash Attention) 
 ./build.sh --release --features cuda,nccl,python
 
-# Multi-GPU CUDA with Flash Attention (standalone runner)
+# CUDA (+Flash Attention, only used in prefill stage) 
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (with CUDA Graph, experimental)
-maturin build --release --features cuda,graph,python
+# CUDA (+Flash Attention, used in both prefill and decode stage, long time to build) 
+./build.sh --release --features cuda,nccl,flash-attn,flash-context,python
 
-# macOS (Metal, Support FP8 kvcache)
+# macOS (Metal, single GPU only, with Context-cache and FP8 kvcache)
 maturin build --release --features metal,python
 ```
 
@@ -271,16 +221,19 @@ pip install fastapi uvicorn
 Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
 
 ```bash
-# CUDA + Built-in Context Cache (single card) (use `--fp8-kvcache` to enable fp8 kvcache)
+# Naive CUDA (single card only, optional `--fp8-kvcache`)
 cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
-# Multi-GPU: CUDA with Flash Attention (this scirpt help build the runner)
+# Multi-GPU CUDA (+Flash Attention, this scirpt help build the runner)
 ./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --context-cache
 
-# Multi-GPU server mode
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --context-cache --server --port 8000
+# Multi-GPU server mode (with `--fp8-kvcache` or `--context-cache`)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
 
-# CUDA (with CUDA Graph, experimental)
+# Multi-GPU server mode (with `--context-cache`, Flash Attention used in both prefill/decode, long time to build)
+./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+
+# Naive CUDA (+CUDA Graph, experimental)
 cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
 
 # macOS (Metal)
@@ -330,7 +283,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-attn and context-cache are not enabled)                 |    |
+| `--fp8-kvcache`       | Use FP8 KV Cache (when context-cache not enabled)                 |    |
 
 ## 📽️ Demo Video
 

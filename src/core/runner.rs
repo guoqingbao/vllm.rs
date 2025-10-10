@@ -248,7 +248,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        if cfg!(feature = "flash-attn") {
+        if cfg!(feature = "flash-attn") && cfg!(feature = "flash-context") {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,
@@ -420,7 +420,7 @@ impl ModelRunner {
 
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             let seqlen_k = if self.config.flash_context.unwrap_or(false)
-                || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-attn"))
+                || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {
                 seq.num_cached_tokens + num_tokens
             } else {

@@ -12,7 +12,7 @@
 ## ✨ 主要特性
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
-* 🚀 **高性能** (支持**上下文缓存**) – 性能优于 vLLM 和 Nano-vLLM
+* 🚀 **高性能** (支持**上下文缓存**) – 性能优于Python同类推理框架
 * 🧠 **极简核心** – 核心逻辑仅 **< 2000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
@@ -22,7 +22,7 @@
 ---
 ### 对话性能
 
-> A100 (单卡, 40G)
+> **A100** (单卡, 40G)
 
 | 模型 | 格式 | 大小 | 输出速度 |
 |------------------|---------------|----------|------------------------|
@@ -32,6 +32,20 @@
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)** | **75.91** tokens/s  |
+
+#### vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
+> 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
+> 并发请求数: 1 - 128；
+> Max Model Length: 512 - 2048；
+> 每个请求最大输出: 512 - 2048；
+
+| 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
+|------------------|--------|--------|---------|-------------|
+| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
+| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
+| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
+| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
+| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 ### 性能对比
 
@@ -47,46 +61,8 @@
 | **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**提升40%+**)               |
 | Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
 
-#### 复现步骤
+<a href="python/ReadMe.md">复现步骤</a>
 
-**vLLM.rs**
-```shell
-pip install vllm_rs
-python -m vllm_rs.completion --w /home/Qwen3-0.6B/ --batch 256 --max-tokens 1024 --max-model-len 1024
-
-# 日志输出
-Allocating 8192 KV blocks (28672 MB) for [256 seqs x 1024 tokens]
-Maximum batched tokens 262144 (8192 blocks x Block_Size 32 for KV cache).
-Start inference with 256 prompts
---- Performance Metrics ---
-⏱️ Prompt tokens: 4096 in 0.28s (14894.55 tokens/s)
-⏱️ Decoded tokens: 258048 in 23.60s (10944.62 tokens/s)
-```
-
-**Nano-vLLM** 
-
-   💡 为公平比较，请修改所有请求最长输出为固定值（如1024），而非随机值（100-1024)
-```shell
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
-python3 bench.py
-# 日志输出
-Generating: 100%|██████████████████| 1/1 [00:02<00:00,  2.65s/it, Prefill=1tok/s, Decode=369tok/s]
-Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
-```
-
-### vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
-> 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
-> 并发请求数: 1 - 128；
-> Max Model Length: 512 - 2048；
-> 每个请求最大输出: 512 - 2048；
-
-| 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
-|------------------|--------|--------|---------|-------------|
-| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
-| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
-| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
-| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
-| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
 ## 🧠 支持的模型架构
 
@@ -100,9 +76,10 @@ Total: 262144tok, Time: 34.22s, Throughput: 7660.26tok/s
 支持 **Safetensor** 和 **GGUF** 格式。
 
 ## 📦 从pip安装
-   💡 CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
+   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
+   
+   💡 2. 预编译包`context cache` 特性不依赖于Flash attention, 如需启用`flash-context`特性需手动编译安装
 ```shell
-# 默认支持上下文缓存（快速响应功能）
 python3 -m pip install vllm_rs
 ```
 
@@ -112,6 +89,7 @@ python3 -m pip install vllm_rs
 ### 🌐✨ API Server
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
+   🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 ```bash
 # 安装web service依赖
 pip install fastapi uvicorn
@@ -119,8 +97,8 @@ pip install fastapi uvicorn
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
 
-# 本地GGUF模型文件 (`--f`)，每个请求默认最大输出tokens（max-tokens）数为：16384
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 16384
+# 本地GGUF模型文件 (`--f`)，每个请求默认最大输出tokens（`--max-tokens`)，启用FP8 KV Cache（`--fp8-kvcache`，精度略有损失)
+python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
 
 # 使用Model ID加载 (`--m`: model_id, `--f`: GGUF文件名)
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
@@ -135,41 +113,13 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
 ```
 
-### 🤖 客户端使用上下文缓存特性
-
-**主要修改点**
-
-```python
-import uuid
-import openai
-use_context_cache = True #是否启用上下文缓存特性
-# 为每一个新对话创建一个session_id，并在此对话中一直使用（当客户端主动中断对话时，此对话缓存会被立即清理）
-session_id = str(uuid.uuid4())
-extra_body = {"session_id": session_id if use_context_cache else None }
-
-# vllm.rs服务地址
-openai.api_key = "EMPTY"
-openai.base_url = "http://localhost:8000/v1/"
-
-response = openai.chat.completions.create(
-   model="",
-   messages=messages + [user_msg],
-   stream=True,
-   max_tokens = max_tokens,
-   temperature = temperature,
-   top_p = top_p,
-   extra_body = extra_body, #将session_id通过extra_body传入
-)
-
-```
----
 
 ### 🤖✨ 交互式聊天与批处理
 
 ```bash
 # 交互式聊天
 # 使用model id加载
-python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
 
 # 本地GGUF文件加载到设备2 (设备序号为1，`--d 1`)
 python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
@@ -180,8 +130,8 @@ python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k -
 # 启用上下文缓存（快速响应请求）
 python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
 
-# ISQ q4k (macOS/Metal推荐)
-python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k --context-cache
+# ISQ q4k (macOS/Metal推荐，可选`--context-cache`)
+python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k
 
 # 批量同步示例
 python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
@@ -235,19 +185,22 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 2. **构建 Python 包**
 
 ```bash
-# CUDA (不使用Flash Attention, 支持FP8 KV Cache)
-maturin build --release --features cuda,nccl,python
+# Naive CUDA (只能用于单卡推理) 
+maturin build --release --features cuda,python
 
-# CUDA + 启用Flash Attention (暂不支持FP8 KV Cache)
-maturin build --release --features cuda,nccl,flash-attn,python
+# Naive CUDA (+CUDA Graph, 实验阶段)
+maturin build --release --features cuda,graph,python
 
-# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程, 支持FP8 KV Cache) 
+# CUDA (支持Context-cache与FP8 KV Cache，不使用Flash attention) 
 ./build.sh --release --features cuda,nccl,python
 
-# 多GPU推理 (CUDA, 生成独立的runner，运行于不同进程，同时启用flash-attn)
+# CUDA (+Flash attention，仅prefill时启用) 
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# macOS（Metal, 支持FP8 KV Cache）
+# CUDA (+Flash attention，prefill/decoding均使用Flash attention，编译时间最长) 
+./build.sh --release --features cuda,nccl,flash-attn,flash-context,python
+
+# macOS（Metal, 支持Context-cache与FP8 KV Cache，但不支持多GPU推理）
 maturin build --release --features metal,python
 
 ```
@@ -271,8 +224,11 @@ cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-
 # 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
 ./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
-# 多卡推理 server 服务
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --context-cache --server --port 8000
+# 多卡推理 server 服务 (可选`--fp8-kvcache` 或 `--context-cache`)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+
+# 多卡推理 server 服务 (可选`--context-cache`，同时使用Flash Attention做decoding)
+./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
 
 # CUDA Graph和输出惩罚项
 cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
@@ -323,7 +279,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | 使用FP8 KV Cache (当flash-attn与context-cache没有启用时生效)                 |    |
+| `--fp8-kvcache`       | 使用FP8 KV Cache (context-cache没有启用时生效)                 |    |
 
 ## 📽️ 演示视频
 
