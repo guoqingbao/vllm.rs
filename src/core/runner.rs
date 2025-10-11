@@ -248,7 +248,7 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
-        if cfg!(feature = "flash-attn") && cfg!(feature = "flash-context") {
+        if cfg!(feature = "flash-context") {
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,

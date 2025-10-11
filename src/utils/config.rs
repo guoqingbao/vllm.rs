@@ -223,12 +223,10 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
+        if (flash_context.unwrap_or(false) || cfg!(feature = "flash-context"))
+            && fp8_kvcache.unwrap_or(false)
+        {
             panic!("Error: fp8 kvcache is not supported under flash-context feature enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context`).");
-        }
-
-        if cfg!(feature = "no-fp8-kvcache") && fp8_kvcache.unwrap_or(false) {
-            panic!("Error: fp8 kvcache is not supported under no-fp8-kvcache feature enabled!\n\t***Tips: remove `--no-fp8-kvcache` feature.");
         }
 
         Self {
@@ -238,15 +236,7 @@ impl EngineConfig {
             hf_token,
             hf_token_path,
             num_blocks: 128, //placeholder
-            block_size: if flash_context.unwrap_or(false) {
-                if cfg!(feature = "flash-context") {
-                    256
-                } else {
-                    64
-                }
-            } else {
-                64
-            },
+            block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder
             max_model_len,                                             //placeholder

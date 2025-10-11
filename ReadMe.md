@@ -201,7 +201,7 @@ maturin build --release --features cuda,python
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
 # CUDA (+Flash Attention, used in both prefill and decode stage, long time to build) 
-./build.sh --release --features cuda,nccl,flash-attn,flash-context,python
+./build.sh --release --features cuda,nccl,flash-context,python
 
 # macOS (Metal, single GPU only, with Context-cache and FP8 kvcache)
 maturin build --release --features metal,python
@@ -231,7 +231,7 @@ cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
 
 # Multi-GPU server mode (with `--context-cache`, Flash Attention used in both prefill/decode, long time to build)
-./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
 
 # Naive CUDA (+CUDA Graph, experimental)
 cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
