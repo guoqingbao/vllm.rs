@@ -356,7 +356,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             .collect::<Vec<_>>()
             .iter()
             .copied()
-            .chain((16..=max_num_seqs.min(512)).step_by(16))
+            .chain((16..=max_num_seqs.min(32)).step_by(16))
             .collect();
         println!("The following batches for capture: {:?}", graph_bs);
 
