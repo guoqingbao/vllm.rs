@@ -176,6 +176,8 @@ pub enum MessageType {
     /// Optional: runner can send back an error message.
     Error(String),
 
+    Heartbeat,
+
     /// shutdown subprocesses
     Shutdown,
 }

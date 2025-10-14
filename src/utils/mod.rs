@@ -1,10 +1,12 @@
 pub mod chat_template;
+pub mod command;
 pub mod config;
 pub mod downloader;
 pub mod gguf_helper;
 pub mod gguf_varbuilder;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
+pub mod heartbeat;
 pub mod logits_processor;
 pub mod progress;
 use crate::utils::config::MoEConfig;

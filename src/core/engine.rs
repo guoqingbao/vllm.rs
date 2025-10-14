@@ -11,6 +11,7 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
+use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
@@ -31,7 +32,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     time::Duration,
 };
 use tokenizers::Tokenizer;
@@ -66,6 +67,7 @@ pub enum RunnerType {
     Process(Vec<LocalStream>),
 }
 
+#[allow(dead_code)]
 pub struct LLMEngine {
     pub runners: RunnerType,
     pub scheduler: Scheduler,
@@ -80,6 +82,7 @@ pub struct LLMEngine {
     active_requests: HashSet<usize>,
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
+    stop_flag: Arc<AtomicBool>,
 }
 
 impl LLMEngine {
@@ -88,6 +91,7 @@ impl LLMEngine {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
 
+        let stop_flag = Arc::new(AtomicBool::new(false));
         let mut econfig = econfig.clone();
         let config_model_len = config.max_model_len.unwrap_or(
             config_tokenizer
@@ -274,7 +278,7 @@ impl LLMEngine {
             let progress_sock_name = "@vllm-rs-progress".to_string();
             let progress_handle =
                 spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
-
+            heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone());
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
             use rayon::iter::ParallelIterator;
@@ -380,6 +384,7 @@ impl LLMEngine {
             active_requests: HashSet::new(),
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
+            stop_flag: stop_flag.clone(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)

@@ -11,6 +11,7 @@ use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
+use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
 
@@ -55,6 +56,9 @@ fn main() -> anyhow::Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     vllm_rs::log_info!("Runner connected to socket: {}", sock);
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let _ = heartbeat_worker(None, true, stop_flag.clone());
+
     let msg = receive_local(&mut stream, true)?;
     let runner = match msg {
         MessageType::Init(init_req) => {
@@ -184,6 +188,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    stop_flag.store(true, Ordering::Relaxed);
     vllm_rs::log_info!("Runner finished");
     Ok(())
 }
