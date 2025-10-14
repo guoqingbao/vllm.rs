@@ -520,7 +520,7 @@ impl ModelRunner {
 
         for seq in &seq_refs {
             input_ids.push(seq.last_token());
-            positions.push(seq.len() as i64);
+            positions.push((seq.len() - 1) as i64);
             context_lens.push(seq.len() as u32);
             let slot = seq.block_table_last() * self.config.block_size as u32
                 + seq.last_block_tokens() as u32
