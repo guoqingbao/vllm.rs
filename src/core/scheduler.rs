@@ -278,6 +278,13 @@ impl Scheduler {
             if *id < self.running.len() {
                 let seq = &self.running[*id];
                 if seq.len() < CHUNK_SIZE || seq.num_cached_tokens + CHUNK_SIZE >= seq.len() {
+                    if seq.len() > CHUNK_SIZE {
+                        crate::log_warn!(
+                            "Seq {} - chunk prefill finished ({} tokens)",
+                            seq.id,
+                            seq.len()
+                        );
+                    }
                     finished_seqs.push((i, seq.id));
                 } else {
                     remove_ids.push(seq.id);
