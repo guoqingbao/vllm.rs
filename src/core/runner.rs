@@ -407,7 +407,7 @@ impl ModelRunner {
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
         const CHUNK_SIZE: usize = 8192;
-
+        let mut max_context_len = 0;
         for seq in seqs {
             let seqlen = seq.len();
             let num_tokens = std::cmp::min(CHUNK_SIZE, seqlen - seq.num_cached_tokens);
@@ -422,8 +422,14 @@ impl ModelRunner {
             let seqlen_k = if self.config.flash_context.unwrap_or(false)
                 || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {
+                if num_tokens > max_context_len {
+                    max_context_len = num_tokens;
+                }
                 seq.num_cached_tokens + num_tokens
             } else {
+                if seqlen > max_context_len {
+                    max_context_len = seqlen;
+                }
                 num_tokens
             };
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
@@ -500,7 +506,7 @@ impl ModelRunner {
             cu_seqlens_k: Some(cu_seqlens_k),
             max_seqlen_q,
             max_seqlen_k,
-            max_context_len: self.config.max_model_len.unwrap_or(4096),
+            max_context_len,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -534,11 +540,11 @@ impl ModelRunner {
         let positions = Tensor::from_vec(positions, (length,), &self.device)?;
         let s_len = slot_mapping.len();
         let c_len = context_lens.len();
+        let max_context_len = context_lens.clone().into_iter().max().unwrap() as usize;
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
         let block_tables = self.prepare_block_tables(seq_refs)?;
-
         let input_metadata = InputMetadata {
             is_prefill: false,
             slot_mapping,
@@ -548,7 +554,7 @@ impl ModelRunner {
             cu_seqlens_k: None,
             max_seqlen_q: 0,
             max_seqlen_k: 0,
-            max_context_len: self.config.max_model_len.unwrap_or(4096),
+            max_context_len,
         };
 
         Ok((input_ids, positions, input_metadata))
