@@ -20,12 +20,9 @@ fn get_casual_mask_internal(
     tgt_len: usize,
     sliding_window: Option<usize>,
 ) -> candle_core::Result<Tensor> {
-    use rayon::iter::IntoParallelIterator;
-    use rayon::iter::ParallelIterator;
     let mask: Vec<_> = if let Some(sliding_window) = sliding_window {
         (0..tgt_len)
-            .into_par_iter()
-            .flat_map_iter(|i| {
+            .flat_map(|i| {
                 (0..tgt_len).map(move |j| {
                     if i < j || j + sliding_window < i {
                         f32::NEG_INFINITY
@@ -37,10 +34,7 @@ fn get_casual_mask_internal(
             .collect()
     } else {
         (0..tgt_len)
-            .into_par_iter()
-            .flat_map_iter(|i| {
-                (0..tgt_len).map(move |j| if i < j { f32::NEG_INFINITY } else { 0.0 })
-            })
+            .flat_map(|i| (0..tgt_len).map(move |j| if i < j { f32::NEG_INFINITY } else { 0.0 }))
             .collect()
     };
     let mask = Tensor::from_slice(&mask, (tgt_len, tgt_len), device)?

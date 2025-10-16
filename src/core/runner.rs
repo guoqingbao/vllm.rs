@@ -417,19 +417,15 @@ impl ModelRunner {
                 (seq.num_cached_tokens as i64..(seq.num_cached_tokens + num_tokens) as i64)
                     .collect::<Vec<_>>(),
             );
-
+            if seqlen > max_context_len {
+                max_context_len = seqlen;
+            }
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             let seqlen_k = if self.config.flash_context.unwrap_or(false)
                 || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {
-                if num_tokens > max_context_len {
-                    max_context_len = num_tokens;
-                }
                 seq.num_cached_tokens + num_tokens
             } else {
-                if seqlen > max_context_len {
-                    max_context_len = seqlen;
-                }
                 num_tokens
             };
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
