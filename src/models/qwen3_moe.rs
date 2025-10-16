@@ -2,7 +2,7 @@
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX as Linear;
-use crate::models::layers::mask::get_attention_casual_mask;
+use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::moe::{FusedMoeGGUF, FusedMoeISQ, MoeNaive};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
@@ -379,7 +379,7 @@ impl Qwen3MoEForCausalLM {
             Vec::new()
         };
 
-        let attention_mask = get_attention_casual_mask(
+        let attention_mask = get_attention_causal_mask(
             &self.device,
             self.dtype,
             positions,

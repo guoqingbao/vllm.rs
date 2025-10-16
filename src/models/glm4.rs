@@ -1,7 +1,7 @@
 // src/models/GLM4.rs
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
-use crate::models::layers::mask::get_attention_casual_mask;
+use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
@@ -291,7 +291,7 @@ impl GLM4ForCausalLM {
             Vec::new()
         };
 
-        let attention_mask = get_attention_casual_mask(
+        let attention_mask = get_attention_causal_mask(
             &self.device,
             self.dtype,
             positions,

@@ -2,7 +2,7 @@ use candle_core::{DType, Device, Tensor};
 
 #[cfg(feature = "flash-attn")] // If flash-attn or metal is enabled, we don't implement this function.
                                // The actual implementation would be embedded in the flash or metal attention kernel.
-pub fn get_attention_casual_mask(
+pub fn get_attention_causal_mask(
     _: &Device,
     _: DType,
     _: &Tensor,
@@ -13,13 +13,22 @@ pub fn get_attention_casual_mask(
     None
 }
 
+#[allow(unreachable_code)]
 #[cfg(not(feature = "flash-attn"))]
-fn get_casual_mask_internal(
+fn get_causal_mask_internal(
     device: &Device,
     dtype: DType,
     tgt_len: usize,
     sliding_window: Option<usize>,
 ) -> candle_core::Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        use attention_rs::mask::causal_mask;
+        let mask = Tensor::zeros((tgt_len, tgt_len), dtype, device)?;
+        let _ = causal_mask(&mask, sliding_window)?;
+        return mask.unsqueeze(0)?.unsqueeze(0);
+    }
+
     let mask: Vec<_> = if let Some(sliding_window) = sliding_window {
         (0..tgt_len)
             .flat_map(|i| {
@@ -48,7 +57,7 @@ fn get_casual_mask_internal(
 }
 
 #[cfg(not(feature = "flash-attn"))]
-pub fn get_attention_casual_mask(
+pub fn get_attention_causal_mask(
     device: &Device,
     dtype: DType,
     _: &Tensor,
@@ -66,7 +75,7 @@ pub fn get_attention_casual_mask(
     for (_, seq_offset) in seqlens.iter().enumerate() {
         let seq_len = seq_offset - start;
         let mask =
-            get_casual_mask_internal(device, dtype, seq_len as usize, sliding_window).unwrap();
+            get_causal_mask_internal(device, dtype, seq_len as usize, sliding_window).unwrap();
         vec_mask.push(mask);
         start = *seq_offset;
     }
