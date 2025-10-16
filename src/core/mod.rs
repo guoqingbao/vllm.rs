@@ -44,7 +44,9 @@ macro_rules! log_info {
         {
             #[cfg(feature = "python")]
             {
-                println!($($arg)*);
+                use colored::Colorize;
+                let s = format!($($arg)*);
+                println!("{}", String::from(s).truecolor(211, 211, 211));
             }
             #[cfg(not(feature = "python"))]
             {
@@ -60,7 +62,9 @@ macro_rules! log_warn {
         {
             #[cfg(feature = "python")]
             {
-                eprintln!($($arg)*);
+                use colored::Colorize;
+                let s = format!($($arg)*);
+                eprintln!("{}", String::from(s).yellow());
             }
             #[cfg(not(feature = "python"))]
             {
@@ -76,7 +80,9 @@ macro_rules! log_error {
         {
             #[cfg(feature = "python")]
             {
-                eprintln!($($arg)*);
+                use colored::Colorize;
+                let s = format!($($arg)*);
+                eprintln!("{}", String::from(s).red());
             }
             #[cfg(not(feature = "python"))]
             {

@@ -93,7 +93,7 @@ pub fn get_kvcache_blocks(
         * dsize
         * 2
         * config.num_hidden_layers;
-    crate::log_info!(
+    crate::log_warn!(
         "Allocating {} KV blocks ({:2} MB) for [{} seqs x {} tokens]",
         num_gpu_blocks,
         total_memory_bytes as f32 / SIZE_IN_MB as f32,

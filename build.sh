@@ -100,4 +100,4 @@ rm "$DEST_DIR/chat.py"
 rm "$DEST_DIR/completion.py"
 rm -r "$DEST_DIR"
 
-echo "✅ ${PUBLISH:+Publish}Build complete."
+echo "✅ ${PUBLISH:+Publish} Build complete."

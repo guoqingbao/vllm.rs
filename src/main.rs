@@ -3,6 +3,7 @@ use axum::Json;
 use axum::Router;
 use candle_core::Result;
 use clap::Parser;
+use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use serde_json::json;
 use std::sync::Arc;
@@ -125,6 +126,7 @@ async fn main() -> Result<()> {
         args.seed,
         Some(args.context_cache),
         Some(args.fp8_kvcache),
+        Some(args.server || !interactive),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
@@ -322,7 +324,10 @@ async fn main() -> Result<()> {
                                         decode_finish_time,
                                         length,
                                     );
-                                    tracing::info!("Generation completed!");
+                                    eprintln!(
+                                        "{}",
+                                        String::from("\r\nGeneration completed!").yellow()
+                                    );
                                     break;
                                 }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),

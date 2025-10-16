@@ -252,11 +252,12 @@ def main():
         generation_cfg=generation_cfg,
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
+        server_mode=True,
     )
 
     app = create_app(cfg, args.dtype)
 
-    print("\nServer url: http://127.0.0.1:" + str(args.port) + "/v1")
+    print("\033[95m", "\nServer url: http://127.0.0.1:" + str(args.port) + "/v1")
     uvicorn.run(app, host=args.host, port=args.port)
 
 

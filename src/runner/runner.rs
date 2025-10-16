@@ -127,8 +127,15 @@ fn main() -> anyhow::Result<()> {
             // Optional warmup
             #[cfg(all(feature = "cuda", feature = "graph"))]
             match runner.warmup_capture() {
-                Ok(_) => eprintln!("Cuda graph captured"),
-                Err(e) => eprintln!("Graph capture failed: {:?}", e),
+                Ok(_) => {
+                    use colored::Colorize;
+                    eprintln!("{}", String::from("Cuda graph captured").yellow());
+                }
+                Err(e) => {
+                    use colored::Colorize;
+                    let s = format!("Graph capture failed: {:?}", e);
+                    eprintln!("{}", s.red());
+                }
             }
 
             send_local(
@@ -190,5 +197,5 @@ fn main() -> anyhow::Result<()> {
     }
     stop_flag.store(true, Ordering::Relaxed);
     vllm_rs::log_info!("Runner finished");
-    Ok(())
+    std::process::exit(0);
 }

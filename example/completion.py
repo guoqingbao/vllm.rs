@@ -55,6 +55,7 @@ def run(args):
         generation_cfg=generation_cfg,
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
+        server_mode=False,
     )
 
 

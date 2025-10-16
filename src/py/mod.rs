@@ -112,6 +112,12 @@ impl Engine {
         let engine = self.engine.read();
         Ok(engine.get_num_cached_tokens())
     }
+
+    #[pyo3(name = "get_available_kv_tokens", text_signature = "($self)")]
+    pub fn get_available_kv_tokens(&mut self) -> PyResult<usize> {
+        let engine = self.engine.read();
+        Ok(engine.get_available_kv_tokens())
+    }
 }
 
 #[pyclass(name = "StreamItem")]
@@ -232,7 +238,7 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None))]
+        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None, server_mode=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -249,6 +255,7 @@ impl EngineConfig {
         seed: Option<u64>,
         flash_context: Option<bool>,
         fp8_kvcache: Option<bool>,
+        server_mode: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -280,6 +287,7 @@ impl EngineConfig {
             seed,
             flash_context,
             fp8_kvcache,
+            server_mode,
         }
     }
 }

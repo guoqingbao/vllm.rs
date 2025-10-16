@@ -173,7 +173,7 @@ impl LLMEngine {
 
         log_info!("{:?}\n", config);
 
-        log_info!(
+        log_warn!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",
             econfig.max_num_batched_tokens,
             num_blocks,
@@ -209,7 +209,7 @@ impl LLMEngine {
         #[cfg(not(feature = "nccl"))]
         let use_runner = num_shards > 1;
 
-        log_info!("Check use_runner {:?}", use_runner);
+        log_warn!("Check use_runner {:?}", use_runner);
 
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
@@ -358,7 +358,7 @@ impl LLMEngine {
         };
 
         let scheduler = Scheduler::new(&econfig, &config);
-        log_info!("Model loaded.\n");
+        log_warn!("Model loaded.\n");
 
         let template = ChatTemplate::new(
             None,
@@ -454,12 +454,14 @@ impl LLMEngine {
         };
 
         let seq_id = if let Some(session_id) = session_id {
-            crate::log_warn!(
-                "Cached {} sessions: {:?} ({} tokens cached).",
-                self.active_sessions.len(),
-                self.active_sessions,
-                self.get_num_cached_tokens(),
-            );
+            if self.econfig.server_mode.unwrap_or(true) {
+                crate::log_warn!(
+                    "Cached {} sessions: {:?} ({} tokens cached).",
+                    self.active_sessions.len(),
+                    self.active_sessions,
+                    self.get_num_cached_tokens(),
+                );
+            }
             if self.scheduler.has_cache(&session_id) {
                 self.scheduler.get_cache(&session_id, token_ids)?
             } else {
@@ -503,7 +505,7 @@ impl LLMEngine {
         });
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
-        if request_type != RequestType::Completion {
+        if self.econfig.server_mode.unwrap_or(true) && request_type != RequestType::Completion {
             log_info!(
                 "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference! (session_id {:?})\n",
                 request_type,
@@ -517,6 +519,10 @@ impl LLMEngine {
 
     pub fn get_num_cached_tokens(&self) -> usize {
         self.scheduler.get_num_cached_tokens()
+    }
+
+    pub fn get_available_kv_tokens(&self) -> usize {
+        self.scheduler.get_available_kv_tokens()
     }
 
     pub fn notify_runner_finished(&mut self, id: usize) -> Result<()> {
@@ -677,6 +683,9 @@ impl LLMEngine {
                     }
                     self.decode_start_times.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
+                    if self.econfig.server_mode.unwrap_or(true) {
+                        self.scheduler.print_free_blocks();
+                    }
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
                         self.decode_start_times.insert(
@@ -696,13 +705,16 @@ impl LLMEngine {
                                         let result =
                                             sender.try_send(StreamItem::Token(tok.clone()));
                                         if result.is_err() {
-                                            log_info!(
-                                                "[seq_id {}] Error when sending token to client",
+                                            crate::log_error!(
+                                                "Error when sending token to client [seq_id {}]",
                                                 seq_id
                                             );
                                             self.cancelled_sequences.push(seq_id);
                                         }
                                     }
+                                }
+                                if self.econfig.server_mode.unwrap_or(true) && s.len() % 1000 == 0 {
+                                    self.scheduler.print_free_blocks();
                                 }
                             } else {
                                 //completion request will be decoded at the final stage (at once)
@@ -728,15 +740,18 @@ impl LLMEngine {
         let has_tokens_left = self.econfig.max_num_seqs * self.econfig.max_model_len.unwrap()
             > (self.get_num_cached_tokens() as f32 * 1.05) as usize;
         if self.active_sessions.len() > 0
-            && (self.active_sessions.len() > self.econfig.max_num_seqs && !has_tokens_left)
+            && (self.active_sessions.len() > self.econfig.max_num_seqs
+                && (!self.econfig.server_mode.unwrap_or(true) || !has_tokens_left))
         {
             if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
                 self.scheduler.release_cache(seq_id);
-                crate::log_warn!(
-                    "***Cache removed for Seq {} (session id {})!\n",
-                    seq_id,
-                    session_id
-                );
+                if self.econfig.server_mode.unwrap_or(true) {
+                    crate::log_warn!(
+                        "🗑️ Seq {} - cache removed (session id {})!\n",
+                        seq_id,
+                        session_id
+                    );
+                }
             }
         }
     }

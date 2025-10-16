@@ -147,12 +147,12 @@ impl Scheduler {
                     if !self.cached_seqs.iter().any(|(_, v)| v == v) {
                         self.cached_seqs.push_back((seq.id, v.clone()));
                     }
-                    crate::log_warn!(
-                        "\n\nSeq {} - {} tokens cached (session_id {})",
-                        seq.id,
-                        seq.num_cached_tokens,
-                        v
-                    );
+                    // crate::log_info!(
+                    //     "\n\nSeq {} - {} tokens cached (session_id {})",
+                    //     seq.id,
+                    //     seq.num_cached_tokens,
+                    //     v
+                    // );
                 } else {
                     seq.status = SequenceStatus::Finished;
                     self.block_manager.deallocate(seq);
@@ -169,8 +169,8 @@ impl Scheduler {
         if let Some((seq_id, _)) = self.cached_seqs.iter().find(|(_, v)| v == session_id) {
             for i in 0..self.cached.len() {
                 if self.cached[i].id == *seq_id {
-                    crate::log_warn!(
-                        "\nSeq {} - continued with {} new tokens ({} cached tokens, session_id {})",
+                    crate::log_info!(
+                        "\nSeq {} - continued with {} new tokens ({} cached tokens, session_id {})\n",
                         seq_id,
                         new_tokens_ids.len(),
                         self.cached[i].token_ids.len(),
@@ -320,5 +320,27 @@ impl Scheduler {
             num_cached_tokens += self.running[i].num_cached_tokens;
         }
         num_cached_tokens
+    }
+
+    pub fn get_available_kv_tokens(&self) -> usize {
+        let free_blocks = self.block_manager.get_num_free_blocks();
+        free_blocks * self.block_manager.get_block_size()
+    }
+
+    pub fn print_free_blocks(&self) {
+        let total_blocks = self.block_manager.get_num_total_blocks();
+        let free_blocks = self.block_manager.get_num_free_blocks();
+        crate::log_info!(
+            "Kvcache Usage: free {} blocks (or {} tokens), used {:.2}%",
+            free_blocks,
+            free_blocks * self.block_manager.get_block_size(),
+            100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32,
+        );
+    }
+
+    pub fn kv_cache_usage_percent(&self) -> f32 {
+        let total_blocks = self.block_manager.get_num_total_blocks();
+        let free_blocks = self.block_manager.get_num_free_blocks();
+        100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32
     }
 }

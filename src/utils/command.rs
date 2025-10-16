@@ -23,11 +23,11 @@ impl fmt::Debug for CommandManager {
 
 impl CommandManager {
     pub fn ipc_default_name() -> anyhow::Result<&'static str> {
-        Ok("candle_vllm_daemon")
+        Ok("vllm_rs_daemon")
     }
 
     pub fn ipc_command_name(command_name: &str) -> anyhow::Result<String> {
-        let printname = format!("command_{}_candle_vllm", command_name);
+        let printname = format!("command_{}", command_name);
         Ok(printname)
     }
 

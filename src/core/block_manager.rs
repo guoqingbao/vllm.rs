@@ -128,4 +128,15 @@ impl BlockManager {
         }
         Ok(())
     }
+
+    pub fn get_num_total_blocks(&self) -> usize {
+        self.blocks.len()
+    }
+    pub fn get_num_free_blocks(&self) -> usize {
+        self.free_block_ids.len()
+    }
+
+    pub fn get_block_size(&self) -> usize {
+        self.block_size
+    }
 }

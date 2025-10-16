@@ -301,14 +301,14 @@ pub async fn chat_completion(
 
         crate::log_info!("--- Performance Metrics ---");
         crate::log_info!(
-            "⏱️ [{} requests] Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+            "[{} requests] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
             choices.len(),
             total_prompt_tokens,
             total_prompt_time_taken,
             total_prompt_tokens as f32 / total_prompt_time_taken.max(0.001)
         );
         crate::log_info!(
-            "⏱️ [{} requests] Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+            "[{} requests] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
             choices.len(),
             total_decoded_tokens,
             total_decoded_time_taken,

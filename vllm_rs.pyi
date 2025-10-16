@@ -49,6 +49,7 @@ class EngineConfig:
     seed: Optional[int]
     flash_context: Optional[bool]
     fp8_kvcache: Optional[bool]
+    server_mode: Optional[bool]
 
 @dataclass
 class SamplingParams:
@@ -137,4 +138,11 @@ class Engine:
         Call this function when context-cache feature enabled
 
         Return: total number of context cached for all requests
+        """
+
+    def get_available_kv_tokens(
+        self,
+    ) -> int:
+        """
+        Return: total number of available kvcache tokens
         """

@@ -68,6 +68,7 @@ def build_engine_config(args, num_of_prompts):
         generation_cfg=generation_cfg,
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
+        server_mode=False,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):
@@ -217,7 +218,7 @@ def main():
                     tokens_left = total_available_tokens
                 print("\n⛔️ Interrupted by user!")
                 if decoded_length > 0:
-                    print("\n⏱️ decode throughput: ", decoded_length * 1000 / (current_millis() - decode_start_time), " tokens/s")
+                    print("\n⏱️ [Unfinished] Decode throughput: ", round(decoded_length * 1000 / (current_millis() - decode_start_time), 2), " tokens/s")
                 continue
             except Exception as e:
                 session_id = str(uuid.uuid4())
@@ -260,14 +261,15 @@ def main():
                     role="assistant", content=output.decode_output)
                 chat_history.append(assistant_msg)
 
+        color = "\033[37m"
         if len(outputs) > 0:
-            print("\n--- Performance Metrics ---")
+            print(color + "\n--- Performance Metrics ---")
             print(
-                f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
+                color + f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
                 f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
             )
             print(
-                f"⏱️ Decoded tokens: {total_decoded_tokens} in {decode_time_taken:.2f}s "
+                color + f"⏱️ Decoded tokens: {total_decoded_tokens} in {decode_time_taken:.2f}s "
                 f"({total_decoded_tokens / max(decode_time_taken, 0.001):.2f} tokens/s)"
             )
 

@@ -156,6 +156,7 @@ pub struct EngineConfig {
     pub seed: Option<u64>,
     pub flash_context: Option<bool>,
     pub fp8_kvcache: Option<bool>,
+    pub server_mode: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -198,6 +199,8 @@ pub struct EngineConfig {
     pub flash_context: Option<bool>,
     #[pyo3(get, set)]
     pub fp8_kvcache: Option<bool>,
+    #[pyo3(get, set)]
+    pub server_mode: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -218,6 +221,7 @@ impl EngineConfig {
         seed: Option<u64>,
         flash_context: Option<bool>,
         fp8_kvcache: Option<bool>,
+        server_mode: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -248,6 +252,7 @@ impl EngineConfig {
             seed,
             flash_context,
             fp8_kvcache,
+            server_mode,
         }
     }
 }

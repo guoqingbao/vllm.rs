@@ -4,7 +4,7 @@ use std::sync::{
     Arc,
 };
 use std::{process, thread, time};
-const HEART_BEAT_COMMAND_NAME: &str = "@vllm-rs-runner-command-heartbeat";
+const HEART_BEAT_COMMAND_NAME: &str = "@vllm-rs-runner-heartbeat";
 
 pub fn heartbeat_worker(
     num_subprocess: Option<usize>,
