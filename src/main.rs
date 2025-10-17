@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
                     decode_output,
                 }]
             } else {
-                tracing::warn!("Starting the inference...");
+                vllm_rs::log_warn!("Starting the inference...");
 
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
@@ -422,7 +422,7 @@ async fn main() -> Result<()> {
         }
 
         let decode_time_taken = all_decode_time_taken / outputs.len() as f32;
-        tracing::info!("--- Performance Metrics ---");
+        vllm_rs::log_info!("--- Performance Metrics ---");
 
         tracing::info!(
             "⏱️ Prompt tokens: {} in {:.2}s ({:.2} tokens/s)",

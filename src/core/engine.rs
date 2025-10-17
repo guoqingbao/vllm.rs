@@ -18,6 +18,7 @@ use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
+use colored::Colorize;
 use either::Either;
 use futures::future::join_all;
 use interprocess::local_socket::traits::Listener;
@@ -40,6 +41,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::{task, time::sleep};
+
 pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -79,6 +81,8 @@ pub struct LLMEngine {
     stream_senders: HashMap<usize, Sender<StreamItem>>,
     request_types: HashMap<usize, RequestType>,
     decode_start_times: HashMap<usize, usize>,
+    decode_length: HashMap<usize, usize>,
+    last_check_throughput_time: usize,
     active_requests: HashSet<usize>,
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
@@ -150,7 +154,7 @@ impl LLMEngine {
 
         let num_shards = device_ids.len();
 
-        let num_blocks = get_kvcache_blocks(
+        let (num_blocks, kvcache_memory_bytes) = get_kvcache_blocks(
             econfig.max_num_seqs,
             econfig.max_model_len.unwrap_or(4096),
             econfig.block_size,
@@ -164,6 +168,7 @@ impl LLMEngine {
         );
 
         econfig.num_blocks = num_blocks;
+        econfig.kvcache_memory_bytes = kvcache_memory_bytes;
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
         econfig.num_shards = Some(num_shards);
         config.fp8_kvcache = econfig.fp8_kvcache;
@@ -381,6 +386,8 @@ impl LLMEngine {
             stream_senders: HashMap::new(),
             request_types: HashMap::new(),
             decode_start_times: HashMap::new(),
+            decode_length: HashMap::new(),
+            last_check_throughput_time: 0,
             active_requests: HashSet::new(),
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
@@ -506,8 +513,8 @@ impl LLMEngine {
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
         if self.econfig.server_mode.unwrap_or(true) && request_type != RequestType::Completion {
-            log_info!(
-                "[{:?}] A new request [Seq_id {}] with prompt length {} added for inference! (session_id {:?})\n",
+            log_warn!(
+                "[{:?}] New request [Seq_id {}, {} tokens] received! (session_id: {:?})\n",
                 request_type,
                 seq_id,
                 prompt_length,
@@ -682,20 +689,41 @@ impl LLMEngine {
                         self.active_requests.remove(&seq_id);
                     }
                     self.decode_start_times.remove(&seq_id);
+                    self.decode_length.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
                     if self.econfig.server_mode.unwrap_or(true) {
                         self.scheduler.print_free_blocks();
                     }
                 } else {
                     if !self.decode_start_times.contains_key(&seq_id) {
-                        self.decode_start_times.insert(
-                            seq_id,
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_millis() as usize,
-                        );
+                        let cur_time = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize;
+                        self.decode_start_times.insert(seq_id, cur_time);
+                        self.decode_length.insert(seq_id, 1);
+
+                        let time_costs = cur_time - s.created_time();
+                        if time_costs / 100 > 0 && s.len() > 0 {
+                            crate::log_info!(
+                                "Prefilling [seq_id {}]: {} tokens in {:.2}s ({:.2} tokens/s{})",
+                                seq_id,
+                                s.len(),
+                                time_costs as f32 / 1000f32,
+                                s.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
+                                if s.num_cached_tokens > 0 {
+                                    ", cache included"
+                                } else {
+                                    ""
+                                },
+                            )
+                        }
                     }
+
+                    if let Some(length) = self.decode_length.get_mut(&seq_id) {
+                        *length = s.output_len();
+                    }
+
                     let token_id = s.last_token;
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -713,9 +741,6 @@ impl LLMEngine {
                                         }
                                     }
                                 }
-                                if self.econfig.server_mode.unwrap_or(true) && s.len() % 1000 == 0 {
-                                    self.scheduler.print_free_blocks();
-                                }
                             } else {
                                 //completion request will be decoded at the final stage (at once)
                                 let _ = sender.try_send(StreamItem::TokenID(token_id));
@@ -732,6 +757,9 @@ impl LLMEngine {
         }
         self.check_cache();
         self.check_canceled();
+        if self.econfig.server_mode.unwrap_or(true) {
+            self.may_print_decoding_throughput();
+        }
         Ok(())
     }
 
@@ -779,6 +807,44 @@ impl LLMEngine {
         }
         self.scheduler.clear_finished();
         self.cancelled_sequences.clear();
+    }
+
+    pub fn may_print_decoding_throughput(&mut self) {
+        if self.active_requests.is_empty() {
+            return;
+        }
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
+        if cur_time - self.last_check_throughput_time < 5000 {
+            return;
+        }
+        self.last_check_throughput_time = cur_time;
+
+        let mut total_decoded_length = 0;
+        let mut total_decoded_time_costs = 0;
+
+        for seq_id in &self.active_requests {
+            if let Some(length) = self.decode_length.get(seq_id) {
+                total_decoded_length += length;
+            }
+            if let Some(start_time) = self.decode_start_times.get(seq_id) {
+                total_decoded_time_costs += cur_time - start_time;
+            }
+        }
+
+        if total_decoded_length > 0 && total_decoded_time_costs / 1000 > 0 {
+            crate::log_info!(
+                "Decoding: {} active request(s), avg. {} tokens/s per request",
+                self.active_requests.len(),
+                total_decoded_length / (total_decoded_time_costs / 1000)
+            )
+        }
+
+        if total_decoded_length % 100 > 50 {
+            self.scheduler.print_free_blocks();
+        }
     }
 
     pub fn cancel(&mut self, seq_id: usize) {
@@ -888,12 +954,13 @@ impl LLMEngine {
 
                     let elapsed = (now - start_time) as f32 / 1000.0;
 
-                    println!(
+                    let s = format!(
                         "[Live Throughput] {} tokens in {:.2}s ({:.2} tokens/s)",
                         count,
                         elapsed,
                         count as f32 / elapsed
                     );
+                    eprintln!("{}", String::from(s).yellow());
                 }
             }
         });

@@ -144,6 +144,7 @@ pub struct EngineConfig {
     pub hf_token: Option<String>,
     pub hf_token_path: Option<String>,
     pub num_blocks: usize,
+    pub kvcache_memory_bytes: usize,
     pub block_size: usize,
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
@@ -177,6 +178,7 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub num_blocks: usize,
     pub block_size: usize,
+    pub kvcache_memory_bytes: usize,
     #[pyo3(get, set)]
     pub max_num_seqs: usize,
     #[pyo3(get, set)]
@@ -241,7 +243,8 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
-            num_blocks: 128, //placeholder
+            num_blocks: 128,         //placeholder
+            kvcache_memory_bytes: 0, //placeholder
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder

@@ -132,7 +132,7 @@ pub async fn chat_completion(
                                     - decode_start_time)
                                     as f32
                                     / 1000.0;
-                                crate::log_info!("--- Performance Metrics ---");
+                                crate::log_warn!("--- Performance Metrics ---");
                                 crate::log_info!(
                                     "[Unfinished seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
                                     seq_id,
@@ -189,7 +189,7 @@ pub async fn chat_completion(
                         let decode_time_taken =
                             (decode_finish_time - decode_start_time) as f32 / 1000.0;
 
-                        crate::log_info!("--- Performance Metrics ---");
+                        crate::log_warn!("--- Performance Metrics ---");
                         crate::log_info!(
                             "[seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
                             seq_id,
@@ -299,7 +299,7 @@ pub async fn chat_completion(
             });
         }
 
-        crate::log_info!("--- Performance Metrics ---");
+        crate::log_warn!("--- Performance Metrics ---");
         crate::log_info!(
             "[{} requests] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
             choices.len(),
