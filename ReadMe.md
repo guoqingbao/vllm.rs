@@ -283,7 +283,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | Use FP8 KV Cache (when context-cache not enabled)                 |    |
+| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
 
 ## 📽️ Demo Video
 

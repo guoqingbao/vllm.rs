@@ -262,10 +262,9 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if (flash_context.unwrap_or(false) || cfg!(feature = "flash-context"))
-            && fp8_kvcache.unwrap_or(false)
+        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) && cfg!(feature = "metal")
         {
-            panic!("Error: fp8 kvcache is not supported under flash-context feature enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context`).");
+            panic!("Error: fp8 kvcache is not compatible under context-context on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`).");
         }
 
         Self {

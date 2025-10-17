@@ -279,7 +279,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | 使用FP8 KV Cache (context-cache没有启用时生效)                 |    |
+| `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |    |
 
 ## 📽️ 演示视频
 

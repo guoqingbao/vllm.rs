@@ -59,14 +59,13 @@ async fn main() -> Result<()> {
         args.max_model_len
     };
 
-    let prompts = match (args.prompts, interactive) {
+    let prompts = match (&args.prompts, interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
             if args.server {
                 tracing::warn!("Enter server mode.");
                 vec![]
             } else {
-                println!("⛔️ No prompts provided, using default prompt.");
                 vec!["Please talk about China in more details.".to_string()]
             }
         }
@@ -169,6 +168,14 @@ async fn main() -> Result<()> {
 
         return Ok(axum::serve(listener, app).await?);
     }
+
+    if !interactive && args.prompts.is_none() {
+        eprintln!(
+            "{}",
+            String::from("⛔️ No prompts provided for completion, using default prompt! Interactive (`--i`) and server mode (`--server`) are no specified!").red()
+        );
+    }
+
     let mut params = Vec::new();
 
     let mut prompt_processed = Vec::new();

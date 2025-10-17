@@ -185,7 +185,7 @@ pub struct Args {
     #[arg(long, default_value_t = 16384)]
     pub max_tokens: usize,
 
-    /// for batch performance tetst
+    /// for batch performance test
     #[arg(long, default_value = None)]
     pub batch: Option<usize>,
 

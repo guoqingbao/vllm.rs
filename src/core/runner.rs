@@ -249,6 +249,10 @@ impl ModelRunner {
     ) -> Result<Vec<(Tensor, Tensor)>> {
         let num_gpu_blocks = econfig.num_blocks;
         if cfg!(feature = "flash-context") {
+            assert!(
+                !econfig.fp8_kvcache.unwrap_or(false),
+                "fp8 kvcache is not compatible with flash-context feature!"
+            );
             let kv_shape = Self::calculate_flash_key_value_block_shape(
                 config,
                 econfig.block_size,
