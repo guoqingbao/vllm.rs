@@ -290,14 +290,9 @@ impl FusedMoeGGUF {
             xs.to_owned()
         };
         let router_logits = self.gate.forward(&xs)?;
-        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
-        let indices = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
-
-        let mut scores = routing_weights.gather(&indices, D::Minus1)?;
+        let (mut scores, indices) =
+            attention_rs::topk::topk_softmax(&router_logits, self.num_experts_per_tok)?;
 
         if self.norm_topk_prob {
             scores = scores.broadcast_div(&scores.sum_keepdim(D::Minus1)?)?;
@@ -536,14 +531,9 @@ impl FusedMoeISQ {
             xs.to_owned()
         };
         let router_logits = self.gate.forward(&xs)?;
-        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
-        let indices = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
-
-        let mut scores = routing_weights.gather(&indices, D::Minus1)?;
+        let (mut scores, indices) =
+            attention_rs::topk::topk_softmax(&router_logits, self.num_experts_per_tok)?;
 
         if self.norm_topk_prob {
             scores = scores.broadcast_div(&scores.sum_keepdim(D::Minus1)?)?;
