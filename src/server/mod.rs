@@ -67,10 +67,16 @@ pub struct ChatCompletionChunk {
 }
 
 #[derive(Serialize)]
+pub struct ErrorMsg {
+    pub message: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct ChatChoiceChunk {
     pub index: usize,
     pub delta: Delta,
     pub finish_reason: Option<String>,
+    pub error: Option<Vec<ErrorMsg>>,
 }
 
 #[derive(Serialize)]

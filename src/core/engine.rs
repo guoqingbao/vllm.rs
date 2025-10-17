@@ -756,7 +756,7 @@ impl LLMEngine {
             self.active_requests.clear();
         }
         self.check_cache();
-        self.check_canceled();
+        self.check_canceled(None);
         if self.econfig.server_mode.unwrap_or(true) {
             self.may_print_decoding_throughput();
         }
@@ -784,7 +784,7 @@ impl LLMEngine {
         }
     }
 
-    pub fn check_canceled(&mut self) {
+    pub fn check_canceled(&mut self, reason: Option<String>) {
         if self.cancelled_sequences.is_empty() {
             return;
         }
@@ -803,6 +803,15 @@ impl LLMEngine {
             }
             self.stream_decoders.remove(&seq_id);
             self.decode_start_times.remove(&seq_id);
+            if let Some(r) = &reason {
+                if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                    if let Some(request_type) = self.request_types.get(&seq_id) {
+                        if *request_type == RequestType::Stream {
+                            let _ = sender.try_send(StreamItem::Error(r.clone()));
+                        }
+                    }
+                }
+            }
             self.stream_senders.remove(&seq_id);
         }
         self.scheduler.clear_finished();
@@ -849,6 +858,15 @@ impl LLMEngine {
 
     pub fn cancel(&mut self, seq_id: usize) {
         self.cancelled_sequences.push(seq_id);
+    }
+
+    pub fn cancel_all_with_reason(&mut self, reason: Option<String>) -> bool {
+        for seq_id in &self.active_requests {
+            self.cancelled_sequences.push(*seq_id);
+        }
+        let has_requests_to_cancel = self.cancelled_sequences.len() > 0;
+        self.check_canceled(reason);
+        has_requests_to_cancel
     }
 
     pub fn apply_chat_template(
@@ -1083,8 +1101,10 @@ impl LLMEngine {
                 {
                     let mut guard = engine.write();
                     if let Err(e) = guard.step() {
-                        crate::log_error!("\n\n[Engine Loop] Step error: {:?}", e);
-                        std::process::exit(1);
+                        crate::log_error!("[Engine Loop] Step error: {:?}", e);
+                        if !guard.cancel_all_with_reason(Some(e.to_string())) {
+                            std::process::exit(1);
+                        }
                     }
                 }
 
