@@ -273,7 +273,8 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
-            num_blocks: 128, //placeholder
+            num_blocks: 128,         //placeholder
+            kvcache_memory_bytes: 0, //placeholder
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder

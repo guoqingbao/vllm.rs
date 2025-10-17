@@ -76,7 +76,7 @@ pub fn get_kvcache_blocks(
     config: &config::Config,
     num_shards: usize,
     dtype: DType,
-) -> usize {
+) -> (usize, usize) {
     const SIZE_IN_MB: usize = 1024 * 1024;
 
     let dsize = dtype.size_in_bytes();
@@ -101,7 +101,7 @@ pub fn get_kvcache_blocks(
         max_model_len,
     );
 
-    num_gpu_blocks
+    (num_gpu_blocks, total_memory_bytes)
 }
 
 pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(

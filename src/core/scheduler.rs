@@ -328,13 +328,18 @@ impl Scheduler {
     }
 
     pub fn print_free_blocks(&self) {
+        const SIZE_IN_GB: usize = 1024 * 1024 * 1024;
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
+        let used_percent = 1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32);
+        let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
         crate::log_info!(
-            "Kvcache Usage: free {} blocks (or {} tokens), used {:.2}%",
+            "Kvcache: {} blocks ({} tokens) free, used {:.1}% ({:.2}GB/{:.1}GB)",
             free_blocks,
             free_blocks * self.block_manager.get_block_size(),
-            100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32,
+            used_percent * 100.0f32,
+            used_percent * kvcache_memory_gb,
+            kvcache_memory_gb,
         );
     }
 
