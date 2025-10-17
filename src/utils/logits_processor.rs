@@ -79,13 +79,11 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let asort = logits.arg_sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let asort = logits
-            .to_device(&candle_core::Device::Cpu)?
-            .arg_sort_last_dim(false)?;
+        let asort = logits.arg_sort_last_dim(false)?;
         let asort: Vec<Vec<u32>> = asort.to_vec2()?;
         let sorted: Vec<Vec<f32>> = logits.to_vec2()?;
         let batch = logits.layout().dims()[0];
-        let vec_ret: Vec<u32> = (0..batch)
+        let vec_ret: Result<Vec<u32>> = (0..batch)
             .into_par_iter()
             .map(|b| {
                 let indices: Vec<u32> = asort[b].to_vec();
@@ -100,10 +98,10 @@ impl LogitsProcessor {
                     }
                 }
                 // Sample with clamped probabilities.
-                self.sample_multinomial(&prs).unwrap()
+                self.sample_multinomial(&prs)
             })
             .collect();
-        Ok(vec_ret)
+        vec_ret
     }
 
     // top-k sampling samples from the k tokens with the largest probabilities.
@@ -111,22 +109,27 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let (sorted, asort) = logits.sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let (sorted, asort) = logits
-            .to_device(&candle_core::Device::Cpu)?
-            .sort_last_dim(false)?;
+        let (sorted, asort) = logits.sort_last_dim(false)?;
+        let sorted = sorted
+            .narrow(candle_core::D::Minus1, 0, top_k)?
+            .contiguous()?;
+        let asort = asort
+            .narrow(candle_core::D::Minus1, 0, top_k)?
+            .contiguous()?;
+
         let asort: Vec<Vec<u32>> = asort.to_vec2()?;
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
         let batch = logits.layout().dims()[0];
-        let vec_ret: Vec<u32> = (0..batch)
+        let vec_ret: Result<Vec<u32>> = (0..batch)
             .into_par_iter()
             .map(|b| {
-                let indices: Vec<u32> = asort[b][0..top_k].to_vec();
-                let prs: Vec<f32> = sorted[b][0..top_k].to_vec();
-                let index = self.sample_multinomial(&prs).unwrap();
-                indices[index as usize] as u32
+                let indices: Vec<u32> = asort[b].clone();
+                let prs: Vec<f32> = sorted[b].clone();
+                let index = self.sample_multinomial(&prs)?;
+                Ok(indices[index as usize] as u32)
             })
             .collect();
-        Ok(vec_ret)
+        vec_ret
     }
 
     // top-k sampling samples from the k tokens with the largest probabilities.
@@ -135,20 +138,30 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let (sorted, asort) = logits.sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let (sorted, asort) = logits
-            .to_device(&candle_core::Device::Cpu)?
-            .sort_last_dim(false)?;
+        let (sorted, asort) = logits.sort_last_dim(false)?;
+
+        let sorted = sorted
+            .narrow(candle_core::D::Minus1, 0, top_k)?
+            .contiguous()?;
+        let asort = asort
+            .narrow(candle_core::D::Minus1, 0, top_k)?
+            .contiguous()?;
+
         let asort: Vec<Vec<u32>> = asort.to_vec2()?;
         let sorted: Vec<Vec<f32>> = sorted.to_vec2()?;
+
         let batch = logits.layout().dims()[0];
-        let vec_ret: Vec<u32> = (0..batch)
+
+        let vec_ret: Result<Vec<u32>> = (0..batch)
             .into_par_iter()
             .map(|b| {
-                let indices: Vec<u32> = asort[b][0..top_k].to_vec();
-                let mut prs: Vec<f32> = sorted[b][0..top_k].to_vec();
+                let indices = asort[b].clone();
+                let mut prs = sorted[b].clone();
+
                 let sum_p = prs.iter().sum::<f32>();
                 let index = if top_p <= 0.0 || top_p >= sum_p {
-                    self.sample_multinomial(&prs).unwrap()
+                    self.sample_multinomial(&prs)
+                        .map_err(candle_core::Error::wrap)?
                 } else {
                     let mut cumsum = 0.;
                     for i in 0..prs.len() {
@@ -158,13 +171,17 @@ impl LogitsProcessor {
                             cumsum += prs[i];
                         }
                     }
+
                     // Sample with clamped probabilities.
-                    self.sample_multinomial(&prs).unwrap()
+                    self.sample_multinomial(&prs)
+                        .map_err(candle_core::Error::wrap)?
                 };
-                indices[index as usize] as u32
+
+                Ok(indices[index as usize] as u32)
             })
             .collect();
-        Ok(vec_ret)
+
+        vec_ret
     }
 
     pub fn sample(

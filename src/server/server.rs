@@ -5,7 +5,7 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, ServerData, Usage,
+    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
@@ -108,6 +108,7 @@ pub async fn chat_completion(
                                     content: Some(token.clone()),
                                 },
                                 finish_reason: None,
+                                error: None,
                             }],
                             usage: None,
                         };
@@ -173,6 +174,7 @@ pub async fn chat_completion(
                                 } else {
                                     Some("stop".to_string())
                                 },
+                                error: None,
                             }],
                             usage: Some(Usage {
                                 prompt_tokens: prompt_length,
@@ -218,6 +220,7 @@ pub async fn chat_completion(
                                 index: 0,
                                 delta: Delta { content: None },
                                 finish_reason: None,
+                                error: Some(vec![ErrorMsg { message: Some(e) }]),
                             }],
                             usage: None,
                         };
