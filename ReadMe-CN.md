@@ -73,7 +73,7 @@
 * ✅ Mistral
 * ✅ GLM4 (0414版本, **非ChatGLM**)
 
-支持 **Safetensor** 和 **GGUF** 格式。
+支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
 ## 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
@@ -313,7 +313,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] CUDA Graph
 * [x] OpenAI API 兼容服务器（支持流式输出）
 * [x] 持续批处理
-* [x] 多卡并行推理（未量化Safetensors模型、GGUF量化模型）
+* [x] 多卡并行推理（Safetensors模型、GPTQ/AWQ及GGUF量化模型）
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
 * [x] 上下文缓存 (使用`context-cache`参数)

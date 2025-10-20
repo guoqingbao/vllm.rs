@@ -6,6 +6,7 @@ pub mod mlp;
 pub mod moe;
 pub mod others;
 pub mod rotary_emb;
+pub mod wna16;
 use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_varbuilder::VarBuilder as QVarBuilder;
 use candle_core::DType;

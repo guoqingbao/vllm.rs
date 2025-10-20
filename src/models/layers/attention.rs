@@ -62,6 +62,7 @@ impl Attention {
                 vb.pp("q_proj")
             },
             comm.clone(),
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;
@@ -75,6 +76,7 @@ impl Attention {
                 vb.pp("k_proj")
             },
             comm.clone(),
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;
@@ -90,7 +92,8 @@ impl Attention {
                 vb.pp("v_proj")
             },
             comm.clone(),
-            if config.quant.is_some() {
+            &config.quantization_config,
+            if config.quant.is_some() && config.quantization_config.is_none() {
                 &q8_0_qunat
             } else {
                 &None
@@ -107,6 +110,7 @@ impl Attention {
                 vb.pp("o_proj")
             },
             comm.clone(),
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;

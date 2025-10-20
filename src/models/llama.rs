@@ -228,6 +228,7 @@ impl LLaMaForCausalLM {
                 }
             },
             &None,
+            &None,
             dtype,
         )?;
 

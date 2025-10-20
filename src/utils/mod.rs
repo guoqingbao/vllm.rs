@@ -4,6 +4,7 @@ pub mod config;
 pub mod downloader;
 pub mod gguf_helper;
 pub mod gguf_varbuilder;
+pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod heartbeat;
@@ -343,6 +344,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         quant: None,
         moe_cfg: mod_cfg,
         fp8_kvcache: None,
+        quantization_config: None,
     };
 
     Ok(cfg)
@@ -370,6 +372,21 @@ pub fn init_config_tokenizer(
         let mut config: Config =
             serde_json::from_slice(&std::fs::read(&config_path).map_err(candle_core::Error::wrap)?)
                 .map_err(candle_core::Error::wrap)?;
+        if let Some(qcfg) = &config.quantization_config {
+            assert!(
+                qcfg.quant_method == "gptq" || qcfg.quant_method == "awq",
+                "Invalid w4a16 quantization format! Only `gptq` and `awq` supported"
+            );
+            assert!(
+                qcfg.bits == 4 || qcfg.bits == 8,
+                "Only 4-bit and 8-bit gptq or awq models supported!"
+            );
+            if qcfg.desc_act.unwrap_or(false) {
+                candle_core::bail!("desc_act==true not supported!");
+            }
+            #[cfg(not(feature = "cuda"))]
+            candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
+        }
         if matches!(
             config.architectures[0].as_str(),
             "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM"

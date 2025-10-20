@@ -133,6 +133,7 @@ pub struct Config {
     pub quant: Option<String>,
     pub moe_cfg: Option<MoEConfig>,
     pub fp8_kvcache: Option<bool>,
+    pub quantization_config: Option<QuantConfig>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -389,4 +390,16 @@ pub struct GenerationConfig {
 
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+pub struct QuantConfig {
+    pub quant_method: String,
+    #[serde(default)]
+    pub bits: usize,
+    #[serde(default)]
+    pub group_size: i32,
+    pub sym: Option<bool>,
+    pub desc_act: Option<bool>,
+    pub checkpoint_format: Option<String>,
 }

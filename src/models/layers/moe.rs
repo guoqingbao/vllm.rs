@@ -33,6 +33,7 @@ impl MoeNaive {
             vb.pp("gate"),
             Shard::default(),
             &None,
+            &None,
             DType::F32,
         )?;
 
@@ -137,6 +138,7 @@ impl FusedMoeGGUF {
             vb.pp("ffn_gate_inp"),
             Shard::default(),
             &None,
+            &None,
             DType::F32,
         )?;
 
@@ -239,6 +241,7 @@ impl FusedMoeGGUF {
             num_experts,
             vb.pp("ffn_gate_inp"),
             Shard::default(),
+            &None,
             &None,
             DType::F32,
         )?;
@@ -377,6 +380,7 @@ impl FusedMoeISQ {
             num_experts,
             vb.pp("gate"),
             Shard::default(),
+            &None,
             &None,
             DType::F32,
         )?;

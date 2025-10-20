@@ -345,6 +345,7 @@ impl Qwen3MoEForCausalLM {
                 }
             },
             &None,
+            &None,
             dtype,
         )?;
 

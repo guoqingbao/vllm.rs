@@ -74,7 +74,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Mistral
 * ✅ GLM4 (0414, **Not ChatGLM**)
 
-Supports both **Safetensor** and **GGUF** formats.
+Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
 ## 📦 Install with pip
    💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100)
@@ -318,7 +318,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] CUDA Graph
 * [x] OpenAI-compatible API (streaming support)
 * [x] Continuous batching
-* [x] Multi-gpu inference (Unquantized safetensors, GGUF)
+* [x] Multi-gpu inference (Safetensors, GPTQ, AWQ, GGUF)
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
 * [x] Session-based context cache (available on `CUDA` when `context-cache` enabled)

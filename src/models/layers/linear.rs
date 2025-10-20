@@ -1,5 +1,7 @@
 //! Linear layer (GGUF and unquantized safetensors)
+use super::wna16::WNA16;
 use crate::models::layers::VarBuilderX;
+use crate::utils::config::QuantConfig;
 use candle_core::quantized;
 use candle_core::quantized::GgmlDType;
 use candle_core::Module;
@@ -37,10 +39,6 @@ impl Linear {
 
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
-    }
-
-    pub fn wdtype(&self) -> DType {
-        self.weight.dtype()
     }
 }
 
@@ -183,10 +181,10 @@ pub fn linear_b(
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct QLinear {
-    inner: QMatMul,
-    bias: Option<Tensor>,
-    dtype: DType,
-    wdtype: GgmlDType,
+    pub inner: Option<QMatMul>,
+    pub bias: Option<Tensor>,
+    pub wna16: Option<WNA16>,
+    pub dtype: DType,
 }
 
 impl QLinear {
@@ -238,9 +236,9 @@ impl QLinear {
             None
         };
         Ok(Self {
-            inner,
+            inner: Some(inner),
             bias,
-            wdtype,
+            wna16: None,
             dtype,
         })
     }
@@ -291,10 +289,10 @@ impl QLinear {
             None
         };
         Ok(Self {
-            inner,
+            inner: Some(inner),
             bias,
+            wna16: None,
             dtype,
-            wdtype,
         })
     }
 
@@ -303,19 +301,18 @@ impl QLinear {
             Some(b_) => Some(b_.to_dtype(DType::F32).unwrap()),
             _ => None,
         };
-        let wdtype = w.dtype();
 
         Self {
-            inner: QMatMul::QTensor(Arc::new(w)),
+            inner: Some(QMatMul::QTensor(Arc::new(w))),
             bias: bx,
+            wna16: None,
             dtype,
-            wdtype,
         }
     }
 
     pub fn dequantize(&self) -> Result<Tensor> {
         match &self.inner {
-            QMatMul::QTensor(t) => t.dequantize(&t.device()),
+            Some(QMatMul::QTensor(t)) => t.dequantize(&t.device()),
             _ => {
                 panic!("Not supported!");
             }
@@ -353,18 +350,6 @@ impl QLinear {
         Ok(QLinear::from_qparts_x(qtensor, qbias, dtype))
     }
 
-    pub fn inner(&mut self) -> &mut QMatMul {
-        &mut self.inner
-    }
-
-    pub fn inner_ref(&self) -> &QMatMul {
-        &self.inner
-    }
-
-    pub fn is_quant(&self) -> bool {
-        matches!(self.inner, QMatMul::QTensor(_))
-    }
-
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
     }
@@ -372,39 +357,42 @@ impl QLinear {
     pub fn bias_mut(&mut self) -> Option<&mut Tensor> {
         self.bias.as_mut()
     }
-
-    pub fn wdtype(&self) -> GgmlDType {
-        self.wdtype
-    }
 }
 
 impl Module for QLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let xs = if x.dtype() != DType::F32 {
-            x.to_dtype(DType::F32)?
-        } else {
-            x.to_owned()
-        };
+        if self.wna16.is_some() {
+            self.wna16_forward(x)
+        } else if let Some(inner) = &self.inner {
+            let xs = if x.dtype() != DType::F32 {
+                x.to_dtype(DType::F32)?
+            } else {
+                x.to_owned()
+            };
+            let xs = QMatMul::forward(inner, &xs)?;
 
-        let xs = QMatMul::forward(&self.inner, &xs)?;
-
-        if let Some(bias) = &self.bias {
-            xs.broadcast_add(bias)
+            if let Some(bias) = &self.bias {
+                xs.broadcast_add(bias)
+            } else {
+                Ok(xs)
+            }
         } else {
-            Ok(xs)
+            candle_core::bail!("Invalid quantization type!")
         }
     }
 }
 
 impl QLinear {
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
-        let xs = self
-            .inner
-            .indexed_moe_forward(&x.to_dtype(DType::F32)?, ids)?;
-        if let Some(bias) = &self.bias {
-            xs.broadcast_add(bias)?.to_dtype(self.dtype)
+        if let Some(inner) = &self.inner {
+            let xs = inner.indexed_moe_forward(&x.to_dtype(DType::F32)?, ids)?;
+            if let Some(bias) = &self.bias {
+                xs.broadcast_add(bias)?.to_dtype(self.dtype)
+            } else {
+                xs.to_dtype(self.dtype)
+            }
         } else {
-            xs.to_dtype(self.dtype)
+            candle_core::bail!("Invalid quantization type!")
         }
     }
 }
@@ -445,13 +433,6 @@ impl LinearX {
         }
     }
 
-    pub fn wdtype(&self) -> Either<DType, GgmlDType> {
-        match &self.0 {
-            Either::Left(ln) => Either::Left(ln.wdtype()),
-            Either::Right(ln) => Either::Right(ln.wdtype()),
-        }
-    }
-
     pub fn dequantize(&self) -> Result<Tensor> {
         match &self.0 {
             Either::Left(_) => {
@@ -466,28 +447,48 @@ pub fn linear_x(
     in_dim: usize,
     out_dim: usize,
     vb: VarBuilderX,
-    shard: Shard,
+    shards: Shard,
+    quant_cfg: &Option<QuantConfig>,
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
     match &vb.0 {
         Either::Left(vb) => {
-            let ln = linear(in_dim, out_dim, vb.clone(), shard, dtype)?;
-            if let Some(quantized_type) = quant {
-                Ok(LinearX(Either::Right(QLinear::from_linear_x(
-                    ln,
-                    quantized_type.clone(),
+            if quant_cfg.is_some() {
+                let wna16 = QLinear::new_w4a16(
+                    in_dim,
+                    out_dim,
+                    vb.clone(),
+                    shards,
+                    quant_cfg,
+                    true,
                     dtype,
-                )?)))
+                )?;
+                let ln = QLinear {
+                    inner: None,
+                    wna16: Some(wna16),
+                    bias: None,
+                    dtype,
+                };
+                Ok(LinearX(Either::Right(ln)))
             } else {
-                Ok(LinearX(Either::Left(ln)))
+                let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                if let Some(quantized_type) = quant {
+                    Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                        ln,
+                        quantized_type.clone(),
+                        dtype,
+                    )?)))
+                } else {
+                    Ok(LinearX(Either::Left(ln)))
+                }
             }
         }
         Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new(
             in_dim,
             out_dim,
             vb.clone(),
-            shard,
+            shards,
             dtype,
         )?))),
     }
@@ -498,20 +499,40 @@ pub fn linear_no_bias_x(
     out_dim: usize,
     vb: VarBuilderX,
     shards: Shard,
+    quant_cfg: &Option<QuantConfig>,
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
     match &vb.0 {
         Either::Left(vb) => {
-            let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
-            if let Some(quantized_type) = quant {
-                Ok(LinearX(Either::Right(QLinear::from_linear_x(
-                    ln,
-                    quantized_type.clone(),
+            if quant_cfg.is_some() {
+                let wna16 = QLinear::new_w4a16(
+                    in_dim,
+                    out_dim,
+                    vb.clone(),
+                    shards,
+                    quant_cfg,
+                    false,
                     dtype,
-                )?)))
+                )?;
+                let ln = QLinear {
+                    inner: None,
+                    wna16: Some(wna16),
+                    bias: None,
+                    dtype,
+                };
+                Ok(LinearX(Either::Right(ln)))
             } else {
-                Ok(LinearX(Either::Left(ln)))
+                let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                if let Some(quantized_type) = quant {
+                    Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                        ln,
+                        quantized_type.clone(),
+                        dtype,
+                    )?)))
+                } else {
+                    Ok(LinearX(Either::Left(ln)))
+                }
             }
         }
         Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new(
@@ -530,6 +551,7 @@ pub fn linear_no_bias_merged_x(
     out_dim: usize,
     vb: VarBuilderX,
     shards: Shard,
+    _: &Option<QuantConfig>,
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
@@ -564,12 +586,13 @@ pub fn linear_b_x(
     bias: bool,
     vb: VarBuilderX,
     shard: Shard,
+    quant_cfg: &Option<QuantConfig>,
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
     if bias {
-        linear_x(in_dim, out_dim, vb, shard, quant, dtype)
+        linear_x(in_dim, out_dim, vb, shard, quant_cfg, quant, dtype)
     } else {
-        linear_no_bias_x(in_dim, out_dim, vb, shard, quant, dtype)
+        linear_no_bias_x(in_dim, out_dim, vb, shard, quant_cfg, quant, dtype)
     }
 }

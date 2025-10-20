@@ -2,6 +2,7 @@ use crate::models::layers::linear::{
     linear_b_x as linear_b, linear_no_bias_x as linear, LinearX as Linear,
 };
 use crate::models::layers::VarBuilderX;
+use crate::utils::config::QuantConfig;
 #[cfg(feature = "nccl")]
 pub use candle_core::cuda_backend::cudarc::nccl::safe::{Comm, Id};
 use candle_core::CustomOp1;
@@ -240,6 +241,7 @@ impl TensorParallelColumnLinear {
         bias: bool,
         vb: VarBuilderX,
         comm: Rc<Comm>,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
@@ -249,6 +251,7 @@ impl TensorParallelColumnLinear {
             bias,
             vb,
             shard(0, comm.rank(), comm.world_size()),
+            quant_cfg,
             quant,
             dtype,
         )?;
@@ -261,10 +264,11 @@ impl TensorParallelColumnLinear {
         bias: bool,
         vb: VarBuilderX,
         shard: Shard,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
-        let linear = linear_b(in_dim, out_dim, bias, vb, shard, quant, dtype)?;
+        let linear = linear_b(in_dim, out_dim, bias, vb, shard, quant_cfg, quant, dtype)?;
         Ok(Self { linear })
     }
 }
@@ -277,6 +281,7 @@ impl MergedParallelColumnLinear {
         chunks: usize,
         vb: VarBuilderX,
         comm: Rc<Comm>,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
@@ -294,6 +299,7 @@ impl MergedParallelColumnLinear {
                     chunk_idx * comm.world_size() + comm.rank(),
                     comm.world_size() * chunks,
                 ),
+                quant_cfg,
                 quant,
                 dtype,
             )?;
@@ -314,6 +320,7 @@ impl TensorParallelRowLinear {
         out_dim: usize,
         vb: VarBuilderX,
         comm: Rc<Comm>,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
@@ -322,6 +329,7 @@ impl TensorParallelRowLinear {
             out_dim,
             vb,
             shard(1, comm.rank(), comm.world_size()),
+            quant_cfg,
             quant,
             dtype,
         )?;
@@ -362,10 +370,11 @@ impl ReplicatedLinear {
         in_dim: usize,
         out_dim: usize,
         vb: VarBuilderX,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
-        let linear = linear(in_dim, out_dim, vb, shard(0, 0, 1), quant, dtype)?;
+        let linear = linear(in_dim, out_dim, vb, shard(0, 0, 1), quant_cfg, quant, dtype)?;
         Ok(Self { linear })
     }
 
@@ -374,13 +383,23 @@ impl ReplicatedLinear {
         out_dim: usize,
         bias: bool,
         vb: VarBuilderX,
+        quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
         if !bias {
-            ReplicatedLinear::load_no_bias(in_dim, out_dim, vb, quant, dtype)
+            ReplicatedLinear::load_no_bias(in_dim, out_dim, vb, quant_cfg, quant, dtype)
         } else {
-            let linear = linear_b(in_dim, out_dim, bias, vb, shard(0, 0, 1), quant, dtype)?;
+            let linear = linear_b(
+                in_dim,
+                out_dim,
+                bias,
+                vb,
+                shard(0, 0, 1),
+                quant_cfg,
+                quant,
+                dtype,
+            )?;
             Ok(Self { linear })
         }
     }
