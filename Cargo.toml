@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.3.10"
+version = "0.3.11"
 edition = "2021"
 default-run = "vllm-rs"
 
@@ -55,11 +55,11 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda", "attention-rs/no-marlin"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda"]
 nccl = ["candle-core/nccl"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
-flash-attn = ["attention-rs/flash-attn", "attention-rs/no-marlin"]
-flash-context = ["attention-rs/flash-attn", "attention-rs/flash-decoding", "attention-rs/flash-context", "attention-rs/no-marlin", "attention-rs/no-fp8-kvcache"]
+flash-attn = ["attention-rs/flash-attn"]
+flash-context = ["attention-rs/flash-attn", "attention-rs/flash-decoding", "attention-rs/flash-context", "attention-rs/no-fp8-kvcache"]
 metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal"]
 python = ["pyo3"]
 

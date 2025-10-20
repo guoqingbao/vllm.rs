@@ -227,6 +227,7 @@ impl Qwen3ForCausalLM {
                 }
             },
             &None,
+            &None,
             dtype,
         )?;
 

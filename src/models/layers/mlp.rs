@@ -64,6 +64,7 @@ impl MLP {
             } else {
                 shard(0, comm.rank(), comm.world_size())
             },
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;
@@ -90,6 +91,7 @@ impl MLP {
             } else {
                 shard(0, comm.rank(), comm.world_size())
             },
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;
@@ -103,6 +105,7 @@ impl MLP {
                 vb.pp("down_proj")
             },
             comm.clone(),
+            &config.quantization_config,
             &config.quant,
             dtype,
         )?;

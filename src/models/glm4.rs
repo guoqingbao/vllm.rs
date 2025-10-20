@@ -257,6 +257,7 @@ impl GLM4ForCausalLM {
                 }
             },
             &None,
+            &None,
             dtype,
         )?;
 
