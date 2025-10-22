@@ -1,5 +1,4 @@
 //! Linear layer (WNA16: GPTQ, AWQ)
-use super::linear::QLinear;
 use crate::models::layers::linear::shard;
 use crate::utils::config::QuantConfig;
 use crate::utils::gptq::{gptq_matmul, marlin_weight_repack};
@@ -10,20 +9,20 @@ use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WNA16 {
-    weight: Tensor,
-    bias: Option<Tensor>,
-    scales: Option<Tensor>,
-    qzeros: Option<Tensor>,
-    g_idx: Option<Tensor>,
-    workspace: Option<Tensor>,
+    pub weight: Tensor,
+    pub bias: Option<Tensor>,
+    pub scales: Option<Tensor>,
+    pub qzeros: Option<Tensor>,
+    pub g_idx: Option<Tensor>,
+    pub workspace: Option<Tensor>,
     group_size: i32,
     bits: i32,
     dtype: DType,
     is_awq: bool,
 }
 
-impl QLinear {
-    pub fn new_w4a16(
+impl WNA16 {
+    pub fn new(
         in_dim: usize,
         out_dim: usize,
         vb: VarBuilder,
@@ -31,9 +30,17 @@ impl QLinear {
         quant_config: &Option<QuantConfig>,
         bias: bool,
         dtype: DType,
+        may_use_marlin: bool,
     ) -> Result<WNA16> {
+        let mut shards = shards.clone();
+        shards.dim = if shards.world_size < 2 || shards.dim == 1 {
+            0
+        } else {
+            1
+        };
+
         let ln = if let Some(cfg) = quant_config {
-            let marlin_compatible = if (cfg.quant_method != "gptq" && cfg.quant_method != "awq")
+            let mut marlin_compatible = if (cfg.quant_method != "gptq" && cfg.quant_method != "awq")
                 || (cfg.bits != 4 && cfg.bits != 8)
             {
                 false
@@ -43,6 +50,9 @@ impl QLinear {
             let marlin_format = cfg.checkpoint_format.is_some()
                 && cfg.checkpoint_format.as_ref().unwrap() == "marlin";
 
+            if !may_use_marlin {
+                marlin_compatible = false;
+            }
             let ws = vb.get_with_hints_dtype(
                 if cfg.quant_method == "gptq" {
                     //quantized gptq (k/pack_factor, n) format
@@ -225,14 +235,18 @@ impl QLinear {
                         scales
                     };
 
-                    let workspace = Tensor::zeros(out_dim_partition, DType::U32, vb.device())?;
+                    let workspace = if marlin_compatible {
+                        Some(Tensor::zeros(out_dim_partition, DType::U32, vb.device())?)
+                    } else {
+                        None
+                    };
                     Ok(WNA16 {
                         weight: ws,
                         bias: bs,
                         scales: Some(scales),
                         qzeros: Some(qzeros),
                         g_idx,
-                        workspace: Some(workspace),
+                        workspace,
                         group_size: cfg.group_size,
                         bits: cfg.bits as i32,
                         dtype,
@@ -246,52 +260,48 @@ impl QLinear {
         ln
     }
 
-    pub fn wna16_forward(&self, x: &Tensor) -> Result<Tensor> {
-        if let Some(wna16) = &self.wna16 {
-            match (&wna16.scales, &wna16.qzeros, &wna16.g_idx, &wna16.workspace) {
-                (Some(scale), qzeros, g_idx, workspace) => {
-                    let x = match *x.dims() {
-                        [_, _, _] => gptq_matmul(
-                            x,
-                            &wna16.weight,
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match (&self.scales, &self.qzeros, &self.g_idx, &self.workspace) {
+            (Some(scale), qzeros, g_idx, workspace) => {
+                let x = match *x.dims() {
+                    [_, _, _] => gptq_matmul(
+                        x,
+                        &self.weight,
+                        scale,
+                        qzeros,
+                        g_idx,
+                        workspace,
+                        self.bits,
+                        self.group_size,
+                        self.is_awq,
+                    )?,
+                    [seq_len, dim] => {
+                        let x = x.reshape((1, seq_len, dim))?;
+                        let o = gptq_matmul(
+                            &x,
+                            &self.weight,
                             scale,
                             qzeros,
                             g_idx,
                             workspace,
-                            wna16.bits,
-                            wna16.group_size,
-                            wna16.is_awq,
-                        )?,
-                        [seq_len, dim] => {
-                            let x = x.reshape((1, seq_len, dim))?;
-                            let o = gptq_matmul(
-                                &x,
-                                &wna16.weight,
-                                scale,
-                                qzeros,
-                                g_idx,
-                                workspace,
-                                wna16.bits,
-                                wna16.group_size,
-                                wna16.is_awq,
-                            )?;
-                            o.reshape((seq_len, ()))?
-                        }
-                        _ => panic!("Invalid input format!"),
-                    };
-
-                    if let Some(bias) = &wna16.bias {
-                        x.broadcast_add(bias)
-                    } else {
-                        Ok(x)
+                            self.bits,
+                            self.group_size,
+                            self.is_awq,
+                        )?;
+                        o.reshape((seq_len, ()))?
                     }
-                }
-                _ => {
-                    candle_core::bail!("Invalid arguments for gptq/awq matmul")
+                    _ => panic!("Invalid input format!"),
+                };
+
+                if let Some(bias) = &self.bias {
+                    x.broadcast_add(bias)
+                } else {
+                    Ok(x)
                 }
             }
-        } else {
-            candle_core::bail!("Invalid arguments for gptq/awq matmul")
+            _ => {
+                candle_core::bail!("Invalid arguments for gptq/awq matmul")
+            }
         }
     }
 }

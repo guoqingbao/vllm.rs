@@ -361,8 +361,8 @@ impl QLinear {
 
 impl Module for QLinear {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        if self.wna16.is_some() {
-            self.wna16_forward(x)
+        if let Some(wna16) = &self.wna16 {
+            wna16.forward(x)
         } else if let Some(inner) = &self.inner {
             let xs = if x.dtype() != DType::F32 {
                 x.to_dtype(DType::F32)?
@@ -455,7 +455,7 @@ pub fn linear_x(
     match &vb.0 {
         Either::Left(vb) => {
             if quant_cfg.is_some() {
-                let wna16 = QLinear::new_w4a16(
+                let wna16 = WNA16::new(
                     in_dim,
                     out_dim,
                     vb.clone(),
@@ -463,6 +463,7 @@ pub fn linear_x(
                     quant_cfg,
                     true,
                     dtype,
+                    true,
                 )?;
                 let ln = QLinear {
                     inner: None,
@@ -506,7 +507,7 @@ pub fn linear_no_bias_x(
     match &vb.0 {
         Either::Left(vb) => {
             if quant_cfg.is_some() {
-                let wna16 = QLinear::new_w4a16(
+                let wna16 = WNA16::new(
                     in_dim,
                     out_dim,
                     vb.clone(),
@@ -514,6 +515,7 @@ pub fn linear_no_bias_x(
                     quant_cfg,
                     false,
                     dtype,
+                    true,
                 )?;
                 let ln = QLinear {
                     inner: None,

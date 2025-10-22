@@ -123,7 +123,7 @@ impl Attention {
             } else {
                 vb.pp("q_norm")
             },
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.quant.is_some() || config.quantization_config.is_some() {
                 DType::F32
             } else {
                 dtype
@@ -143,7 +143,7 @@ impl Attention {
             } else {
                 vb.pp("k_norm")
             },
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.quant.is_some() || config.quantization_config.is_some() {
                 DType::F32
             } else {
                 dtype
