@@ -2,7 +2,7 @@ use super::config::SamplingParams;
 #[cfg(feature = "cuda")]
 use attention_rs::sort::ArgSortOp; //Use our custom sort kernel, fix kernel crash on A100
 use candle_core::D;
-use candle_core::{DType, Error, Result, Tensor};
+use candle_core::{DType, Device, Error, Result, Tensor};
 use rand::{distr::Distribution, SeedableRng};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
@@ -79,7 +79,7 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let asort = logits.arg_sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let asort = logits.arg_sort_last_dim(false)?;
+        let asort = logits.to_device(&Device::Cpu)?.arg_sort_last_dim(false)?;
         let asort: Vec<Vec<u32>> = asort.to_vec2()?;
         let sorted: Vec<Vec<f32>> = logits.to_vec2()?;
         let batch = logits.layout().dims()[0];
@@ -109,7 +109,7 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let (sorted, asort) = logits.sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let (sorted, asort) = logits.sort_last_dim(false)?;
+        let (sorted, asort) = logits.to_device(&Device::Cpu)?.sort_last_dim(false)?;
         let sorted = sorted
             .narrow(candle_core::D::Minus1, 0, top_k)?
             .contiguous()?;
@@ -138,7 +138,7 @@ impl LogitsProcessor {
         #[cfg(feature = "cuda")]
         let (sorted, asort) = logits.sort(false)?;
         #[cfg(not(feature = "cuda"))]
-        let (sorted, asort) = logits.sort_last_dim(false)?;
+        let (sorted, asort) = logits.to_device(&Device::Cpu)?.sort_last_dim(false)?;
 
         let sorted = sorted
             .narrow(candle_core::D::Minus1, 0, top_k)?
