@@ -75,6 +75,11 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
+## 📽️ 演示视频
+
+🎉 观看项目运行演示：
+<video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
+
 ## 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
    
@@ -280,12 +285,6 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |    |
-
-## 📽️ 演示视频
-
-🎉 观看项目运行演示：
-
-<video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
 
 ## 🗜️ 实时量化（GGUF 格式转换）
