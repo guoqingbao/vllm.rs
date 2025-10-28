@@ -76,6 +76,12 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
+
+## 📽️ Demo Video
+
+Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
+
+
 ## 📦 Install with pip
    💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100)
 
@@ -284,10 +290,6 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
-
-## 📽️ Demo Video
-
-Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/0751471b-a0c4-45d7-acc6-99a3e91e4c91" width="70%"></video>
 
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
