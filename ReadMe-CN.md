@@ -224,6 +224,9 @@ cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-
 # 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
 ./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
 
+# 多卡推理 server 服务 (未量化模型)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+
 # 多卡推理 server 服务 (可选`--fp8-kvcache` 或 `--context-cache`)
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
 

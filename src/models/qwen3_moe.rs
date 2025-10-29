@@ -4,7 +4,7 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX as Linear;
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::{FusedMoeGGUF, FusedMoeISQ, MoeNaive};
+use crate::models::layers::moe::{FusedMoe, FusedMoeGGUF, FusedMoeISQ};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
@@ -21,17 +21,17 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 enum MoeOrMlp {
-    MoeNaive(MoeNaive),
+    FusedMoe(FusedMoe),
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
     Mlp(MLP),
 }
 
 impl MoeOrMlp {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         match self {
             Self::Mlp(m) => m.forward(xs),
-            Self::MoeNaive(m) => m.forward(xs),
+            Self::FusedMoe(m) => m.forward(xs, is_prefill),
             Self::FusedMoeGGUF(m) => m.forward(xs),
             Self::FusedMoeISQ(m) => m.forward(xs),
         }
@@ -85,6 +85,8 @@ impl Qwen3DecoderLayer {
             if is_qvar_builder {
                 //experts weights packed
                 MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
+            } else if config.quantization_config.is_some() {
+                panic!("This feature is under developement (use unquantized, gguf or isq to gguf instead)!");
             } else if config.quant.is_some() {
                 MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
                     config,
@@ -93,7 +95,7 @@ impl Qwen3DecoderLayer {
                     dtype,
                 )?)
             } else {
-                MoeOrMlp::MoeNaive(MoeNaive::new(
+                MoeOrMlp::FusedMoe(FusedMoe::new(
                     config,
                     vb.pp("mlp").clone(),
                     comm.clone(),
@@ -226,7 +228,7 @@ impl Qwen3DecoderLayer {
             }
             _ => None,
         };
-        let mlp_output = self.mlp.forward(&xs)?;
+        let mlp_output = self.mlp.forward(&xs, input_metadata.is_prefill)?;
         if let Some(shared_output) = shared_output {
             residual + (mlp_output + shared_output)?
         } else {

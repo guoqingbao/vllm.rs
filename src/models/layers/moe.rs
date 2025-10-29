@@ -1,7 +1,6 @@
 // src/models/layers/moe.rs
 use crate::models::layers::distributed::{shard, AllReduce, Comm};
 use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
-use crate::models::layers::mlp::MLP;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use candle_core::Module;
@@ -14,19 +13,29 @@ use either::Either;
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub struct MoeNaive {
+#[allow(dead_code)]
+pub struct FusedMoe {
     gate: Linear,
-    experts: Vec<MLP>,
+    gate_up_w: Tensor,
+    down_w: Tensor,
+    w_size_n: usize,
+    act: candle_nn::Activation,
     norm_topk_prob: bool,
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
+    dtype: DType,
 }
 
-impl MoeNaive {
+impl FusedMoe {
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
+
+        assert!(
+            cfg.quantization_config.is_none(),
+            "Invalid quantization format!"
+        );
         let gate = linear_no_bias(
             cfg.hidden_size,
             num_experts,
@@ -34,80 +43,134 @@ impl MoeNaive {
             Shard::default(),
             &None,
             &None,
-            DType::F32,
+            dtype,
         )?;
 
         let experts_vb = vb.pp("experts");
-        let mut experts = Vec::with_capacity(num_experts);
+        let mut gate_up_experts = Vec::with_capacity(num_experts);
+        let mut down_experts = Vec::with_capacity(num_experts);
+
+        //pack experts
         for i in 0..num_experts {
-            experts.push(MLP::new(
-                experts_vb.pp(format!("{}", i).as_str()).clone(),
-                comm.clone(),
-                cfg,
-                moe_cfg.moe_intermediate_size,
-                false,
-                dtype,
-                "",
-            )?);
+            let experts_vb = experts_vb.pp(format!("{}", i).as_str());
+
+            let (gate_up_expert, down_expert) = match &experts_vb.0 {
+                Either::Left(vb) => {
+                    // n x k format
+                    let gate_expert = vb.pp("gate_proj").get_with_hints(
+                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                        "weight",
+                        shard(0, comm.rank(), comm.world_size()),
+                    )?;
+                    let up_expert = vb.pp("up_proj").get_with_hints(
+                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                        "weight",
+                        shard(0, comm.rank(), comm.world_size()),
+                    )?;
+                    let down_expert = vb.pp("down_proj").get_with_hints(
+                        (cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                        "weight",
+                        shard(1, comm.rank(), comm.world_size()),
+                    )?;
+                    //pack gate_proj and up_proj
+                    let gate_up_expert = Tensor::cat(&[&gate_expert, &up_expert], 0)?;
+
+                    (gate_up_expert, down_expert)
+                }
+                _ => candle_core::bail!("invalid varbuild or quant config!"),
+            };
+
+            gate_up_experts.push(gate_up_expert);
+            down_experts.push(down_expert);
         }
+
+        let gate_up_w = Tensor::stack(&gate_up_experts, 0)?;
+        let down_w = Tensor::stack(&down_experts, 0)?;
         let world_size = comm.world_size();
+        let w_size_n = gate_up_w.dim(1)? / 2;
+
         Ok(Self {
             gate,
-            experts,
+            gate_up_w,
+            down_w,
+            w_size_n,
+            act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
+            dtype,
         })
     }
 
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (_, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
-        let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
+    pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
+        use attention_rs::moe;
+        let (num_tokens, hidden_dim) = xs.dims2()?;
+        let router_logits = self.gate.forward(&xs)?;
 
-        let experts_per_tok = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
+            &router_logits.to_dtype(DType::F32)?,
+            self.num_experts_per_tok,
+        )?;
+
+        if self.norm_topk_prob {
+            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
+        }
+
+        let gemm_func = if is_prefill {
+            moe::moe_gemm_wmma
+        } else {
+            moe::moe_gemm
+        };
+
+        let (expert_ids, sorted_token_ids) = if is_prefill {
+            #[cfg(feature = "cuda")]
+            use attention_rs::sort::ArgSortOp;
+            #[cfg(feature = "cuda")]
+            let (expert_ids, sorted_token_ids) = topk_ids.flatten_all()?.sort(true)?;
+
+            #[cfg(not(feature = "cuda"))]
+            let (expert_ids, sorted_token_ids) = topk_ids
+                .flatten_all()?
+                .to_device(&candle_core::Device::Cpu)?
+                .sort_last_dim(true)?;
+            (expert_ids, sorted_token_ids)
+        } else {
+            topk_ids.flatten_all()?.sort_last_dim(true)?
+        };
+
+        //out (M, top_k, N)
+        let gate_up = gemm_func(
+            &xs,
+            &self.gate_up_w,
+            &None,
+            &sorted_token_ids,
+            &expert_ids,
+            self.num_experts_per_tok,
+        )?;
+
+        let gate = gate_up
+            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
+            .contiguous()?;
+        let up = gate_up
+            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
             .contiguous()?;
 
-        let routing_weights = routing_weights.gather(&experts_per_tok, D::Minus1)?;
+        //(M * top_k, N // 2)
+        let down_inputs = (up * gate.apply(&self.act)?)?.reshape(((), self.w_size_n))?;
 
-        let routing_weights = routing_weights.to_vec2::<f32>()?;
-        let experts_per_tok = experts_per_tok.to_vec2::<u32>()?;
-        let mut top_x = vec![vec![]; self.experts.len()];
-        let mut selected_experts = vec![vec![]; self.experts.len()];
-        for (row_idx, (rw, expert_idxs)) in routing_weights
-            .iter()
-            .zip(experts_per_tok.iter())
-            .enumerate()
-        {
-            let sum_rw = rw.iter().sum::<f32>();
-            for (&rw, &expert_idx) in rw.iter().zip(expert_idxs.iter()) {
-                top_x[expert_idx as usize].push(row_idx as u32);
-                let rw = if self.norm_topk_prob { rw / sum_rw } else { rw };
-                selected_experts[expert_idx as usize].push(rw)
-            }
-        }
+        //view(M, top_k, K) -> sum -> (M, K)
+        let mut ys = gemm_func(
+            &down_inputs,
+            &self.down_w,
+            &Some(topk_weights),
+            &sorted_token_ids,
+            &expert_ids,
+            self.num_experts_per_tok,
+        )?
+        .reshape((num_tokens, (), hidden_dim))?
+        .sum(D::Minus2)?;
 
-        let mut ys = xs.zeros_like()?;
-        for (expert_idx, expert_layer) in self.experts.iter().enumerate() {
-            let top_x = &top_x[expert_idx];
-            if top_x.is_empty() {
-                continue;
-            }
-            let top_x = Tensor::new(top_x.as_slice(), xs.device())?;
-            let selected_experts =
-                Tensor::new(selected_experts[expert_idx].as_slice(), xs.device())?
-                    .reshape(((), 1))?
-                    .to_dtype(xs.dtype())?;
-            let current_state = xs.index_select(&top_x, 0)?.reshape(((), hidden_dim))?;
-            let current_hidden_states = expert_layer
-                .forward(&current_state.unsqueeze(0)?)?
-                .squeeze(0)?;
-            let current_hidden_states = current_hidden_states.broadcast_mul(&selected_experts)?;
-            ys = ys.index_add(&top_x, &current_hidden_states, 0)?;
-        }
         if self.world_size > 1 {
             ys = self.all_reduce.apply(&ys)?;
         }
