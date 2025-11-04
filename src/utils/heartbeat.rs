@@ -46,7 +46,7 @@ pub fn heartbeat_worker(
                 if !flag_clone.load(Ordering::Relaxed) {
                     crate::log_warn!("{:?}", alive_result);
                 }
-                if heartbeat_error_count > 10 {
+                if heartbeat_error_count > 5 {
                     crate::log_error!(
                         "heartbeat detection failed, exit the current process because of {:?}",
                         alive_result

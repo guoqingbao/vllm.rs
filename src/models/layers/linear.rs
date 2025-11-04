@@ -322,16 +322,16 @@ impl QLinear {
     pub fn from_linear_x(linear: Linear, quant: String, dtype: DType) -> Result<Self> {
         use quantized::GgmlDType;
         let ggml_dtype = match quant.as_str() {
-            "q4_0" => GgmlDType::Q4_0,
-            "q4_1" => GgmlDType::Q4_1,
-            "q5_0" => GgmlDType::Q5_0,
-            "q5_1" => GgmlDType::Q5_1,
-            "q8_0" => GgmlDType::Q8_0,
-            "q2k" => GgmlDType::Q2K,
-            "q3k" => GgmlDType::Q3K,
-            "q4k" => GgmlDType::Q4K,
-            "q5k" => GgmlDType::Q5K,
-            "q6k" => GgmlDType::Q6K,
+            "q40" | "q4_0" => GgmlDType::Q4_0,
+            "q4" | "q41" | "q4_1" => GgmlDType::Q4_1,
+            "q50" | "q5_0" => GgmlDType::Q5_0,
+            "q5" | "q51" | "q5_1" => GgmlDType::Q5_1,
+            "q8" | "q80" | "q8_0" => GgmlDType::Q8_0,
+            "q2k" | "q2_k" => GgmlDType::Q2K,
+            "q3k" | "q3_k" => GgmlDType::Q3K,
+            "q4k" | "q4_k" => GgmlDType::Q4K,
+            "q5k" | "q5_k" => GgmlDType::Q5K,
+            "q6k" | "q6_k" => GgmlDType::Q6K,
             _ => panic!("Unsupported GGML data type!"),
         };
         let weight = linear.weight();
