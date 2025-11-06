@@ -90,6 +90,7 @@ impl Scheduler {
 
         for idx in preempt_ids.into_iter().rev() {
             let seq = self.running.remove(idx);
+            crate::log_warn!("Sequence {} unable to schedule!", seq.id);
             self.waiting.push_back(seq);
         }
 

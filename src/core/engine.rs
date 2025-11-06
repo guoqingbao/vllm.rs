@@ -435,7 +435,10 @@ impl LLMEngine {
         let remain_tokens = (self.econfig.max_num_seqs * max_model_len) as isize
             - self.get_num_cached_tokens() as isize;
 
-        if remain_tokens < 1 || length as isize > remain_tokens {
+        if remain_tokens < 1
+            || (length.div_ceil(self.econfig.block_size) * self.econfig.block_size) as isize
+                >= remain_tokens
+        {
             candle_core::bail!(
                 "Remaining {} kvcache tokens, but your prompt length is {}, please request later!",
                 remain_tokens,
@@ -753,7 +756,16 @@ impl LLMEngine {
         self.scheduler.clear_finished();
 
         if indices.is_empty() {
-            self.active_requests.clear();
+            if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
+                crate::log_error!(
+                    "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
+                    oldest_seq_id
+                );
+                self.cancelled_sequences.push(*oldest_seq_id);
+                self.check_canceled(Some(
+                    "Unable to schedule task(s), this request has been dropped!".to_string(),
+                ));
+            }
         }
         self.check_cache();
         self.check_canceled(None);
@@ -1078,7 +1090,9 @@ impl LLMEngine {
         match self.add_request(params, &prompt, RequestType::Stream) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
-                self.free_resources();
+                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                    self.free_resources();
+                }
                 candle_core::bail!("{:?}", e)
             }
         }
