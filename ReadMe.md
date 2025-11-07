@@ -293,7 +293,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
-
+| `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 1.0, range from 0.1 to 10.0)              |    |
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
 
@@ -334,6 +334,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
 * [ ] Additional model support
+* [x] CPU KV Cache Offloading
 ---
 
 ## 📚 References

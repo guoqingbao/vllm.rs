@@ -288,6 +288,7 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |    |
+| `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 1.0，取值0.1 - 10.0)              |    |
 
 
 ## 🗜️ 实时量化（GGUF 格式转换）
@@ -326,7 +327,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
 * [ ] 支持更多模型类型
-
+* [x] CPU KV Cache 卸载
 
 ## 📚 参考项目
 

@@ -56,6 +56,7 @@ def run(args):
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=False,
+        cpu_mem_fold=args.cpu_mem_fold,
     )
 
 
@@ -122,6 +123,7 @@ if __name__ == "__main__":
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
+    parser.add_argument("--cpu-mem-fold", type=float, default=None)
 
     args = parser.parse_args()
     if not os.path.exists(args.w):

@@ -181,6 +181,22 @@ fn main() -> anyhow::Result<()> {
             Ok(MessageType::LoadingProgress(_)) => {
                 vllm_rs::log_info!("Received loading progress message");
             }
+            Ok(MessageType::KVCacheSwap((mappings, swap_in))) => {
+                vllm_rs::log_info!(
+                    "Received KVCacheSwap message: {} kv cache blocks need to {}!",
+                    mappings.len(),
+                    if swap_in { "swap in" } else { "swap out" },
+                );
+                let ret = runner.kvcache_swap(mappings, swap_in);
+                if ret.is_err() {
+                    vllm_rs::log_error!("KvCache Swap failed: {:?}", ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KVCacheSwapResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
             Ok(MessageType::FinishDecode(id)) => {
                 runner.finished(id);
             }

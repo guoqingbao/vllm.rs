@@ -7,13 +7,15 @@ pub enum SequenceStatus {
     Waiting,
     Running,
     Finished,
-    Cached, //Finished but resources not freed
+    Cached,  //Finished but resources not freed
+    Swapped, //Finished and kv cache swapped to CPU memory
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub id: usize,
     pub created_time: usize,
+    pub swapped_time: Option<usize>,
     pub status: SequenceStatus,
     pub token_ids: Vec<u32>,
     pub output_ids: Vec<u32>,
@@ -124,6 +126,7 @@ impl Sequence {
                 .duration_since(UNIX_EPOCH)
                 .expect("Time went backwards")
                 .as_millis() as usize,
+            swapped_time: None,
             status: SequenceStatus::Waiting,
             token_ids: token_ids.clone(),
             output_ids: Vec::new(),
@@ -177,5 +180,9 @@ impl Sequence {
 
     pub fn created_time(&self) -> usize {
         self.created_time
+    }
+
+    pub fn swapped_time(&self) -> Option<usize> {
+        self.swapped_time
     }
 }

@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
         Some(args.context_cache),
         Some(args.fp8_kvcache),
         Some(args.server || !interactive),
+        args.cpu_mem_fold,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

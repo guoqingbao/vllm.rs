@@ -217,6 +217,7 @@ def parse_args():
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
+    parser.add_argument("--cpu-mem-fold", type=float, default=None)
 
     return parser.parse_args()
 
@@ -253,6 +254,7 @@ def main():
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=True,
+        cpu_mem_fold=args.cpu_mem_fold,
     )
 
     app = create_app(cfg, args.dtype)
