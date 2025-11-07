@@ -477,6 +477,13 @@ impl LLMEngine {
             } else {
                 let seq = Sequence::new(token_ids, self.econfig.block_size, params);
                 let seq_id = self.scheduler.add(seq);
+                if let Some(pos) = self
+                    .active_sessions
+                    .iter()
+                    .position(|(_, s)| s == &session_id)
+                {
+                    self.active_sessions.remove(pos);
+                }
                 self.active_sessions.push_back((seq_id, session_id.clone()));
                 seq_id
             }
@@ -765,6 +772,9 @@ impl LLMEngine {
                 self.check_canceled(Some(
                     "Unable to schedule task(s), this request has been dropped!".to_string(),
                 ));
+                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                    self.free_resources();
+                }
             }
         }
         self.check_cache();
