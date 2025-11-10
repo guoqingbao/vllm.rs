@@ -179,6 +179,8 @@ pub struct EngineConfig {
     pub hf_token_path: Option<String>,
     #[pyo3(get, set)]
     pub num_blocks: usize,
+    #[pyo3(get, set)]
+    pub cpu_mem_fold: Option<f32>,
     pub block_size: usize,
     pub kvcache_memory_bytes: usize,
     #[pyo3(get, set)]

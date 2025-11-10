@@ -742,7 +742,7 @@ impl ModelRunner {
 
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub fn warmup_capture(&mut self) -> Result<()> {
-        let kv_cache_lock = self.kv_cache.lock().unwrap(); // no custom method call on `self`
+        let kv_cache_lock = self.gpu_kv_cache.lock().unwrap(); // no custom method call on `self`
         self.capturer.capture(&self.device, Some(&kv_cache_lock))
     }
 }
