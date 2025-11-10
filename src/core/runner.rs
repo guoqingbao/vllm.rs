@@ -257,6 +257,9 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<(Vec<(Tensor, Tensor)>, Vec<(Tensor, Tensor)>)> {
         let num_gpu_blocks = econfig.num_blocks;
+        let num_cpu_blocks =
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize;
+
         if cfg!(feature = "flash-context") {
             assert!(
                 !econfig.fp8_kvcache.unwrap_or(false),
@@ -285,12 +288,12 @@ impl ModelRunner {
             }
             for _ in 0..config.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
+                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     &Device::Cpu,
                 )?;
                 let value_blocks = Tensor::zeros(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
+                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     &Device::Cpu,
                 )?;
@@ -333,12 +336,12 @@ impl ModelRunner {
             }
             for _ in 0..config.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
-                    (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
+                    (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
                     &Device::Cpu,
                 )?;
                 let value_blocks = Tensor::zeros(
-                    (num_gpu_blocks, vshape.0, vshape.1, vshape.2),
+                    (num_cpu_blocks, vshape.0, vshape.1, vshape.2),
                     cache_dtype,
                     &Device::Cpu,
                 )?;
@@ -371,6 +374,10 @@ impl ModelRunner {
             mappings: &HashMap<usize, usize>,
             swap_in: bool,
         ) -> Result<()> {
+            assert!(
+                gpu_cache.len() > 0 && cpu_cache.len() > 0,
+                "Invalid kvcache tensors!"
+            );
             let block_size_bytes = cpu_cache[0].0.elem_count() / cpu_cache[0].0.dim(0)?
                 * cpu_cache[0].0.dtype().size_in_bytes();
             for i in 0..gpu_cache.len() {

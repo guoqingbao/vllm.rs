@@ -22,8 +22,9 @@ pub struct Scheduler {
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
-const KVCACHE_SWAP_THRESHOLD: f32 = 90.0f32; // over 90%
+const KVCACHE_SWAP_THRESHOLD: f32 = 95.0f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
+const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
 
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
@@ -99,6 +100,7 @@ impl Scheduler {
         }
 
         // Swap back seq from cpu memory if possible
+        let available_kvcache_tokens = self.get_available_kv_tokens();
         if preempt_ids.is_empty() && self.kv_cache_usage_percent() < KVCACHE_SWAP_THRESHOLD * 0.9 {
             let cur_time = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -108,6 +110,9 @@ impl Scheduler {
             for i in 0..self.cached.len() {
                 let mut seq = &mut self.cached[i];
                 if seq.status == SequenceStatus::Swapped
+                    && available_kvcache_tokens as isize
+                        - std::cmp::max(seq.num_cached_tokens, seq.len()) as isize
+                        > MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP as isize
                     && self.block_manager.can_append(seq)
                     && cur_time - seq.swapped_time().unwrap_or(cur_time) > SWAP_COOLING_PERIOD
                 {
@@ -444,14 +449,17 @@ impl Scheduler {
         let used_percent =
             100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32;
         let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
+        let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
         crate::log_info!(
-            "Kvcache: {} blocks ({} tokens) free, used {:.1}% ({:.2}GB/{:.2}GB), CPU swap used {:.1}%",
+            "GPU Kvcache: {} blocks ({} tokens) free, used {:.1}% ({:.2}GB/{:.2}GB); CPU swap used {:.1}% ({:.2}GB/{:.2}GB)",
             free_blocks,
             free_blocks * self.block_manager.get_block_size(),
             used_percent,
             used_percent / 100.0f32 * kvcache_memory_gb,
             kvcache_memory_gb,
             self.block_manager.get_cpu_swap_usage() * 100.0f32,
+            self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
+            cpu_kvcache_memory_gb,
         );
     }
 
