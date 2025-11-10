@@ -1,6 +1,6 @@
 //src/core/engine.rs
 use super::runner::{ModelRunner, RunnerType, Seqs};
-use super::scheduler::Scheduler;
+use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
@@ -557,7 +557,7 @@ impl LLMEngine {
         }
     }
 
-    pub fn step(&mut self) -> Result<()> {
+    pub fn step(&mut self) -> Result<usize> {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
         // Get scheduled sequence indexes and prefill flag
@@ -623,7 +623,7 @@ impl LLMEngine {
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
                 if indices.is_empty() {
                     //chunked prefill, no finished
-                    return Ok(());
+                    return Ok(0);
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
                     self.scheduler.postprocess(
@@ -759,7 +759,9 @@ impl LLMEngine {
         }
         self.scheduler.clear_finished();
 
-        if indices.is_empty() && self.scheduler.kv_cache_usage_percent() > 0.95f32 {
+        if indices.is_empty()
+            && self.scheduler.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD + 0.01f32
+        {
             if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
                 crate::log_error!(
                     "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
@@ -779,7 +781,7 @@ impl LLMEngine {
         if self.econfig.server_mode.unwrap_or(true) {
             self.may_print_decoding_throughput();
         }
-        Ok(())
+        Ok(indices.len())
     }
 
     pub fn check_cache(&mut self) {
@@ -1121,10 +1123,17 @@ impl LLMEngine {
 
                 {
                     let mut guard = engine.write();
-                    if let Err(e) = guard.step() {
-                        crate::log_error!("[Engine Loop] Step error: {:?}", e);
-                        if !guard.cancel_all_with_reason(Some(e.to_string())) {
-                            std::process::exit(1);
+                    match guard.step() {
+                        Ok(n_tasks) => {
+                            if n_tasks == 0 {
+                                let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1));
+                            }
+                        }
+                        Err(e) => {
+                            crate::log_error!("[Engine Loop] Step error: {:?}", e);
+                            if !guard.cancel_all_with_reason(Some(e.to_string())) {
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }

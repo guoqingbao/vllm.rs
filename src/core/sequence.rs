@@ -185,4 +185,8 @@ impl Sequence {
     pub fn swapped_time(&self) -> Option<usize> {
         self.swapped_time
     }
+
+    pub fn clear_block_table(&mut self) {
+        self.block_table.clear();
+    }
 }

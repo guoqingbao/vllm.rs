@@ -257,8 +257,11 @@ impl ModelRunner {
         device: &Device,
     ) -> Result<(Vec<(Tensor, Tensor)>, Vec<(Tensor, Tensor)>)> {
         let num_gpu_blocks = econfig.num_blocks;
+        #[cfg(feature = "cuda")]
         let num_cpu_blocks =
             (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize;
+        #[cfg(not(feature = "cuda"))]
+        let num_cpu_blocks = 1; // dummy cpu kvcache on Metal
 
         if cfg!(feature = "flash-context") {
             assert!(
@@ -393,12 +396,12 @@ impl ModelRunner {
                 (block_size_bytes * mappings.len() * gpu_cache.len() * 2) as f32 / 1024.0 / 1024.0;
             if swap_in {
                 crate::log_info!(
-                    "{:.2} MB CPU KV cached swapped in GPU!",
+                    "{:.2} MB CPU KV cached blocks swapped in GPU!",
                     total_mb_bytes_swapped
                 );
             } else {
                 crate::log_info!(
-                    "{:.2} MB GPU KV cached swapped out to CPU!",
+                    "{:.2} MB GPU KV cached blocks swapped out to CPU!",
                     total_mb_bytes_swapped
                 );
             }

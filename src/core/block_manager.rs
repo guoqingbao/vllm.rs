@@ -120,8 +120,11 @@ impl BlockManager {
     }
 
     pub fn can_append(&self, seq: &Sequence) -> bool {
-        let need_block = seq.len() % self.block_size == 1;
-        self.free_block_ids.len() >= (need_block as usize)
+        let mut need_block: usize = 1;
+        if seq.len() % self.block_size != 0 {
+            need_block += 1;
+        }
+        self.free_block_ids.len() >= need_block
     }
 
     pub fn may_append(&mut self, seq: &mut Sequence) -> Result<()> {
@@ -208,8 +211,8 @@ impl BlockManager {
         // Need at least as many free CPU blocks as the sequence currently owns.
         #[cfg(feature = "cuda")]
         {
-            let needed = seq.block_table.len();
-            self.free_cpu_block_ids.len() >= needed
+            let needed = seq.num_blocks();
+            self.free_cpu_block_ids.len() > needed
         }
         #[cfg(not(feature = "cuda"))]
         false
@@ -221,7 +224,7 @@ impl BlockManager {
         // Need at least as many free GPU blocks as seq.num_blocks()
         #[cfg(feature = "cuda")]
         {
-            self.free_block_ids.len() >= seq.num_blocks()
+            self.free_block_ids.len() > seq.num_blocks()
         }
         #[cfg(not(feature = "cuda"))]
         false
@@ -237,8 +240,8 @@ impl BlockManager {
 
         crate::log_warn!(
             "Swap out sequence {} ({} blocks) to CPU memory",
+            seq.id,
             num_blocks,
-            seq.id
         );
 
         // mapping GPU → CPU
