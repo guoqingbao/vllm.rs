@@ -7,6 +7,7 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use candle_core::DType;
 use interprocess::local_socket::Stream as LocalStream;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RunnerInitRequest {
@@ -177,6 +178,10 @@ pub enum MessageType {
     Error(String),
 
     Heartbeat,
+
+    KVCacheSwap((HashMap<usize, usize>, bool)),
+
+    KVCacheSwapResponse(bool),
 
     /// shutdown subprocesses
     Shutdown,

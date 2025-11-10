@@ -1,6 +1,6 @@
 //src/core/engine.rs
-use super::runner::{ModelRunner, Seqs};
-use super::scheduler::Scheduler;
+use super::runner::{ModelRunner, RunnerType, Seqs};
+use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
@@ -27,6 +27,8 @@ use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
 use interprocess::TryClone;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use rayon::iter::IntoParallelIterator;
+use rayon::iter::ParallelIterator;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
@@ -64,14 +66,9 @@ pub enum RequestType {
     Completion,
 }
 
-pub enum RunnerType {
-    Thread(ModelRunner),
-    Process(Vec<LocalStream>),
-}
-
 #[allow(dead_code)]
 pub struct LLMEngine {
-    pub runners: RunnerType,
+    pub runners: Arc<RwLock<RunnerType>>,
     pub scheduler: Scheduler,
     pub tokenizer: Tokenizer,
     econfig: EngineConfig,
@@ -179,10 +176,11 @@ impl LLMEngine {
         log_info!("{:?}\n", config);
 
         log_warn!(
-            "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache).",
+            "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
             econfig.max_num_batched_tokens,
             num_blocks,
-            econfig.block_size
+            econfig.block_size,
+            (num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize
         );
 
         #[cfg(not(feature = "nccl"))]
@@ -362,7 +360,8 @@ impl LLMEngine {
             RunnerType::Process(runner_streams?)
         };
 
-        let scheduler = Scheduler::new(&econfig, &config);
+        let runners = Arc::new(RwLock::new(runners));
+        let scheduler = Scheduler::new(runners.clone(), &econfig, &config);
         log_warn!("Model loaded.\n");
 
         let template = ChatTemplate::new(
@@ -543,7 +542,7 @@ impl LLMEngine {
     }
 
     pub fn notify_runner_finished(&mut self, id: usize) -> Result<()> {
-        match &mut self.runners {
+        match &mut *self.runners.write() {
             RunnerType::Thread(model_runner) => Ok(model_runner.finished(id)),
             RunnerType::Process(ref mut runner_streams) => {
                 for stream in runner_streams {
@@ -558,7 +557,7 @@ impl LLMEngine {
         }
     }
 
-    pub fn step(&mut self) -> Result<()> {
+    pub fn step(&mut self) -> Result<usize> {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
         // Get scheduled sequence indexes and prefill flag
@@ -570,7 +569,7 @@ impl LLMEngine {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
-            let output_ids = match &mut self.runners {
+            let output_ids = match &mut *self.runners.write() {
                 RunnerType::Thread(model_runner) => {
                     // Run model on the scheduled sequences in the main thread
                     model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
@@ -592,8 +591,6 @@ impl LLMEngine {
                         .map(|s| s.try_clone().expect("clone failed"))
                         .collect();
 
-                    use rayon::iter::IntoParallelIterator;
-                    use rayon::iter::ParallelIterator;
                     let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
                         .into_par_iter()
                         .map(|mut stream| {
@@ -626,7 +623,7 @@ impl LLMEngine {
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
                 if indices.is_empty() {
                     //chunked prefill, no finished
-                    return Ok(());
+                    return Ok(0);
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
                     self.scheduler.postprocess(
@@ -762,7 +759,9 @@ impl LLMEngine {
         }
         self.scheduler.clear_finished();
 
-        if indices.is_empty() {
+        if indices.is_empty()
+            && self.scheduler.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD + 0.01f32
+        {
             if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
                 crate::log_error!(
                     "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
@@ -772,7 +771,7 @@ impl LLMEngine {
                 self.check_canceled(Some(
                     "Unable to schedule task(s), this request has been dropped!".to_string(),
                 ));
-                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
                     self.free_resources();
                 }
             }
@@ -782,7 +781,7 @@ impl LLMEngine {
         if self.econfig.server_mode.unwrap_or(true) {
             self.may_print_decoding_throughput();
         }
-        Ok(())
+        Ok(indices.len())
     }
 
     pub fn check_cache(&mut self) {
@@ -1100,7 +1099,7 @@ impl LLMEngine {
         match self.add_request(params, &prompt, RequestType::Stream) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
-                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
                     self.free_resources();
                 }
                 candle_core::bail!("{:?}", e)
@@ -1124,10 +1123,17 @@ impl LLMEngine {
 
                 {
                     let mut guard = engine.write();
-                    if let Err(e) = guard.step() {
-                        crate::log_error!("[Engine Loop] Step error: {:?}", e);
-                        if !guard.cancel_all_with_reason(Some(e.to_string())) {
-                            std::process::exit(1);
+                    match guard.step() {
+                        Ok(n_tasks) => {
+                            if n_tasks == 0 {
+                                let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1));
+                            }
+                        }
+                        Err(e) => {
+                            crate::log_error!("[Engine Loop] Step error: {:?}", e);
+                            if !guard.cancel_all_with_reason(Some(e.to_string())) {
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }

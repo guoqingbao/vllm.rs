@@ -238,7 +238,8 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None, server_mode=None))]
+        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
+        server_mode=None, cpu_mem_fold=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -256,6 +257,7 @@ impl EngineConfig {
         flash_context: Option<bool>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
+        cpu_mem_fold: Option<f32>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -273,7 +275,8 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
-            num_blocks: 128,         //placeholder
+            num_blocks: 128, //placeholder
+            cpu_mem_fold,
             kvcache_memory_bytes: 0, //placeholder
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),

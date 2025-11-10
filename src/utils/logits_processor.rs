@@ -3,11 +3,11 @@ use super::config::SamplingParams;
 use attention_rs::sort::ArgSortOp; //Use our custom sort kernel, fix kernel crash on A100
 use candle_core::D;
 use candle_core::{DType, Error, Result, Tensor};
+use parking_lot::Mutex;
 use rand::{distr::Distribution, SeedableRng};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::sync::Arc;
-use std::sync::Mutex;
 #[derive(Clone, PartialEq, Debug)]
 pub enum Sampling {
     ArgMax,
@@ -67,7 +67,7 @@ impl LogitsProcessor {
 
     fn sample_multinomial(&self, prs: &Vec<f32>) -> Result<u32> {
         let distr = rand::distr::weighted::WeightedIndex::new(prs).map_err(Error::wrap)?;
-        let mut rng = self.rng.lock().unwrap();
+        let mut rng = self.rng.lock();
         let next_token = distr.sample(&mut *rng) as u32;
         Ok(next_token)
     }

@@ -1,17 +1,20 @@
 // src/core/scheduler.rs
+use super::runner::RunnerType;
 use super::{
     block_manager::BlockManager,
     sequence::{Sequence, SequenceStatus},
 };
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
+use parking_lot::RwLock;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
     cached: Vec<Sequence>,
-    block_manager: BlockManager,
+    pub block_manager: BlockManager,
     next_seq_id: usize,
     eos_token_id: Vec<u32>,
     cfg: EngineConfig,
@@ -19,14 +22,22 @@ pub struct Scheduler {
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
+pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
+const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
+const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
 
 impl Scheduler {
-    pub fn new(econfig: &EngineConfig, config: &Config) -> Self {
+    pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
         Self {
             waiting: VecDeque::new(),
             running: Vec::new(),
             cached: Vec::new(),
-            block_manager: BlockManager::new(econfig.num_blocks, econfig.block_size),
+            block_manager: BlockManager::new(
+                runners,
+                econfig.num_blocks,
+                (econfig.cpu_mem_fold.unwrap_or(1.0f32) * econfig.num_blocks as f32) as usize,
+                econfig.block_size,
+            ),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
                 EosTokenId::Single(eos) => vec![*eos],
@@ -50,7 +61,7 @@ impl Scheduler {
     }
 
     /// Schedule sequences and return their indexes in `running` along with prefill flag
-    pub fn schedule(&mut self) -> candle_core::Result<(Vec<usize>, bool)> {
+    pub fn schedule(&mut self) -> Result<(Vec<usize>, bool)> {
         let mut scheduled_ids = Vec::new();
         let mut num_tokens = 0;
 
@@ -88,15 +99,28 @@ impl Scheduler {
             }
         }
 
-        for idx in preempt_ids.into_iter().rev() {
-            let seq = self.running.remove(idx);
-            crate::log_warn!("Sequence {} unable to schedule!", seq.id);
-            self.waiting.push_back(seq);
+        // Swap back seq from cpu memory if possible
+        #[cfg(feature = "cuda")]
+        if preempt_ids.is_empty()
+            && (self.kv_cache_usage_percent() < KVCACHE_SWAP_THRESHOLD * 0.9
+                || (self.running.is_empty() && self.kv_cache_usage_percent() == 0.0f32))
+        {
+            self.try_swap_in();
+        } else if !preempt_ids.is_empty() && self.running.len() > 1 {
+            // Requests unable to be processed at the current moment
+            // If we only have one sequence running and it has been preempt,
+            // swap out to cpu memory make non-sense
+            // in such case, the only option is either waiting resources or abort it
+            self.try_swap_out(preempt_ids.clone());
         }
 
         for (idx, seq) in self.running.iter_mut().enumerate() {
             if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
                 break;
+            }
+            if !self.block_manager.can_append(&seq) {
+                // filter out seq that unable to acquire resources
+                continue;
             }
             self.block_manager.may_append(seq)?;
             decode_ids.push(idx);
@@ -143,18 +167,9 @@ impl Scheduler {
                 || seq.len() > self.cfg.max_num_batched_tokens
             {
                 if let Some((_, v)) = active_sessions.iter().find(|(k, _)| *k == seq.id) {
-                    seq.status = SequenceStatus::Cached;
-                    seq.num_cached_tokens = seq.len();
-                    if !self.cached_seqs.iter().any(|(_, v)| v == v) {
-                        self.cached_seqs.push_back((seq.id, v.clone()));
-                    }
-                    // crate::log_info!(
-                    //     "\n\nSeq {} - {} tokens cached (session_id {})",
-                    //     seq.id,
-                    //     seq.num_cached_tokens,
-                    //     v
-                    // );
+                    self.swap_out_or_cache(idx, v.clone());
                 } else {
+                    // Resources for non context-cache requests will be removed immediately when finished
                     seq.status = SequenceStatus::Finished;
                     self.block_manager.deallocate(seq);
                 }
@@ -179,14 +194,34 @@ impl Scheduler {
                     );
                     let mut seq = self.cached.remove(i);
                     seq.token_ids.extend(new_tokens_ids.clone());
-                    seq.status = SequenceStatus::Waiting; //active ths sequence (from cached to waiting)
                     seq.output_ids.clear();
                     //in context-cache, we dont' recreate sequences, so we need to update created_time
                     seq.created_time = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .expect("Time went backwards")
                         .as_millis() as usize;
+
+                    if seq.status == SequenceStatus::Swapped
+                        && !self.block_manager.can_swap_in(&seq)
+                    {
+                        candle_core::bail!("Seq {} swapped out but currently no resources to swap in for execution, please request later!", seq.id);
+                    }
+
+                    let mut failed_reason = None;
                     if let Err(e) = self.block_manager.ensure_allocate(&mut seq) {
+                        failed_reason = Some(e);
+                    }
+
+                    // Swap in data from CPU (if swapped previously)
+                    if seq.status == SequenceStatus::Swapped && failed_reason.is_none() {
+                        if let Err(e) = self.block_manager.swap_in(&mut seq) {
+                            // swap in failed: mark finished and free gpu blocks
+                            crate::log_warn!("Failed to swap in seq {}: {:?}", seq.id, e);
+                            failed_reason = Some(e);
+                        }
+                    }
+
+                    if let Some(e) = failed_reason {
                         seq.status = SequenceStatus::Finished;
                         self.block_manager.deallocate(&seq);
                         if let Some(pos) = self.cached_seqs.iter().position(|(id, _)| id == seq_id)
@@ -195,6 +230,7 @@ impl Scheduler {
                         }
                         candle_core::bail!("{:?}", e);
                     }
+                    seq.status = SequenceStatus::Waiting; //active this sequence (from cached/swaped in to waiting)
                     self.waiting.push_back(seq.clone());
                     break;
                 }
@@ -238,6 +274,8 @@ impl Scheduler {
             let seq = &mut self.cached[i];
             seq.status = SequenceStatus::Finished;
             self.block_manager.deallocate(seq);
+            // free gpu blocks and also free any CPU swap space
+            self.block_manager.free_cpu_swap_for_seq(seq.id);
         }
         self.cached.clear();
         self.cached_seqs.clear();
@@ -248,6 +286,10 @@ impl Scheduler {
             let mut seq = self.cached.remove(pos);
             seq.status = SequenceStatus::Finished;
             self.block_manager.deallocate(&seq);
+            // also free cpu swap
+            if seq.status == SequenceStatus::Swapped {
+                self.block_manager.free_cpu_swap_for_seq(seq_id);
+            }
         }
         if let Some(pos) = self.cached_seqs.iter().position(|(id, _)| *id == seq_id) {
             self.cached_seqs.remove(pos);
@@ -312,6 +354,111 @@ impl Scheduler {
         (indices, finished_indices)
     }
 
+    pub fn try_swap_in(&mut self) {
+        let available_kvcache_tokens = self.get_available_kv_tokens();
+        let no_kv_cache_usage = self.kv_cache_usage_percent() == 0.0f32;
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
+
+        for i in 0..self.cached.len() {
+            let mut seq = &mut self.cached[i];
+            if seq.status == SequenceStatus::Swapped
+                && ((available_kvcache_tokens as isize - seq.len() as isize
+                    > MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP as isize)
+                    || self.running.is_empty() && no_kv_cache_usage)
+                && self.block_manager.can_append(seq)
+                && cur_time - seq.swapped_time().unwrap_or(cur_time) > SWAP_COOLING_PERIOD
+            {
+                seq.swapped_time = Some(cur_time);
+                seq.clear_block_table(); //reallocate block table since previous gpu blocks were freed
+                                         // Swap in data from CPU (if swapped out previously)
+                if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
+                    continue;
+                }
+
+                let mut seq = self.cached.remove(i);
+                match self.block_manager.swap_in(&mut seq) {
+                    Ok(_) => {
+                        seq.status = SequenceStatus::Running;
+                        crate::log_warn!("Seq {} is swapped in for execution!", seq.id);
+                    }
+                    Err(e) => {
+                        seq.status = SequenceStatus::Finished;
+                        crate::log_error!("Seq {} swap in failed: {:?}!", seq.id, e);
+                    }
+                }
+                self.running.push(seq);
+                break;
+            }
+        }
+    }
+
+    // swap out one sequence a time
+    pub fn try_swap_out(&mut self, preempt_ids: Vec<usize>) {
+        for idx in preempt_ids.into_iter().rev() {
+            let mut seq = &mut self.running[idx];
+            // If sequence has blocks, attempt to swap to CPU.
+            // If cannot swap, fallback.
+            if !seq.block_table.is_empty()
+                && seq.output_len() > 0
+                && seq.status == SequenceStatus::Running
+                && self.block_manager.can_swap_out(&seq)
+            {
+                // make sure we have identical number of blocks when swapping in
+                // for decoding
+                if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
+                    continue;
+                }
+                match self.block_manager.swap_out(&mut seq) {
+                    Ok(_) => {
+                        let mut seq = self.running.remove(idx);
+                        seq.status = SequenceStatus::Swapped;
+                        // seq.num_cached_tokens = seq.len();
+                        self.block_manager.deallocate(&seq);
+                        // block table need to be reallocated when swapping in
+                        self.cached.push(seq.clone());
+                        break;
+                    }
+                    Err(e) => {
+                        crate::log_warn!("Swap out failed for seq {}: {:?}", seq.id, e);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn swap_out_or_cache(&mut self, idx: usize, v: String) {
+        let kvcache_usage_percentage = self.kv_cache_usage_percent();
+        let mut seq = &mut self.running[idx];
+        if kvcache_usage_percentage > KVCACHE_SWAP_THRESHOLD
+            && !seq.block_table.is_empty()
+            && self.block_manager.can_swap_out(seq)
+            && self.block_manager.ensure_allocate(&mut seq).is_ok()
+        {
+            // Reach the kvcache threashold and we have cpu memory to swap out
+            match self.block_manager.swap_out(seq) {
+                Ok(_) => {
+                    seq.status = SequenceStatus::Swapped;
+                }
+                Err(e) => {
+                    crate::log_warn!("Failed to swap out seq {}: {:?}", seq.id, e);
+                    seq.status = SequenceStatus::Finished;
+                }
+            }
+            // Free resources for swapped out sequences
+            self.block_manager.deallocate(seq);
+        } else {
+            // Sufficient GPU KV Cache, no need to swap, mark as cached in GPU memory
+            seq.status = SequenceStatus::Cached;
+            seq.num_cached_tokens = seq.len();
+            if !self.cached_seqs.iter().any(|(_, v)| v == v) {
+                self.cached_seqs.push_back((seq.id, v.clone()));
+            }
+        }
+    }
+
     pub fn get_num_cached_tokens(&self) -> usize {
         let mut num_cached_tokens = 0;
         for i in 0..self.cached.len() {
@@ -332,21 +479,36 @@ impl Scheduler {
         const SIZE_IN_GB: usize = 1024 * 1024 * 1024;
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
-        let used_percent = 1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32);
+        let used_percent =
+            100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32;
         let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
+        #[cfg(feature = "cuda")]
+        let cpu_swap_log = {
+            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
+            format!(
+                "CPU swap used {:.1}% ({:.2}GB/{:.2}GB)",
+                self.block_manager.get_cpu_swap_usage() * 100.0f32,
+                self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
+                cpu_kvcache_memory_gb,
+            )
+        };
+        #[cfg(not(feature = "cuda"))]
+        let cpu_swap_log = "".to_string();
+
         crate::log_info!(
-            "Kvcache: {} blocks ({} tokens) free, used {:.1}% ({:.2}GB/{:.1}GB)",
+            "GPU Kvcache: {} blocks ({} tokens) free, used {:.1}% ({:.2}GB/{:.2}GB); {}",
             free_blocks,
             free_blocks * self.block_manager.get_block_size(),
-            used_percent * 100.0f32,
-            used_percent * kvcache_memory_gb,
+            used_percent,
+            used_percent / 100.0f32 * kvcache_memory_gb,
             kvcache_memory_gb,
+            cpu_swap_log,
         );
     }
 
     pub fn kv_cache_usage_percent(&self) -> f32 {
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
-        100.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32) * 100.0f32
+        1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32)
     }
 }

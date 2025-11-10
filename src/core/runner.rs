@@ -14,8 +14,10 @@ use crate::{
     models::qwen3_moe::Qwen3MoEForCausalLM,
     utils::config::{Config, EngineConfig, ModelType},
 };
+use attention_rs::cache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
+use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -40,9 +42,15 @@ pub enum Model {
     // DeepSeek(DeepSeekForCausalLM),
 }
 
+pub enum RunnerType {
+    Thread(ModelRunner),
+    Process(Vec<LocalStream>),
+}
+
 pub struct ModelRunner {
     model: Model,
-    kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
+    gpu_kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
+    cpu_kv_cache: Arc<Mutex<Vec<(Tensor, Tensor)>>>,
     device: Device,
     config: EngineConfig,
     #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -160,7 +168,7 @@ impl ModelRunner {
             }
         };
 
-        let kv_cache = Self::init_kv_cache(econfig, config, dtype, &device)?;
+        let (gpu_kv_cache, cpu_kv_cache) = Self::init_kv_cache(econfig, config, dtype, &device)?;
 
         let (temperature, top_k, top_p) = if econfig.generation_cfg.is_some() {
             (
@@ -179,7 +187,8 @@ impl ModelRunner {
         };
         Ok(Self {
             model,
-            kv_cache: Arc::new(Mutex::new(kv_cache)),
+            gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
+            cpu_kv_cache: Arc::new(Mutex::new(cpu_kv_cache)),
             device,
             config: econfig.clone(),
             #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -246,8 +255,14 @@ impl ModelRunner {
         config: &Config,
         dtype: DType,
         device: &Device,
-    ) -> Result<Vec<(Tensor, Tensor)>> {
+    ) -> Result<(Vec<(Tensor, Tensor)>, Vec<(Tensor, Tensor)>)> {
         let num_gpu_blocks = econfig.num_blocks;
+        #[cfg(feature = "cuda")]
+        let num_cpu_blocks =
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize;
+        #[cfg(not(feature = "cuda"))]
+        let num_cpu_blocks = 1; // dummy cpu kvcache on Metal
+
         if cfg!(feature = "flash-context") {
             assert!(
                 !econfig.fp8_kvcache.unwrap_or(false),
@@ -260,6 +275,7 @@ impl ModelRunner {
             );
 
             let mut gpu_cache = Vec::new();
+            let mut cpu_cache = Vec::new();
             for _ in 0..config.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
@@ -273,7 +289,20 @@ impl ModelRunner {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            Ok(gpu_cache)
+            for _ in 0..config.num_hidden_layers {
+                let key_blocks = Tensor::zeros(
+                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
+                    dtype,
+                    &Device::Cpu,
+                )?;
+                let value_blocks = Tensor::zeros(
+                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
+                    dtype,
+                    &Device::Cpu,
+                )?;
+                cpu_cache.push((key_blocks, value_blocks));
+            }
+            Ok((gpu_cache, cpu_cache))
         } else {
             let fp8_kvcache = econfig.fp8_kvcache.unwrap_or(false);
             let cache_dtype = if fp8_kvcache { DType::U8 } else { dtype };
@@ -294,6 +323,7 @@ impl ModelRunner {
                 econfig.num_shards.unwrap_or(1),
             );
             let mut gpu_cache = Vec::new();
+            let mut cpu_cache = Vec::new();
             for _ in 0..config.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
@@ -307,16 +337,82 @@ impl ModelRunner {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            Ok(gpu_cache)
+            for _ in 0..config.num_hidden_layers {
+                let key_blocks = Tensor::zeros(
+                    (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
+                    cache_dtype,
+                    &Device::Cpu,
+                )?;
+                let value_blocks = Tensor::zeros(
+                    (num_cpu_blocks, vshape.0, vshape.1, vshape.2),
+                    cache_dtype,
+                    &Device::Cpu,
+                )?;
+                cpu_cache.push((key_blocks, value_blocks));
+            }
+            Ok((gpu_cache, cpu_cache))
         }
     }
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
         loop {
-            if let Ok(v) = self.kv_cache.try_lock() {
+            if let Ok(v) = self.gpu_kv_cache.try_lock() {
                 return v;
             }
         }
+    }
+
+    pub fn get_cpu_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
+        loop {
+            if let Ok(v) = self.cpu_kv_cache.try_lock() {
+                return v;
+            }
+        }
+    }
+
+    pub fn kvcache_swap(&self, mappings: HashMap<usize, usize>, swap_in: bool) -> Result<()> {
+        fn cache_swap(
+            gpu_cache: &Vec<(Tensor, Tensor)>,
+            cpu_cache: &Vec<(Tensor, Tensor)>,
+            mappings: &HashMap<usize, usize>,
+            swap_in: bool,
+        ) -> Result<()> {
+            assert!(
+                gpu_cache.len() > 0 && cpu_cache.len() > 0,
+                "Invalid kvcache tensors!"
+            );
+            let block_size_bytes = cpu_cache[0].0.elem_count() / cpu_cache[0].0.dim(0)?
+                * cpu_cache[0].0.dtype().size_in_bytes();
+            for i in 0..gpu_cache.len() {
+                if swap_in {
+                    cache::swap_blocks(&cpu_cache[i].0, &gpu_cache[i].0, mappings)?;
+                    cache::swap_blocks(&cpu_cache[i].1, &gpu_cache[i].1, mappings)?;
+                } else {
+                    cache::swap_blocks(&gpu_cache[i].0, &cpu_cache[i].0, mappings)?;
+                    cache::swap_blocks(&gpu_cache[i].1, &cpu_cache[i].1, mappings)?;
+                }
+            }
+            let total_mb_bytes_swapped =
+                (block_size_bytes * mappings.len() * gpu_cache.len() * 2) as f32 / 1024.0 / 1024.0;
+            if swap_in {
+                crate::log_info!(
+                    "{:.2} MB CPU KV cached blocks swapped in GPU!",
+                    total_mb_bytes_swapped
+                );
+            } else {
+                crate::log_info!(
+                    "{:.2} MB GPU KV cached blocks swapped out to CPU!",
+                    total_mb_bytes_swapped
+                );
+            }
+            Ok(())
+        }
+        cache_swap(
+            &*self.get_kv_cache(),
+            &*self.get_cpu_kv_cache(),
+            &mappings,
+            swap_in,
+        )
     }
 
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
@@ -656,7 +752,7 @@ impl ModelRunner {
 
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub fn warmup_capture(&mut self) -> Result<()> {
-        let kv_cache_lock = self.kv_cache.lock().unwrap(); // no custom method call on `self`
+        let kv_cache_lock = self.gpu_kv_cache.lock().unwrap(); // no custom method call on `self`
         self.capturer.capture(&self.device, Some(&kv_cache_lock))
     }
 }

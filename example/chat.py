@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--frequency-penalty", type=float, default=None)
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
+    parser.add_argument("--cpu-mem-fold", type=float, default=None)
 
     return parser.parse_args()
 
@@ -69,6 +70,7 @@ def build_engine_config(args, num_of_prompts):
         flash_context=args.context_cache,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=False,
+        cpu_mem_fold=args.cpu_mem_fold,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):

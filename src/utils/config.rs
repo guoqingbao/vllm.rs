@@ -145,6 +145,7 @@ pub struct EngineConfig {
     pub hf_token: Option<String>,
     pub hf_token_path: Option<String>,
     pub num_blocks: usize,
+    pub cpu_mem_fold: Option<f32>, // the percentage of gpu kvcache: 0.1x to 10x, default 1.0x
     pub kvcache_memory_bytes: usize,
     pub block_size: usize,
     pub max_num_seqs: usize,
@@ -178,6 +179,8 @@ pub struct EngineConfig {
     pub hf_token_path: Option<String>,
     #[pyo3(get, set)]
     pub num_blocks: usize,
+    #[pyo3(get, set)]
+    pub cpu_mem_fold: Option<f32>,
     pub block_size: usize,
     pub kvcache_memory_bytes: usize,
     #[pyo3(get, set)]
@@ -225,6 +228,7 @@ impl EngineConfig {
         flash_context: Option<bool>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
+        cpu_mem_fold: Option<f32>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -244,7 +248,8 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
-            num_blocks: 128,         //placeholder
+            num_blocks: 128, //placeholder
+            cpu_mem_fold,
             kvcache_memory_bytes: 0, //placeholder
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
