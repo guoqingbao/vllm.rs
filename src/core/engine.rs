@@ -759,7 +759,7 @@ impl LLMEngine {
         }
         self.scheduler.clear_finished();
 
-        if indices.is_empty() && self.scheduler.kv_cache_usage_percent() > 90.0f32 {
+        if indices.is_empty() && self.scheduler.kv_cache_usage_percent() > 0.95f32 {
             if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
                 crate::log_error!(
                     "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
@@ -769,7 +769,7 @@ impl LLMEngine {
                 self.check_canceled(Some(
                     "Unable to schedule task(s), this request has been dropped!".to_string(),
                 ));
-                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
                     self.free_resources();
                 }
             }
@@ -1097,7 +1097,7 @@ impl LLMEngine {
         match self.add_request(params, &prompt, RequestType::Stream) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
-                if self.scheduler.kv_cache_usage_percent() > 95.0f32 {
+                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
                     self.free_resources();
                 }
                 candle_core::bail!("{:?}", e)

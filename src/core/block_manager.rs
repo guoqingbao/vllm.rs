@@ -203,16 +203,28 @@ impl BlockManager {
     }
 
     /// Can we swap-out `seq` (i.e., move its GPU blocks to CPU swap space)?
+    #[allow(unused)]
     pub fn can_swap_out(&self, seq: &Sequence) -> bool {
         // Need at least as many free CPU blocks as the sequence currently owns.
-        let needed = seq.block_table.len();
-        self.free_cpu_block_ids.len() >= needed
+        #[cfg(feature = "cuda")]
+        {
+            let needed = seq.block_table.len();
+            self.free_cpu_block_ids.len() >= needed
+        }
+        #[cfg(not(feature = "cuda"))]
+        false
     }
 
     /// Can we swap-in `seq` (i.e., bring its blocks back from CPU to GPU)?
+    #[allow(unused)]
     pub fn can_swap_in(&self, seq: &Sequence) -> bool {
         // Need at least as many free GPU blocks as seq.num_blocks()
-        self.free_block_ids.len() >= seq.num_blocks()
+        #[cfg(feature = "cuda")]
+        {
+            self.free_block_ids.len() >= seq.num_blocks()
+        }
+        #[cfg(not(feature = "cuda"))]
+        false
     }
 
     /// Swap out the GPU blocks of `seq` into CPU swap space.
