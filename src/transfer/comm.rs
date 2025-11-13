@@ -11,6 +11,8 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -111,25 +113,32 @@ impl Communicator {
         &self,
         pending_prefills: Arc<Mutex<VecDeque<crate::core::sequence::Sequence>>>,
         finished_data: Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
+        model_loaded: Arc<AtomicBool>,
+        stop_flag: Arc<AtomicBool>,
     ) {
         // --- Outer loop: Connection Establishing ---
         loop {
             match self.establish_connection() {
                 Ok(_) => {
                     crate::log_info!(
-                        "[{:?} Rank {}] Connection established. Starting listener...",
+                        "[{:?} Rank {}] PD Connection established.",
                         self.role,
                         self.rank
                     );
                 }
                 Err(e) => {
-                    crate::log_error!(
-                        "[{:?} Rank {}] Failed to establish connection: {}. Retrying in 2s...",
-                        self.role,
-                        self.rank,
-                        e
-                    );
-                    std::thread::sleep(Duration::from_secs(2));
+                    if model_loaded.load(Ordering::SeqCst) {
+                        crate::log_error!(
+                            "[{:?} Rank {}] Failed to establish PD connection: {}. Retrying in 5s...",
+                            self.role,
+                            self.rank,
+                            e
+                        );
+                    }
+                    if stop_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_secs(5));
                     continue; // Retry connection
                 }
             }
@@ -137,6 +146,9 @@ impl Communicator {
             // --- Inner loop: Message Receiving ---
             // Now that connection is established, self.stream is Some.
             loop {
+                if stop_flag.load(Ordering::SeqCst) {
+                    break;
+                }
                 match self.receive() {
                     Ok(msg) => self.handle_received_message(msg, &pending_prefills, &finished_data),
                     Err(e) => {
@@ -162,7 +174,7 @@ impl Communicator {
             match self.role {
                 PdRole::Client => {
                     let stream = TcpStream::connect(url)?;
-                    stream.set_nodelay(true)?; // Disable Nagle's algorithm for low latency
+                    stream.set_nodelay(true)?;
                     crate::log_info!(
                         "[PD Client Rank {}] Connected to TCP server at {}",
                         self.rank,
@@ -207,7 +219,7 @@ impl Communicator {
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                                 // Server might not be ready, wait and retry
-                                std::thread::sleep(Duration::from_millis(100));
+                                std::thread::sleep(Duration::from_millis(500));
                                 continue;
                             }
                             Err(e) => return Err(e.into()), // Other error

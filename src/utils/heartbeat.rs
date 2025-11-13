@@ -4,18 +4,20 @@ use std::sync::{
     Arc,
 };
 use std::{process, thread, time};
-const HEART_BEAT_COMMAND_NAME: &str = "@vllm-rs-runner-heartbeat";
 
 pub fn heartbeat_worker(
     num_subprocess: Option<usize>,
     is_daemon: bool,
     stop_flag: Arc<AtomicBool>,
+    uuid: &str,
 ) -> std::thread::JoinHandle<()> {
+    let uuid_str = uuid.to_string();
     let handle = thread::spawn(move || {
         let flag_clone = Arc::clone(&stop_flag);
+        let sock_name = format!("{}@vllm-rs-runner-heartbeat", uuid_str);
         let mut connect_retry_count = 0;
         let mut command_manager = if is_daemon {
-            let mut manager = CommandManager::new_command(HEART_BEAT_COMMAND_NAME, None, is_daemon);
+            let mut manager = CommandManager::new_command(&sock_name, None, is_daemon);
             while !flag_clone.load(Ordering::Relaxed) {
                 if manager.is_ok() {
                     break;
@@ -26,7 +28,7 @@ pub fn heartbeat_worker(
                         manager
                     );
                     let _ = thread::sleep(time::Duration::from_millis(1000 as u64));
-                    manager = CommandManager::new_command(HEART_BEAT_COMMAND_NAME, None, is_daemon);
+                    manager = CommandManager::new_command(&sock_name, None, is_daemon);
                     continue;
                 } else {
                     crate::log_warn!("{:?}", manager);
@@ -35,7 +37,7 @@ pub fn heartbeat_worker(
             }
             manager
         } else {
-            CommandManager::new_command(HEART_BEAT_COMMAND_NAME, num_subprocess, is_daemon)
+            CommandManager::new_command(&sock_name, num_subprocess, is_daemon)
         };
 
         let mut heartbeat_error_count = 0;

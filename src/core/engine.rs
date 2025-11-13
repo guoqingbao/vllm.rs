@@ -94,6 +94,7 @@ impl LLMEngine {
             init_config_tokenizer(econfig)?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let model_loaded = Arc::new(AtomicBool::new(false));
         let mut econfig = econfig.clone();
         let config_model_len = config.max_model_len.unwrap_or(
             config_tokenizer
@@ -223,7 +224,12 @@ impl LLMEngine {
             let handle = progress_worker(1, config.num_hidden_layers, &reporter);
             let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
             let transfer = if let Some(p_cfg) = &econfig.pd_config {
-                Some(Arc::new(Transfer::new(p_cfg.clone(), 0)?))
+                Some(Arc::new(Transfer::new(
+                    p_cfg.clone(),
+                    0,
+                    model_loaded.clone(),
+                    stop_flag.clone(),
+                )?))
             } else {
                 None
             };
@@ -259,6 +265,7 @@ impl LLMEngine {
                 Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
             }
 
+            model_loaded.store(true, Ordering::SeqCst);
             let _ = handle.join();
             RunnerType::Thread(model_runner)
         } else {
@@ -269,26 +276,34 @@ impl LLMEngine {
 
             let runner_path = get_runner_path()?;
 
+            let uuid_str = uuid::Uuid::new_v4();
+            let uuid_str = uuid_str.to_string();
+            let unique_id = if let Some(l_uuid) = uuid_str.split('-').last() {
+                l_uuid
+            } else {
+                ""
+            };
+
             #[cfg(feature = "python")]
             pyo3::Python::with_gil(|py| {
                 for (rank, _) in device_ids.iter().enumerate() {
-                    let sock_name = format!("@vllm-rs-runner-{}", rank);
-                    spawn_runner(py, &runner_path.display().to_string(), &sock_name)
+                    let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
+                    spawn_runner(py, &runner_path.display().to_string(), &sock_name, unique_id)
                         .expect("Failed to spawn runner. \n\r*****Tips: runner is not built within this package, use 'build.sh' script to build package with runner!");
                 }
             });
 
             #[cfg(not(feature = "python"))]
             for (rank, _) in device_ids.iter().enumerate() {
-                let sock_name = format!("@vllm-rs-runner-{}", rank);
-                spawn_runner(&runner_path.display().to_string(), &sock_name)
+                let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
+                spawn_runner(&runner_path.display().to_string(), &sock_name, unique_id)
                     .expect("Failed to spawn runner. \n\r*****Tips: runner is not built, use 'run.sh' script instead of 'cargo run'!");
             }
 
-            let progress_sock_name = "@vllm-rs-progress".to_string();
+            let progress_sock_name = format!("{}@vllm-rs-progress", unique_id);
             let progress_handle =
                 spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
-            heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone());
+            heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone(), unique_id);
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
             use rayon::iter::ParallelIterator;
@@ -299,7 +314,7 @@ impl LLMEngine {
                     let model_type = model_type.clone();
                     let config = config.clone();
                     let econfig = econfig.clone();
-                    let sock_name = format!("@vllm-rs-runner-{}", rank);
+                    let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
                     let listener = ListenerOptions::new()
                         .name(
                             sock_name

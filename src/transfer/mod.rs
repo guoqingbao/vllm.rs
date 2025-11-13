@@ -6,6 +6,7 @@ use candle_core::{DType, Result, Tensor, WithDType};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 // Sub-modules for implementation details
@@ -113,7 +114,12 @@ pub struct Transfer {
 
 impl Transfer {
     /// Creates a new Transfer instance and starts its communication thread.
-    pub fn new(config: PdConfig, rank: usize) -> Result<Self> {
+    pub fn new(
+        config: PdConfig,
+        rank: usize,
+        model_loaded: Arc<AtomicBool>,
+        stop_flag: Arc<AtomicBool>,
+    ) -> Result<Self> {
         let finished_data = Arc::new(RwLock::new(HashMap::new()));
         let pending_prefills = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -124,7 +130,12 @@ impl Transfer {
         // Start the background communication thread
         let thread_comm = communicator.clone();
         let comm_handle = Some(std::thread::spawn(move || {
-            thread_comm.run_listener_loop(thread_pending_prefills, thread_finished_data);
+            thread_comm.run_listener_loop(
+                thread_pending_prefills,
+                thread_finished_data,
+                model_loaded,
+                stop_flag,
+            );
         }));
 
         Ok(Self {

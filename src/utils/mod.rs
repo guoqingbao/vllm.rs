@@ -540,6 +540,7 @@ pub fn spawn_runner(
     #[cfg(feature = "python")] py: Python,
     runner_path: &str,
     sock_name: &str,
+    uuid_str: &str,
 ) -> Result<()> {
     #[cfg(feature = "python")]
     {
@@ -554,6 +555,8 @@ pub fn spawn_runner(
                 PyString::new(py, runner_path),
                 PyString::new(py, "--sock"),
                 PyString::new(py, sock_name),
+                PyString::new(py, "--uuid"),
+                PyString::new(py, uuid_str),
             ],
         )
         .map_err(candle_core::Error::wrap)?;
@@ -579,6 +582,8 @@ pub fn spawn_runner(
         Command::new(runner_path)
             .arg("--sock")
             .arg(sock_name)
+            .arg("--uuid")
+            .arg(uuid_str)
             .spawn()
             .map_err(|e| e.into())
             .map(|_child| ())

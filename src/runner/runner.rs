@@ -28,6 +28,12 @@ fn main() -> anyhow::Result<()> {
         .position(|s| s == "--sock")
         .and_then(|i| args.get(i + 1))
         .expect("Socket name missing");
+    let uuid_str: String = args
+        .iter()
+        .position(|s| s == "--uuid")
+        .and_then(|i| args.get(i + 1))
+        .map_or("", |v| v)
+        .to_string();
     let sock_name = sock.clone().to_ns_name::<GenericNamespaced>()?;
     let mut stream = LocalStream::connect(sock_name.clone());
     // shared flag for model loaded
@@ -58,7 +64,7 @@ fn main() -> anyhow::Result<()> {
 
     vllm_rs::log_info!("Runner connected to socket: {}", sock);
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let _ = heartbeat_worker(None, true, stop_flag.clone());
+    let _ = heartbeat_worker(None, true, stop_flag.clone(), &uuid_str);
 
     let msg = receive_local(&mut stream, true)?;
     let runner = match msg {
@@ -83,7 +89,7 @@ fn main() -> anyhow::Result<()> {
 
             vllm_rs::log_info!("Loading model at rank {}", init_req.rank);
 
-            let progress_sock_name = "@vllm-rs-progress".to_string();
+            let progress_sock_name = format!("{}@vllm-rs-progress", uuid_str);
 
             let progress_reporter = match RemoteProgressReporter::new(
                 init_req.rank,
@@ -105,7 +111,12 @@ fn main() -> anyhow::Result<()> {
             };
 
             let transfer = if let Some(t_cfg) = &init_req.econfig.pd_config {
-                Some(Arc::new(Transfer::new(t_cfg.clone(), init_req.rank)?))
+                Some(Arc::new(Transfer::new(
+                    t_cfg.clone(),
+                    init_req.rank,
+                    model_loaded.clone(),
+                    stop_flag.clone(),
+                )?))
             } else {
                 None
             };

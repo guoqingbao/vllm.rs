@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    if args.server {
+    if args.server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
             econfig: econfig.clone(),
@@ -186,13 +186,19 @@ async fn main() -> Result<()> {
             .route("/v1/chat/completions", post(chat_completion))
             .with_state(Arc::new(server_data));
 
-        // Start server
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", args.port)).await?;
-        vllm_rs::log_warn!(
-            "🚀 Chat server listening on http://0.0.0.0:{}/v1/",
-            args.port
-        );
-
+        let addr = if args.pd_server {
+            // Start PD server
+            vllm_rs::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
+            format!("0.0.0.0:{}", 0)
+        } else {
+            // Start server
+            vllm_rs::log_warn!(
+                "🚀 Chat server listening on http://0.0.0.0:{}/v1/",
+                args.port
+            );
+            format!("0.0.0.0:{}", args.port)
+        };
+        let listener = tokio::net::TcpListener::bind(addr).await?;
         return Ok(axum::serve(listener, app).await?);
     }
 
