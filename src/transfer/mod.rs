@@ -163,12 +163,22 @@ impl Transfer {
         if !self.is_client() {
             return Ok(false);
         }
+        crate::log_warn!("transfer_prefill Seq {}", seq.id);
         self.communicator
             .send(&TransferMessage::TransferPrefill(seq.clone()))
     }
 
     /// (Client) Checks if a specific prefill has finished.
     pub fn check_prefill_finished(&self, seq_id: usize) -> Result<bool> {
+        {
+            let guard = self.finished_data.read();
+            crate::log_warn!(
+                "check_prefill_finished Seq {}, existing {:?}",
+                seq_id,
+                guard.keys()
+            );
+        }
+
         Ok(self.finished_data.write().contains_key(&seq_id))
     }
 
@@ -178,6 +188,8 @@ impl Transfer {
         seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
     ) -> Result<u32> {
+        crate::log_warn!("receive_kv_cache Seq {}", seq.id);
+
         let status = self.check_prefill_finished(seq.id)?;
         if !status {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
@@ -293,9 +305,16 @@ impl Transfer {
         server_gpu_cache: &Vec<(Tensor, Tensor)>,
         first_token: u32,
     ) -> Result<bool> {
-        if !self.is_server() {
-            return Ok(false);
-        }
+        crate::log_warn!(
+            "transfer_kv_cache Seq {}, first token {}, config {:?}",
+            seq.id,
+            first_token,
+            self.config,
+        );
+
+        // if !self.is_server() {
+        //     return Ok(false);
+        // }
 
         fn transfer_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
             sf: &Transfer,
@@ -314,6 +333,11 @@ impl Transfer {
                         let v_handle = cuda_remote::get_ipc_handle::<T>(v_tensor)?;
                         layer_handles.push((k_handle, v_handle));
                     }
+                    crate::log_warn!(
+                        "KVTransferHandle::LocalIpc Seq {}, block_table {:?}",
+                        seq.id,
+                        seq.block_table.clone()
+                    );
                     KVTransferHandle::LocalIpc {
                         layer_handles,
                         server_block_ids: seq.block_table.clone(),
@@ -363,7 +387,10 @@ impl Transfer {
                 first_token,
                 transfer_handle,
             });
-
+            crate::log_warn!(
+                "Sending TransferMessage::TransferKvCache for Seq {}",
+                seq.id,
+            );
             // Send the finished data back to the client
             sf.communicator.send(&msg)
         }
@@ -371,16 +398,21 @@ impl Transfer {
         let dtype = server_gpu_cache[0].0.dtype();
         match dtype {
             DType::F16 => {
-                transfer_data::<half::f16>(&self, &self.config, seq, server_gpu_cache, first_token)
+                transfer_data::<half::f16>(&self, &self.config, seq, server_gpu_cache, first_token)?
             }
-            DType::BF16 => {
-                transfer_data::<half::bf16>(&self, &self.config, seq, server_gpu_cache, first_token)
-            }
+            DType::BF16 => transfer_data::<half::bf16>(
+                &self,
+                &self.config,
+                seq,
+                server_gpu_cache,
+                first_token,
+            )?,
             DType::U8 => {
-                transfer_data::<u8>(&self, &self.config, seq, server_gpu_cache, first_token)
+                transfer_data::<u8>(&self, &self.config, seq, server_gpu_cache, first_token)?
             }
             _ => candle_core::bail!("Invalid kvcache dtype!"),
-        }
+        };
+        Ok(true)
     }
 }
 

@@ -83,6 +83,13 @@ impl Scheduler {
             if self.is_pd_mode() && !self.is_pd_server() {
                 if let Ok(_) = self.block_manager.try_transfer_prefill(&seq) {
                     // Client: Offload prefill request to PD server
+                    crate::log_warn!("Prefill request (Seq {}) transfered to PD server.", seq.id);
+                    seq.swapped_time = Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize,
+                    );
                     self.transferred.push_back(seq);
                     continue; // Sent to PD server, move to next
                 }
@@ -528,8 +535,19 @@ impl Scheduler {
     /// Client: Check for finished prefills and move them to the running queue.
     pub fn try_receive_kvcache(&mut self) -> Result<()> {
         let mut finished_seq_ids = Vec::new();
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
         for idx in 0..self.transferred.len() {
             let seq_id = self.transferred[idx].id;
+            if cur_time - self.transferred[idx].swapped_time().unwrap_or(cur_time)
+                < SWAP_COOLING_PERIOD
+            {
+                continue;
+            }
+
+            self.transferred[idx].swapped_time = Some(cur_time);
             let status = self.block_manager.try_check_prefill_status(seq_id);
             if status.is_err() || !status.unwrap_or(false) {
                 continue;

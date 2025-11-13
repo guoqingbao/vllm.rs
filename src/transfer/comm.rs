@@ -7,6 +7,7 @@ use interprocess::local_socket::traits::Stream;
 use interprocess::local_socket::{
     GenericNamespaced, ListenerOptions, Stream as LocalStream, ToNsName,
 };
+use interprocess::TryClone;
 use parking_lot::{Mutex, RwLock};
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -15,7 +16,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-
 /// An internal enum to abstract over the two stream types.
 /// It implements Read and Write to be used generically.
 enum CommStream {
@@ -54,8 +54,10 @@ impl Write for CommStream {
 #[derive(Clone)]
 pub struct Communicator {
     /// The stream is None until a connection is established.
-    /// Arc<Mutex<...>> allows sharing between the listener and main threads.
-    stream: Arc<Mutex<Option<CommStream>>>,
+    /// Read-half of the connection
+    reader: Arc<Mutex<Option<CommStream>>>,
+    /// Write-half of the connection
+    writer: Arc<Mutex<Option<CommStream>>>,
     config: PdConfig,
     role: PdRole,
     rank: usize,
@@ -65,7 +67,8 @@ impl Communicator {
     /// Creates a new Communicator, ready to connect.
     pub fn new(config: PdConfig, role: PdRole, rank: usize) -> Self {
         Self {
-            stream: Arc::new(Mutex::new(None)),
+            reader: Arc::new(Mutex::new(None)),
+            writer: Arc::new(Mutex::new(None)),
             config,
             role,
             rank,
@@ -76,7 +79,7 @@ impl Communicator {
     /// This is called from the *main thread* (e.g., Scheduler).
     /// It locks the stream, sends the data, and unlocks.
     pub fn send(&self, msg: &TransferMessage) -> Result<bool> {
-        let mut guard = self.stream.lock();
+        let mut guard = self.writer.lock();
         if let Some(stream) = guard.as_mut() {
             send_message_generic(stream, msg)
         } else {
@@ -91,7 +94,7 @@ impl Communicator {
     /// Internal method to receive a message.
     /// This is called from the *listener thread* in a loop.
     fn receive(&self) -> Result<TransferMessage> {
-        let mut guard = self.stream.lock();
+        let mut guard = self.reader.lock();
         if let Some(stream) = guard.as_mut() {
             receive_message_generic(stream)
         } else {
@@ -146,9 +149,6 @@ impl Communicator {
             // --- Inner loop: Message Receiving ---
             // Now that connection is established, self.stream is Some.
             loop {
-                if stop_flag.load(Ordering::SeqCst) {
-                    break;
-                }
                 match self.receive() {
                     Ok(msg) => self.handle_received_message(msg, &pending_prefills, &finished_data),
                     Err(e) => {
@@ -158,7 +158,8 @@ impl Communicator {
                             self.rank,
                             e
                         );
-                        *self.stream.lock() = None; // Clear the dead stream
+                        *self.reader.lock() = None;
+                        *self.writer.lock() = None;
                         break; // Break inner loop to re-establish connection
                     }
                 }
@@ -169,7 +170,7 @@ impl Communicator {
     /// Blocks until a connection is established based on role and config.
     /// On success, it populates `self.stream`.
     fn establish_connection(&self) -> Result<()> {
-        let new_stream = if let Some(url) = &self.config.url {
+        let (read_stream, write_stream) = if let Some(url) = &self.config.url {
             // --- Remote (TCP) Mode ---
             match self.role {
                 PdRole::Client => {
@@ -180,7 +181,10 @@ impl Communicator {
                         self.rank,
                         url
                     );
-                    CommStream::Remote(stream)
+                    (
+                        CommStream::Remote(stream.try_clone()?),
+                        CommStream::Remote(stream),
+                    )
                 }
                 PdRole::Server => {
                     let listener = TcpListener::bind(url)?;
@@ -196,7 +200,11 @@ impl Communicator {
                         self.rank,
                         addr
                     );
-                    CommStream::Remote(stream)
+                    // Split the TCP stream by cloning its handle
+                    (
+                        CommStream::Remote(stream.try_clone()?),
+                        CommStream::Remote(stream),
+                    )
                 }
             }
         } else {
@@ -215,7 +223,10 @@ impl Communicator {
                                     self.rank,
                                     sock_name
                                 );
-                                break CommStream::Local(stream);
+                                break (
+                                    CommStream::Local(stream.try_clone()?),
+                                    CommStream::Local(stream),
+                                );
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                                 // Server might not be ready, wait and retry
@@ -238,13 +249,18 @@ impl Communicator {
                         "[PD Server Rank {}] Accepted LocalIPC connection",
                         self.rank
                     );
-                    CommStream::Local(stream)
+                    // Split the LocalStream by cloning its handle
+                    (
+                        CommStream::Local(stream.try_clone()?),
+                        CommStream::Local(stream),
+                    )
                 }
             }
         };
 
-        // Store the newly established stream
-        *self.stream.lock() = Some(new_stream);
+        // Store the newly established streams
+        *self.reader.lock() = Some(read_stream);
+        *self.writer.lock() = Some(write_stream);
         Ok(())
     }
 
@@ -258,10 +274,15 @@ impl Communicator {
         match (&self.role, msg) {
             // Client receives KV cache
             (PdRole::Client, TransferMessage::TransferKvCache(data)) => {
+                crate::log_warn!(
+                    "PD client received kvcache for the transfered prefill (Seq {})",
+                    data.seq_id
+                );
                 finished_data.write().insert(data.seq_id, data);
             }
             // Server receives Prefill request
             (PdRole::Server, TransferMessage::TransferPrefill(seq)) => {
+                crate::log_warn!("PD server received a transfered prefill (Seq {})", seq.id);
                 pending_prefills.lock().push_back(seq);
             }
             // Mismatched messages (warn and drop)

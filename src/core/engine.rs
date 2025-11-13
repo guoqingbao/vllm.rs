@@ -9,6 +9,7 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
+use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
@@ -965,6 +966,18 @@ impl LLMEngine {
         self.active_requests.is_empty()
     }
 
+    pub fn is_pd_mode(&self) -> bool {
+        self.econfig.pd_config.is_some()
+    }
+
+    pub fn is_pd_server(&self) -> bool {
+        if let Some(p_cfg) = &self.econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        }
+    }
+
     pub fn generate_sync(
         &mut self,
         params: &Vec<SamplingParams>,
@@ -1132,10 +1145,15 @@ impl LLMEngine {
     pub fn start_engine(engine: Arc<RwLock<Self>>) {
         GLOBAL_RT.spawn(async move {
             let engine = engine.clone();
+            let is_pd_server = {
+                let guard = engine.read();
+                guard.is_pd_mode() && guard.is_pd_server()
+            };
             loop {
                 let idle = {
                     let guard = engine.read();
-                    guard.is_idle()
+                    //no add_request in PD server, marking it always active
+                    guard.is_idle() && !is_pd_server
                 };
 
                 if idle {
@@ -1143,13 +1161,12 @@ impl LLMEngine {
                     continue;
                 }
 
+                let mut task_processed = 0;
                 {
                     let mut guard = engine.write();
                     match guard.step() {
                         Ok(n_tasks) => {
-                            if n_tasks == 0 {
-                                let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1));
-                            }
+                            task_processed = n_tasks;
                         }
                         Err(e) => {
                             crate::log_error!("[Engine Loop] Step error: {:?}", e);
@@ -1159,7 +1176,14 @@ impl LLMEngine {
                         }
                     }
                 }
-
+                if task_processed == 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(if is_pd_server {
+                        5000
+                    } else {
+                        1
+                    }))
+                    .await;
+                }
                 tokio::task::yield_now().await;
             }
         });

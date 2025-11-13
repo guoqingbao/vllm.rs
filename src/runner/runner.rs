@@ -251,6 +251,9 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(MessageType::KvCacheSend((sequence, token))) => {
                 let ret = runner.send_kvcache(&sequence, token);
+                if ret.is_err() {
+                    vllm_rs::log_error!("KvCacheSend failed: {:?}", ret);
+                }
                 send_local(
                     &mut vec![stream.try_clone()?],
                     &MessageType::KvCacheSendResponse(ret.is_ok()),
