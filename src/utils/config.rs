@@ -1,4 +1,5 @@
 // src/utils/config.rs
+use crate::transfer::PdConfig;
 use either::Either;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
@@ -160,6 +161,7 @@ pub struct EngineConfig {
     pub flash_context: Option<bool>,
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
+    pub pd_config: Option<PdConfig>,
 }
 
 #[cfg(feature = "python")]
@@ -207,6 +209,8 @@ pub struct EngineConfig {
     pub fp8_kvcache: Option<bool>,
     #[pyo3(get, set)]
     pub server_mode: Option<bool>,
+    #[pyo3(get, set)]
+    pub pd_config: Option<PdConfig>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -229,6 +233,7 @@ impl EngineConfig {
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
+        pd_config: Option<PdConfig>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -264,6 +269,7 @@ impl EngineConfig {
             flash_context,
             fp8_kvcache,
             server_mode,
+            pd_config,
         }
     }
 }

@@ -9,6 +9,7 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
+use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -221,6 +222,11 @@ impl LLMEngine {
                 Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
             let handle = progress_worker(1, config.num_hidden_layers, &reporter);
             let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
+            let transfer = if let Some(p_cfg) = &econfig.pd_config {
+                Some(Arc::new(Transfer::new(p_cfg.clone(), 0)?))
+            } else {
+                None
+            };
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -242,6 +248,7 @@ impl LLMEngine {
                 is_rope_i,
                 device.clone(),
                 reporter,
+                transfer,
             )?;
 
             #[cfg(all(feature = "cuda", feature = "graph"))]

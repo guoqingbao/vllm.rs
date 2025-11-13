@@ -227,4 +227,13 @@ pub struct Args {
 
     #[arg(long, default_value = None)]
     pub cpu_mem_fold: Option<f32>, //the percentage of cpu vs. gpu kvcache size
+
+    #[arg(long, default_value_t = false)]
+    pub pd_server: bool, //PD server mode
+
+    #[arg(long, default_value_t = false)]
+    pub pd_client: bool, //PD client mode
+
+    #[arg(long)]
+    pub pd_url: Option<String>, //Url for PD server mode (server in remote)
 }

@@ -6,7 +6,7 @@ import sys
 # pip install fastapi uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig
+from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig, PdConfig, PdMethod, PdRole
 import uvicorn
 import warnings
 
@@ -218,6 +218,10 @@ def parse_args():
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
+    parser.add_argument("--pd-server", action="store_true")
+    parser.add_argument("--pd-client", action="store_true")
+    parser.add_argument("--pd-url", help="Url like `192.168.1.100:8888` \
+        used for TCP/IP communication between PD server and client", type=str, default=None)
 
     return parser.parse_args()
 
@@ -241,6 +245,13 @@ def main():
 
     assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
     args.max_tokens = max_model_len if args.max_tokens > max_model_len else args.max_tokens
+
+    pd_config = None
+    if args.pd_server or args.pd_client:
+        pd_role = PdRole.Server if args.pd_server else PdRole.Client
+        pd_method = PdMethod.RemoteTcp if args.pd_url != None else PdMethod.LocalIpc
+        pd_config = PdConfig(role=pd_role, method=pd_method, url=args.pd_url)
+
     cfg = EngineConfig(
         model_id=args.m,
         weight_path=args.w,
@@ -255,6 +266,7 @@ def main():
         fp8_kvcache=args.fp8_kvcache,
         server_mode=True,
         cpu_mem_fold=args.cpu_mem_fold,
+        pd_config=pd_config,
     )
 
     app = create_app(cfg, args.dtype)

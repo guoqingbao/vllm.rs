@@ -6,6 +6,7 @@ pub mod models;
 pub mod py;
 pub mod runner;
 pub mod server;
+pub mod transfer;
 pub mod utils;
 #[cfg(feature = "python")]
 use crate::core::GenerationOutput;

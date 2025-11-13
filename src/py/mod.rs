@@ -2,6 +2,7 @@ use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
+use crate::transfer::PdConfig;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
@@ -239,7 +240,7 @@ impl EngineConfig {
         max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None))]
+        server_mode=None, cpu_mem_fold=None, pd_config=None,))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -258,6 +259,7 @@ impl EngineConfig {
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
+        pd_config: Option<PdConfig>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -291,6 +293,7 @@ impl EngineConfig {
             flash_context,
             fp8_kvcache,
             server_mode,
+            pd_config,
         }
     }
 }

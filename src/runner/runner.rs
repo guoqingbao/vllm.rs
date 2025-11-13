@@ -11,6 +11,7 @@ use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
+use vllm_rs::transfer::Transfer;
 use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
@@ -103,6 +104,12 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
+            let transfer = if let Some(t_cfg) = &init_req.econfig.pd_config {
+                Some(Arc::new(Transfer::new(t_cfg.clone(), init_req.rank)?))
+            } else {
+                None
+            };
+
             let vb = VarBuilderX::new(
                 &init_req.model_pathes,
                 init_req.is_gguf,
@@ -120,9 +127,14 @@ fn main() -> anyhow::Result<()> {
                 init_req.is_rope_i,
                 device,
                 progress_reporter,
+                transfer,
             )?;
 
-            vllm_rs::log_info!("Runner at rank {} created!", init_req.rank);
+            vllm_rs::log_info!(
+                "Runner at rank {} created (PD config: {:?})!",
+                init_req.rank,
+                init_req.econfig.pd_config
+            );
 
             // Optional warmup
             #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -187,7 +199,7 @@ fn main() -> anyhow::Result<()> {
                     mappings.len(),
                     if swap_in { "swap in" } else { "swap out" },
                 );
-                let ret = runner.kvcache_swap(mappings, swap_in);
+                let ret = runner.swap_kvcache(mappings, swap_in);
                 if ret.is_err() {
                     vllm_rs::log_error!("KvCache Swap failed: {:?}", ret);
                 }
@@ -199,6 +211,48 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(MessageType::FinishDecode(id)) => {
                 runner.finished(id);
+            }
+            Ok(MessageType::TransferPrefill(sequence)) => {
+                let ret = runner.transfer_prefill(&sequence);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::TransferPrefillResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
+            Ok(MessageType::ReceivePrefill(id)) => {
+                let ret = runner.try_receive_prefill(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::ReceivePrefillResponse(ret.unwrap_or(None)),
+                    false,
+                )?;
+            }
+            Ok(MessageType::CheckPrefillStatus(id)) => {
+                let status = runner.check_prefill_status(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::CheckPrefillStatusResponse(
+                        status.is_ok() && status.unwrap_or(false),
+                    ),
+                    false,
+                )?;
+            }
+            Ok(MessageType::KvCacheSend((sequence, token))) => {
+                let ret = runner.send_kvcache(&sequence, token);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheSendResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
+            Ok(MessageType::KvCacheReceive(sequence)) => {
+                let ret = runner.receive_kvcache(&sequence);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or(0)),
+                    false,
+                )?;
             }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {

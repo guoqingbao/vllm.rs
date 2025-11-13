@@ -272,6 +272,20 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 ./run.sh --release --features cuda,nccl,flash-attn -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
+**Prefill-decode Disaggregation**
+```shell
+# Start the PD server (not `port` required since it does not directly respond request(s))
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+
+# Start the corresponding PD client (with exactly same args except device ids and pd mode)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+
+# If `--pd-url` (e.g., 192.168.0.10:8888) is provided, the PD server will try to bind to the given address,
+# and the client will attempt to connect to the server using the specified URL.
+# In this scenario, the server and client can be located on different machines.
+```
+
+
 ## ⚙️ Command Line Arguments
 
 | Flag        | Description                                                      |    |
@@ -294,6 +308,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 1.0, range from 0.1 to 10.0)              |    |
+| `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |    |
+| `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |    |
+| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |    |
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
 
@@ -335,6 +352,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [ ] FP8 KV Cache (with Flash-Attn)
 * [ ] Additional model support
 * [x] CPU KV Cache Offloading
+* [x] Prefill-decode Disaggregation
 ---
 
 ## 📚 References

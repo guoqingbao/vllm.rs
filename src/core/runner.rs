@@ -1,6 +1,7 @@
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
+use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
@@ -58,6 +59,7 @@ pub struct ModelRunner {
     logit_processor: LogitsProcessor,
     sampling_params: RwLock<SamplingParams>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
+    transfer: Option<Arc<Transfer>>,
 }
 
 impl ModelRunner {
@@ -71,6 +73,7 @@ impl ModelRunner {
         is_rope_i: bool,
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
+        transfer: Option<Arc<Transfer>>,
     ) -> Result<Self> {
         let model = match model_type {
             ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
@@ -202,6 +205,7 @@ impl ModelRunner {
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             sampling_params: RwLock::new(SamplingParams::default()),
             seq_tokens: RwLock::new(HashMap::new()),
+            transfer,
         })
     }
 
@@ -370,13 +374,13 @@ impl ModelRunner {
         }
     }
 
-    pub fn kvcache_swap(&self, mappings: HashMap<usize, usize>, swap_in: bool) -> Result<()> {
+    pub fn swap_kvcache(&self, mappings: HashMap<usize, usize>, swap_in: bool) -> Result<bool> {
         fn cache_swap(
             gpu_cache: &Vec<(Tensor, Tensor)>,
             cpu_cache: &Vec<(Tensor, Tensor)>,
             mappings: &HashMap<usize, usize>,
             swap_in: bool,
-        ) -> Result<()> {
+        ) -> Result<bool> {
             assert!(
                 gpu_cache.len() > 0 && cpu_cache.len() > 0,
                 "Invalid kvcache tensors!"
@@ -405,7 +409,7 @@ impl ModelRunner {
                     total_mb_bytes_swapped
                 );
             }
-            Ok(())
+            Ok(true)
         }
         cache_swap(
             &*self.get_kv_cache(),
@@ -413,6 +417,67 @@ impl ModelRunner {
             &mappings,
             swap_in,
         )
+    }
+
+    pub fn transfer_prefill(&self, seq: &Sequence) -> Result<bool> {
+        if let Some(transfer) = &self.transfer {
+            if !transfer.is_client() {
+                candle_core::bail!(
+                    "PD server does not support prefill transfer, call this in the client!"
+                )
+            }
+            transfer.transfer_prefill(seq)
+        } else {
+            candle_core::bail!("KV Cache transfer engine is not initialized!")
+        }
+    }
+
+    pub fn try_receive_prefill(&self, _: usize) -> Result<Option<Sequence>> {
+        if let Some(transfer) = &self.transfer {
+            if !transfer.is_client() {
+                candle_core::bail!("PD client does not support try_receive_prefill!");
+            }
+            Ok(transfer.try_receive_prefill_request())
+        } else {
+            candle_core::bail!("KV Cache transfer engine is not initialized!");
+        }
+    }
+
+    pub fn check_prefill_status(&self, seq_id: usize) -> Result<bool> {
+        if let Some(transfer) = &self.transfer {
+            if !transfer.is_client() {
+                candle_core::bail!("PD server does not support check prefill status!");
+            }
+            transfer.check_prefill_finished(seq_id)
+        } else {
+            candle_core::bail!("KV Cache transfer engine is not initialized!");
+        }
+    }
+
+    pub fn send_kvcache(&self, seq: &Sequence, first_token: u32) -> Result<bool> {
+        if let Some(transfer) = &self.transfer {
+            if !transfer.is_server() {
+                candle_core::bail!(
+                    "PD client does not support send_kvcache, call this in the PD server!"
+                )
+            }
+            transfer.transfer_kv_cache(seq, &*self.get_kv_cache(), first_token)
+        } else {
+            candle_core::bail!("KV Cache transfer engine is not initialized!")
+        }
+    }
+
+    pub fn receive_kvcache(&self, seq: &Sequence) -> Result<u32> {
+        if let Some(transfer) = &self.transfer {
+            if !transfer.is_client() {
+                candle_core::bail!(
+                    "PD server does not support receive_kvcache, call this in the PD client!"
+                )
+            }
+            transfer.receive_kv_cache(seq, &*self.get_kv_cache())
+        } else {
+            candle_core::bail!("KV Cache transfer engine is not initialized!")
+        }
     }
 
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {

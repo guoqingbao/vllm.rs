@@ -14,6 +14,7 @@ use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
 use vllm_rs::server::Args;
 use vllm_rs::server::{server::chat_completion, ServerData};
+use vllm_rs::transfer::{PdConfig, PdMethod, PdRole};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
@@ -109,6 +110,30 @@ async fn main() -> Result<()> {
         None
     };
 
+    if args.pd_server && args.pd_client {
+        candle_core::bail!("This program can only be served as PD server or PD client, not both!");
+    }
+
+    let pd_config = if args.pd_server || args.pd_client {
+        let pd_role = if args.pd_server {
+            PdRole::Server
+        } else {
+            PdRole::Client
+        };
+        let pd_method = if args.pd_url.is_some() {
+            PdMethod::RemoteTcp
+        } else {
+            PdMethod::LocalIpc
+        };
+        Some(PdConfig {
+            role: pd_role,
+            method: pd_method,
+            url: args.pd_url,
+        })
+    } else {
+        None
+    };
+
     let econfig = EngineConfig::new(
         args.model_id,
         args.weight_path,
@@ -127,6 +152,7 @@ async fn main() -> Result<()> {
         Some(args.fp8_kvcache),
         Some(args.server || !interactive),
         args.cpu_mem_fold,
+        pd_config,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

@@ -1,6 +1,7 @@
 // src/core/block_manager.rs
 use super::runner::RunnerType;
 use super::sequence::Sequence;
+use crate::def_broadcast_message_to_runners;
 use crate::runner::{receive_local, send_local, MessageType};
 use candle_core::Result;
 use interprocess::{local_socket::Stream as LocalStream, TryClone};
@@ -10,6 +11,7 @@ use rayon::iter::ParallelIterator;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
 #[derive(Debug, Clone)]
 pub struct Block {
     pub id: usize,
@@ -169,41 +171,77 @@ impl BlockManager {
         (total_cpu_blocks - self.free_cpu_block_ids.len()) as f32 / total_cpu_blocks as f32
     }
 
-    pub fn kvcache_swap(&mut self, mappings: HashMap<usize, usize>, swap_in: bool) -> Result<()> {
-        match &mut *self.runners.write() {
-            RunnerType::Thread(model_runner) => model_runner.kvcache_swap(mappings, swap_in),
-            RunnerType::Process(ref mut runner_streams) => {
-                let cloned_streams: Vec<LocalStream> = runner_streams
-                    .iter_mut()
-                    .map(|s| s.try_clone().expect("clone failed"))
-                    .collect();
-                let all_result: Result<()> = cloned_streams
-                    .into_par_iter()
-                    .map(|mut stream| {
-                        send_local(
-                            &mut vec![stream.try_clone()?],
-                            &MessageType::KVCacheSwap((mappings.clone(), swap_in)),
-                            false,
-                        )?;
-                        let response = receive_local(&mut stream, false)?;
-                        match response {
-                            MessageType::KVCacheSwapResponse(success) => {
-                                if success {
-                                    Ok(())
-                                } else {
-                                    candle_core::bail!("Kv cache swap failed!")
-                                }
-                            }
-                            other => {
-                                candle_core::bail!("Unexpected response type: {:?}", other)
-                            }
-                        }
-                    })
-                    .collect();
-                all_result
-            }
-        }
-    }
+    // def try_transfer_prefill
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_transfer_prefill, // function name to create
+        transfer_prefill, // thread-mode method name
+        (seq: &Sequence), // arguments
+        MessageType::TransferPrefill, // message to send
+        (seq.clone()), // message payload (must clone)
+        MessageType::TransferPrefillResponse, // response to match
+        bool // inner return type
+    );
+
+    // def try_receive_prefill
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_receive_prefill, // function name to create
+        try_receive_prefill, // thread-mode method name
+        (seq_id: usize), // arguments
+        MessageType::ReceivePrefill, // message to send
+        (seq_id), // message payload (must clone)
+        MessageType::ReceivePrefillResponse, // response to match
+        Option<Sequence> // inner return type
+    );
+
+    // check_prefill_status
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_check_prefill_status, // function name to create
+        check_prefill_status, // thread-mode method name
+        (seq_id: usize), // arguments
+        MessageType::CheckPrefillStatus, // message to send
+        (seq_id), // message payload (must clone)
+        MessageType::CheckPrefillStatusResponse, // response to match
+        bool // inner return type
+    );
+
+    // def try_swap_kvcache
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_swap_kvcache, // function name to create
+        swap_kvcache, // thread-mode method name
+        (mappings: HashMap<usize, usize>, swap_in: bool), // arguments
+        MessageType::KVCacheSwap, // message to send
+        ((mappings.clone(), swap_in)), // message payload (must clone)
+        MessageType::KVCacheSwapResponse, // response to match
+        bool // inner return type
+    );
+
+    // def try_send_kvcache
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_send_kvcache, // function name to create
+        send_kvcache, // thread-mode method name
+        (seq: &Sequence, token: u32), // arguments
+        MessageType::KvCacheSend, // message to send
+        ((seq.clone(), token)), // message payload (must clone)
+        MessageType::KvCacheSendResponse, // response to match
+        bool // inner return type
+    );
+
+    // def try_receive_kvcache
+    def_broadcast_message_to_runners!(
+        pub, // visibility
+        try_receive_kvcache, // function name to create
+        receive_kvcache, // thread-mode method name
+        (seq: &Sequence), // arguments
+        MessageType::KvCacheReceive, // message to send
+        (seq.clone()), // message payload (must clone)
+        MessageType::KvCacheReceiveResponse, // response to match
+        u32 // inner return type
+    );
 
     /// Can we swap-out `seq` (i.e., move its GPU blocks to CPU swap space)?
     #[allow(unused)]
@@ -260,7 +298,7 @@ impl BlockManager {
         }
 
         // Actual data copy GPU → CPU
-        self.kvcache_swap(mapping.clone(), false)?;
+        self.try_swap_kvcache(mapping.clone(), false)?;
         seq.swapped_time = Some(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -302,7 +340,7 @@ impl BlockManager {
             .collect();
 
         // Actual data copy CPU → GPU
-        self.kvcache_swap(mapping.clone(), true)?;
+        self.try_swap_kvcache(mapping.clone(), true)?;
 
         // Free CPU blocks now that data is back on GPU
         for cpu_bid in cpu_ids {
