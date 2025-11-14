@@ -278,6 +278,24 @@ fn main() -> anyhow::Result<()> {
                     false,
                 )?;
             }
+            Ok(MessageType::KvCacheRelease(id)) => {
+                let status = runner.release_remote_kvcache(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheReleaseResponse(status.is_ok() && status.unwrap_or(false)),
+                    false,
+                )?;
+            }
+            Ok(MessageType::CheckKvCacheRelease(id)) => {
+                let status = runner.check_kvcache_release(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::CheckKvCacheReleaseResponse(
+                        status.is_ok() && status.unwrap_or(false),
+                    ),
+                    false,
+                )?;
+            }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {
                     vllm_rs::log_error!("Runner exit with error: {:?}", e);

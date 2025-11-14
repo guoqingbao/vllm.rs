@@ -187,7 +187,7 @@ pub enum MessageType {
     ReceivePrefill(usize),
     ReceivePrefillResponse(Option<Sequence>),
 
-    // PD check prefill status
+    // Client: Check PD prefill status
     CheckPrefillStatus(usize),
     CheckPrefillStatusResponse(bool),
 
@@ -199,8 +199,17 @@ pub enum MessageType {
     KvCacheSend((Sequence, u32)),
     KvCacheSendResponse(bool),
 
+    // receive kvcache from PD server
     KvCacheReceive(Sequence),
     KvCacheReceiveResponse((bool, u32)),
+
+    // notify PD server to release kvcache
+    KvCacheRelease(usize),
+    KvCacheReleaseResponse(bool),
+
+    // Server: Check if a prefilled seq need to release kvcache
+    CheckKvCacheRelease(usize),
+    CheckKvCacheReleaseResponse(bool),
 
     /// shutdown subprocesses
     Shutdown,

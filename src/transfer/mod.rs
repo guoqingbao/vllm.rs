@@ -106,6 +106,8 @@ pub enum TransferMessage {
     TransferPrefill(Sequence),
     /// Server -> Client: Prefill finished, contains KV cache handle.
     TransferKvCache(FinishedPrefillData),
+    // Client -> Server: Request to release prefill kvcache
+    ReleaseKvCache(usize),
 }
 
 /// The main Transfer struct that orchestrates PD disaggregation.
@@ -116,6 +118,8 @@ pub struct Transfer {
     finished_data: Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
     /// (Server-side) Holds incoming prefill requests from the client.
     pending_prefills: Arc<Mutex<VecDeque<Sequence>>>,
+    /// (Server-side) Holds sequences that kvcache unreleased
+    server_tasks: Arc<RwLock<Vec<usize>>>,
     /// Handle to the background communication thread.
     comm_handle: Option<JoinHandle<()>>,
     rank: usize,
@@ -132,10 +136,13 @@ impl Transfer {
     ) -> Result<Self> {
         let finished_data = Arc::new(RwLock::new(HashMap::new()));
         let pending_prefills = Arc::new(Mutex::new(VecDeque::new()));
+        let server_tasks = Arc::new(RwLock::new(Vec::new()));
 
         // Clone Arcs for the background thread
         let thread_finished_data = finished_data.clone();
         let thread_pending_prefills = pending_prefills.clone();
+        let thread_server_tasks = server_tasks.clone();
+
         let communicator = Communicator::new(config.clone(), config.role.clone(), rank);
         // Start the background communication thread
         let thread_comm = communicator.clone();
@@ -143,6 +150,7 @@ impl Transfer {
             thread_comm.run_listener_loop(
                 thread_pending_prefills,
                 thread_finished_data,
+                thread_server_tasks,
                 model_loaded,
                 stop_flag,
             );
@@ -152,6 +160,7 @@ impl Transfer {
             config,
             finished_data,
             pending_prefills,
+            server_tasks,
             comm_handle,
             rank,
             communicator,
@@ -173,7 +182,6 @@ impl Transfer {
         if !self.is_client() {
             return Ok(false);
         }
-        crate::log_warn!("transfer_prefill Seq {}", seq.id);
         self.communicator
             .send(&TransferMessage::TransferPrefill(seq.clone()))
     }
@@ -290,6 +298,12 @@ impl Transfer {
         }
     }
 
+    /// (Client) Notify the server to release kvcache
+    pub fn release_remote_kvcache(&self, seq_id: usize) -> Result<bool> {
+        self.communicator
+            .send(&TransferMessage::ReleaseKvCache(seq_id))
+    }
+
     // --- Server-side API ---
 
     /// (Server) Tries to receive a new prefill request from the queue.
@@ -304,17 +318,6 @@ impl Transfer {
         server_gpu_cache: &Vec<(Tensor, Tensor)>,
         first_token: u32,
     ) -> Result<bool> {
-        crate::log_warn!(
-            "transfer_kv_cache Seq {}, first token {}, config {:?}",
-            seq.id,
-            first_token,
-            self.config,
-        );
-
-        // if !self.is_server() {
-        //     return Ok(false);
-        // }
-
         fn transfer_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
             sf: &Transfer,
             config: &PdConfig,
@@ -381,10 +384,6 @@ impl Transfer {
                 first_token,
                 transfer_handle,
             });
-            crate::log_warn!(
-                "Sending TransferMessage::TransferKvCache for Seq {}",
-                seq.id,
-            );
             // Send the finished data back to the client
             sf.communicator.send(&msg)
         }
@@ -407,6 +406,11 @@ impl Transfer {
             _ => candle_core::bail!("Invalid kvcache dtype!"),
         };
         Ok(true)
+    }
+
+    /// (Server) Checks if a specific prefill need to release kvcache.
+    pub fn check_kvcache_release(&self, seq_id: usize) -> Result<bool> {
+        Ok(!self.server_tasks.read().contains(&seq_id))
     }
 }
 

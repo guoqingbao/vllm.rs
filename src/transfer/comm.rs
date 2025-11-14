@@ -116,6 +116,7 @@ impl Communicator {
         &self,
         pending_prefills: Arc<Mutex<VecDeque<crate::core::sequence::Sequence>>>,
         finished_data: Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
+        server_tasks: Arc<RwLock<Vec<usize>>>,
         model_loaded: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
     ) {
@@ -150,7 +151,12 @@ impl Communicator {
             // Now that connection is established, self.stream is Some.
             loop {
                 match self.receive() {
-                    Ok(msg) => self.handle_received_message(msg, &pending_prefills, &finished_data),
+                    Ok(msg) => self.handle_received_message(
+                        msg,
+                        &pending_prefills,
+                        &finished_data,
+                        &server_tasks,
+                    ),
                     Err(e) => {
                         crate::log_error!(
                             "[{:?} Rank {}] Connection error: {}. Re-establishing...",
@@ -270,20 +276,36 @@ impl Communicator {
         msg: TransferMessage,
         pending_prefills: &Arc<Mutex<VecDeque<crate::core::sequence::Sequence>>>,
         finished_data: &Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
+        server_tasks: &Arc<RwLock<Vec<usize>>>,
     ) {
         match (&self.role, msg) {
             // Client receives KV cache
             (PdRole::Client, TransferMessage::TransferKvCache(data)) => {
-                crate::log_warn!(
-                    "PD client received kvcache for the transfered prefill (Seq {})",
+                crate::log_info!(
+                    "[PD Client Rank {}] KvCache for Seq {} received",
+                    self.rank,
                     data.seq_id
                 );
                 finished_data.write().insert(data.seq_id, data);
             }
             // Server receives Prefill request
             (PdRole::Server, TransferMessage::TransferPrefill(seq)) => {
-                crate::log_warn!("PD server received a transfered prefill (Seq {})", seq.id);
+                crate::log_info!(
+                    "[PD Server Rank {}] Received prefill request for Seq {} ({} tokens)",
+                    self.rank,
+                    seq.id,
+                    seq.len()
+                );
+                server_tasks.write().push(seq.id); // indicate working in progress
                 pending_prefills.lock().push_back(seq);
+            }
+            (PdRole::Server, TransferMessage::ReleaseKvCache(seq_id)) => {
+                crate::log_info!(
+                    "[PD Server Rank {}] Release KvCache for Seq {}",
+                    self.rank,
+                    seq_id
+                );
+                server_tasks.write().retain(|&id| id != seq_id); // remove, indicate the server need to release this cache
             }
             // Mismatched messages (warn and drop)
             (PdRole::Client, TransferMessage::TransferPrefill(_)) => {
@@ -295,6 +317,12 @@ impl Communicator {
             (PdRole::Server, TransferMessage::TransferKvCache(_)) => {
                 crate::log_warn!(
                     "[PD Server Rank {}] Received unexpected TransferKvCache msg",
+                    self.rank
+                );
+            }
+            (PdRole::Client, TransferMessage::ReleaseKvCache(_)) => {
+                crate::log_warn!(
+                    "[PD Client Rank {}] Received unexpected ReleaseKvCache msg",
                     self.rank
                 );
             }

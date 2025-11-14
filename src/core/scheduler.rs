@@ -158,6 +158,13 @@ impl Scheduler {
                 continue;
             }
             if is_pd_server && seq.status == SequenceStatus::Cached {
+                if let Ok(success) = self.block_manager.try_check_kvcache_release(seq.id) {
+                    if success {
+                        // Client successfully received kvcache and we need to release it on the server
+                        crate::log_warn!("PD Server: release prefilled kvcache for Seq {}", seq.id);
+                        seq.status = SequenceStatus::Finished;
+                    }
+                }
                 // in PD server mode, we do not decode, filter out seq have been prefilled
                 continue;
             }
@@ -209,7 +216,7 @@ impl Scheduler {
                 {
                     Ok(success) => {
                         crate::log_warn!(
-                            "PD Server: transferred KV cache for seq {} {}",
+                            "PD Server: transferred KV cache for seq {} ({})",
                             seq_id,
                             if success { "success" } else { "faild" }
                         );
@@ -218,6 +225,20 @@ impl Scheduler {
                             // if successed, we need to mantain the resources
                             // until the client ask explicitly to release or cache not sufficient
                             seq.status = SequenceStatus::Cached;
+                            let cur_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as usize;
+                            let time_costs = cur_time - seq.created_time();
+                            if time_costs / 100 > 0 && seq.len() > 0 {
+                                crate::log_info!(
+                                    "PD Prefilling [seq_id {}]: {} tokens in {:.2}s ({:.2} tokens/s)",
+                                    seq_id,
+                                    seq.len(),
+                                    time_costs as f32 / 1000f32,
+                                    seq.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
+                                )
+                            }
                         } else {
                             // release resources immediately if failed
                             seq.status = SequenceStatus::Finished;
@@ -604,6 +625,7 @@ impl Scheduler {
                             "KvCache Transfer: Seq {} prefill finished and received!",
                             seq.id,
                         );
+                        self.block_manager.try_release_remote_kvcache(seq.id)?;
                     } else {
                         crate::log_error!(
                             "KvCache Transfer: Seq {} prefill finished but failed to receive. Aborting seq.",

@@ -186,61 +186,87 @@ impl BlockManager {
     // def try_receive_prefill
     def_broadcast_message_to_runners!(
         pub, // visibility
-        try_receive_prefill, // function name to create
-        try_receive_prefill, // thread-mode method name
-        (seq_id: usize), // arguments
-        MessageType::ReceivePrefill, // message to send
-        (seq_id), // message payload (must clone)
-        MessageType::ReceivePrefillResponse, // response to match
-        Option<Sequence> // inner return type
+        try_receive_prefill,
+        try_receive_prefill,
+        (seq_id: usize),
+        MessageType::ReceivePrefill,
+        (seq_id),
+        MessageType::ReceivePrefillResponse,
+        Option<Sequence>
     );
 
-    // check_prefill_status
+    // def try_check_prefill_status
     def_broadcast_message_to_runners!(
-        pub, // visibility
-        try_check_prefill_status, // function name to create
-        check_prefill_status, // thread-mode method name
-        (seq_id: usize), // arguments
-        MessageType::CheckPrefillStatus, // message to send
-        (seq_id), // message payload (must clone)
-        MessageType::CheckPrefillStatusResponse, // response to match
-        bool // inner return type
+        pub,
+        try_check_prefill_status,
+        check_prefill_status,
+        (seq_id: usize),
+        MessageType::CheckPrefillStatus,
+        (seq_id),
+        MessageType::CheckPrefillStatusResponse,
+        bool
     );
 
     // def try_swap_kvcache
     def_broadcast_message_to_runners!(
-        pub, // visibility
-        try_swap_kvcache, // function name to create
-        swap_kvcache, // thread-mode method name
-        (mappings: HashMap<usize, usize>, swap_in: bool), // arguments
-        MessageType::KVCacheSwap, // message to send
-        ((mappings.clone(), swap_in)), // message payload (must clone)
-        MessageType::KVCacheSwapResponse, // response to match
-        bool // inner return type
+        pub,
+        try_swap_kvcache,
+        swap_kvcache,
+        (mappings: HashMap<usize, usize>, swap_in: bool),
+        MessageType::KVCacheSwap,
+        ((mappings.clone(), swap_in)),
+        MessageType::KVCacheSwapResponse,
+        bool
     );
 
     // def try_send_kvcache
     def_broadcast_message_to_runners!(
-        pub, // visibility
-        try_send_kvcache, // function name to create
-        send_kvcache, // thread-mode method name
-        (seq: &Sequence, token: u32), // arguments
-        MessageType::KvCacheSend, // message to send
-        ((seq.clone(), token)), // message payload (must clone)
-        MessageType::KvCacheSendResponse, // response to match
-        bool // inner return type
+        pub,
+        try_send_kvcache,
+        send_kvcache,
+        (seq: &Sequence, token: u32),
+        MessageType::KvCacheSend,
+        ((seq.clone(), token)),
+        MessageType::KvCacheSendResponse,
+        bool
     );
 
     // def try_receive_kvcache
     def_broadcast_message_to_runners!(
-        pub, // visibility
-        try_receive_kvcache, // function name to create
-        receive_kvcache, // thread-mode method name
-        (seq: &Sequence), // arguments
-        MessageType::KvCacheReceive, // message to send
-        (seq.clone()), // message payload (must clone)
-        MessageType::KvCacheReceiveResponse, // response to match
-        (bool, u32) // inner return type
+        pub,
+        try_receive_kvcache,
+        receive_kvcache,
+        (seq: &Sequence),
+        MessageType::KvCacheReceive,
+        (seq.clone()),
+        MessageType::KvCacheReceiveResponse,
+        (bool, u32)
+    );
+
+    // After the client received prefill kvcache, it can call PD server to release
+    // corresponding kvcache backup
+    // def try_release_remote_kvcache
+    def_broadcast_message_to_runners!(
+        pub,
+        try_release_remote_kvcache,
+        release_remote_kvcache,
+        (seq_id: usize),
+        MessageType::KvCacheRelease,
+        (seq_id),
+        MessageType::KvCacheReleaseResponse,
+        bool
+    );
+
+    // def try_check_kvcache_release
+    def_broadcast_message_to_runners!(
+        pub,
+        try_check_kvcache_release,
+        check_kvcache_release,
+        (seq_id: usize),
+        MessageType::CheckKvCacheRelease,
+        (seq_id),
+        MessageType::CheckKvCacheReleaseResponse,
+        bool
     );
 
     /// Can we swap-out `seq` (i.e., move its GPU blocks to CPU swap space)?
