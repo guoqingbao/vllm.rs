@@ -200,7 +200,7 @@ pub enum MessageType {
     KvCacheSendResponse(bool),
 
     KvCacheReceive(Sequence),
-    KvCacheReceiveResponse(u32),
+    KvCacheReceiveResponse((bool, u32)),
 
     /// shutdown subprocesses
     Shutdown,

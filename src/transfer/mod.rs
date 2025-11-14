@@ -13,8 +13,11 @@ use std::thread::JoinHandle;
 mod comm;
 #[cfg(feature = "cuda")]
 mod cuda_remote;
+#[cfg(feature = "python")]
+use pyo3::pyclass;
 
 /// Defines the role of the current inference engine instance.
+#[cfg_attr(feature = "python", pyclass)]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum PdRole {
     /// The main instance, handles decoding and orchestrates prefills.
@@ -23,34 +26,41 @@ pub enum PdRole {
     Server = 2,
 }
 
-/// Configuration for the Transfer sub-system.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct PdConfig {
-    /// Is this instance a Client or a PDServer?
-    pub role: PdRole,
-    /// The network address for the PDServer to listen on (e.g., "0.0.0.0:9000").
-    // pub server_addr: String,
-    // /// The network address for the Client to connect to (e.g., "1.2.3.4:9000").
-    // pub client_addr: String,
-    // /// The CUDA device IDs this instance is managing (for multi-rank).
-    // pub device_ids: Vec<usize>,
-    // /// The current rank of this process.
-    // pub rank: usize,
-    // /// Total number of ranks in the world (e.g., 2 for 2-GPU tensor parallel).
-    // pub world_size: usize,
-    /// The chosen transfer method.
-    pub method: PdMethod,
-
-    pub url: Option<String>,
-}
-
 /// The mechanism used to transfer KV cache data.
+#[cfg_attr(feature = "python", pyclass)]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum PdMethod {
     /// Use CUDA IPC handles for D2D transfer (fastest, local machine only).
     LocalIpc = 1,
     /// Use TCP for remote transfer (inter-machine).
     RemoteTcp = 2,
+}
+
+#[cfg(not(feature = "python"))]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PdConfig {
+    /// Is this instance a Client or a PDServer?
+    pub role: PdRole,
+    /// The chosen transfer method.
+    pub method: PdMethod,
+    // The network address for the PD Server or client to listen on/connect to (e.g., "0.0.0.0:9000")
+    pub url: Option<String>,
+}
+
+/// Configuration for the Transfer sub-system.
+#[cfg(feature = "python")]
+#[pyclass]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PdConfig {
+    /// Is this instance a Client or a PDServer?
+    #[pyo3(get, set)]
+    pub role: PdRole,
+    /// The chosen transfer method.
+    #[pyo3(get, set)]
+    pub method: PdMethod,
+    // The network address for the PD Server or client to listen on/connect to (e.g., "0.0.0.0:9000")
+    #[pyo3(get, set)]
+    pub url: Option<String>,
 }
 
 /// Serializable handle for a CUDA IPC memory region.
@@ -187,7 +197,7 @@ impl Transfer {
         &self,
         seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
-    ) -> Result<u32> {
+    ) -> Result<(bool, u32)> {
         crate::log_warn!("receive_kv_cache Seq {}", seq.id);
 
         let status = self.check_prefill_finished(seq.id)?;
@@ -199,7 +209,7 @@ impl Transfer {
             sf: &Transfer,
             seq: &Sequence,
             local_gpu_cache: &Vec<(Tensor, Tensor)>,
-        ) -> Result<u32> {
+        ) -> Result<(bool, u32)> {
             let local_gpu_ids = seq.block_table.clone();
             let local_device = local_gpu_cache[0].0.device();
 
@@ -226,8 +236,11 @@ impl Transfer {
                         let remote_v_tensor =
                             cuda_remote::open_ipc_handle::<T>(v_handle, local_device)?;
 
+                        crate::log_warn!("got remote_k_tensor {:?}", remote_k_tensor);
+                        crate::log_warn!("got remote_v_tensor {:?}", remote_v_tensor);
+
                         // Use swap_blocks to perform a D2D (peer) copy
-                        // Copy from: remote_k_tensor, To: local_gpu_cache[i].0
+                        // Copy from: remote_k_tensor, To: local_gpu_cache
                         attention_rs::cache::swap_blocks(
                             &remote_k_tensor,
                             &local_gpu_cache[i].0,
@@ -280,7 +293,7 @@ impl Transfer {
                     }
                 }
             }
-            Ok(token)
+            Ok((true, token))
         }
         let dtype = local_gpu_cache[0].0.dtype();
         match dtype {

@@ -262,9 +262,12 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(MessageType::KvCacheReceive(sequence)) => {
                 let ret = runner.receive_kvcache(&sequence);
+                if ret.is_err() {
+                    vllm_rs::log_error!("KvCacheReceive failed: {:?}", ret);
+                }
                 send_local(
                     &mut vec![stream.try_clone()?],
-                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or(0)),
+                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or((false, 0))),
                     false,
                 )?;
             }

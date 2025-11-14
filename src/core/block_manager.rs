@@ -240,7 +240,7 @@ impl BlockManager {
         MessageType::KvCacheReceive, // message to send
         (seq.clone()), // message payload (must clone)
         MessageType::KvCacheReceiveResponse, // response to match
-        u32 // inner return type
+        (bool, u32) // inner return type
     );
 
     /// Can we swap-out `seq` (i.e., move its GPU blocks to CPU swap space)?

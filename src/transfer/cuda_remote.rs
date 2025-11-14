@@ -4,7 +4,7 @@ use candle_core::cuda_backend::cudarc::driver::sys::{lib, CUdeviceptr, CUipcMemH
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use candle_core::{Device, Result, Tensor, WithDType};
 use std::collections::HashMap;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 /// (Server) Gets a serializable IPC handle for a GPU tensor's memory.
 pub(super) fn get_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDType>(
     tensor: &Tensor,
@@ -36,7 +36,7 @@ pub(super) fn get_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDType
 pub(super) fn open_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDType>(
     handle: &CudaIpcMemHandle,
     device: &Device,
-) -> Result<Tensor> {
+) -> Result<ManuallyDrop<Tensor>> {
     use candle_core::cuda_backend::cudarc::driver::CudaSlice;
 
     let mut ptr: CUdeviceptr = 0;
@@ -62,7 +62,11 @@ pub(super) fn open_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDTyp
     };
 
     let slice = candle_core::CudaStorage::wrap_cuda_slice(src_slice, dev.clone());
-    Tensor::from_storage(candle_core::Storage::Cuda(slice), handle.1.clone())
+    // We created a virtual Tensor, it stored the remote mem handle, so we should not release it
+    Ok(ManuallyDrop::new(Tensor::from_storage(
+        candle_core::Storage::Cuda(slice),
+        handle.1.clone(),
+    )?))
 }
 
 /// (Server) Copies specific blocks from a GPU tensor to a new, contiguous CPU tensor.

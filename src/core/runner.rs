@@ -1,6 +1,7 @@
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
+use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -267,6 +268,12 @@ impl ModelRunner {
         #[cfg(not(feature = "cuda"))]
         let num_cpu_blocks = 1; // dummy cpu kvcache on Metal
 
+        let sync_alloc = if let Some(p_cfg) = &econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        };
+
         if cfg!(feature = "flash-context") {
             assert!(
                 !econfig.fp8_kvcache.unwrap_or(false),
@@ -281,15 +288,17 @@ impl ModelRunner {
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
             for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::zeros(
+                let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     device,
+                    sync_alloc,
                 )?;
-                let value_blocks = Tensor::zeros(
+                let value_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     device,
+                    sync_alloc,
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
@@ -329,15 +338,17 @@ impl ModelRunner {
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
             for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::zeros(
+                let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
                     device,
+                    sync_alloc,
                 )?;
-                let value_blocks = Tensor::zeros(
+                let value_blocks = Tensor::empty(
                     (num_gpu_blocks, vshape.0, vshape.1, vshape.2),
                     cache_dtype,
                     device,
+                    sync_alloc,
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
@@ -473,7 +484,7 @@ impl ModelRunner {
         }
     }
 
-    pub fn receive_kvcache(&self, seq: &Sequence) -> Result<u32> {
+    pub fn receive_kvcache(&self, seq: &Sequence) -> Result<(bool, u32)> {
         crate::log_warn!("receive_kvcache Seq {}", seq.id);
 
         if let Some(transfer) = &self.transfer {

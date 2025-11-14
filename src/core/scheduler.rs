@@ -147,12 +147,17 @@ impl Scheduler {
             self.try_swap_out(preempt_ids.clone());
         }
 
+        let is_pd_server = self.is_pd_mode() && self.is_pd_server();
         for (idx, seq) in self.running.iter_mut().enumerate() {
             if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
                 break;
             }
             if !self.block_manager.can_append(&seq) {
                 // filter out seq that unable to acquire resources
+                continue;
+            }
+            if is_pd_server && seq.status == SequenceStatus::Cached {
+                // in PD server mode, we do not decode, filter out seq have been prefilled
                 continue;
             }
             self.block_manager.may_append(seq)?;
@@ -201,8 +206,22 @@ impl Scheduler {
                     .block_manager
                     .try_send_kvcache(&self.running[idx], token)
                 {
-                    Ok(_) => {
-                        crate::log_warn!("PD Server: transferred KV cache for seq {}", seq_id);
+                    Ok(success) => {
+                        crate::log_warn!(
+                            "PD Server: transferred KV cache for seq {} {}",
+                            seq_id,
+                            if success { "success" } else { "faild" }
+                        );
+                        let seq = &mut self.running[idx];
+                        if success {
+                            // if successed, we need to mantain the resources
+                            // until the client ask explicitly to release or cache not sufficient
+                            seq.status = SequenceStatus::Cached;
+                        } else {
+                            // release resources immediately if failed
+                            seq.status = SequenceStatus::Finished;
+                            self.block_manager.deallocate(seq);
+                        }
                     }
                     Err(e) => {
                         crate::log_error!(
@@ -213,10 +232,6 @@ impl Scheduler {
                     }
                 }
 
-                let seq = &mut self.running[idx];
-                // Mark as finished on the server to free its resources
-                seq.status = SequenceStatus::Finished;
-                self.block_manager.deallocate(seq);
                 continue; // Go to next sequence in postprocess
             }
 
@@ -571,32 +586,43 @@ impl Scheduler {
             self.block_manager.allocate(&mut self.transferred[idx])?;
 
             // Perform the actual KV cache data transfer
+            let mut success = false;
             match self
                 .block_manager
                 .try_receive_kvcache(&self.transferred[idx])
             {
-                Ok(first_token) => {
-                    // Update sequence and move to running
+                Ok((ret, first_token)) => {
                     let seq = &mut self.transferred[idx];
-                    seq.append_token(first_token);
-                    seq.status = SequenceStatus::Running;
-                    crate::log_info!(
-                        "KvCache Transfer: Seq {} prefill finished and received!",
-                        seq.id
-                    );
+                    success = ret;
+                    if success {
+                        // Update sequence and move to running
+                        seq.append_token(first_token);
+                        seq.status = SequenceStatus::Running;
+                        self.running.push(seq.clone());
+                        crate::log_info!(
+                            "KvCache Transfer: Seq {} prefill finished and received!",
+                            seq.id,
+                        );
+                    } else {
+                        crate::log_error!(
+                            "KvCache Transfer: Seq {} prefill finished but failed to receive. Aborting seq.",
+                            seq.id,
+                        );
+                    }
                 }
                 Err(e) => {
                     crate::log_error!(
                         "KvCache Transfer: Failed to receive KV cache for seq {}: {}. Aborting seq.",
                         seq_id, e
                     );
-                    let seq = &mut self.transferred[idx];
-                    seq.status = SequenceStatus::Finished; // Mark as failed
-                    self.block_manager.deallocate(seq);
                 }
             }
-            let seq = &self.transferred[idx];
-            self.running.push(seq.clone());
+
+            let seq = &mut self.transferred[idx];
+            if !success {
+                seq.status = SequenceStatus::Finished; // Mark as failed
+                self.running.push(seq.clone());
+            }
             finished_seq_ids.push(seq.id);
         }
 
