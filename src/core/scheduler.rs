@@ -28,7 +28,7 @@ const MIN_NUM_SCHEDULED_REQS: usize = 5;
 pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
-pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 1000; // check prefill status on PD server every 1 second
+pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 500; // check prefill status on PD server every 1 second
 
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
@@ -72,7 +72,7 @@ impl Scheduler {
         let mut num_tokens = 0;
 
         // PD server: Check for new incoming prefill requests
-        if self.is_pd_mode() && self.is_pd_server() {
+        if self.is_pd_server() {
             while let Ok(Some(seq)) = self.block_manager.try_receive_prefill(0) {
                 // Add to waiting queue.
                 self.waiting.push_back(seq);
@@ -81,7 +81,8 @@ impl Scheduler {
 
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
-            if self.is_pd_mode() && !self.is_pd_server() {
+            // We do not transfer context-cache request
+            if self.is_pd_mode() && !self.is_pd_server() && seq.status != SequenceStatus::Cached {
                 if let Ok(_) = self.block_manager.try_transfer_prefill(&seq) {
                     // Client: Offload prefill request to PD server
                     crate::log_warn!("Prefill request (Seq {}) transfered to PD server.", seq.id);
@@ -148,7 +149,7 @@ impl Scheduler {
             self.try_swap_out(preempt_ids.clone());
         }
 
-        let is_pd_server = self.is_pd_mode() && self.is_pd_server();
+        let is_pd_server = self.is_pd_server();
         for (idx, seq) in self.running.iter_mut().enumerate() {
             if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
                 break;
@@ -163,6 +164,7 @@ impl Scheduler {
                         // Client successfully received kvcache and we need to release it on the server
                         crate::log_warn!("PD Server: release prefilled kvcache for Seq {}", seq.id);
                         seq.status = SequenceStatus::Finished;
+                        self.block_manager.deallocate(seq);
                     }
                 }
                 // in PD server mode, we do not decode, filter out seq have been prefilled
@@ -209,7 +211,7 @@ impl Scheduler {
 
             // Since all reqeusts in PD server are prefill request, we need to finish and transfer
             // the kvcache in the first postprocess for each request.
-            if self.is_pd_mode() && self.is_pd_server() {
+            if self.is_pd_server() {
                 match self
                     .block_manager
                     .try_send_kvcache(&self.running[idx], token)
@@ -340,10 +342,11 @@ impl Scheduler {
     }
 
     pub fn clear_finished(&mut self) {
+        let is_pd_server = self.is_pd_server();
         let mut remove_ids = Vec::new();
         for i in 0..self.running.len() {
             let seq: &mut Sequence = &mut self.running[i];
-            if seq.status == SequenceStatus::Cached {
+            if seq.status == SequenceStatus::Cached && !is_pd_server {
                 seq.output_ids.clear();
                 remove_ids.push(seq.id);
                 self.cached.push(seq.clone());

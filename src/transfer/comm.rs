@@ -124,20 +124,19 @@ impl Communicator {
         loop {
             match self.establish_connection() {
                 Ok(_) => {
-                    crate::log_info!(
-                        "[{:?} Rank {}] PD Connection established.",
-                        self.role,
-                        self.rank
-                    );
+                    if self.rank == 0 {
+                        crate::log_info!("[{:?}] PD Connection established.", self.role,);
+                    }
                 }
                 Err(e) => {
                     if model_loaded.load(Ordering::SeqCst) {
-                        crate::log_error!(
-                            "[{:?} Rank {}] Failed to establish PD connection: {}. Retrying in 5s...",
-                            self.role,
-                            self.rank,
-                            e
-                        );
+                        if self.rank == 0 {
+                            crate::log_error!(
+                                "[{:?}] Failed to establish PD connection: {}. Retrying in 5s...",
+                                self.role,
+                                e
+                            );
+                        }
                     }
                     if stop_flag.load(Ordering::SeqCst) {
                         break;
@@ -224,11 +223,13 @@ impl Communicator {
                     loop {
                         match LocalStream::connect(ns_name.clone()) {
                             Ok(stream) => {
-                                crate::log_info!(
-                                    "[PD Client Rank {}] Connected to LocalIPC server at {}",
-                                    self.rank,
-                                    sock_name
-                                );
+                                if self.rank == 0 {
+                                    crate::log_info!(
+                                        "PD Client: Connected to LocalIPC server at {}",
+                                        sock_name
+                                    );
+                                }
+
                                 break (
                                     CommStream::Local(stream.try_clone()?),
                                     CommStream::Local(stream),
@@ -245,16 +246,10 @@ impl Communicator {
                 }
                 PdRole::Server => {
                     let listener = ListenerOptions::new().name(ns_name).create_sync()?;
-                    crate::log_info!(
-                        "[PD Server Rank {}] LocalIPC listener created. Waiting for client at {}",
-                        self.rank,
-                        sock_name
-                    );
                     let stream = listener.accept()?;
-                    crate::log_info!(
-                        "[PD Server Rank {}] Accepted LocalIPC connection",
-                        self.rank
-                    );
+                    if self.rank == 0 {
+                        crate::log_info!("PD Server: Accepted LocalIPC connection",);
+                    }
                     // Split the LocalStream by cloning its handle
                     (
                         CommStream::Local(stream.try_clone()?),
@@ -281,30 +276,27 @@ impl Communicator {
         match (&self.role, msg) {
             // Client receives KV cache
             (PdRole::Client, TransferMessage::TransferKvCache(data)) => {
-                crate::log_info!(
-                    "[PD Client Rank {}] KvCache for Seq {} received",
-                    self.rank,
-                    data.seq_id
-                );
+                if self.rank == 0 {
+                    crate::log_info!("PD Client: KvCache for Seq {} received", data.seq_id);
+                }
                 finished_data.write().insert(data.seq_id, data);
             }
             // Server receives Prefill request
             (PdRole::Server, TransferMessage::TransferPrefill(seq)) => {
-                crate::log_info!(
-                    "[PD Server Rank {}] Received prefill request for Seq {} ({} tokens)",
-                    self.rank,
-                    seq.id,
-                    seq.len()
-                );
+                if self.rank == 0 {
+                    crate::log_info!(
+                        "PD Server: received TransferPrefill for Seq {} ({} tokens)",
+                        seq.id,
+                        seq.len()
+                    );
+                }
                 server_tasks.write().push(seq.id); // indicate working in progress
                 pending_prefills.lock().push_back(seq);
             }
             (PdRole::Server, TransferMessage::ReleaseKvCache(seq_id)) => {
-                crate::log_info!(
-                    "[PD Server Rank {}] Release KvCache for Seq {}",
-                    self.rank,
-                    seq_id
-                );
+                if self.rank == 0 {
+                    crate::log_info!("PD Server: received ReleaseKvCache for Seq {}", seq_id);
+                }
                 server_tasks.write().retain(|&id| id != seq_id); // remove, indicate the server need to release this cache
             }
             // Mismatched messages (warn and drop)
