@@ -104,6 +104,7 @@ pub struct FinishedPrefillData {
 pub enum TransferMessage {
     /// Client -> Server: Request to prefill a new sequence.
     TransferPrefill(Sequence),
+    AvailableTokenResponse(usize),
     /// Server -> Client: Prefill finished, contains KV cache handle.
     TransferKvCache(FinishedPrefillData),
     // Client -> Server: Request to release prefill kvcache
@@ -120,6 +121,7 @@ pub struct Transfer {
     pending_prefills: Arc<Mutex<VecDeque<Sequence>>>,
     /// (Server-side) Holds sequences that kvcache unreleased
     server_tasks: Arc<RwLock<Vec<usize>>>,
+    available_tokens: Arc<RwLock<usize>>,
     /// Handle to the background communication thread.
     comm_handle: Option<JoinHandle<()>>,
     rank: usize,
@@ -137,11 +139,12 @@ impl Transfer {
         let finished_data = Arc::new(RwLock::new(HashMap::new()));
         let pending_prefills = Arc::new(Mutex::new(VecDeque::new()));
         let server_tasks = Arc::new(RwLock::new(Vec::new()));
-
+        let available_tokens = Arc::new(RwLock::new(0));
         // Clone Arcs for the background thread
         let thread_finished_data = finished_data.clone();
         let thread_pending_prefills = pending_prefills.clone();
         let thread_server_tasks = server_tasks.clone();
+        let thread_available_tokens = available_tokens.clone();
 
         let communicator = Communicator::new(config.clone(), config.role.clone(), rank);
         // Start the background communication thread
@@ -151,6 +154,7 @@ impl Transfer {
                 thread_pending_prefills,
                 thread_finished_data,
                 thread_server_tasks,
+                thread_available_tokens,
                 model_loaded,
                 stop_flag,
             );
@@ -164,6 +168,7 @@ impl Transfer {
             comm_handle,
             rank,
             communicator,
+            available_tokens,
         })
     }
 
@@ -181,6 +186,10 @@ impl Transfer {
     pub fn transfer_prefill(&self, seq: &Sequence) -> Result<bool> {
         if !self.is_client() {
             return Ok(false);
+        }
+        let available_tokens = *self.available_tokens.read();
+        if available_tokens != 0 && seq.len() + 1 > available_tokens {
+            candle_core::bail!("PD Client: transfer prefill failed because prefill length {} > available tokens {} on PD Server", seq.len(), available_tokens);
         }
         self.communicator
             .send(&TransferMessage::TransferPrefill(seq.clone()))
@@ -307,8 +316,21 @@ impl Transfer {
     // --- Server-side API ---
 
     /// (Server) Tries to receive a new prefill request from the queue.
-    pub fn try_receive_prefill_request(&self) -> Option<Sequence> {
-        self.pending_prefills.lock().pop_front()
+    pub fn try_receive_prefill_request(&self, available_tokens: usize) -> Option<Sequence> {
+        *self.available_tokens.write() = available_tokens;
+        let _ = self
+            .communicator
+            .send(&TransferMessage::AvailableTokenResponse(available_tokens))
+            .ok()?;
+        if let Some(seq) = self.pending_prefills.lock().pop_front() {
+            if seq.len() + 1 < available_tokens {
+                Some(seq)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     /// (Server) Creates the KVTransferHandle and sends it to the client.

@@ -117,6 +117,7 @@ impl Communicator {
         pending_prefills: Arc<Mutex<VecDeque<crate::core::sequence::Sequence>>>,
         finished_data: Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
         server_tasks: Arc<RwLock<Vec<usize>>>,
+        available_tokens: Arc<RwLock<usize>>,
         model_loaded: Arc<AtomicBool>,
         stop_flag: Arc<AtomicBool>,
     ) {
@@ -155,6 +156,7 @@ impl Communicator {
                         &pending_prefills,
                         &finished_data,
                         &server_tasks,
+                        &available_tokens,
                     ),
                     Err(e) => {
                         crate::log_error!(
@@ -272,6 +274,7 @@ impl Communicator {
         pending_prefills: &Arc<Mutex<VecDeque<crate::core::sequence::Sequence>>>,
         finished_data: &Arc<RwLock<HashMap<usize, FinishedPrefillData>>>,
         server_tasks: &Arc<RwLock<Vec<usize>>>,
+        available_tokens: &Arc<RwLock<usize>>,
     ) {
         match (&self.role, msg) {
             // Client receives KV cache
@@ -292,6 +295,15 @@ impl Communicator {
                 }
                 server_tasks.write().push(seq.id); // indicate working in progress
                 pending_prefills.lock().push_back(seq);
+            }
+            (PdRole::Client, TransferMessage::AvailableTokenResponse(num_tokens)) => {
+                *available_tokens.write() = num_tokens;
+            }
+            (PdRole::Server, TransferMessage::AvailableTokenResponse(_)) => {
+                crate::log_warn!(
+                    "[PD Client Rank {}] Received unexpected AvailableTokenResponse msg",
+                    self.rank
+                );
             }
             (PdRole::Server, TransferMessage::ReleaseKvCache(seq_id)) => {
                 if self.rank == 0 {

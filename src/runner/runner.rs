@@ -232,6 +232,9 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(MessageType::TransferPrefill(sequence)) => {
                 let ret = runner.transfer_prefill(&sequence);
+                if ret.is_err() {
+                    vllm_rs::log_error!("Prefill transfer failed: {:?}", ret);
+                }
                 send_local(
                     &mut vec![stream.try_clone()?],
                     &MessageType::TransferPrefillResponse(ret.is_ok()),

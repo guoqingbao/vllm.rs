@@ -73,7 +73,10 @@ impl Scheduler {
 
         // PD server: Check for new incoming prefill requests
         if self.is_pd_server() {
-            while let Ok(Some(seq)) = self.block_manager.try_receive_prefill(0) {
+            while let Ok(Some(seq)) = self
+                .block_manager
+                .try_receive_prefill(self.get_available_kv_tokens())
+            {
                 // Add to waiting queue.
                 self.waiting.push_back(seq);
             }
@@ -83,16 +86,26 @@ impl Scheduler {
         while let Some(mut seq) = self.waiting.pop_front() {
             // We do not transfer context-cache request
             if self.is_pd_mode() && !self.is_pd_server() && seq.status != SequenceStatus::Cached {
-                if let Ok(_) = self.block_manager.try_transfer_prefill(&seq) {
+                if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
                     // Client: Offload prefill request to PD server
-                    crate::log_warn!("Prefill request (Seq {}) transfered to PD server.", seq.id);
-                    seq.swapped_time = Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .expect("Time went backwards")
-                            .as_millis() as usize,
-                    );
-                    self.transferred.push_back(seq);
+                    if success {
+                        crate::log_warn!(
+                            "Prefill request (Seq {}) transfered to PD server.",
+                            seq.id
+                        );
+                        seq.swapped_time = Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as usize,
+                        );
+                        self.transferred.push_back(seq);
+                    } else {
+                        crate::log_warn!(
+                            "Unable transfer prefill request (Seq {}) to PD server. Retry later...",
+                            seq.id
+                        );
+                    }
                     continue; // Sent to PD server, move to next
                 }
             }

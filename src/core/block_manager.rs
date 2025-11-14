@@ -188,9 +188,9 @@ impl BlockManager {
         pub, // visibility
         try_receive_prefill,
         try_receive_prefill,
-        (seq_id: usize),
+        (available_tokens: usize),
         MessageType::ReceivePrefill,
-        (seq_id),
+        (available_tokens),
         MessageType::ReceivePrefillResponse,
         Option<Sequence>
     );
