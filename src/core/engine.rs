@@ -173,6 +173,13 @@ impl LLMEngine {
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
         econfig.num_shards = Some(num_shards);
         config.fp8_kvcache = econfig.fp8_kvcache;
+
+        let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        };
+
         log_info!("{:?}", econfig);
 
         log_info!("{:?}\n", config_tokenizer);
@@ -259,12 +266,15 @@ impl LLMEngine {
                 transfer,
             )?;
 
-            #[cfg(all(feature = "cuda", feature = "graph"))]
-            match model_runner.warmup_capture() {
-                Ok(_) => {
-                    log_info!("Cuda graph captured for performance enhancement!")
+            if !is_pd_server {
+                //No graph capture for PD server
+                #[cfg(all(feature = "cuda", feature = "graph"))]
+                match model_runner.warmup_capture() {
+                    Ok(_) => {
+                        log_info!("Cuda graph captured for performance enhancement!")
+                    }
+                    Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
                 }
-                Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
             }
 
             model_loaded.store(true, Ordering::SeqCst);
