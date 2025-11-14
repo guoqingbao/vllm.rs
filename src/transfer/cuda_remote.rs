@@ -1,4 +1,4 @@
-// src/core/transfer/cuda.rs
+// src/core/transfer/cuda_remote.rs
 use super::CudaIpcMemHandle;
 use candle_core::cuda_backend::cudarc::driver::sys::{lib, CUdeviceptr, CUipcMemHandle};
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;

@@ -21,7 +21,7 @@ class PdMethod(Enum):
     RemoteTcp = 2
 
 @dataclass 
-class PdConfig(Enum):
+class PdConfig:
     role: PdRole
     method = PdMethod
     url: Optional[str]

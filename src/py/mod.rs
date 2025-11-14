@@ -2,7 +2,7 @@ use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
-use crate::transfer::PdConfig;
+use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
@@ -345,5 +345,14 @@ impl GenerationConfig {
             frequency_penalty,
             presence_penalty,
         }
+    }
+}
+
+#[pymethods]
+impl PdConfig {
+    #[new]
+    #[pyo3(signature = (role, method, url=None))]
+    pub fn new(role: PdRole, method: PdMethod, url: Option<String>) -> Self {
+        Self { role, method, url }
     }
 }

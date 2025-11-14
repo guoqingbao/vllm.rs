@@ -9,7 +9,6 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-// Sub-modules for implementation details
 mod comm;
 #[cfg(feature = "cuda")]
 mod cuda_remote;
