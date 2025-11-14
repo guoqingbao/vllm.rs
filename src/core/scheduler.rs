@@ -621,7 +621,10 @@ impl Scheduler {
                     success = ret;
                     if success {
                         // Update sequence and move to running
+                        // The first token is generated on PD server,
+                        // it has been transfered to client, but haven't been send to user
                         seq.append_token(first_token);
+                        seq.pd_first_token = Some(first_token);
                         seq.status = SequenceStatus::Running;
                         self.running.push(seq.clone());
                         crate::log_info!(

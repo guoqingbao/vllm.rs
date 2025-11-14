@@ -765,26 +765,37 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
-                    let token_id = s.last_token;
+                    let token_ids =
+                        if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
+                            // Special case, the real first token is generated on PD server
+                            vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
+                        } else {
+                            vec![s.last_token]
+                        };
+
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
                             if *request_type == RequestType::Stream {
                                 if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                    if let Some(tok) = decoder.step(token_id) {
-                                        let result =
-                                            sender.try_send(StreamItem::Token(tok.clone()));
-                                        if result.is_err() {
-                                            crate::log_error!(
-                                                "Error when sending token to client [seq_id {}]",
-                                                seq_id
-                                            );
-                                            self.cancelled_sequences.push(seq_id);
+                                    for token_id in token_ids {
+                                        if let Some(tok) = decoder.step(token_id) {
+                                            let result =
+                                                sender.try_send(StreamItem::Token(tok.clone()));
+                                            if result.is_err() {
+                                                crate::log_error!(
+                                                    "Error when sending token to client [seq_id {}]",
+                                                    seq_id
+                                                );
+                                                self.cancelled_sequences.push(seq_id);
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 //completion request will be decoded at the final stage (at once)
-                                let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                for token_id in token_ids {
+                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                }
                             }
                         }
                     }
