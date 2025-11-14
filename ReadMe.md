@@ -272,13 +272,22 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 ./run.sh --release --features cuda,nccl,flash-attn -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
-**Prefill-decode Disaggregation**
+## Prefill-decode Disaggregation
 ```shell
 # Start the PD server (not `port` required since it does not directly respond request(s))
+# Rust
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
 
+# Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+
+
 # Start the corresponding PD client (with exactly same args except device ids and pd mode)
+# Rust
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+
+# Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
 
 # If `--pd-url` (e.g., 192.168.0.10:8888) is provided, the PD server will try to bind to the given address,
 # and the client will attempt to connect to the server using the specified URL.

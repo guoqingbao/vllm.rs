@@ -267,13 +267,21 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 ./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
 ```
 
-**Prefill-decode 分离（PD分离）**
+## Prefill-decode 分离（PD分离）
 ```shell
 # 启动PD服务器 (无需指定`port`，因为此服务器不直接接收用户请求)
+# Rust
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
 
+# Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+
 # 启动PD客户端 (除device id与PD模式外，其它参数需与PD服务器启动方式一致)
+# Rust
 ./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+
+# Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
 
 # 如果指定了 `--pd-url`（例如 192.168.0.10:8888），PD 服务器将尝试绑定到该地址，
 # 客户端将尝试使用指定的 URL 连接到服务器。在这种情况下，服务器和客户端可以部署在不同的机器上。
