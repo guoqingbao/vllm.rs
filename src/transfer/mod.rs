@@ -180,15 +180,6 @@ impl Transfer {
 
     /// (Client) Checks if a specific prefill has finished.
     pub fn check_prefill_finished(&self, seq_id: usize) -> Result<bool> {
-        {
-            let guard = self.finished_data.read();
-            crate::log_warn!(
-                "check_prefill_finished Seq {}, existing {:?}",
-                seq_id,
-                guard.keys()
-            );
-        }
-
         Ok(self.finished_data.write().contains_key(&seq_id))
     }
 
@@ -198,8 +189,6 @@ impl Transfer {
         seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
     ) -> Result<(bool, u32)> {
-        crate::log_warn!("receive_kv_cache Seq {}", seq.id);
-
         let status = self.check_prefill_finished(seq.id)?;
         if !status {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
@@ -235,9 +224,6 @@ impl Transfer {
                             cuda_remote::open_ipc_handle::<T>(k_handle, local_device)?;
                         let remote_v_tensor =
                             cuda_remote::open_ipc_handle::<T>(v_handle, local_device)?;
-
-                        crate::log_warn!("got remote_k_tensor {:?}", remote_k_tensor);
-                        crate::log_warn!("got remote_v_tensor {:?}", remote_v_tensor);
 
                         // Use swap_blocks to perform a D2D (peer) copy
                         // Copy from: remote_k_tensor, To: local_gpu_cache
@@ -346,11 +332,6 @@ impl Transfer {
                         let v_handle = cuda_remote::get_ipc_handle::<T>(v_tensor)?;
                         layer_handles.push((k_handle, v_handle));
                     }
-                    crate::log_warn!(
-                        "KVTransferHandle::LocalIpc Seq {}, block_table {:?}",
-                        seq.id,
-                        seq.block_table.clone()
-                    );
                     KVTransferHandle::LocalIpc {
                         layer_handles,
                         server_block_ids: seq.block_table.clone(),

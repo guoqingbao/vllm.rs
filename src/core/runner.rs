@@ -431,8 +431,6 @@ impl ModelRunner {
     }
 
     pub fn transfer_prefill(&self, seq: &Sequence) -> Result<bool> {
-        crate::log_warn!("transfer_prefill Seq {}", seq.id);
-
         if let Some(transfer) = &self.transfer {
             if !transfer.is_client() {
                 candle_core::bail!(
@@ -457,8 +455,6 @@ impl ModelRunner {
     }
 
     pub fn check_prefill_status(&self, seq_id: usize) -> Result<bool> {
-        crate::log_warn!("check_prefill_status Seq {}", seq_id);
-
         if let Some(transfer) = &self.transfer {
             if !transfer.is_client() {
                 candle_core::bail!("PD server does not support check prefill status!");
@@ -470,8 +466,6 @@ impl ModelRunner {
     }
 
     pub fn send_kvcache(&self, seq: &Sequence, first_token: u32) -> Result<bool> {
-        crate::log_warn!("send_kvcache Seq {}", seq.id);
-
         if let Some(transfer) = &self.transfer {
             if !transfer.is_server() {
                 candle_core::bail!(
@@ -485,8 +479,6 @@ impl ModelRunner {
     }
 
     pub fn receive_kvcache(&self, seq: &Sequence) -> Result<(bool, u32)> {
-        crate::log_warn!("receive_kvcache Seq {}", seq.id);
-
         if let Some(transfer) = &self.transfer {
             if !transfer.is_client() {
                 candle_core::bail!(

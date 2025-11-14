@@ -2,6 +2,7 @@
 use super::runner::{ModelRunner, RunnerType, Seqs};
 use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
+use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
 use crate::models::layers::distributed::Comm;
@@ -1178,7 +1179,7 @@ impl LLMEngine {
                 }
                 if task_processed == 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(if is_pd_server {
-                        5000
+                        PD_PREFILL_STATUS_CHECK_COOLING_PERIOD as u64
                     } else {
                         1
                     }))

@@ -28,6 +28,7 @@ const MIN_NUM_SCHEDULED_REQS: usize = 5;
 pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
+pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 1000; // check prefill status on PD server every 1 second
 
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
@@ -557,7 +558,7 @@ impl Scheduler {
         for idx in 0..self.transferred.len() {
             let seq_id = self.transferred[idx].id;
             if cur_time - self.transferred[idx].swapped_time().unwrap_or(cur_time)
-                < SWAP_COOLING_PERIOD
+                < PD_PREFILL_STATUS_CHECK_COOLING_PERIOD
             {
                 continue;
             }
