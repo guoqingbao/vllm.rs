@@ -12,8 +12,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** (with **session-based context cache**) – Superior than Python counterparts
-* 🧠 **Minimalist Core** – Core logic written in **< 2000 lines** of clean Rust
+* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**) – Superior than Python counterparts
+* 🧠 **Minimalist Core** – Core logic written in **~ 2000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
@@ -82,15 +82,62 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 Watch it in action 🎉 <video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
 
 
-## 📦 Install with pip
-   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100)
+## 📘 Usage in Rust
+
+Run with `--i` for interactive chat 🤖, `--server` for server mode 🌐, `--m` specify Huggingface model, or `--w` to specify local safetensors model path, or `--f` local gguf file:
+
+```bash
+# Naive CUDA chat mode (single card only, optional `--fp8-kvcache`)
+cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --context-cache
+
+# Multi-GPU chat mode (+Flash Attention, +CUDA graph, this scirpt help build the runner)
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --context-cache
+
+# Multi-GPU server mode (unquantized models)
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 262144 --max-num-seqs 2 --server --port 8000
+
+# Multi-GPU server mode (load as Q4K format, with `--fp8-kvcache` or `--context-cache`)
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 2 --server --port 8000 --fp8-kvcache
+
+# Multi-GPU server mode (with `--context-cache`, Flash Attention used in both prefill/decode, long time to build)
+./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 2 --server --port 8000 --context-cache
+
+# macOS chat mode (Metal, or `--server` for server mode)
+cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+#macOS (Metal, ISQ)
+cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q4k --context-cache
+```
+
+## 🚀 Prefill-decode Disaggregation
+```shell
+# Start the PD server (`port` not required since it does not directly respond request(s))
+# Option 1: Rust
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 2 --server --pd-server
+# Option 2: Python (depend: pip install vllm_rs fastapi uvicorn)
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 2 --d 0,1 --pd-server
+
+# Start the corresponding PD client
+# Option 1: Rust
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+# Option 2: Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
+
+# PD server and client need to use same number of ranks and same model (can be different formats, e.g., unquantized safetensor on Server but GGUF on client).
+
+# If `--pd-url` (e.g., 192.168.0.10:8888) is provided, the PD server will try to bind to the given address, and the client will attempt to connect to the server using the specified URL. In this scenario, the server and client can be located on different machines. This feature is experimental.
+```
+---
+
+## 📘 Usage in Python
+
+### 📦 Install with pip
+   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support)
 
    💡 2. Prebuilt package has native `context cache` feature without relying on flash attention, manual build required to use `flash-context` feature.
 ```shell
-python3 -m pip install vllm_rs
+python3 -m pip install vllm_rs fastapi uvicorn
 ```
-
-## 📘 Usage in Python
 
 ### 🌐✨ API Server Mode
    💡 You can use any client compatible with the OpenAI API.
@@ -98,8 +145,6 @@ python3 -m pip install vllm_rs
    🤖 <a href="python/ReadMe.md">Here is the client usage of context cache</a>
 
 ```bash
-# install server dependency
-pip install fastapi uvicorn
 # Start OpenAI API Server (default http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
@@ -221,56 +266,6 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 
-## 📘 Usage in Rust
-### 🤖✨ Rust CLI Mode
-
-Run with `--i` for interactive chat and `--w` to specify safetensors model path, or `--f` load local gguf file:
-
-```bash
-# Naive CUDA (single card only, optional `--fp8-kvcache`)
-cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
-
-# Multi-GPU CUDA (+Flash Attention, this scirpt help build the runner)
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --context-cache
-
-# Multi-GPU CUDA (unquantized models)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
-
-# Multi-GPU server mode (with `--fp8-kvcache` or `--context-cache`)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
-
-# Multi-GPU server mode (with `--context-cache`, Flash Attention used in both prefill/decode, long time to build)
-./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
-
-# Naive CUDA (+CUDA Graph, experimental)
-cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
-
-# macOS (Metal)
-cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-
-#macOS (Metal, ISQ)
-cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q4k --context-cache
-```
-
-
-Safetensor Models (Unquantized)
-
-```bash
-# CUDA
-cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
-
-# Metal
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are you today?"
-
-# Multi-GPUs (interactive mode)
-./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
-
-# Multi-GPUs (server mode)
-./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --max-tokens 1024 --max-model-len 1024 --server
-
-# Multi-GPUs with Context Cache (interactive mode)
-./run.sh --release --features cuda,nccl,flash-attn -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
-```
 
 ## ⚙️ Command Line Arguments
 
@@ -294,6 +289,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "How are y
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 1.0, range from 0.1 to 10.0)              |    |
+| `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |    |
+| `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |    |
+| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |    |
 
 ## 🗜️ In-Situ Quantization (GGUF Conversion during loading)
 
@@ -333,8 +331,10 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
-* [ ] Additional model support
+* [ ] Additional model support (GLM 4.6, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
+* [x] Prefill-decode Disaggregation (CUDA)
+* [ ] Prefill-decode Disaggregation (Metal)
 ---
 
 ## 📚 References

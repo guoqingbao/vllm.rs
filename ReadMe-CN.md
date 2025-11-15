@@ -12,8 +12,8 @@
 ## ✨ 主要特性
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
-* 🚀 **高性能** (支持**上下文缓存**) – 性能优于Python同类推理框架
-* 🧠 **极简核心** – 核心逻辑仅 **< 2000 行** Rust 代码
+* 🚀 **高性能** (支持**上下文缓存、PD分离**) – 性能优于Python同类推理框架
+* 🧠 **极简核心** – 核心逻辑仅 **~ 3000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
 * 🐍 **轻量 Python 接口** – 使用 PyO3 构建的 Python 聊天接口
@@ -80,24 +80,72 @@
 🎉 观看项目运行演示：
 <video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
 
-## 📦 从pip安装
-   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100）上需要手动编译安装
+
+## 📘 使用方法（Rust）
+
+使用 `--i` 启用交互模式 🤖，`--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
+
+```bash
+# 单卡推理 CUDA + Built-in Context Cache (使用 `--fp8-kvcache` 启用 FP8 KV Cache)
+cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+
+# 多卡推理 CUDA Graph + Flash Attention（使用run.sh生成独立runner）
+./run.sh --release --features cuda,nccl,graph,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+
+# 多卡推理 server 服务 (未量化模型)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+
+# 多卡推理 server 服务 (可选`--fp8-kvcache` 或 `--context-cache`)
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+
+# 多卡推理 server 服务 (量化并加载为Q4K格式，可选`--context-cache`，同时使用Flash Attention做decoding)
+./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+
+# CUDA Graph和输出惩罚项
+cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
+
+# macOS（Metal）
+cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+
+#macOS (Metal, ISQ) with context cache
+cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k --context-cache
+```
+
+## Prefill-decode 分离（PD分离）
+```shell
+# 启动PD服务器 (无需指定`port`，因为此服务器不直接接收用户请求)
+# Rust
+./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+# Python (依赖：pip install vllm_rs fastapi uvicorn)
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+
+# 启动PD客户端
+# Rust
+./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+
+# Python
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
+
+# PD Server与Client启动时的模型及Rank数量（卡数）需要一致，可为相同模型的不同格式（例如服务器未量化Safetensor, 客户端GGUF）
+# 如果指定了 `--pd-url`（例如 192.168.0.10:8888），PD 服务器将尝试绑定到该地址，
+# 客户端将尝试使用指定的 URL 连接到服务器。在这种情况下，服务器和客户端可以部署在不同的机器上。
+```
+---
+
+## 📘 使用方法（Python）
+### 📦 从pip安装
+   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装
    
    💡 2. 预编译包`context cache` 特性不依赖于Flash attention, 如需启用`flash-context`特性需手动编译安装
 ```shell
-python3 -m pip install vllm_rs
+python3 -m pip install vllm_rs fastapi uvicorn
 ```
-
-
-## 📘 使用方法（Python）
 
 ### 🌐✨ API Server
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 ```bash
-# 安装web service依赖
-pip install fastapi uvicorn
 # 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
 # openai.base_url = "http://localhost:8000/v1/"
 # openai.api_key = "EMPTY"
@@ -217,55 +265,6 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 pip install fastapi uvicorn
 ```
 
-## 📘 使用方法（Rust）
-### 🤖✨ Rust CLI 模式
-
-使用 `--i` 启用交互模式，`--w` 指定Safetensors模型路径 或`--f` 指定GGUF模型文件：
-
-```bash
-# 单卡推理 CUDA + Built-in Context Cache (使用 `--fp8-kvcache` 启用 FP8 KV Cache)
-cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
-
-# 多卡推理 CUDA + Flash Attention（使用run.sh生成独立runner）
-./run.sh --release --features cuda,nccl,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
-
-# 多卡推理 server 服务 (未量化模型)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
-
-# 多卡推理 server 服务 (可选`--fp8-kvcache` 或 `--context-cache`)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
-
-# 多卡推理 server 服务 (可选`--context-cache`，同时使用Flash Attention做decoding)
-./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
-
-# CUDA Graph和输出惩罚项
-cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
-
-# macOS（Metal）
-cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-
-#macOS (Metal, ISQ) with context cache
-cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k --context-cache
-```
-
-Safetensor 模型（未量化）
-
-```bash
-# CUDA
-cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --prompts "How are you today?"
-
-# Metal（macOS）, 多个 prompt 使用 `|` 分隔
-cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk about China. | Talk about America."
-
-# 多GPU推理（交互模式）
-./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024
-
-# 多GPU推理 (server 模式)
-./run.sh --release --features cuda,nccl -- --w /home/GLM-4-9B-0414 --d 0,1 --max-tokens 1024 --max-model-len 1024 --server
-
-# 多GPU推理+上下文缓存（交互模式）
-./run.sh --release --features cuda,nccl,flash-context -- --w /home/GLM-4-9B-0414 --d 0,1 --i --max-tokens 1024 --max-model-len 1024 --context-cache
-```
 
 ### ⚙️ 命令行参数说明
 
@@ -289,7 +288,9 @@ cargo run --release --features metal -- --w /path/Qwen3-8B/ --prompts "Talk abou
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
 | `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |    |
 | `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 1.0，取值0.1 - 10.0)              |    |
-
+| `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |    |
+| `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|    |
+| `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |    |
 
 ## 🗜️ 实时量化（GGUF 格式转换）
 
@@ -326,8 +327,10 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
-* [ ] 支持更多模型类型
+* [ ] 支持更多模型类型（GLM 4.6, Kimi K2 Thinking等）
 * [x] CPU KV Cache 卸载
+* [x] PD（Prefill/Decode）分离（CUDA）
+* [ ] PD（Prefill/Decode）分离（Metal）
 
 ## 📚 参考项目
 

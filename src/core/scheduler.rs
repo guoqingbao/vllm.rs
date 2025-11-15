@@ -4,6 +4,7 @@ use super::{
     block_manager::BlockManager,
     sequence::{Sequence, SequenceStatus},
 };
+use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
@@ -14,17 +15,20 @@ pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
     cached: Vec<Sequence>,
+    transferred: VecDeque<Sequence>,
     pub block_manager: BlockManager,
     next_seq_id: usize,
     eos_token_id: Vec<u32>,
     cfg: EngineConfig,
     cached_seqs: VecDeque<(usize, String)>,
+    pd_config: Option<PdConfig>,
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
 pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
+pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 500; // check prefill status on PD server every 1 second
 
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
@@ -32,6 +36,7 @@ impl Scheduler {
             waiting: VecDeque::new(),
             running: Vec::new(),
             cached: Vec::new(),
+            transferred: VecDeque::new(),
             block_manager: BlockManager::new(
                 runners,
                 econfig.num_blocks,
@@ -45,6 +50,7 @@ impl Scheduler {
             },
             cfg: econfig.clone(),
             cached_seqs: VecDeque::new(),
+            pd_config: econfig.pd_config.clone(),
         }
     }
 
@@ -65,8 +71,45 @@ impl Scheduler {
         let mut scheduled_ids = Vec::new();
         let mut num_tokens = 0;
 
+        // PD server: Check for new incoming prefill requests
+        if self.is_pd_server() {
+            while let Ok(Some(seq)) = self
+                .block_manager
+                .try_receive_prefill(self.get_available_kv_tokens())
+            {
+                // Add to waiting queue.
+                self.waiting.push_back(seq);
+            }
+        }
+
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
+            // We do not transfer context-cache request
+            if self.is_pd_mode() && !self.is_pd_server() && seq.status != SequenceStatus::Cached {
+                if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
+                    // Client: Offload prefill request to PD server
+                    if success {
+                        crate::log_warn!(
+                            "Prefill request (Seq {}) transfered to PD server.",
+                            seq.id
+                        );
+                        seq.swapped_time = Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as usize,
+                        );
+                        self.transferred.push_back(seq);
+                    } else {
+                        crate::log_warn!(
+                            "Unable transfer prefill request (Seq {}) to PD server. Retry later...",
+                            seq.id
+                        );
+                    }
+                    continue; // Sent to PD server, move to next
+                }
+            }
+
             if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
                 || num_tokens + seq.len() >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
@@ -99,6 +142,11 @@ impl Scheduler {
             }
         }
 
+        // Client: Check for finished prefills
+        if self.is_pd_mode() && !self.is_pd_server() {
+            self.try_receive_kvcache()?;
+        }
+
         // Swap back seq from cpu memory if possible
         #[cfg(feature = "cuda")]
         if preempt_ids.is_empty()
@@ -114,12 +162,25 @@ impl Scheduler {
             self.try_swap_out(preempt_ids.clone());
         }
 
+        let is_pd_server = self.is_pd_server();
         for (idx, seq) in self.running.iter_mut().enumerate() {
             if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
                 break;
             }
             if !self.block_manager.can_append(&seq) {
                 // filter out seq that unable to acquire resources
+                continue;
+            }
+            if is_pd_server && seq.status == SequenceStatus::Cached {
+                if let Ok(success) = self.block_manager.try_check_kvcache_release(seq.id) {
+                    if success {
+                        // Client successfully received kvcache and we need to release it on the server
+                        crate::log_warn!("PD Server: release prefilled kvcache for Seq {}", seq.id);
+                        seq.status = SequenceStatus::Finished;
+                        self.block_manager.deallocate(seq);
+                    }
+                }
+                // in PD server mode, we do not decode, filter out seq have been prefilled
                 continue;
             }
             self.block_manager.may_append(seq)?;
@@ -158,8 +219,60 @@ impl Scheduler {
         active_sessions: &VecDeque<(usize, String)>,
     ) {
         for (i, &idx) in ids.iter().enumerate() {
-            let seq = &mut self.running[idx];
+            let seq_id = self.running[idx].id;
             let token = output_ids[i];
+
+            // Since all reqeusts in PD server are prefill request, we need to finish and transfer
+            // the kvcache in the first postprocess for each request.
+            if self.is_pd_server() {
+                match self
+                    .block_manager
+                    .try_send_kvcache(&self.running[idx], token)
+                {
+                    Ok(success) => {
+                        crate::log_warn!(
+                            "PD Server: transferred KV cache for seq {} ({})",
+                            seq_id,
+                            if success { "success" } else { "faild" }
+                        );
+                        let seq = &mut self.running[idx];
+                        if success {
+                            // if successed, we need to mantain the resources
+                            // until the client ask explicitly to release or cache not sufficient
+                            seq.status = SequenceStatus::Cached;
+                            let cur_time = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as usize;
+                            let time_costs = cur_time - seq.created_time();
+                            if time_costs / 100 > 0 && seq.len() > 0 {
+                                crate::log_info!(
+                                    "PD Prefilling [seq_id {}]: {} tokens in {:.2}s ({:.2} tokens/s)",
+                                    seq_id,
+                                    seq.len(),
+                                    time_costs as f32 / 1000f32,
+                                    seq.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
+                                )
+                            }
+                        } else {
+                            // release resources immediately if failed
+                            seq.status = SequenceStatus::Finished;
+                            self.block_manager.deallocate(seq);
+                        }
+                    }
+                    Err(e) => {
+                        crate::log_error!(
+                            "PD Server: failed to transfer KV cache for seq {}: {}",
+                            seq_id,
+                            e
+                        );
+                    }
+                }
+
+                continue; // Go to next sequence in postprocess
+            }
+
+            let seq = &mut self.running[idx];
             seq.append_token(token);
 
             if self.eos_token_id.contains(&token)
@@ -242,10 +355,11 @@ impl Scheduler {
     }
 
     pub fn clear_finished(&mut self) {
+        let is_pd_server = self.is_pd_server();
         let mut remove_ids = Vec::new();
         for i in 0..self.running.len() {
             let seq: &mut Sequence = &mut self.running[i];
-            if seq.status == SequenceStatus::Cached {
+            if seq.status == SequenceStatus::Cached && !is_pd_server {
                 seq.output_ids.clear();
                 remove_ids.push(seq.id);
                 self.cached.push(seq.clone());
@@ -457,6 +571,107 @@ impl Scheduler {
                 self.cached_seqs.push_back((seq.id, v.clone()));
             }
         }
+    }
+
+    pub fn is_pd_mode(&self) -> bool {
+        self.pd_config.is_some()
+    }
+
+    pub fn is_pd_server(&self) -> bool {
+        if let Some(p_cfg) = &self.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        }
+    }
+
+    /// Client: Check for finished prefills and move them to the running queue.
+    pub fn try_receive_kvcache(&mut self) -> Result<()> {
+        let mut finished_seq_ids = Vec::new();
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
+        for idx in 0..self.transferred.len() {
+            let seq_id = self.transferred[idx].id;
+            if cur_time - self.transferred[idx].swapped_time().unwrap_or(cur_time)
+                < PD_PREFILL_STATUS_CHECK_COOLING_PERIOD
+            {
+                continue;
+            }
+
+            self.transferred[idx].swapped_time = Some(cur_time);
+            let status = self.block_manager.try_check_prefill_status(seq_id);
+            if status.is_err() || !status.unwrap_or(false) {
+                continue;
+            }
+            // We have the data. Can we allocate space for it?
+            if !self.block_manager.can_allocate(&self.transferred[idx]) {
+                // Not enough memory right now. Put data back and try later.
+                // This part is tricky. The `finished_data` is already
+                // removed. We need to re-insert it.
+                // This logic should be improved, e.g., by peeking.
+                crate::log_warn!(
+                    "KvCache Transfer: Seq {} prefill finished on PD server, but no blocks to receive. Will retry.",
+                    seq_id
+                );
+                // For simplicity, we just break and retry next cycle.
+                // A robust impl would re-queue `finished_data`.
+                break;
+            }
+
+            // Allocate GPU blocks for the sequence
+            self.block_manager.allocate(&mut self.transferred[idx])?;
+
+            // Perform the actual KV cache data transfer
+            let mut success = false;
+            match self
+                .block_manager
+                .try_receive_kvcache(&self.transferred[idx])
+            {
+                Ok((ret, first_token)) => {
+                    let seq = &mut self.transferred[idx];
+                    success = ret;
+                    if success {
+                        // Update sequence and move to running
+                        // The first token is generated on PD server,
+                        // it has been transfered to client, but haven't been send to user
+                        seq.append_token(first_token);
+                        seq.pd_first_token = Some(first_token);
+                        seq.status = SequenceStatus::Running;
+                        self.running.push(seq.clone());
+                        crate::log_info!(
+                            "KvCache Transfer: Seq {} prefill finished and received!",
+                            seq.id,
+                        );
+                        self.block_manager.try_release_remote_kvcache(seq.id)?;
+                    } else {
+                        crate::log_error!(
+                            "KvCache Transfer: Seq {} prefill finished but failed to receive. Aborting seq.",
+                            seq.id,
+                        );
+                    }
+                }
+                Err(e) => {
+                    crate::log_error!(
+                        "KvCache Transfer: Failed to receive KV cache for seq {}: {}. Aborting seq.",
+                        seq_id, e
+                    );
+                }
+            }
+
+            let seq = &mut self.transferred[idx];
+            if !success {
+                seq.status = SequenceStatus::Finished; // Mark as failed
+                self.running.push(seq.clone());
+            }
+            finished_seq_ids.push(seq.id);
+        }
+
+        // Remove all processed sequences from the transferred queue
+        self.transferred
+            .retain(|s| !finished_seq_ids.contains(&s.id));
+        Ok(())
     }
 
     pub fn get_num_cached_tokens(&self) -> usize {

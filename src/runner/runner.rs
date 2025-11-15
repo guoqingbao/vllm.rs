@@ -11,6 +11,8 @@ use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
+use vllm_rs::transfer::PdRole;
+use vllm_rs::transfer::Transfer;
 use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
@@ -27,6 +29,12 @@ fn main() -> anyhow::Result<()> {
         .position(|s| s == "--sock")
         .and_then(|i| args.get(i + 1))
         .expect("Socket name missing");
+    let uuid_str: String = args
+        .iter()
+        .position(|s| s == "--uuid")
+        .and_then(|i| args.get(i + 1))
+        .map_or("", |v| v)
+        .to_string();
     let sock_name = sock.clone().to_ns_name::<GenericNamespaced>()?;
     let mut stream = LocalStream::connect(sock_name.clone());
     // shared flag for model loaded
@@ -57,7 +65,7 @@ fn main() -> anyhow::Result<()> {
 
     vllm_rs::log_info!("Runner connected to socket: {}", sock);
     let stop_flag = Arc::new(AtomicBool::new(false));
-    let _ = heartbeat_worker(None, true, stop_flag.clone());
+    let _ = heartbeat_worker(None, true, stop_flag.clone(), &uuid_str);
 
     let msg = receive_local(&mut stream, true)?;
     let runner = match msg {
@@ -82,7 +90,7 @@ fn main() -> anyhow::Result<()> {
 
             vllm_rs::log_info!("Loading model at rank {}", init_req.rank);
 
-            let progress_sock_name = "@vllm-rs-progress".to_string();
+            let progress_sock_name = format!("{}@vllm-rs-progress", uuid_str);
 
             let progress_reporter = match RemoteProgressReporter::new(
                 init_req.rank,
@@ -103,6 +111,20 @@ fn main() -> anyhow::Result<()> {
                 }
             };
 
+            let (transfer, is_pd_server) = if let Some(t_cfg) = &init_req.econfig.pd_config {
+                (
+                    Some(Arc::new(Transfer::new(
+                        t_cfg.clone(),
+                        init_req.rank,
+                        model_loaded.clone(),
+                        stop_flag.clone(),
+                    )?)),
+                    matches!(t_cfg.role, PdRole::Server),
+                )
+            } else {
+                (None, false)
+            };
+
             let vb = VarBuilderX::new(
                 &init_req.model_pathes,
                 init_req.is_gguf,
@@ -120,21 +142,29 @@ fn main() -> anyhow::Result<()> {
                 init_req.is_rope_i,
                 device,
                 progress_reporter,
+                transfer,
             )?;
 
-            vllm_rs::log_info!("Runner at rank {} created!", init_req.rank);
+            vllm_rs::log_info!(
+                "Runner at rank {} created (PD config: {:?})!",
+                init_req.rank,
+                init_req.econfig.pd_config
+            );
 
             // Optional warmup
-            #[cfg(all(feature = "cuda", feature = "graph"))]
-            match runner.warmup_capture() {
-                Ok(_) => {
-                    use colored::Colorize;
-                    eprintln!("{}", String::from("Cuda graph captured").yellow());
-                }
-                Err(e) => {
-                    use colored::Colorize;
-                    let s = format!("Graph capture failed: {:?}", e);
-                    eprintln!("{}", s.red());
+            if !is_pd_server {
+                //No need graph capture for PD server
+                #[cfg(all(feature = "cuda", feature = "graph"))]
+                match runner.warmup_capture() {
+                    Ok(_) => {
+                        use colored::Colorize;
+                        eprintln!("{}", String::from("Cuda graph captured").yellow());
+                    }
+                    Err(e) => {
+                        use colored::Colorize;
+                        let s = format!("Graph capture failed: {:?}", e);
+                        eprintln!("{}", s.red());
+                    }
                 }
             }
 
@@ -187,7 +217,7 @@ fn main() -> anyhow::Result<()> {
                     mappings.len(),
                     if swap_in { "swap in" } else { "swap out" },
                 );
-                let ret = runner.kvcache_swap(mappings, swap_in);
+                let ret = runner.swap_kvcache(mappings, swap_in);
                 if ret.is_err() {
                     vllm_rs::log_error!("KvCache Swap failed: {:?}", ret);
                 }
@@ -199,6 +229,75 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(MessageType::FinishDecode(id)) => {
                 runner.finished(id);
+            }
+            Ok(MessageType::TransferPrefill(sequence)) => {
+                let ret = runner.transfer_prefill(&sequence);
+                if ret.is_err() {
+                    vllm_rs::log_error!("Prefill transfer failed: {:?}", ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::TransferPrefillResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
+            Ok(MessageType::ReceivePrefill(id)) => {
+                let ret = runner.try_receive_prefill(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::ReceivePrefillResponse(ret.unwrap_or(None)),
+                    false,
+                )?;
+            }
+            Ok(MessageType::CheckPrefillStatus(id)) => {
+                let status = runner.check_prefill_status(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::CheckPrefillStatusResponse(
+                        status.is_ok() && status.unwrap_or(false),
+                    ),
+                    false,
+                )?;
+            }
+            Ok(MessageType::KvCacheSend((sequence, token))) => {
+                let ret = runner.send_kvcache(&sequence, token);
+                if ret.is_err() {
+                    vllm_rs::log_error!("KvCacheSend failed: {:?}", ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheSendResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
+            Ok(MessageType::KvCacheReceive(sequence)) => {
+                let ret = runner.receive_kvcache(&sequence);
+                if ret.is_err() {
+                    vllm_rs::log_error!("KvCacheReceive failed: {:?}", ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or((false, 0))),
+                    false,
+                )?;
+            }
+            Ok(MessageType::KvCacheRelease(id)) => {
+                let status = runner.release_remote_kvcache(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::KvCacheReleaseResponse(status.is_ok() && status.unwrap_or(false)),
+                    false,
+                )?;
+            }
+            Ok(MessageType::CheckKvCacheRelease(id)) => {
+                let status = runner.check_kvcache_release(id);
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::CheckKvCacheReleaseResponse(
+                        status.is_ok() && status.unwrap_or(false),
+                    ),
+                    false,
+                )?;
             }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {

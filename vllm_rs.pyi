@@ -10,6 +10,23 @@ class DType(Enum):
     BF16 = "bf16"
     F32 = "f32"
 
+@dataclass 
+class PdRole(Enum):
+    Client = 1
+    PDServer = 2
+
+@dataclass 
+class PdMethod(Enum):
+    LocalIpc = 1
+    RemoteTcp = 2
+
+@dataclass 
+class PdConfig:
+    role: PdRole
+    method = PdMethod
+    url: Optional[str]
+
+
 @dataclass
 class GenerationOutput:
     seq_id: int
@@ -51,6 +68,7 @@ class EngineConfig:
     flash_context: Optional[bool]
     fp8_kvcache: Optional[bool]
     server_mode: Optional[bool]
+    pd_config: Optional[PdConfig]
 
 @dataclass
 class SamplingParams:

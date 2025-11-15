@@ -6,7 +6,7 @@ import sys
 # pip install fastapi uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
-from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig
+from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig, PdConfig, PdMethod, PdRole
 import uvicorn
 import warnings
 
@@ -96,8 +96,10 @@ def create_app(cfg, dtype):
             async def streamer():
                 stream = None
                 done_item = None
+                g_seq_id = 0
                 try:
                     (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
+                    g_seq_id = seq_id
                     for item in stream:
                         if await request.is_disconnected():
                             print(
@@ -169,7 +171,7 @@ def create_app(cfg, dtype):
                         stream.cancel()
                     # Yield an assistant-style error message
                     yield "data: " + json.dumps({
-                        "id": "seq" + str(seq_id),
+                        "id": "seq" + str(g_seq_id),
                         "object": "chat.completion.chunk",
                         "model": "default",
                         "created": int(time.time()),
@@ -199,13 +201,13 @@ def create_app(cfg, dtype):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Chat Server")
-    parser.add_argument("--host", type=str, default="127.0.0.1")
+    parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--m", help="huggingface model id", type=str, default=None)
     parser.add_argument("--w", help="safetensor weight path", type=str, default=None)
     parser.add_argument("--f", help="gguf file path or gguf file name when model_id is given", type=str, default=None)
     parser.add_argument("--dtype", choices=["f16", "bf16", "f32"], default="bf16")
-    parser.add_argument("--max-num-seqs", type=int, default=4)
+    parser.add_argument("--max-num-seqs", type=int, default=2)
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--max-tokens", type=int, default=16384)
     parser.add_argument("--d", type=str, default="0")
@@ -218,6 +220,10 @@ def parse_args():
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
+    parser.add_argument("--pd-server", action="store_true")
+    parser.add_argument("--pd-client", action="store_true")
+    parser.add_argument("--pd-url", help="Url like `192.168.1.100:8888` \
+        used for TCP/IP communication between PD server and client", type=str, default=None)
 
     return parser.parse_args()
 
@@ -227,7 +233,7 @@ def main():
 
     # limit default max_num_seqs to 1 on MacOs (due to limited gpu memory)
     max_num_seqs = 1 if sys.platform == "darwin" else args.max_num_seqs
-    max_model_len = 32768 if sys.platform == "darwin" else 65536
+    max_model_len = 32768 if sys.platform == "darwin" else 65536 * 2
     if args.max_model_len is None:
         if max_num_seqs > 0:
             max_model_len =  max_model_len // max_num_seqs
@@ -241,6 +247,13 @@ def main():
 
     assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
     args.max_tokens = max_model_len if args.max_tokens > max_model_len else args.max_tokens
+
+    pd_config = None
+    if args.pd_server or args.pd_client:
+        pd_role = PdRole.Server if args.pd_server else PdRole.Client
+        pd_method = PdMethod.RemoteTcp if args.pd_url != None else PdMethod.LocalIpc
+        pd_config = PdConfig(role=pd_role, method=pd_method, url=args.pd_url)
+
     cfg = EngineConfig(
         model_id=args.m,
         weight_path=args.w,
@@ -255,12 +268,17 @@ def main():
         fp8_kvcache=args.fp8_kvcache,
         server_mode=True,
         cpu_mem_fold=args.cpu_mem_fold,
+        pd_config=pd_config,
     )
 
     app = create_app(cfg, args.dtype)
 
-    print("\033[95m", "\nServer url: http://127.0.0.1:" + str(args.port) + "/v1")
-    uvicorn.run(app, host=args.host, port=args.port)
+    if args.pd_server:
+        print("\033[95m", "\n🚀 PD server started, waiting for prefill request(s)...")
+        uvicorn.run(app, host=args.host, port=0)
+    else:
+        print("\033[95m", "\nServer url: http://0.0.0.0:" + str(args.port) + "/v1")
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

@@ -410,7 +410,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             outputs.insert(bs, out);
         }
         let _ = self.model.report_graph_pool_usage();
-        println!("captured batches {:?}", outputs.keys());
+        crate::log_warn!("Captured batches {:?}", outputs.keys());
         self.graph_vars = Some(GraphCaptureVars {
             input_ids,
             positions,

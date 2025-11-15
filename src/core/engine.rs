@@ -2,6 +2,7 @@
 use super::runner::{ModelRunner, RunnerType, Seqs};
 use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
+use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
 use crate::core::sequence::DecodeSequence;
 use crate::core::GenerationOutput;
 use crate::models::layers::distributed::Comm;
@@ -9,6 +10,8 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
+use crate::transfer::PdRole;
+use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -93,6 +96,7 @@ impl LLMEngine {
             init_config_tokenizer(econfig)?;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
+        let model_loaded = Arc::new(AtomicBool::new(false));
         let mut econfig = econfig.clone();
         let config_model_len = config.max_model_len.unwrap_or(
             config_tokenizer
@@ -169,6 +173,13 @@ impl LLMEngine {
         econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
         econfig.num_shards = Some(num_shards);
         config.fp8_kvcache = econfig.fp8_kvcache;
+
+        let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        };
+
         log_info!("{:?}", econfig);
 
         log_info!("{:?}\n", config_tokenizer);
@@ -221,6 +232,16 @@ impl LLMEngine {
                 Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
             let handle = progress_worker(1, config.num_hidden_layers, &reporter);
             let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
+            let transfer = if let Some(p_cfg) = &econfig.pd_config {
+                Some(Arc::new(Transfer::new(
+                    p_cfg.clone(),
+                    0,
+                    model_loaded.clone(),
+                    stop_flag.clone(),
+                )?))
+            } else {
+                None
+            };
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -242,16 +263,21 @@ impl LLMEngine {
                 is_rope_i,
                 device.clone(),
                 reporter,
+                transfer,
             )?;
 
-            #[cfg(all(feature = "cuda", feature = "graph"))]
-            match model_runner.warmup_capture() {
-                Ok(_) => {
-                    log_info!("Cuda graph captured for performance enhancement!")
+            if !is_pd_server {
+                //No graph capture for PD server
+                #[cfg(all(feature = "cuda", feature = "graph"))]
+                match model_runner.warmup_capture() {
+                    Ok(_) => {
+                        log_info!("Cuda graph captured for performance enhancement!")
+                    }
+                    Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
                 }
-                Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
             }
 
+            model_loaded.store(true, Ordering::SeqCst);
             let _ = handle.join();
             RunnerType::Thread(model_runner)
         } else {
@@ -262,26 +288,34 @@ impl LLMEngine {
 
             let runner_path = get_runner_path()?;
 
+            let uuid_str = uuid::Uuid::new_v4();
+            let uuid_str = uuid_str.to_string();
+            let unique_id = if let Some(l_uuid) = uuid_str.split('-').last() {
+                l_uuid
+            } else {
+                ""
+            };
+
             #[cfg(feature = "python")]
             pyo3::Python::with_gil(|py| {
                 for (rank, _) in device_ids.iter().enumerate() {
-                    let sock_name = format!("@vllm-rs-runner-{}", rank);
-                    spawn_runner(py, &runner_path.display().to_string(), &sock_name)
+                    let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
+                    spawn_runner(py, &runner_path.display().to_string(), &sock_name, unique_id)
                         .expect("Failed to spawn runner. \n\r*****Tips: runner is not built within this package, use 'build.sh' script to build package with runner!");
                 }
             });
 
             #[cfg(not(feature = "python"))]
             for (rank, _) in device_ids.iter().enumerate() {
-                let sock_name = format!("@vllm-rs-runner-{}", rank);
-                spawn_runner(&runner_path.display().to_string(), &sock_name)
+                let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
+                spawn_runner(&runner_path.display().to_string(), &sock_name, unique_id)
                     .expect("Failed to spawn runner. \n\r*****Tips: runner is not built, use 'run.sh' script instead of 'cargo run'!");
             }
 
-            let progress_sock_name = "@vllm-rs-progress".to_string();
+            let progress_sock_name = format!("{}@vllm-rs-progress", unique_id);
             let progress_handle =
                 spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
-            heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone());
+            heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone(), unique_id);
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
             use rayon::iter::ParallelIterator;
@@ -292,7 +326,7 @@ impl LLMEngine {
                     let model_type = model_type.clone();
                     let config = config.clone();
                     let econfig = econfig.clone();
-                    let sock_name = format!("@vllm-rs-runner-{}", rank);
+                    let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
                     let listener = ListenerOptions::new()
                         .name(
                             sock_name
@@ -731,26 +765,37 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
-                    let token_id = s.last_token;
+                    let token_ids =
+                        if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
+                            // Special case, the real first token is generated on PD server
+                            vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
+                        } else {
+                            vec![s.last_token]
+                        };
+
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
                             if *request_type == RequestType::Stream {
                                 if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                    if let Some(tok) = decoder.step(token_id) {
-                                        let result =
-                                            sender.try_send(StreamItem::Token(tok.clone()));
-                                        if result.is_err() {
-                                            crate::log_error!(
-                                                "Error when sending token to client [seq_id {}]",
-                                                seq_id
-                                            );
-                                            self.cancelled_sequences.push(seq_id);
+                                    for token_id in token_ids {
+                                        if let Some(tok) = decoder.step(token_id) {
+                                            let result =
+                                                sender.try_send(StreamItem::Token(tok.clone()));
+                                            if result.is_err() {
+                                                crate::log_error!(
+                                                    "Error when sending token to client [seq_id {}]",
+                                                    seq_id
+                                                );
+                                                self.cancelled_sequences.push(seq_id);
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 //completion request will be decoded at the final stage (at once)
-                                let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                for token_id in token_ids {
+                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                }
                             }
                         }
                     }
@@ -943,6 +988,18 @@ impl LLMEngine {
         self.active_requests.is_empty()
     }
 
+    pub fn is_pd_mode(&self) -> bool {
+        self.econfig.pd_config.is_some()
+    }
+
+    pub fn is_pd_server(&self) -> bool {
+        if let Some(p_cfg) = &self.econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        }
+    }
+
     pub fn generate_sync(
         &mut self,
         params: &Vec<SamplingParams>,
@@ -1110,10 +1167,15 @@ impl LLMEngine {
     pub fn start_engine(engine: Arc<RwLock<Self>>) {
         GLOBAL_RT.spawn(async move {
             let engine = engine.clone();
+            let is_pd_server = {
+                let guard = engine.read();
+                guard.is_pd_mode() && guard.is_pd_server()
+            };
             loop {
                 let idle = {
                     let guard = engine.read();
-                    guard.is_idle()
+                    //no add_request in PD server, marking it always active
+                    guard.is_idle() && !is_pd_server
                 };
 
                 if idle {
@@ -1121,13 +1183,12 @@ impl LLMEngine {
                     continue;
                 }
 
+                let mut task_processed = 0;
                 {
                     let mut guard = engine.write();
                     match guard.step() {
                         Ok(n_tasks) => {
-                            if n_tasks == 0 {
-                                let _ = tokio::time::sleep(tokio::time::Duration::from_millis(1));
-                            }
+                            task_processed = n_tasks;
                         }
                         Err(e) => {
                             crate::log_error!("[Engine Loop] Step error: {:?}", e);
@@ -1137,7 +1198,14 @@ impl LLMEngine {
                         }
                     }
                 }
-
+                if task_processed == 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(if is_pd_server {
+                        PD_PREFILL_STATUS_CHECK_COOLING_PERIOD as u64
+                    } else {
+                        1
+                    }))
+                    .await;
+                }
                 tokio::task::yield_now().await;
             }
         });

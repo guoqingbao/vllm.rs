@@ -6,11 +6,14 @@ pub mod models;
 pub mod py;
 pub mod runner;
 pub mod server;
+pub mod transfer;
 pub mod utils;
 #[cfg(feature = "python")]
 use crate::core::GenerationOutput;
 #[cfg(feature = "python")]
 use crate::py::Engine;
+#[cfg(feature = "python")]
+use crate::transfer::{PdConfig, PdMethod, PdRole};
 #[cfg(feature = "python")]
 use crate::utils::chat_template::Message;
 #[cfg(feature = "python")]
@@ -19,12 +22,14 @@ use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 #[cfg(feature = "python")]
 #[pymodule]
 fn vllm_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
     m.add_class::<Engine>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<SamplingParams>()?;
     m.add_class::<GenerationConfig>()?;
     m.add_class::<GenerationOutput>()?;
     m.add_class::<Message>()?;
+    m.add_class::<PdConfig>()?;
+    m.add_class::<PdMethod>()?;
+    m.add_class::<PdRole>()?;
     Ok(())
 }
