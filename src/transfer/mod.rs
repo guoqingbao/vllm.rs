@@ -210,6 +210,7 @@ impl Transfer {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
         }
 
+        #[cfg(feature = "cuda")]
         fn read_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
             sf: &Transfer,
             seq: &Sequence,
@@ -233,7 +234,6 @@ impl Transfer {
                         .map(|(server_id, local_id)| (*server_id as usize, local_id as usize))
                         .collect();
 
-                    #[cfg(feature = "cuda")]
                     for (i, (k_handle, v_handle)) in layer_handles.iter().enumerate() {
                         // Open the remote IPC handles to get local pointers to remote memory
                         let remote_k_tensor =
@@ -270,7 +270,6 @@ impl Transfer {
                         .map(|(i, local_id)| (i, local_id as usize))
                         .collect();
 
-                    #[cfg(feature = "cuda")]
                     for (i, (k_bytes, v_bytes)) in layer_data.into_iter().enumerate() {
                         // Reconstruct CPU tensors from raw bytes
                         let (local_k_cache, local_v_cache) = &local_gpu_cache[i];
@@ -297,6 +296,16 @@ impl Transfer {
             }
             Ok((true, token))
         }
+
+        #[cfg(not(feature = "cuda"))]
+        fn read_data<T: WithDType>(
+            _: &Transfer,
+            _: &Sequence,
+            _: &Vec<(Tensor, Tensor)>,
+        ) -> Result<(bool, u32)> {
+            candle_core::bail!("Transfer read_data not implmented on this platform!")
+        }
+
         let dtype = local_gpu_cache[0].0.dtype();
         match dtype {
             DType::F16 => read_data::<half::f16>(&self, seq, local_gpu_cache),
@@ -339,6 +348,7 @@ impl Transfer {
         server_gpu_cache: &Vec<(Tensor, Tensor)>,
         first_token: u32,
     ) -> Result<bool> {
+        #[cfg(feature = "cuda")]
         fn transfer_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
             sf: &Transfer,
             config: &PdConfig,
@@ -349,7 +359,6 @@ impl Transfer {
             let transfer_handle = match config.method {
                 PdMethod::LocalIpc => {
                     let mut layer_handles = Vec::new();
-                    #[cfg(feature = "cuda")]
                     for (k_tensor, v_tensor) in server_gpu_cache.iter() {
                         // Get IPC handles for the *entire* layer tensors
                         let k_handle = cuda_remote::get_ipc_handle::<T>(k_tensor)?;
@@ -373,7 +382,6 @@ impl Transfer {
                         .map(|(i, &server_id)| (server_id as usize, i))
                         .collect();
 
-                    #[cfg(feature = "cuda")]
                     for (k_tensor, v_tensor) in server_gpu_cache.iter() {
                         // Copy blocks from GPU to a new contiguous CPU tensor
                         let k_cpu_tensor = cuda_remote::copy_blocks_to_cpu(
@@ -407,6 +415,17 @@ impl Transfer {
             });
             // Send the finished data back to the client
             sf.communicator.send(&msg)
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        fn transfer_data<T: WithDType>(
+            _: &Transfer,
+            _: &PdConfig,
+            _: &Sequence,
+            _: &Vec<(Tensor, Tensor)>,
+            _: u32,
+        ) -> Result<bool> {
+            candle_core::bail!("Transfer transfer_data not implmented on this platform!")
         }
 
         let dtype = server_gpu_cache[0].0.dtype();

@@ -114,6 +114,11 @@ async fn main() -> Result<()> {
         candle_core::bail!("This program can only be served as PD server or PD client, not both!");
     }
 
+    #[cfg(not(feature = "cuda"))]
+    if args.pd_server || args.pd_client {
+        candle_core::bail!("PD server is not implemented on this platform!");
+    }
+
     let pd_config = if args.pd_server || args.pd_client {
         let pd_role = if args.pd_server {
             PdRole::Server
