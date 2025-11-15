@@ -12,8 +12,12 @@ use std::thread::JoinHandle;
 mod comm;
 #[cfg(feature = "cuda")]
 mod cuda_remote;
+#[cfg(feature = "cuda")]
+use candle_core::cuda_backend::CudaDType as MsgDtype;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+#[cfg(not(feature = "cuda"))]
+use Sized as MsgDtype;
 
 /// Defines the role of the current inference engine instance.
 #[cfg_attr(feature = "python", pyclass)]
@@ -200,6 +204,7 @@ impl Transfer {
     }
 
     /// (Client) Receives the KV cache data and copies it into local GPU blocks.
+    #[allow(unused)]
     pub fn receive_kv_cache(
         &self,
         seq: &Sequence,
@@ -210,8 +215,7 @@ impl Transfer {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
         }
 
-        #[cfg(feature = "cuda")]
-        fn read_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
+        fn read_data<T: WithDType + MsgDtype>(
             sf: &Transfer,
             seq: &Sequence,
             local_gpu_cache: &Vec<(Tensor, Tensor)>,
@@ -234,6 +238,7 @@ impl Transfer {
                         .map(|(server_id, local_id)| (*server_id as usize, local_id as usize))
                         .collect();
 
+                    #[cfg(feature = "cuda")]
                     for (i, (k_handle, v_handle)) in layer_handles.iter().enumerate() {
                         // Open the remote IPC handles to get local pointers to remote memory
                         let remote_k_tensor =
@@ -274,10 +279,16 @@ impl Transfer {
                         // Reconstruct CPU tensors from raw bytes
                         let (local_k_cache, local_v_cache) = &local_gpu_cache[i];
 
-                        let remote_k_tensor =
-                            cuda_remote::bytes_to_cpu_tensor(k_bytes, *num_blocks, local_k_cache)?;
-                        let remote_v_tensor =
-                            cuda_remote::bytes_to_cpu_tensor(v_bytes, *num_blocks, local_v_cache)?;
+                        let remote_k_tensor = super::transfer::bytes_to_cpu_tensor(
+                            k_bytes,
+                            *num_blocks,
+                            local_k_cache,
+                        )?;
+                        let remote_v_tensor = super::transfer::bytes_to_cpu_tensor(
+                            v_bytes,
+                            *num_blocks,
+                            local_v_cache,
+                        )?;
 
                         // Use swap_blocks to perform an HtoD copy
                         // Copy from: remote_k_tensor (CPU), To: local_k_cache (GPU)
@@ -295,15 +306,6 @@ impl Transfer {
                 }
             }
             Ok((true, token))
-        }
-
-        #[cfg(not(feature = "cuda"))]
-        fn read_data<T: WithDType>(
-            _: &Transfer,
-            _: &Sequence,
-            _: &Vec<(Tensor, Tensor)>,
-        ) -> Result<(bool, u32)> {
-            candle_core::bail!("Transfer read_data not implmented on this platform!")
         }
 
         let dtype = local_gpu_cache[0].0.dtype();
@@ -342,14 +344,14 @@ impl Transfer {
     }
 
     /// (Server) Creates the KVTransferHandle and sends it to the client.
+    #[allow(unused)]
     pub fn transfer_kv_cache(
         &self,
         seq: &Sequence,
         server_gpu_cache: &Vec<(Tensor, Tensor)>,
         first_token: u32,
     ) -> Result<bool> {
-        #[cfg(feature = "cuda")]
-        fn transfer_data<T: WithDType + candle_core::cuda_backend::CudaDType>(
+        fn transfer_data<T: WithDType + MsgDtype>(
             sf: &Transfer,
             config: &PdConfig,
             seq: &Sequence,
@@ -359,6 +361,7 @@ impl Transfer {
             let transfer_handle = match config.method {
                 PdMethod::LocalIpc => {
                     let mut layer_handles = Vec::new();
+                    #[cfg(feature = "cuda")]
                     for (k_tensor, v_tensor) in server_gpu_cache.iter() {
                         // Get IPC handles for the *entire* layer tensors
                         let k_handle = cuda_remote::get_ipc_handle::<T>(k_tensor)?;
@@ -384,12 +387,12 @@ impl Transfer {
 
                     for (k_tensor, v_tensor) in server_gpu_cache.iter() {
                         // Copy blocks from GPU to a new contiguous CPU tensor
-                        let k_cpu_tensor = cuda_remote::copy_blocks_to_cpu(
+                        let k_cpu_tensor = super::transfer::copy_blocks_to_cpu(
                             k_tensor,
                             &mapping,
                             server_block_ids.len(),
                         )?;
-                        let v_cpu_tensor = cuda_remote::copy_blocks_to_cpu(
+                        let v_cpu_tensor = super::transfer::copy_blocks_to_cpu(
                             v_tensor,
                             &mapping,
                             server_block_ids.len(),
@@ -397,8 +400,8 @@ impl Transfer {
 
                         // Get raw bytes from the CPU tensors
                         layer_data.push((
-                            cuda_remote::cpu_tensor_to_bytes::<T>(&k_cpu_tensor)?,
-                            cuda_remote::cpu_tensor_to_bytes::<T>(&v_cpu_tensor)?,
+                            super::transfer::cpu_tensor_to_bytes::<T>(&k_cpu_tensor)?,
+                            super::transfer::cpu_tensor_to_bytes::<T>(&v_cpu_tensor)?,
                         ));
                     }
                     KVTransferHandle::RemoteTcp {
@@ -415,17 +418,6 @@ impl Transfer {
             });
             // Send the finished data back to the client
             sf.communicator.send(&msg)
-        }
-
-        #[cfg(not(feature = "cuda"))]
-        fn transfer_data<T: WithDType>(
-            _: &Transfer,
-            _: &PdConfig,
-            _: &Sequence,
-            _: &Vec<(Tensor, Tensor)>,
-            _: u32,
-        ) -> Result<bool> {
-            candle_core::bail!("Transfer transfer_data not implmented on this platform!")
         }
 
         let dtype = server_gpu_cache[0].0.dtype();
@@ -458,4 +450,57 @@ impl Drop for Transfer {
     fn drop(&mut self) {
         // TODO: Add logic to gracefully shut down the comm_handle thread
     }
+}
+
+/// (Client) Converts raw bytes back into a CPU tensor for HtoD copy.
+pub fn bytes_to_cpu_tensor(
+    bytes: &Vec<u8>,
+    num_blocks: usize,
+    gpu_tensor_template: &Tensor, // Used for shape/dtype
+) -> Result<Tensor> {
+    let dtype = gpu_tensor_template.dtype();
+    let mut cpu_shape = gpu_tensor_template.shape().dims().to_vec();
+    cpu_shape[0] = num_blocks;
+
+    // This is a candle-specific way to create a tensor from raw bytes
+    Tensor::from_raw_buffer(bytes, dtype, &cpu_shape, &candle_core::Device::Cpu)
+}
+
+/// (Server) Converts a CPU tensor to raw bytes for network transfer.
+pub fn cpu_tensor_to_bytes<T: WithDType>(cpu_tensor: &Tensor) -> Result<Vec<u8>> {
+    use candle_core::Storage;
+    if !cpu_tensor.is_contiguous() {
+        candle_core::bail!("CPU tensor must be contiguous to serialize");
+    }
+    let (storage, _) = cpu_tensor.storage_and_layout();
+    let Storage::Cpu(src_storage) = &*storage else {
+        candle_core::bail!("Invalid source kvcache storage!")
+    };
+    let src_slice: &[T] = src_storage.as_slice()?;
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            src_slice.as_ptr() as *const u8,
+            src_slice.len() * std::mem::size_of::<T>(),
+        )
+    };
+    Ok(bytes.to_vec())
+}
+
+/// (Server) Copies specific blocks from a GPU tensor to a new, contiguous CPU tensor.
+pub fn copy_blocks_to_cpu(
+    gpu_tensor: &Tensor,
+    mapping: &HashMap<usize, usize>,
+    num_blocks: usize,
+) -> Result<Tensor> {
+    // Create a new destination tensor on the CPU
+    let mut cpu_shape = gpu_tensor.shape().dims().to_vec();
+    cpu_shape[0] = num_blocks;
+    let cpu_tensor = Tensor::zeros(cpu_shape, gpu_tensor.dtype(), &candle_core::Device::Cpu)?;
+
+    // Use swap_blocks to copy from sparse locations in `gpu_tensor` to
+    //    contiguous locations in `cpu_tensor`.
+    //    mapping: { server_block_id -> contiguous_index (0, 1, 2...) }
+    attention_rs::cache::swap_blocks(gpu_tensor, &cpu_tensor, mapping)?;
+
+    Ok(cpu_tensor)
 }

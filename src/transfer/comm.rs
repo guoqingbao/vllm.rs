@@ -306,9 +306,9 @@ impl Communicator {
                 );
             }
             (PdRole::Server, TransferMessage::ReleaseKvCache(seq_id)) => {
-                if self.rank == 0 {
-                    crate::log_info!("PD Server: received ReleaseKvCache for Seq {}", seq_id);
-                }
+                // if self.rank == 0 {
+                //     crate::log_info!("PD Server: received ReleaseKvCache for Seq {}", seq_id);
+                // }
                 server_tasks.write().retain(|&id| id != seq_id); // remove, indicate the server need to release this cache
             }
             // Mismatched messages (warn and drop)

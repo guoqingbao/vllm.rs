@@ -266,6 +266,9 @@ impl Scheduler {
                             seq_id,
                             e
                         );
+                        let seq = &mut self.running[idx];
+                        seq.status = SequenceStatus::Finished;
+                        self.block_manager.deallocate(seq);
                     }
                 }
 

@@ -1,7 +1,6 @@
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
-use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -268,8 +267,17 @@ impl ModelRunner {
         #[cfg(not(feature = "cuda"))]
         let num_cpu_blocks = 1; // dummy cpu kvcache on Metal
 
+        #[allow(unused)]
         let sync_alloc = if let Some(p_cfg) = &econfig.pd_config {
-            matches!(p_cfg.role, PdRole::Server)
+            #[cfg(feature = "cuda")]
+            {
+                matches!(p_cfg.role, crate::transfer::PdRole::Server)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                // Mark Tensor created on Metal always Shared
+                true
+            }
         } else {
             false
         };

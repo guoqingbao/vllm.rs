@@ -115,8 +115,8 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(not(feature = "cuda"))]
-    if args.pd_server || args.pd_client {
-        candle_core::bail!("PD server is not implemented on this platform!");
+    if args.pd_url.is_none() {
+        candle_core::bail!("Non-CUDA platform does not support LocalIPC, please provide pd-url (e.g., 0.0.0.0:8100)!");
     }
 
     let pd_config = if args.pd_server || args.pd_client {

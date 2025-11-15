@@ -125,7 +125,7 @@ python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-
 
 # PD server and client need to use same number of ranks and same model (can be different formats, e.g., unquantized safetensor on Server but GGUF on client).
 
-# If `--pd-url` (e.g., 192.168.0.10:8888) is provided, the PD server will try to bind to the given address, and the client will attempt to connect to the server using the specified URL. In this scenario, the server and client can be located on different machines. This feature is experimental.
+# If `--pd-url` (e.g., server side: 0.0.0.0:8100, client side: server_ip:8100) is provided, the PD server/client will try to bind (or connect) to the given address, and the client will attempt to connect to the server using the specified URL. In this scenario, the server and client can be located on different machines. This feature is experimental. Metal platform must provide `--pd-url` because it does not support LocalIPC for transfer GPU mem handles.
 ```
 ---
 
@@ -334,7 +334,7 @@ cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k 
 * [ ] Additional model support (GLM 4.6, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
-* [ ] Prefill-decode Disaggregation (Metal)
+* [x] Prefill-decode Disaggregation (Metal)
 ---
 
 ## 📚 References

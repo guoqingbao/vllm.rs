@@ -353,6 +353,10 @@ impl PdConfig {
     #[new]
     #[pyo3(signature = (role, method, url=None))]
     pub fn new(role: PdRole, method: PdMethod, url: Option<String>) -> Self {
+        #[cfg(not(feature = "cuda"))]
+        if url.is_none() {
+            panic!("Non-CUDA platform does not support LocalIPC, please provide pd-url (e.g., server: 0.0.0.0:8100, client: server_id:8100)!");
+        }
         Self { role, method, url }
     }
 }
