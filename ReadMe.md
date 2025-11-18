@@ -103,14 +103,13 @@ python3 -m pip install vllm_rs fastapi uvicorn
   <details open>
     <summary>Single GPU + GGUF model + FP8 KvCache</summary>
 
-Each request has a default maximum output tokens (`--max-tokens`), enables FP8 KV Cache (`--fp8-kvcache`, with slight precision loss)
-
-Default client configuration (if the client and API Server are on the same system):
-openai.base_url = "[http://localhost:8000/v1/](http://localhost:8000/v1/)"
-openai.api_key = "EMPTY"
-
-`--m`: model_id, `--f`: GGUF file name
 ```bash
+# Each request has a default maximum output tokens (`--max-tokens`), enables FP8 KV Cache (`--fp8-kvcache`, with slight precision loss)
+
+# Default client configuration (if the client and API Server are on the same system):
+# openai.base_url = "[http://localhost:8000/v1/](http://localhost:8000/v1/)"
+# openai.api_key = "EMPTY"
+# `--m`: model_id, `--f`: GGUF file name
 python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
 ```
 
@@ -128,16 +127,15 @@ python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0
   <details open>
     <summary>Non-quantized to quantized models (ISQ)</summary>
 
-Safetensors model multi-GPU inference (also quantizes weights to Q4K format, enabling maximum context length):
-
 ```bash
+# Safetensors model multi-GPU inference (also quantizes weights to Q4K format, enabling maximum context length):
 python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
 ```
 
   </details>
 
   <details>
-    <summary>GPTQ/AWQ and Marlin compatible model</summary>
+    <summary>GPTQ/AWQ Marlin-compatible model</summary>
 
 ```bash
 python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin --host 0.0.0.0 --port 8000
@@ -146,7 +144,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
   </details>
 
   <details>
-    <summary>Multi-GPU + GGUF model + context cache</summary>
+    <summary>Multi-GPU + GGUF model + Context-Cache</summary>
 
 When context cache is enabled, pass `session_id` in the `extra_body` field when sending requests through the OpenAI API.
 `session_id` stays unchanged during one conversation; new conversations need a new `session_id`. No other settings need to be changed.
@@ -171,9 +169,8 @@ python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30
   <details open>
     <summary>Non-quantized to GGUF quantized model</summary>
 
-And enable maximum context (262144 tokens)
-
 ```bash
+# And enable maximum context (262144 tokens)
 python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
 ```
 
@@ -191,9 +188,8 @@ python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qw
   <details>
     <summary>Load local GGUF file to a specific device</summary>
 
-Device index is 1, `--d 1`
-
 ```bash
+# Device index is 1, `--d 1`
 python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 ```
 
@@ -257,9 +253,8 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   <details open>
     <summary>Multi-GPU inference + built-in Context Cache</summary>
 
-  Requires using run.sh to generate a separate runner
-
   ```bash
+  # Requires using run.sh to generate a separate runner
   ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --context-cache
   ```
 

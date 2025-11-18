@@ -96,22 +96,22 @@ python3 -m pip install vllm_rs fastapi uvicorn
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 
   <details open>
-    <summary>单卡运行GGUF模型 + FP8 KvCache</summary>
+    <summary>单卡 + GGUF模型 + FP8 KvCache</summary>
 
-   每个请求默认最大输出tokens（`--max-tokens`)，启用FP8 KV Cache（`--fp8-kvcache`，精度略有损失)
-
-   客户端默认配置（如客户端与API Server在同一系统）：
-   openai.base_url = "http://localhost:8000/v1/"
-   openai.api_key = "EMPTY"
-
-   `--m`: model_id, `--f`: GGUF文件名
    ```bash
+   # 每个请求默认最大输出tokens（`--max-tokens`)，启用FP8 KV Cache（`--fp8-kvcache`，精度略有损失)
+
+   # 客户端默认配置（如客户端与API Server在同一系统）：
+   # openai.base_url = "http://localhost:8000/v1/"
+   # openai.api_key = "EMPTY"
+
+   # `--m`: model_id, `--f`: GGUF文件名
    python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
    ```
   </details>
 
    <details open>
-    <summary>多GPU推理量化模型</summary>
+    <summary>多GPU + 本地GGUF模型</summary>
 
    ```bash
    python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
@@ -121,14 +121,14 @@ python3 -m pip install vllm_rs fastapi uvicorn
    <details open>
     <summary>将未量化模型加载为量化模型</summary>
 
-   Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
    ```bash
+   # Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
    python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
    ```
   </details>
 
   <details>
-    <summary>运行GPTQ/AWQ and Marlin兼容模型</summary>
+    <summary>运行GPTQ/AWQ Marlin兼容模型</summary>
 
 ```bash
 python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin --host 0.0.0.0 --port 8000
@@ -137,10 +137,10 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
   </details>
 
    <details>
-    <summary>GGUF模型多GPU推理+上下文缓存</summary>
-
-   缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
+    <summary>多GPU + GGUF模型 + 上下文缓存</summary>
+   
    ```bash
+   # 缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
    python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
    ```
   </details>
@@ -148,7 +148,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 ### 🤖✨ 交互式聊天与批处理
 
   <details open>
-    <summary>使用model id加载</summary>
+    <summary>使用Huggingface model_id加载</summary>
 
    ```bash
    python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
@@ -158,8 +158,8 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
   <details open>
     <summary>将未量化模型加载为GGUF量化模型</summary>
 
-   并启用最长上下文（262144 tokens）
    ```bash
+   # 并启用最长上下文（262144 tokens）
    python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
    ```
   </details>
@@ -175,8 +175,8 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
   <details>
     <summary>本地GGUF文件加载到指定设备</summary>
 
-   设备序号为1，`--d 1`
    ```bash
+   # 设备序号为1，`--d 1`
    python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
    ```
   </details>
@@ -235,8 +235,8 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
   <details open>
     <summary>多卡推理 + 内置Context Cache</summary>
 
-   需使用run.sh生成独立runner
    ```bash
+   # 需使用run.sh生成独立runner
    ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --context-cache
    ```
   </details>
