@@ -13,14 +13,14 @@
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
 * 🚀 **高性能** (支持**上下文缓存、PD分离**) – 性能优于Python同类推理框架
-* 🧠 **极简核心** – 核心逻辑仅 **~ 3000 行** Rust 代码
+* 🧠 **极简核心** – 核心逻辑仅 **<3000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
 * 🐍 **轻量 Python 接口** – 使用 PyO3 构建的 Python 聊天接口
 * 🤝 **欢迎贡献** – 欢迎提交 PR、问题或给项目点亮 ⭐！
 
 ---
-### 对话性能
+### 💬 对话性能
 
 > **A100** (单卡, 40G)
 
@@ -33,19 +33,24 @@
 | QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)** | **75.91** tokens/s  |
 
-#### vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
-> 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
-> 并发请求数: 1 - 128；
-> Max Model Length: 512 - 2048；
-> 每个请求最大输出: 512 - 2048；
+> vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
+  <details>
+    <summary>展开详情</summary>
 
-| 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
-|------------------|--------|--------|---------|-------------|
-| Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
-| Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
-| Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
-| Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
-| Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+   > 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
+   > 并发请求数: 1 - 128；
+   > Max Model Length: 512 - 2048；
+   > 每个请求最大输出: 512 - 2048；
+
+   | 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
+   |------------------|--------|--------|---------|-------------|
+   | Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
+   | Qwen3-0.6B (BF16) |  32      | 15872       | 23.53s    | 674.43    |
+   | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
+   | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
+   | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+
+  </details>
 
 ### 性能对比
 
@@ -75,62 +80,6 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
-## 📽️ 演示视频
-
-🎉 观看项目运行演示：
-<video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
-
-
-## 📘 使用方法（Rust）
-
-使用 `--i` 启用交互模式 🤖，`--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
-
-```bash
-# 单卡推理 CUDA + Built-in Context Cache (使用 `--fp8-kvcache` 启用 FP8 KV Cache)
-cargo run --release --features cuda,nccl -- --i --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
-
-# 多卡推理 CUDA Graph + Flash Attention（使用run.sh生成独立runner）
-./run.sh --release --features cuda,nccl,graph,flash-attn -- --i --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
-
-# 多卡推理 server 服务 (未量化模型)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
-
-# 多卡推理 server 服务 (可选`--fp8-kvcache` 或 `--context-cache`)
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
-
-# 多卡推理 server 服务 (量化并加载为Q4K格式，可选`--context-cache`，同时使用Flash Attention做decoding)
-./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
-
-# CUDA Graph和输出惩罚项
-cargo run --release --features cuda,graph -- --i --f /path/qwq-32b-q4_k_m.gguf --presence-penalty 1.2 --frequency-penalty 1.2
-
-# macOS（Metal）
-cargo run --release --features metal -- --i --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
-
-#macOS (Metal, ISQ) with context cache
-cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k --context-cache
-```
-
-## Prefill-decode 分离（PD分离）
-```shell
-# 启动PD服务器 (无需指定`port`，因为此服务器不直接接收用户请求)
-# Rust
-./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
-# Python (依赖：pip install vllm_rs fastapi uvicorn)
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
-
-# 启动PD客户端
-# Rust
-./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
-
-# Python
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
-
-# PD Server与Client启动时的模型及Rank数量（卡数）需要一致，可为相同模型的不同格式（例如服务器未量化Safetensor, 客户端GGUF）
-# 如果指定了 `--pd-url`（例如 server端: 0.0.0.0:8100, client端: server_ip:8100），PD 服务器/客户端将尝试绑定或连接到该地址，
-# 客户端将尝试使用指定的 URL 连接到服务器（Metal平台不支持LocalIPC, 必须提供pd-url）。在这种情况下，服务器和客户端可以部署在不同的机器上。
-```
----
 
 ## 📘 使用方法（Python）
 ### 📦 从pip安装
@@ -145,74 +94,257 @@ python3 -m pip install vllm_rs fastapi uvicorn
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
+
+  <details open>
+    <summary>单卡运行GGUF模型 + FP8 KvCache</summary>
+
+   每个请求默认最大输出tokens（`--max-tokens`)，启用FP8 KV Cache（`--fp8-kvcache`，精度略有损失)
+
+   客户端默认配置（如客户端与API Server在同一系统）：
+   openai.base_url = "http://localhost:8000/v1/"
+   openai.api_key = "EMPTY"
+
+   `--m`: model_id, `--f`: GGUF文件名
+   ```bash
+   python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
+   ```
+  </details>
+
+   <details open>
+    <summary>多GPU推理量化模型</summary>
+
+   ```bash
+   python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+   ```
+  </details>
+
+   <details open>
+    <summary>将未量化模型加载为量化模型</summary>
+
+   Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
+   ```bash
+   python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
+   ```
+  </details>
+
+  <details>
+    <summary>运行GPTQ/AWQ and Marlin兼容模型</summary>
+
 ```bash
-# 启动 OpenAI 兼容的 API 服务（监听 http://0.0.0.0:8000）
-# openai.base_url = "http://localhost:8000/v1/"
-# openai.api_key = "EMPTY"
-
-# 本地GGUF模型文件 (`--f`)，每个请求默认最大输出tokens（`--max-tokens`)，启用FP8 KV Cache（`--fp8-kvcache`，精度略有损失)
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
-
-# 使用Model ID加载 (`--m`: model_id, `--f`: GGUF文件名)
-python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
-
-# 多GPU推理 (`--d`)
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
-
-# Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --isq q4k --max-model-len 262144 --max-num-seqs 1
-
-# GGUF模型多GPU推理+上下文缓存 (缓存上下文，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置)
-python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
+python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin --host 0.0.0.0 --port 8000
 ```
 
+  </details>
+
+   <details>
+    <summary>GGUF模型多GPU推理+上下文缓存</summary>
+
+   缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
+   ```bash
+   python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
+   ```
+  </details>
 
 ### 🤖✨ 交互式聊天与批处理
 
-```bash
-# 交互式聊天
-# 使用model id加载
-python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
+  <details open>
+    <summary>使用model id加载</summary>
 
-# 本地GGUF文件加载到设备2 (设备序号为1，`--d 1`)
-python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+   ```bash
+   python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
+   ```
+  </details>
 
-# 将未量化模型加载为GGUF量化模型 (例如q4k格式)，并启用最长上下文（262144 tokens），适用于任意已支持的模型架构
-python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
+  <details open>
+    <summary>将未量化模型加载为GGUF量化模型</summary>
 
-# 启用上下文缓存（快速响应请求）
-python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --max-num-seqs 1 --context-cache
+   并启用最长上下文（262144 tokens）
+   ```bash
+   python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
+   ```
+  </details>
 
-# ISQ q4k (macOS/Metal推荐，可选`--context-cache`)
-python -m vllm_rs.chat --w /path/Qwen3-0.6B --isq q4k
+  <details open>
+    <summary>启用上下文缓存（快速响应请求）</summary>
 
-# 批量同步示例
-python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+   ```bash
+   python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --context-cache
+   ```
+  </details>
 
-# 批量同步示例 (多GPU)
-python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
+  <details>
+    <summary>本地GGUF文件加载到指定设备</summary>
 
-### 🐍 Python API
-```python
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+   设备序号为1，`--d 1`
+   ```bash
+   python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+   ```
+  </details>
 
-# 同步批量生成
-outputs = engine.generate_sync([params,params], [prompt, prompt])
-print(outputs)
+  <details>
+    <summary>批量同步示例</summary>
 
-params.session_id = xxx #传入session_id以使用上下文缓存功能
+   ```bash
+   python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+   ```
 
-# 单请求流式生成
-(seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-for item in stream:
-    # item.datatype == "TOKEN"
-    print(item.data)
-```
+   ```bash
+   python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+   ```
+  </details>
+
+
+#### 🐍 Python API
+  <details>
+    <summary>详情</summary>
+
+   ```python
+   from vllm_rs import Engine, EngineConfig, SamplingParams, Message
+   cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
+   engine = Engine(cfg, "bf16")
+   params = SamplingParams(temperature=0.6, max_tokens=256)
+   prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+
+   同步批量生成
+   outputs = engine.generate_sync([params,params], [prompt, prompt])
+   print(outputs)
+
+   params.session_id = xxx #传入session_id以使用上下文缓存功能
+
+   单请求流式生成
+   (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
+   for item in stream:
+      # item.datatype == "TOKEN"
+      print(item.data)
+   ```
+  </details>
+
+## 📘 使用方法（Rust）
+
+使用 `--i` 启用交互模式 🤖，`--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
+
+> Chat模式
+  <details open>
+    <summary>单卡推理 + 内置Context Cache</summary>
+
+   ```bash
+   cargo run --release --features cuda,nccl -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   ```
+  </details>
+
+  <details open>
+    <summary>多卡推理 + 内置Context Cache</summary>
+
+   需使用run.sh生成独立runner
+   ```bash
+   ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --context-cache
+   ```
+  </details>
+
+> 多卡推理 server 服务 （需使用run.sh生成独立runner）
+
+  <details open>
+    <summary>运行未量化Qwen3-30B-A3B模型，同时使用CUDA Graph特性（4卡）</summary>
+
+   ```bash
+   ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+   ```
+  </details>
+
+   <details open>
+    <summary>多卡运行Qwen3-30B-A3B量化模型</summary>
+
+   ```bash
+   ./run.sh --release --features cuda,nccl,graph,flash-attn -- --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   ```
+  </details>
+
+   <details>
+    <summary>将未量化Qwen3-30B-A3B模型运行为Q4K量化模型，同时使用FP8 KVCache</summary>
+
+   ```bash
+   ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+   ```
+  </details>
+
+   <details>
+    <summary>进一步使用Context-Cache功能</summary>
+
+   使用内置Context-cache，不依赖Flash Attention，支持V100, Metal平台
+   ```bash
+   ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+   ```
+
+   使用Flash Attention做context-cache及decoding（需要Ampere+硬件，编译耗时时长，长文本Prefill性能最高）
+   ```bash
+   ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+   ```
+  </details>
+
+> MacOS/Metal平台
+
+  <details open>
+    <summary>运行Q2K量化模型</summary>
+
+   ```bash
+   cargo run --release --features metal -- --server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+   ```
+  </details>
+
+  <details>
+    <summary>将未量化模型运行为Q6K量化模型，同时使用Context-cache</summary>
+
+   ```bash
+   cargo run --release --features metal -- --server --w /path/Qwen3-0.6B --isq q6k --context-cache
+   ```
+  </details>
+
+
+## 🔀 Prefill-decode 分离（PD分离）
+
+  <details>
+    <summary>启动PD服务器</summary>
+
+   无需指定`port`，因为此服务器不直接接收用户请求
+   ```bash
+   ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+   ```
+
+   PD服务器还可使用Python启动 (依赖：pip install vllm_rs fastapi uvicorn)
+   ```bash
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+   ```
+  </details>
+
+  <details>
+    <summary>启动PD客户端</summary>
+
+   ```bash
+   ./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+   ```
+
+   PD客户端也可使用Python启动
+   ```bash
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
+   ```
+  </details>
+
+  <details>
+    <summary>单机多个Dockers/多机配置</summary>
+
+   PD Server与Client启动时的模型及Rank数量（卡数）需要一致，可为相同模型的不同格式（例如服务器未量化Safetensor, 客户端GGUF）
+   如果指定了 `--pd-url`（例如 server端: 0.0.0.0:8100, client端: server_ip:8100），PD 服务器/客户端将尝试绑定或连接到该地址，
+   客户端将尝试使用指定的 URL 连接到服务器（Metal平台不支持LocalIPC, 必须提供pd-url）。在这种情况下，服务器和客户端可以部署在不同的机器上。
+   单机多卡，PD服务器与客户端运行于不同Docker，需要配置Docker启动参数 `--ipc=host`
+  </details>
+
+---
+
+## 📽️ 演示视频
+
+🎉 观看项目运行演示：
+<video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
+
 
 ## 🔨 从源代码编译安装（可选）
 
@@ -291,19 +423,6 @@ pip install fastapi uvicorn
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |    |
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|    |
 | `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |    |
-
-## 🗜️ 实时量化（GGUF 格式转换）
-
-   💡 将任意非量化模型实时量化加载为GGUF格式，指定`--isq`非q4k、q8_0时可能需要几分钟时间：
-
-```bash
-# macOS
-cargo run --release --features metal -- --w /path/Qwen3-0.6B/ --isq q4k --prompts "How are you today?"
-
-# CUDA
-cargo run --release --features cuda,flash-attn -- --w /path/Qwen3-8B/ --isq q4k --prompts "How are you today?"
-```
-
 
 ## 📌 项目状态
 

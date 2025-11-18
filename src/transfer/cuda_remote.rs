@@ -3,7 +3,6 @@ use super::CudaIpcMemHandle;
 use candle_core::cuda_backend::cudarc::driver::sys::{lib, CUdeviceptr, CUipcMemHandle};
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use candle_core::{Device, Result, Tensor, WithDType};
-use std::collections::HashMap;
 use std::mem::{ManuallyDrop, MaybeUninit};
 /// (Server) Gets a serializable IPC handle for a GPU tensor's memory.
 pub(super) fn get_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDType>(
