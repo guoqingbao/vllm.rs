@@ -85,7 +85,7 @@ impl Scheduler {
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
             // We do not transfer context-cache request
-            if self.is_pd_mode() && !self.is_pd_server() && seq.status != SequenceStatus::Cached {
+            if self.is_pd_mode() && !self.is_pd_server() {
                 if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
                     // Client: Offload prefill request to PD server
                     if success {
@@ -577,7 +577,8 @@ impl Scheduler {
     }
 
     pub fn is_pd_mode(&self) -> bool {
-        self.pd_config.is_some()
+        // disable pd mod if context cache is enabled
+        !self.cfg.flash_context.unwrap_or(false) && self.pd_config.is_some()
     }
 
     pub fn is_pd_server(&self) -> bool {
