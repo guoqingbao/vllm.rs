@@ -97,7 +97,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 
   <details open>
-    <summary>单卡 + GGUF模型 + FP8 KvCache</summary>
+    <summary>单卡 + GGUF模型</summary>
 
    ```bash
    # 客户端默认配置（如客户端与API Server在同一系统）：
@@ -105,8 +105,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
    # openai.api_key = "EMPTY"
 
    # `--m`: model_id, `--f`: GGUF文件名
-   # 启用FP8 KV Cache（`--fp8-kvcache`)需要重新编译Python安装包（去掉`flash-context`特性）
-   python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000
+   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
    ```
   </details>
 
@@ -114,16 +113,16 @@ python3 -m pip install vllm_rs fastapi uvicorn
     <summary>多GPU + 本地GGUF模型</summary>
 
    ```bash
-   python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --max-model-len 64000
    ```
   </details>
 
    <details open>
-    <summary>将未量化模型加载为量化模型</summary>
+    <summary>将未量化模型加载为GGUF模型</summary>
 
    ```bash
-   # Safetensors模型多GPU推理（同时将权重量化为Q4K格式，启用最长上下文）：
-   python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
+   # 同时将权重量化为Q4K格式，启用最长上下文：
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
    ```
   </details>
 
@@ -131,7 +130,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
     <summary>运行GPTQ/AWQ Marlin兼容模型</summary>
 
 ```bash
-python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin --host 0.0.0.0 --port 8000
+python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ```
 
   </details>
@@ -141,18 +140,18 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
    
    ```bash
    # 缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
-   python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
+   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
    ```
   </details>
 
 ### 🤖✨ 交互式聊天与批处理
 
   <details open>
-    <summary>使用Huggingface model_id加载</summary>
+    <summary>使用Huggingface 模型id加载</summary>
 
    ```bash
    # 默认使用Context-cache
-   python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+   python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
    ```
   </details>
 
@@ -161,7 +160,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
    ```bash
    # 并启用最长上下文（262144 tokens）
-   python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
+   python3 -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
    ```
   </details>
 
@@ -169,11 +168,11 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>批量同步示例</summary>
 
    ```bash
-   python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+   python3 -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
    ```
 
    ```bash
-   python -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+   python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
    ```
   </details>
 
@@ -212,7 +211,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>单卡推理 + 内置Context Cache</summary>
 
    ```bash
-   cargo run --release --features cuda,nccl -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
    ```
   </details>
 
@@ -221,17 +220,17 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
    ```bash
    # 需使用run.sh生成独立runner，启用flash-context特性需要Ampere+以上设备，编译时间较长
-   ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --i
+   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --i
    ```
   </details>
 
-> 多卡推理 server 服务 （需使用run.sh生成独立runner）
+> 多卡推理 server 服务
 
   <details open>
-    <summary>运行未量化Qwen3-30B-A3B模型，同时使用CUDA Graph特性（4卡）</summary>
+    <summary>运行未量化Qwen3-30B-A3B模型</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-context  -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+   ./run.sh --release --features cuda,nccl,graph,flash-context --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
    ```
   </details>
 
@@ -239,7 +238,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>多卡运行Qwen3-30B-A3B量化模型</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-attn -- --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   ./run.sh --release --features cuda,nccl,graph,flash-attn --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
    ```
   </details>
 
@@ -248,7 +247,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
    ```bash
    # 去除`flash-context`以使用fp8 kvcache
-   ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
    ```
   </details>
 
@@ -257,12 +256,12 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
    使用内置Context-cache，不依赖Flash Attention，支持V100, Metal平台
    ```bash
-   ./run.sh --release --features cuda,nccl -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+   ./run.sh --release --features cuda,nccl --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
    ```
 
    使用Flash Attention做context-cache及decoding（需要Ampere+硬件，编译耗时时长，长文本Prefill性能最高）
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
    ```
   </details>
 
@@ -280,7 +279,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>将未量化模型运行为Q6K量化模型，同时使用Context-cache</summary>
 
    ```bash
-   cargo run --release --features metal -- --server --w /path/Qwen3-0.6B --isq q6k --context-cache
+   cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k
    ```
   </details>
 
@@ -293,7 +292,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
    无需指定`port`，因为此服务器不直接接收用户请求
    ```bash
    # PD服务器使用`flash-context`加快处理长文本prefill
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
    ```
 
    PD服务器还可使用Python启动 (依赖：pip install vllm_rs fastapi uvicorn)
@@ -306,7 +305,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>启动PD客户端</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+   ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
    ```
 
    PD客户端也可使用Python启动
@@ -336,7 +335,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
 
-> ⚠️ 启用 上下文缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh` 或 `run.sh`）
+> ⚠️ 启用 上下文缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh`编译 或 `run.sh`运行）
 
 ### 🛠️ 环境要求
 
