@@ -85,8 +85,9 @@
 ### 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装
    
-   💡 2. 预编译包`context cache` 特性不依赖于Flash attention, 如需启用`flash-context`特性需手动编译安装
+   💡 2. 预编译包`context cache` 依赖于Flash attention, 如需FP8 KvCache，请重新编译并去除`flash-context`特性
 ```shell
+# 多卡需要安装NCCL库
 python3 -m pip install vllm_rs fastapi uvicorn
 ```
 
@@ -220,7 +221,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
 
    ```bash
    # 需使用run.sh生成独立runner，启用flash-context特性需要Ampere+以上设备，编译时间较长
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --i
+   ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --i
    ```
   </details>
 
@@ -230,7 +231,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>运行未量化Qwen3-30B-A3B模型，同时使用CUDA Graph特性（4卡）</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-attn,flash-context  -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+   ./run.sh --release --features cuda,nccl,graph,flash-context  -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
    ```
   </details>
 
