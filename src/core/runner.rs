@@ -300,13 +300,13 @@ impl ModelRunner {
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     device,
-                    sync_alloc,
+                    Some(sync_alloc),
                 )?;
                 let value_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     dtype,
                     device,
-                    sync_alloc,
+                    Some(sync_alloc),
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
@@ -350,13 +350,13 @@ impl ModelRunner {
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
                     device,
-                    sync_alloc,
+                    Some(sync_alloc),
                 )?;
                 let value_blocks = Tensor::empty(
                     (num_gpu_blocks, vshape.0, vshape.1, vshape.2),
                     cache_dtype,
                     device,
-                    sync_alloc,
+                    Some(sync_alloc),
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }

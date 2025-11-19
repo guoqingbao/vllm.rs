@@ -139,6 +139,12 @@ async fn main() -> Result<()> {
         None
     };
 
+    let mut context_cache = args.context_cache;
+
+    if interactive && !args.server && !args.pd_server {
+        // force to use context_cache in chat mode
+        context_cache = true;
+    }
     let econfig = EngineConfig::new(
         args.model_id,
         args.weight_path,
@@ -153,7 +159,7 @@ async fn main() -> Result<()> {
         args.device_ids.clone(),
         generation_cfg,
         args.seed,
-        Some(args.context_cache),
+        Some(context_cache),
         Some(args.fp8_kvcache),
         Some(args.server || !interactive),
         args.cpu_mem_fold,
@@ -255,7 +261,7 @@ async fn main() -> Result<()> {
     };
 
     let mut request_params = params[0].clone();
-    request_params.session_id = if args.context_cache {
+    request_params.session_id = if context_cache {
         Some(format!("{}", Uuid::new_v4()))
     } else {
         None
@@ -300,7 +306,7 @@ async fn main() -> Result<()> {
                     } else {
                         print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
-                        if args.context_cache {
+                        if context_cache {
                             let e = engine.read();
                             chat_context_left =
                                 total_available_tokens - e.get_num_cached_tokens() as i64;
@@ -311,7 +317,7 @@ async fn main() -> Result<()> {
                             "Tokens left: {} (full)",
                             chat_context_left
                         ));
-                        request_params.session_id = if args.context_cache {
+                        request_params.session_id = if context_cache {
                             Some(format!("{}", Uuid::new_v4()))
                         } else {
                             None
@@ -387,7 +393,7 @@ async fn main() -> Result<()> {
                     decoded_length,
                     decode_output,
                 ) = handle.await.map_err(candle_core::Error::wrap)?;
-                if args.context_cache {
+                if context_cache {
                     let e = engine.read();
                     chat_context_left = total_available_tokens - e.get_num_cached_tokens() as i64;
                 } else {

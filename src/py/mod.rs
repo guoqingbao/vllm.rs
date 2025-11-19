@@ -266,9 +266,13 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) && cfg!(feature = "metal")
-        {
-            panic!("Error: fp8 kvcache is not compatible under context-context on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`).");
+        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
+            if cfg!(feature = "metal") {
+                panic!("Error: fp8 kvcache is not compatible under context-context on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`).");
+            } else {
+                panic!("Error: This python package build has flash-context (context-cache using flash attention), which does not compatible with fp8 kvcache
+                !\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`) when building the package.");
+            }
         }
 
         Self {

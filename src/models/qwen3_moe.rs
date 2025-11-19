@@ -32,7 +32,7 @@ impl MoeOrMlp {
         match self {
             Self::Mlp(m) => m.forward(xs),
             Self::FusedMoe(m) => m.forward(xs, is_prefill),
-            Self::FusedMoeGGUF(m) => m.forward(xs),
+            Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
         }
     }

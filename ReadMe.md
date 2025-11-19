@@ -89,8 +89,9 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 ### 📦 Install with pip
    💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support)
 
-   💡 2. Prebuilt package has native `context cache` feature without relying on flash attention, manual build required to use `flash-context` feature.
+   💡 2. Prebuilt package has native support of `context cache` using flash attention (built with `flash-context` feature), `fp8-kvcache` feature is not compatible with `flash-context`, manual build required to use FP8 KvCache.
 ```shell
+# You might install NCCL library for multi-gpu inference
 python3 -m pip install vllm_rs fastapi uvicorn
 ```
 
@@ -104,13 +105,14 @@ python3 -m pip install vllm_rs fastapi uvicorn
     <summary>Single GPU + GGUF model + FP8 KvCache</summary>
 
 ```bash
-# Each request has a default maximum output tokens (`--max-tokens`), enables FP8 KV Cache (`--fp8-kvcache`, with slight precision loss)
+# Each request has a default maximum output tokens (`--max-tokens`)
 
 # Default client configuration (if the client and API Server are on the same system):
 # openai.base_url = "[http://localhost:8000/v1/](http://localhost:8000/v1/)"
 # openai.api_key = "EMPTY"
 # `--m`: model_id, `--f`: GGUF file name
-python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000 --fp8-kvcache
+# To enable FP8 KV Cache (`--fp8-kvcache`), python package need to be built without `flash-context` feature
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000
 ```
 
   </details>
@@ -161,45 +163,37 @@ python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-
     <summary>Load with Huggingface model_id</summary>
 
 ```bash
-python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --fp8-kvcache
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 ```
 
   </details>
 
   <details open>
-    <summary>Non-quantized to GGUF quantized model</summary>
+    <summary>Run GGUF models with Huggingface Model ID</summary>
 
 ```bash
-# And enable maximum context (262144 tokens)
-python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144 --max-num-seqs 1 --max-tokens 16384
+# Context-cache will be automatically enabled under chat mode
+python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
 ```
 
   </details>
 
   <details open>
-    <summary>Enable context cache (fast response)</summary>
+    <summary>Unquantized to GGUF model (ISQ)</summary>
 
 ```bash
-python -m vllm_rs.chat --d 0 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --context-cache
+# Enable maximum context (262144 tokens), two ranks (`--d 0,1`) (`--f` for local gguf file)
+python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 ```
 
   </details>
 
   <details>
-    <summary>Load local GGUF file to a specific device</summary>
+    <summary>Batch Completion</summary>
 
 ```bash
-# Device index is 1, `--d 1`
-python -m vllm_rs.chat --d 1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-```
-
-  </details>
-
-  <details>
-    <summary>Batch sync examples</summary>
-
-```bash
-python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --d 0,1 --prompts "How are you? | How to make money?"
+python -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
 ```
 
 ```bash
@@ -251,7 +245,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   </details>
 
   <details open>
-    <summary>Multi-GPU inference + built-in Context Cache</summary>
+    <summary>Multi-GPU inference + Flash attention</summary>
 
   ```bash
   # Requires using run.sh to generate a separate runner
@@ -295,13 +289,13 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   Using built-in context cache, without Flash Attention, supports V100 and Metal platforms:
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
   ```
 
   Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
   ```
 
   </details>
@@ -334,7 +328,8 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   No need to specify `port`, since the server does not directly handle user requests.
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+  # Build with `flash-context` for maximum speed in long-context prefill
+  ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
   ```
 
   PD server can also be started with Python (dependency: pip install vllm_rs fastapi uvicorn)

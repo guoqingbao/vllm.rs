@@ -40,7 +40,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_engine_config(args, num_of_prompts):
+def build_engine_config(args, num_of_prompts, context_cache):
     if args.max_model_len is None:
         if args.i:
             max_model_len = 32768
@@ -67,7 +67,7 @@ def build_engine_config(args, num_of_prompts):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=args.context_cache,
+        flash_context=context_cache,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=False,
         cpu_mem_fold=args.cpu_mem_fold,
@@ -106,13 +106,14 @@ def main():
     args = parse_args()
     interactive = args.i
     interactive = True # disable non-interactive mode for now
+    context_cache = True # force to use context-cache in chat mode
     prompts = (
         args.prompts.split("|")
         if args.prompts and not interactive
         else ["How are you today?"]
     )
 
-    econfig = build_engine_config(args, len(prompts))
+    econfig = build_engine_config(args, len(prompts), context_cache)
     engine = Engine(econfig, args.dtype)
 
     if args.prompts and interactive:
@@ -146,7 +147,7 @@ def main():
                     continue
                 msg = Message(role="user", content=remove_surrogates(prompt_input))
                 chat_history.append(msg)
-                if args.context_cache:
+                if context_cache:
                     params.session_id = session_id
                 else:
                     params.session_id = None
@@ -157,7 +158,7 @@ def main():
                 if chat_history:
                     print("\n🌀 Chat history cleared. Start a new conversation.")
                     chat_history.clear()
-                    if args.context_cache:
+                    if context_cache:
                         tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                     else:
                         tokens_left = total_available_tokens
@@ -194,7 +195,7 @@ def main():
                 print()  # newline after streaming ends
                 if done_item != None:
                     prompt_start_time, decode_start_time, decode_finish_time, decoded_length = done_item
-                if args.context_cache:
+                if context_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens - prompt_length - decoded_length
@@ -214,7 +215,7 @@ def main():
                     outputs = []
             except KeyboardInterrupt:
                 stream.cancel()
-                if args.context_cache:
+                if context_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens
@@ -225,7 +226,7 @@ def main():
             except Exception as e:
                 session_id = str(uuid.uuid4())
                 chat_history.clear()
-                if args.context_cache:
+                if context_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens

@@ -6,7 +6,7 @@ use crate::utils::config::Config;
 use attention_rs::moe;
 use candle_core::Module;
 use candle_core::{
-    quantized::{GgmlDType, QMatMul, QTensor},
+    quantized::{GgmlDType, QTensor},
     DType, Result, Tensor, D,
 };
 use candle_nn::var_builder::Shard;
@@ -172,9 +172,9 @@ impl FusedMoe {
 
 pub struct FusedMoeGGUF {
     gate: Linear,
-    gate_experts: QMatMul,
-    up_experts: QMatMul,
-    down_experts: QMatMul,
+    gate_experts: Arc<QTensor>,
+    up_experts: Arc<QTensor>,
+    down_experts: Arc<QTensor>,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
     num_experts_per_tok: usize,
@@ -260,14 +260,9 @@ impl FusedMoeGGUF {
                 .narrow(2, comm.rank() * moe_intermediate_chunk, cur_chunk_size)?
                 .contiguous()?,
         );
-        let qtensor = QTensor::quantize(&gate_experts, ggml_dtype)?;
-        let gate_experts = QMatMul::QTensor(Arc::new(qtensor));
-
-        let qtensor = QTensor::quantize(&up_experts, ggml_dtype)?;
-        let up_experts = QMatMul::QTensor(Arc::new(qtensor));
-
-        let qtensor = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
-        let down_experts = QMatMul::QTensor(Arc::new(qtensor));
+        let gate_experts = Arc::new(QTensor::quantize(&gate_experts, ggml_dtype)?);
+        let up_experts = Arc::new(QTensor::quantize(&up_experts, ggml_dtype)?);
+        let down_experts = Arc::new(QTensor::quantize(&down_experts, GgmlDType::Q8_0)?);
 
         let world_size = comm.world_size();
 
@@ -321,10 +316,6 @@ impl FusedMoeGGUF {
             }
         };
 
-        let gate_experts = QMatMul::QTensor(gate_experts);
-        let up_experts = QMatMul::QTensor(up_experts);
-        let down_experts = QMatMul::QTensor(down_experts);
-
         Ok(Self {
             gate,
             gate_experts,
@@ -339,37 +330,74 @@ impl FusedMoeGGUF {
         })
     }
 
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let original_dtype = xs.dtype();
+    pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
+        let original_dtype = xs.dtype();
         let xs = if xs.dtype() != DType::F32 {
             xs.to_dtype(DType::F32)?
         } else {
             xs.to_owned()
         };
+
         let router_logits = self.gate.forward(&xs)?;
 
-        let (mut scores, indices) =
+        let (mut topk_weights, topk_ids) =
             attention_rs::topk::topk_softmax(&router_logits, self.num_experts_per_tok)?;
 
         if self.norm_topk_prob {
-            scores = scores.broadcast_div(&scores.sum_keepdim(D::Minus1)?)?;
+            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
 
-        let ys = {
-            let xs = xs.reshape((num_tokens, 1, hidden_dim))?;
-            let gate = self.gate_experts.indexed_moe_forward(&xs, &indices)?;
-            let up = self.up_experts.indexed_moe_forward(&xs, &indices)?;
-            self.down_experts
-                .indexed_moe_forward(&(up * gate.apply(&self.act)?)?, &indices)?
+        let (expert_ids, sorted_token_ids) = if is_prefill {
+            #[cfg(feature = "cuda")]
+            {
+                use attention_rs::sort::ArgSortOp;
+                topk_ids.flatten_all()?.sort(true)?
+            }
+            #[cfg(not(feature = "cuda"))]
+            topk_ids.flatten_all()?.sort_last_dim(true)?
+        } else {
+            topk_ids.flatten_all()?.sort_last_dim(true)?
         };
 
-        let mut ys = ys
-            .broadcast_mul(&scores.unsqueeze(D::Minus1)?)?
-            .sum(D::Minus2)?
-            .reshape((num_tokens, hidden_dim))?
-            .to_dtype(self.dtype)?;
+        let ys = {
+            let gate = moe::moe_gemm_gguf(
+                &xs,
+                &self.gate_experts,
+                &None,
+                &sorted_token_ids,
+                &expert_ids,
+                self.num_experts_per_tok,
+                is_prefill,
+                self.dtype,
+            )?;
+            let up = moe::moe_gemm_gguf(
+                &xs,
+                &self.up_experts,
+                &None,
+                &sorted_token_ids,
+                &expert_ids,
+                self.num_experts_per_tok,
+                is_prefill,
+                self.dtype,
+            )?;
 
+            let down_inputs = (up * gate.apply(&self.act)?)?;
+            moe::moe_gemm_gguf(
+                &down_inputs,
+                &self.down_experts,
+                &Some(topk_weights),
+                &sorted_token_ids,
+                &expert_ids,
+                self.num_experts_per_tok,
+                is_prefill,
+                self.dtype,
+            )?
+        };
+        let mut ys = ys.reshape((num_tokens, (), hidden_dim))?.sum(D::Minus2)?;
+        if ys.dtype() != self.dtype {
+            ys = ys.to_dtype(self.dtype)?;
+        }
         if self.world_size > 1 {
             ys = self.all_reduce.apply(&ys)?;
         }
@@ -561,9 +589,9 @@ impl FusedMoeISQ {
         let gate_up_experts = Tensor::cat(&[gate_experts, up_experts], candle_core::D::Minus2)?;
         let w_size_n = gate_up_experts.dim(1)? / 2;
 
-        let gate_up_experts = QTensor::quantize(&gate_up_experts, quant_type).unwrap();
+        let gate_up_experts = QTensor::quantize(&gate_up_experts, quant_type)?;
 
-        let down_experts = QTensor::quantize(&down_experts, GgmlDType::Q8_0).unwrap();
+        let down_experts = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
         let world_size = comm.world_size();
 
         Ok(Self {
