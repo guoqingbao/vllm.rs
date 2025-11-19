@@ -91,7 +91,7 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 
    ðŸ’¡ 2. Prebuilt package has native support of `context cache` using flash attention (built with `flash-context` feature), `fp8-kvcache` feature is not compatible with `flash-context`, manual build required to use FP8 KvCache.
 ```shell
-# You might install NCCL library for multi-gpu inference
+# You might need to install NCCL library on CUDA
 python3 -m pip install vllm_rs fastapi uvicorn
 ```
 
@@ -102,36 +102,33 @@ python3 -m pip install vllm_rs fastapi uvicorn
 ðŸ¤– <a href="python/ReadMe.md">Here are notes on using Context-cache with clients</a>
 
   <details open>
-    <summary>Single GPU + GGUF model + FP8 KvCache</summary>
+    <summary>Single GPU + GGUF model</summary>
 
 ```bash
-# Each request has a default maximum output tokens (`--max-tokens`)
-
 # Default client configuration (if the client and API Server are on the same system):
-# openai.base_url = "[http://localhost:8000/v1/](http://localhost:8000/v1/)"
+# openai.base_url = http://localhost:8000/v1/
 # openai.api_key = "EMPTY"
 # `--m`: model_id, `--f`: GGUF file name
-# To enable FP8 KV Cache (`--fp8-kvcache`), python package need to be built without `flash-context` feature
-python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --host 0.0.0.0 --port 8000 --max-tokens 32768 --max-model-len 128000
+python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-tokens 32768 --max-model-len 128000
 ```
 
   </details>
 
   <details open>
-    <summary>Multi-GPU + Local GGUF model</summary>
+    <summary>Multi-GPU + Local safetensors model</summary>
 
 ```bash
-python -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-model-len 64000
 ```
 
   </details>
 
   <details open>
-    <summary>Non-quantized to quantized models (ISQ)</summary>
+    <summary>Unquantized load as GGUF models (ISQ)</summary>
 
 ```bash
-# Safetensors model multi-GPU inference (also quantizes weights to Q4K format, enabling maximum context length):
-python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
+# Load as  Q4K format, enabling maximum context length:
+python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1
 ```
 
   </details>
@@ -140,7 +137,7 @@ python -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1
     <summary>GPTQ/AWQ Marlin-compatible model</summary>
 
 ```bash
-python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin --host 0.0.0.0 --port 8000
+python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ```
 
   </details>
@@ -149,6 +146,7 @@ python -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin -
     <summary>Multi-GPU + GGUF model + Context-Cache</summary>
 
 When context cache is enabled, pass `session_id` in the `extra_body` field when sending requests through the OpenAI API.
+
 `session_id` stays unchanged during one conversation; new conversations need a new `session_id`. No other settings need to be changed.
 
 ```bash
@@ -160,30 +158,31 @@ python -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-
 ### ðŸ¤–âœ¨ Interactive Chat and Batch Processing
 
   <details open>
-    <summary>Load with Huggingface model_id</summary>
+    <summary>Chat with Qwen3-32B-A3B model</summary>
 
 ```bash
+# Context-cache automatically enabled under chat mode
 python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 ```
 
   </details>
 
   <details open>
-    <summary>Run GGUF models with Huggingface Model ID</summary>
+    <summary>Chat with local unquantized model</summary>
 
 ```bash
-# Context-cache will be automatically enabled under chat mode
-python -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+
+python -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
 
 ```
 
   </details>
 
   <details open>
-    <summary>Unquantized to GGUF model (ISQ)</summary>
+    <summary>Chat with model quantized instantly (ISQ)</summary>
 
 ```bash
-# Enable maximum context (262144 tokens), two ranks (`--d 0,1`) (`--f` for local gguf file)
+# Enable maximum context (262144 tokens), two ranks (`--d 0,1`)
 python -m vllm_rs.chat --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 ```
 
@@ -236,49 +235,50 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
 > Chat mode
 
   <details open>
-    <summary>Single GPU inference + built-in Context Cache</summary>
+    <summary>Single GPU + built-in Context Cache</summary>
 
   ```bash
-  cargo run --release --features cuda,nccl -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+  cargo run --release --features cuda,nccl --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
   ```
 
   </details>
 
   <details open>
-    <summary>Multi-GPU inference + Flash attention</summary>
+    <summary>Multi-GPU + CUDA Graph + Flash attention</summary>
 
   ```bash
-  # Requires using run.sh to generate a separate runner
-  ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --context-cache
+  # run.sh script help generate the standalone runner
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --context-cache
   ```
 
   </details>
 
-> Multi-GPU inference server (requires run.sh to generate independent runner)
+> Multi-GPU server (other option: PD server)
 
   <details open>
-    <summary>Run non-quantized Qwen3-30B-A3B model with CUDA Graph (4 GPUs)</summary>
+    <summary>Serve unquantized model with multiple GPUs</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn -- --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
   ```
 
   </details>
 
   <details open>
-    <summary>Run quantized Qwen3-30B-A3B on multiple GPUs</summary>
+    <summary>Serve GGUF models</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn -- --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
   ```
 
   </details>
 
   <details>
-    <summary>Run non-quantized Qwen3-30B-A3B as Q4K quantized model with FP8 KVCache</summary>
+    <summary>Serve ISQ model with FP8 KVCache</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-attn -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+# disable flash-context feature
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
   ```
 
   </details>
@@ -289,13 +289,13 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   Using built-in context cache, without Flash Attention, supports V100 and Metal platforms:
 
   ```bash
-  ./run.sh --release --features cuda,nccl -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
   ```
 
   Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-attn,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
   ```
 
   </details>
@@ -312,7 +312,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   </details>
 
   <details>
-    <summary>Run non-quantized model as Q6K quantized model with context-cache</summary>
+    <summary>Run unquantized as Q6K model with context-cache</summary>
 
   ```bash
   cargo run --release --features metal -- --server --w /path/Qwen3-0.6B --isq q6k --context-cache
@@ -329,7 +329,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
 
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
-  ./run.sh --release --features cuda,nccl,flash-context -- --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
   ```
 
   PD server can also be started with Python (dependency: pip install vllm_rs fastapi uvicorn)
@@ -344,7 +344,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Start PD client</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-attn -- --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
   ```
 
   PD client can also be started with Python:
