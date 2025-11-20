@@ -241,6 +241,8 @@ def main():
     else:
         max_model_len = args.max_model_len
 
+    assert not args.pd_client, "PD Client is not available on Python due to Python Global Lock! Use Rust PD Client instead!"
+
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)

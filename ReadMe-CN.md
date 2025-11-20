@@ -94,6 +94,8 @@ python3 -m pip install vllm_rs fastapi uvicorn
 ### 🌐✨ API Server
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
+   💡如新的长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server/Client** （见**PD分离**）
+
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 
   <details open>
@@ -289,28 +291,24 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
   <details>
     <summary>启动PD服务器</summary>
 
-   无需指定`port`，因为此服务器不直接接收用户请求
+   无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
-   # PD服务器使用`flash-context`加快处理长文本prefill
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+   # PD服务器使用`flash-context`加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
+   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
    ```
 
-   PD服务器还可使用Python启动 (依赖：pip install vllm_rs fastapi uvicorn)
+   PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs fastapi uvicorn)
    ```bash
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
    ```
   </details>
 
   <details>
     <summary>启动PD客户端</summary>
 
+   PD客户端当前仅支持Rust版本，Python PD客户端由于Python全局锁，会导致PD Server处理长文本时影响PD客户端（如果Server/Client处于同一操作系统）
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
-   ```
-
-   PD客户端也可使用Python启动
-   ```bash
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
+   ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
    ```
   </details>
 
@@ -435,6 +433,7 @@ pip install fastapi uvicorn
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
+* [ ] PD Client for Python（Python全局锁问题）
 
 ## 📚 参考项目
 

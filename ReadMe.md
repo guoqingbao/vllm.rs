@@ -99,6 +99,8 @@ python3 -m pip install vllm_rs fastapi uvicorn
 
 💡You can use **any client compatible with the OpenAI API** to interact.
 
+💡Decoding may stuck during prefilling other long-context requests, use **Rust PD Server/Client** instead.
+
 🤖 <a href="python/ReadMe.md">Here are notes on using Context-cache with clients</a>
 
   <details open>
@@ -320,40 +322,33 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
   </details>
 
-## 🔀 Prefill-Decode Separation (PD Separation)
+## 🔀 Prefill-Decode Separation (PD Disaggregation)
 
   <details>
     <summary>Start PD server</summary>
 
   No need to specify `port`, since the server does not directly handle user requests.
+  The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`。
 
   ```bash
-  # Build with `flash-context` for maximum speed in long-context prefill
+  # Build with `flash-context` for maximum speed in long-context prefill (use unquantized model to obtain maximum prefill speed)
   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
   ```
 
-  PD server can also be started with Python (dependency: pip install vllm_rs fastapi uvicorn)
-
+  Or, use prebuilt Python package as PD server:
   ```bash
-  python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+  python3 -m vllm_rs.server --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
   ```
-
   </details>
 
   <details>
     <summary>Start PD client</summary>
 
+  Use **Rust** PD client since Python Global Lock will block decoding during PD server prefilling (if PD Client and PD server within same OS system).
   ```bash
-# Client can use different format of the same model
-  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+  # Client can use different format of the same model
+  ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
   ```
-
-  PD client can also be started with Python:
-
-  ```bash
-  python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --d 2,3 --port 8000 --pd-client
-  ```
-
   </details>
 
   <details>

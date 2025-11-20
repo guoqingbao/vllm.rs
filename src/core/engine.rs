@@ -548,11 +548,7 @@ impl LLMEngine {
         request_type: RequestType,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
         let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type)?;
-        let (tx, rx) = channel(if request_type == RequestType::Stream {
-            16
-        } else {
-            256
-        });
+        let (tx, rx) = channel(4096);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
         if self.econfig.server_mode.unwrap_or(true) && request_type != RequestType::Completion {
