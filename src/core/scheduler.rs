@@ -29,6 +29,7 @@ pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
 pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 500; // check prefill status on PD server every 1 second
+pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
 
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
@@ -93,6 +94,7 @@ impl Scheduler {
                             "Prefill request (Seq {}) transfered to PD server.",
                             seq.id
                         );
+                        seq.pd_first_token = None;
                         seq.swapped_time = Some(
                             SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -219,6 +221,10 @@ impl Scheduler {
         active_sessions: &VecDeque<(usize, String)>,
     ) {
         for (i, &idx) in ids.iter().enumerate() {
+            // Sequence may swapped out
+            if idx >= self.running.len() {
+                continue;
+            }
             let seq_id = self.running[idx].id;
             let token = output_ids[i];
 
@@ -593,6 +599,7 @@ impl Scheduler {
 
     pub fn is_suitable_for_transfer(&self, seq: &Sequence) -> bool {
         if seq.status == SequenceStatus::Swapped // swapped out sequence
+            || seq.len() < PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD // prefill length < 128
             || (self.cfg.flash_context.unwrap_or(false) // Context-cache request
             && self.cached_seqs.iter().position(|(id, _)| id == &seq.id).is_some())
         {
