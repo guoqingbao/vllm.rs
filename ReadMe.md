@@ -99,7 +99,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
 
 💡You can use **any client compatible with the OpenAI API** to interact.
 
-💡Decoding may stuck during prefilling other long-context requests, use **Rust PD Server/Client** instead.
+💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
 🤖 <a href="python/ReadMe.md">Here are notes on using Context-cache with clients</a>
 
@@ -255,7 +255,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
   </details>
 
-> Multi-GPU server (other option: PD server)
+> Multi-GPU server (other option: **PD server**)
 
   <details open>
     <summary>Serve unquantized model with multiple GPUs</summary>
@@ -279,8 +279,8 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
     <summary>Serve ISQ model</summary>
 
   ```bash
-# disable flash-context feature
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+# disable flash-context feature to use fp8-kvcache
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
   ```
 
   </details>
@@ -308,7 +308,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
     <summary>Run Q2K quantized model</summary>
 
   ```bash
-  cargo run --release --features metal -- --server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf
   ```
 
   </details>
@@ -331,7 +331,8 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`。
 
   ```bash
-  # Build with `flash-context` for maximum speed in long-context prefill (use unquantized model to obtain maximum prefill speed)
+  # Build with `flash-context` for maximum speed in long-context prefill
+  # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
   ```
 
@@ -347,7 +348,8 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   Use **Rust** PD client since Python Global Lock will block decoding during PD server prefilling (if PD Client and PD server within same OS system).
   ```bash
   # Client can use different format of the same model
-  ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+  # Use Q4K to obtain higher decoding speed for small batches
+  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
   ```
   </details>
 
@@ -405,13 +407,13 @@ maturin build --release --features cuda,python
 # Naive CUDA (+CUDA Graph, experimental)
 ./build.sh --release --features cuda,graph,python
 
-# CUDA (with context-cache and FP8 KV Cache, no Flash Attention) 
+# CUDA (with context-cache and FP8 KV Cache, no Flash Attention, compatible with V100) 
 ./build.sh --release --features cuda,nccl,python
 
 # CUDA (+Flash Attention, only used in prefill stage) 
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (+Flash Attention, used in both prefill and decode stage, long time to build) 
+# CUDA (+Flash Attention for decoding, +high prefill throughput, long time to build) 
 ./build.sh --release --features cuda,nccl,flash-context,python
 
 # macOS (Metal, single GPU only, with Context-cache and FP8 kvcache)
@@ -480,6 +482,7 @@ pip install fastapi uvicorn
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
+* [ ] PD Client for Python (Python GIL issue)
 ---
 
 ## 📚 References

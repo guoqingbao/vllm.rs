@@ -94,7 +94,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
 ### 🌐✨ API Server
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
 
-   💡如新的长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server/Client** （见**PD分离**）
+   💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
    🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 
@@ -142,7 +142,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    
    ```bash
    # 缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
-   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
+   python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 128000 --max-num-seqs 4 --context-cache
    ```
   </details>
 
@@ -294,7 +294,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
    # PD服务器使用`flash-context`加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
-   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
    ```
 
    PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs fastapi uvicorn)
@@ -306,7 +306,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
   <details>
     <summary>启动PD客户端</summary>
 
-   PD客户端当前仅支持Rust版本，Python PD客户端由于Python全局锁，会导致PD Server处理长文本时影响PD客户端（如果Server/Client处于同一操作系统）
+   PD客户端当前仅支持Rust版本，Python PD客户端由于Python全局锁，会导致PD Server处理长文本时影响PD客户端（如果Server/Client处于同一操作系统），客户端可使用相同模型的量化格式，加快小批量decoding处理
    ```bash
    ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
    ```
