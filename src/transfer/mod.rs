@@ -209,9 +209,9 @@ impl Transfer {
     #[allow(unused)]
     pub fn receive_kv_cache(
         &self,
-        seq: &mut Sequence,
+        seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
-    ) -> Result<(bool, u32)> {
+    ) -> Result<(bool, u32, usize)> {
         let status = self.check_prefill_finished(seq.id)?;
         if !status {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
@@ -219,16 +219,15 @@ impl Transfer {
 
         fn read_data<T: WithDType + MsgDtype>(
             sf: &Transfer,
-            seq: &mut Sequence,
+            seq: &Sequence,
             local_gpu_cache: &Vec<(Tensor, Tensor)>,
-        ) -> Result<(bool, u32)> {
+        ) -> Result<(bool, u32, usize)> {
             let local_gpu_ids = seq.block_table.clone();
             let local_device = local_gpu_cache[0].0.device();
 
             let data_guard = sf.finished_data.read();
             let data = &data_guard.get(&seq.id).unwrap();
             let token = data.first_token;
-            seq.pd_sending_time = Some(data.sending_time);
             match &data.transfer_handle {
                 KVTransferHandle::LocalIpc {
                     layer_handles,
@@ -308,7 +307,7 @@ impl Transfer {
                     }
                 }
             }
-            Ok((true, token))
+            Ok((true, token, data.sending_time))
         }
 
         let dtype = local_gpu_cache[0].0.dtype();

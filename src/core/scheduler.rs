@@ -630,9 +630,9 @@ impl Scheduler {
             let mut success = false;
             match self
                 .block_manager
-                .try_receive_kvcache(&mut self.transferred[idx])
+                .try_receive_kvcache(&self.transferred[idx])
             {
-                Ok((ret, first_token)) => {
+                Ok((ret, first_token, sending_time)) => {
                     let seq = &mut self.transferred[idx];
                     success = ret;
                     if success {
@@ -647,12 +647,24 @@ impl Scheduler {
                             .duration_since(UNIX_EPOCH)
                             .expect("Time went backwards")
                             .as_millis() as usize;
-                        let transfer_duration = now - seq.pd_sending_time.unwrap_or(now);
-                        crate::log_info!(
-                            "KvCache Transfer: Seq {} prefill finished and received in {} ms!",
-                            seq.id,
-                            transfer_duration
-                        );
+                        let transfer_duration = now - sending_time;
+
+                        if transfer_duration > 10000 {
+                            // Log a warning when a sequence takes an unusually long time to arrive.
+                            // Possible causes: insufficient KV cache on server or client, or low communication bandwidth.
+                            crate::log_warn!(
+                                "KvCache Transfer: Seq {} prefill finished, but receive time was unexpectedly long ({} ms).",
+                                seq.id,
+                                transfer_duration
+                            );
+                        } else {
+                            crate::log_info!(
+                                "KvCache Transfer: Seq {} prefill finished and received in {} ms!",
+                                seq.id,
+                                transfer_duration
+                            );
+                        };
+
                         self.block_manager.try_release_remote_kvcache(seq.id)?;
                     } else {
                         crate::log_error!(

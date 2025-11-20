@@ -277,7 +277,7 @@ fn main() -> anyhow::Result<()> {
                 }
                 send_local(
                     &mut vec![stream.try_clone()?],
-                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or((false, 0))),
+                    &MessageType::KvCacheReceiveResponse(ret.unwrap_or((false, 0, 0))),
                     false,
                 )?;
             }

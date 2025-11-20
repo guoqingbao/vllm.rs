@@ -201,7 +201,7 @@ pub enum MessageType {
 
     // receive kvcache from PD server
     KvCacheReceive(Sequence),
-    KvCacheReceiveResponse((bool, u32)),
+    KvCacheReceiveResponse((bool, u32, usize)),
 
     // notify PD server to release kvcache
     KvCacheRelease(usize),
