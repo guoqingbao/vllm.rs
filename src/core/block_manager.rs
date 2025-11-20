@@ -240,7 +240,7 @@ impl BlockManager {
         MessageType::KvCacheReceive,
         (seq.clone()),
         MessageType::KvCacheReceiveResponse,
-        (bool, u32)
+        (bool, u32, usize)
     );
 
     // After the client received prefill kvcache, it can call PD server to release
