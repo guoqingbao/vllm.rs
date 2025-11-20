@@ -236,7 +236,7 @@ impl BlockManager {
         pub,
         try_receive_kvcache,
         receive_kvcache,
-        (seq: &Sequence),
+        (seq: &mut Sequence),
         MessageType::KvCacheReceive,
         (seq.clone()),
         MessageType::KvCacheReceiveResponse,

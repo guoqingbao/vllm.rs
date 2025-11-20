@@ -630,7 +630,7 @@ impl Scheduler {
             let mut success = false;
             match self
                 .block_manager
-                .try_receive_kvcache(&self.transferred[idx])
+                .try_receive_kvcache(&mut self.transferred[idx])
             {
                 Ok((ret, first_token)) => {
                     let seq = &mut self.transferred[idx];
@@ -643,9 +643,15 @@ impl Scheduler {
                         seq.pd_first_token = Some(first_token);
                         seq.status = SequenceStatus::Running;
                         self.running.push(seq.clone());
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as usize;
+                        let transfer_duration = now - seq.pd_sending_time.unwrap_or(now);
                         crate::log_info!(
-                            "KvCache Transfer: Seq {} prefill finished and received!",
+                            "KvCache Transfer: Seq {} prefill finished and received in {} ms!",
                             seq.id,
+                            transfer_duration
                         );
                         self.block_manager.try_release_remote_kvcache(seq.id)?;
                     } else {

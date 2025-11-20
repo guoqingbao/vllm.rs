@@ -16,6 +16,7 @@ mod cuda_remote;
 use candle_core::cuda_backend::CudaDType as MsgDtype;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(not(feature = "cuda"))]
 use Sized as MsgDtype;
 
@@ -100,6 +101,7 @@ pub struct FinishedPrefillData {
     pub seq_id: usize,
     pub first_token: u32,
     pub transfer_handle: KVTransferHandle,
+    pub sending_time: usize,
 }
 
 /// Messages for communication between Client and PDServer.
@@ -207,7 +209,7 @@ impl Transfer {
     #[allow(unused)]
     pub fn receive_kv_cache(
         &self,
-        seq: &Sequence,
+        seq: &mut Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
     ) -> Result<(bool, u32)> {
         let status = self.check_prefill_finished(seq.id)?;
@@ -217,7 +219,7 @@ impl Transfer {
 
         fn read_data<T: WithDType + MsgDtype>(
             sf: &Transfer,
-            seq: &Sequence,
+            seq: &mut Sequence,
             local_gpu_cache: &Vec<(Tensor, Tensor)>,
         ) -> Result<(bool, u32)> {
             let local_gpu_ids = seq.block_table.clone();
@@ -226,6 +228,7 @@ impl Transfer {
             let data_guard = sf.finished_data.read();
             let data = &data_guard.get(&seq.id).unwrap();
             let token = data.first_token;
+            seq.pd_sending_time = Some(data.sending_time);
             match &data.transfer_handle {
                 KVTransferHandle::LocalIpc {
                     layer_handles,
@@ -358,6 +361,10 @@ impl Transfer {
             server_gpu_cache: &Vec<(Tensor, Tensor)>,
             first_token: u32,
         ) -> Result<bool> {
+            let sending_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_millis() as usize;
             let transfer_handle = match config.method {
                 PdMethod::LocalIpc => {
                     let mut layer_handles = Vec::new();
@@ -415,6 +422,7 @@ impl Transfer {
                 seq_id: seq.id,
                 first_token,
                 transfer_handle,
+                sending_time,
             });
             // Send the finished data back to the client
             sf.communicator.send(&msg)
