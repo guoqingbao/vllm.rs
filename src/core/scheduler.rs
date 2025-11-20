@@ -557,15 +557,18 @@ impl Scheduler {
             // Reach the kvcache threashold and we have cpu memory to swap out
             match self.block_manager.swap_out(seq) {
                 Ok(_) => {
+                    let mut seq = self.running.remove(idx);
                     seq.status = SequenceStatus::Swapped;
+                    self.block_manager.deallocate(&seq);
+                    // block table need to be reallocated when swapping in
+                    self.cached.push(seq.clone());
                 }
                 Err(e) => {
                     crate::log_warn!("Failed to swap out seq {}: {:?}", seq.id, e);
                     seq.status = SequenceStatus::Finished;
+                    self.block_manager.deallocate(seq);
                 }
             }
-            // Free resources for swapped out sequences
-            self.block_manager.deallocate(seq);
         } else {
             // Sufficient GPU KV Cache, no need to swap, mark as cached in GPU memory
             seq.status = SequenceStatus::Cached;

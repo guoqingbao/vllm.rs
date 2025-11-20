@@ -823,8 +823,8 @@ impl LLMEngine {
         }
         self.check_cache();
         self.check_canceled(None);
-        if self.econfig.server_mode.unwrap_or(true) {
-            self.may_print_decoding_throughput();
+        if self.econfig.server_mode.unwrap_or(true) && is_running {
+            self.may_print_decoding_throughput(&indices);
         }
         Ok(indices.len())
     }
@@ -884,8 +884,8 @@ impl LLMEngine {
         self.cancelled_sequences.clear();
     }
 
-    pub fn may_print_decoding_throughput(&mut self) {
-        if self.active_requests.is_empty() {
+    pub fn may_print_decoding_throughput(&mut self, active_indices: &Vec<usize>) {
+        if active_indices.is_empty() || self.active_requests.is_empty() {
             return;
         }
         let cur_time = SystemTime::now()
@@ -900,20 +900,24 @@ impl LLMEngine {
         let mut total_decoded_length = 0;
         let mut total_decoded_time_costs = 0;
 
-        for seq_id in &self.active_requests {
-            if let Some(length) = self.decode_length.get(seq_id) {
-                total_decoded_length += length;
-            }
-            if let Some(start_time) = self.decode_start_times.get(seq_id) {
-                total_decoded_time_costs += cur_time - start_time;
+        for &idx in active_indices {
+            if let Some(seq) = self.scheduler.get_running(idx) {
+                if let Some(length) = self.decode_length.get(&seq.id) {
+                    total_decoded_length += length;
+                }
+                if let Some(start_time) = self.decode_start_times.get(&seq.id) {
+                    total_decoded_time_costs += cur_time - start_time;
+                }
             }
         }
 
         if total_decoded_length > 0 && total_decoded_time_costs / 1000 > 0 {
+            let avg_throughput = total_decoded_length / (total_decoded_time_costs / 1000);
             crate::log_info!(
-                "Decoding: {} active request(s), avg. {} tokens/s per request",
-                self.active_requests.len(),
-                total_decoded_length / (total_decoded_time_costs / 1000)
+                "Decoding: {} active request(s), avg. {} tokens/s per request (total: {} tokens/s)",
+                active_indices.len(),
+                avg_throughput,
+                avg_throughput * active_indices.len()
             )
         }
 
