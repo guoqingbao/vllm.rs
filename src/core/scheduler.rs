@@ -161,7 +161,7 @@ impl Scheduler {
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            self.try_swap_out(preempt_ids.clone());
+            self.preempt_to_swap_out(preempt_ids.clone());
         }
 
         let is_pd_server = self.is_pd_server();
@@ -518,69 +518,52 @@ impl Scheduler {
         }
     }
 
-    // swap out one sequence a time
-    pub fn try_swap_out(&mut self, preempt_ids: Vec<usize>) {
+    // swap out one sequence for preemption
+    pub fn preempt_to_swap_out(&mut self, preempt_ids: Vec<usize>) {
         for idx in preempt_ids.into_iter().rev() {
-            let mut seq = &mut self.running[idx];
-            // If sequence has blocks, attempt to swap to CPU.
-            // If cannot swap, fallback.
-            if !seq.block_table.is_empty()
-                && seq.output_len() > 0
-                && seq.status == SequenceStatus::Running
-                && self.block_manager.can_swap_out(&seq)
-            {
-                // make sure we have identical number of blocks when swapping in
-                // for decoding
-                if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
-                    continue;
-                }
-                match self.block_manager.swap_out(&mut seq) {
-                    Ok(_) => {
-                        let mut seq = self.running.remove(idx);
-                        seq.status = SequenceStatus::Swapped;
-                        // seq.num_cached_tokens = seq.len();
-                        self.block_manager.deallocate(&seq);
-                        // block table need to be reallocated when swapping in
-                        self.cached.push(seq.clone());
-                        break;
-                    }
-                    Err(e) => {
-                        crate::log_warn!("Swap out failed for seq {}: {:?}", seq.id, e);
-                    }
-                }
+            if self.swap_out(idx) {
+                break;
             }
         }
     }
 
-    pub fn swap_out_or_cache(&mut self, idx: usize, v: String) {
-        let kvcache_usage_percentage = self.kv_cache_usage_percent();
+    // swap out for one sequence
+    pub fn swap_out(&mut self, idx: usize) -> bool {
         let mut seq = &mut self.running[idx];
-        if kvcache_usage_percentage > KVCACHE_SWAP_THRESHOLD
-            && !seq.block_table.is_empty()
-            && self.block_manager.can_swap_out(seq)
+        if !seq.block_table.is_empty()
+            && self.block_manager.can_swap_out(&seq)
             && self.block_manager.ensure_allocate(&mut seq).is_ok()
+            && seq.output_len() > 0
         {
-            // Reach the kvcache threashold and we have cpu memory to swap out
-            match self.block_manager.swap_out(seq) {
+            match self.block_manager.swap_out(&mut seq) {
                 Ok(_) => {
                     let mut seq = self.running.remove(idx);
                     seq.status = SequenceStatus::Swapped;
                     self.block_manager.deallocate(&seq);
-                    // block table need to be reallocated when swapping in
                     self.cached.push(seq.clone());
+                    true
                 }
                 Err(e) => {
-                    crate::log_warn!("Failed to swap out seq {}: {:?}", seq.id, e);
-                    seq.status = SequenceStatus::Finished;
-                    self.block_manager.deallocate(seq);
+                    crate::log_warn!("Swap out failed for seq {}: {:?}", seq.id, e);
+                    false
                 }
             }
         } else {
+            false
+        }
+    }
+
+    // swap out or cache for one sequence
+    pub fn swap_out_or_cache(&mut self, seq_id: usize, session_id: String) {
+        if self.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD {
+            self.swap_out(seq_id);
+        } else {
+            let mut seq = &mut self.running[seq_id];
             // Sufficient GPU KV Cache, no need to swap, mark as cached in GPU memory
             seq.status = SequenceStatus::Cached;
             seq.num_cached_tokens = seq.len();
-            if !self.cached_seqs.iter().any(|(_, v)| v == v) {
-                self.cached_seqs.push_back((seq.id, v.clone()));
+            if !self.cached_seqs.iter().any(|(_, v)| v == &session_id) {
+                self.cached_seqs.push_back((seq.id, session_id.clone()));
             }
         }
     }
