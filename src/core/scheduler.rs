@@ -512,16 +512,18 @@ impl Scheduler {
         }
     }
 
-    // swap out multi sequences for preemption
+    // swap out one sequence for preemption
     pub fn preempt_to_swap_out(&mut self, preempt_ids: Vec<usize>) {
         for idx in preempt_ids.into_iter().rev() {
-            self.swap_out(idx);
+            if self.swap_out(idx) {
+                break;
+            }
         }
     }
 
     // swap out for one sequence
-    pub fn swap_out(&mut self, seq_id: usize) -> bool {
-        let mut seq = &mut self.running[seq_id];
+    pub fn swap_out(&mut self, idx: usize) -> bool {
+        let mut seq = &mut self.running[idx];
         if !seq.block_table.is_empty()
             && self.block_manager.can_swap_out(&seq)
             && self.block_manager.ensure_allocate(&mut seq).is_ok()
@@ -529,7 +531,7 @@ impl Scheduler {
         {
             match self.block_manager.swap_out(&mut seq) {
                 Ok(_) => {
-                    let mut seq = self.running.remove(seq_id);
+                    let mut seq = self.running.remove(idx);
                     seq.status = SequenceStatus::Swapped;
                     self.block_manager.deallocate(&seq);
                     self.cached.push(seq.clone());
@@ -554,7 +556,7 @@ impl Scheduler {
             // Sufficient GPU KV Cache, no need to swap, mark as cached in GPU memory
             seq.status = SequenceStatus::Cached;
             seq.num_cached_tokens = seq.len();
-            if !self.cached_seqs.iter().any(|(_, v)| v == v) {
+            if !self.cached_seqs.iter().any(|(_, v)| v == &session_id) {
                 self.cached_seqs.push_back((seq.id, session_id.clone()));
             }
         }
