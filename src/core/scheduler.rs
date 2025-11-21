@@ -74,15 +74,25 @@ impl Scheduler {
 
         // PD server: Check for new incoming prefill requests
         if self.is_pd_server() {
-            while let Ok(Some(seq)) = self
+            if let Ok((fit, Some(seq))) = self
                 .block_manager
                 .try_receive_prefill(self.get_available_kv_tokens())
             {
-                crate::log_warn!(
-                    "Prefill request (Seq {}, {} tokens) received from PD client.",
-                    seq.id,
-                    seq.len(),
-                );
+                let seq_id = seq.id;
+                if !fit {
+                    crate::log_warn!(
+                        "Prefill request (Seq {}) enter pending status because it require {} KvCache tokens (left {}).",
+                        seq_id,
+                        seq.len() + 1,
+                        self.get_available_kv_tokens(),
+                    );
+                } else {
+                    crate::log_warn!(
+                        "Prefill request (Seq {}, {} tokens) received from PD client.",
+                        seq_id,
+                        seq.len(),
+                    );
+                }
                 // Add to waiting queue.
                 self.waiting.push_back(seq);
             }
@@ -91,33 +101,8 @@ impl Scheduler {
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
             // We do not transfer context-cache request
-            if self.is_pd_mode() && !self.is_pd_server() && self.is_suitable_for_transfer(&seq) {
-                // assert!(seq.block_table.is_empty());
-                if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
-                    // Client: Offload prefill request to PD server
-                    if success {
-                        crate::log_warn!(
-                            "Prefill request (Seq {}, {} tokens) transfered to PD server.",
-                            seq.id,
-                            seq.len(),
-                        );
-                        seq.pd_first_token = None;
-                        seq.swapped_time = Some(
-                            SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_millis() as usize,
-                        );
-                        self.transferred.push_back(seq);
-                    } else {
-                        crate::log_warn!(
-                            "Unable transfer prefill request (Seq {}) to PD server. Retry later...",
-                            seq.id
-                        );
-                        self.waiting.push_front(seq); // push back, retry later
-                    }
-                    break; // transfer one sequence a time
-                }
+            if self.is_pd_mode() && !self.is_pd_server() && self.try_transfer(&mut seq) {
+                break;
             }
 
             if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
@@ -404,10 +389,13 @@ impl Scheduler {
         let mut remove_ids = Vec::new();
         for i in 0..self.running.len() {
             let seq: &mut Sequence = &mut self.running[i];
-            if seq.status == SequenceStatus::Cached && !is_pd_server {
+            if !is_pd_server && seq.status == SequenceStatus::Cached {
                 seq.output_ids.clear();
                 remove_ids.push(seq.id);
                 self.cached.push(seq.clone());
+            }
+            if is_pd_server && seq.status == SequenceStatus::Finished {
+                self.print_free_blocks();
             }
         }
         self.running.retain(|s| !remove_ids.contains(&s.id));
@@ -511,6 +499,49 @@ impl Scheduler {
             .filter_map(|&target_id| self.running.iter().position(|seq| seq.id == target_id))
             .collect();
         (indices, finished_indices)
+    }
+
+    pub fn try_transfer(&mut self, seq: &mut Sequence) -> bool {
+        if !self.is_suitable_for_transfer(&seq) {
+            return false;
+        }
+        let cur_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_millis() as usize;
+
+        if let Some(tm) = seq.swapped_time {
+            if cur_time - tm < SWAP_COOLING_PERIOD {
+                return false;
+            }
+        }
+        if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
+            // Client: Offload prefill request to PD server
+            seq.swapped_time = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_millis() as usize,
+            );
+            if success {
+                crate::log_warn!(
+                    "Prefill request (Seq {}, {} tokens) transfered to PD server.",
+                    seq.id,
+                    seq.len(),
+                );
+                seq.pd_first_token = None;
+                self.transferred.push_back(seq.clone());
+            } else {
+                crate::log_warn!(
+                    "Unable transfer prefill request (Seq {}) to PD server. Retry later...",
+                    seq.id
+                );
+                self.waiting.push_front(seq.clone()); // push back, retry later
+            }
+            success
+        } else {
+            false
+        }
     }
 
     pub fn try_swap_in(&mut self) {

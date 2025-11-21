@@ -185,7 +185,7 @@ pub enum MessageType {
 
     // Prefill transfer receive
     ReceivePrefill(usize),
-    ReceivePrefillResponse(Option<Sequence>),
+    ReceivePrefillResponse((bool, Option<Sequence>)),
 
     // Client: Check PD prefill status
     CheckPrefillStatus(usize),

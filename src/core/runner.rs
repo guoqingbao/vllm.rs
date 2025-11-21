@@ -792,12 +792,12 @@ impl ModelRunner {
         }
     }
 
-    pub fn try_receive_prefill(&self, available_tokens: usize) -> Result<Option<Sequence>> {
+    pub fn try_receive_prefill(&self, available_tokens: usize) -> Result<(bool, Option<Sequence>)> {
         if let Some(transfer) = &self.transfer {
             if transfer.is_client() {
                 candle_core::bail!("PD client does not support try_receive_prefill!");
             }
-            Ok(transfer.try_receive_prefill_request(available_tokens))
+            transfer.try_receive_prefill_request(available_tokens)
         } else {
             candle_core::bail!("KV Cache transfer engine is not initialized!");
         }

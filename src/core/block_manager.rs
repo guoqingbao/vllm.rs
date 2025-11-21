@@ -192,7 +192,7 @@ impl BlockManager {
         MessageType::ReceivePrefill,
         (available_tokens),
         MessageType::ReceivePrefillResponse,
-        Option<Sequence>
+        (bool, Option<Sequence>)
     );
 
     // def try_check_prefill_status

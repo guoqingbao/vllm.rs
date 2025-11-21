@@ -328,20 +328,26 @@ impl Transfer {
     // --- Server-side API ---
 
     /// (Server) Tries to receive a new prefill request from the queue.
-    pub fn try_receive_prefill_request(&self, available_tokens: usize) -> Option<Sequence> {
+    pub fn try_receive_prefill_request(
+        &self,
+        available_tokens: usize,
+    ) -> Result<(bool, Option<Sequence>)> {
         *self.available_tokens.write() = available_tokens;
-        let _ = self
-            .communicator
-            .send(&TransferMessage::AvailableTokenResponse(available_tokens))
-            .ok()?;
+        self.communicator
+            .send(&TransferMessage::AvailableTokenResponse(available_tokens))?;
         if let Some(seq) = self.pending_prefills.lock().pop_front() {
             if seq.len() + 1 < available_tokens {
-                Some(seq)
+                Ok((true, Some(seq)))
             } else {
-                None
+                crate::log_warn!(
+                    "A new prefill request requires {} KvCache tokens, but KvCache only left {}",
+                    seq.len() + 1,
+                    available_tokens
+                );
+                Ok((false, Some(seq)))
             }
         } else {
-            None
+            Ok((true, None))
         }
     }
 
