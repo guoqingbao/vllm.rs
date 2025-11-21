@@ -92,7 +92,7 @@ impl Scheduler {
         while let Some(mut seq) = self.waiting.pop_front() {
             // We do not transfer context-cache request
             if self.is_pd_mode() && !self.is_pd_server() && self.is_suitable_for_transfer(&seq) {
-                assert!(seq.block_table.is_empty());
+                // assert!(seq.block_table.is_empty());
                 if let Ok(success) = self.block_manager.try_transfer_prefill(&seq) {
                     // Client: Offload prefill request to PD server
                     if success {
@@ -169,7 +169,14 @@ impl Scheduler {
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            self.try_swap_out(preempt_ids.clone());
+            if let Some((idx, _)) = preempt_ids
+                .iter()
+                .map(|&i| (i, &self.running[i]))
+                .min_by_key(|(_, seq)| seq.id)
+            // swap-out the oldest sequence
+            {
+                self.try_swap_out(idx, true);
+            }
         }
 
         let is_pd_server = self.is_pd_server();
@@ -514,13 +521,12 @@ impl Scheduler {
             .as_millis() as usize;
 
         for i in 0..self.cached.len() {
-            let mut seq = &mut self.cached[i];
+            let seq = &self.cached[i];
             if seq.status != SequenceStatus::Swapped
                 || cur_time - seq.swapped_time().unwrap_or(cur_time) < SWAP_COOLING_PERIOD
             {
                 continue;
             }
-            seq.swapped_time = Some(cur_time);
 
             if !self.block_manager.can_swap_in(&seq)
                 || (available_kvcache_tokens - seq.len() < MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP)
@@ -530,6 +536,18 @@ impl Scheduler {
                     continue;
                 }
 
+                // KvCache not sufficent, try if we can swap-out cached seq
+                if let Some((pos, s)) = self
+                    .cached
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.status == SequenceStatus::Cached)
+                {
+                    crate::log_warn!("Insufficient KvCache, trying to swap out cached Seq {} for swapping in Seq {}!", s.id, seq.id);
+                    self.try_swap_out(pos, true);
+                    break;
+                }
+
                 let mut seq = self.cached.remove(i);
                 seq.status = SequenceStatus::Finished;
                 crate::log_error!("No KvCache left for swap in Seq {}!", seq.id);
@@ -537,6 +555,8 @@ impl Scheduler {
                 break;
             }
 
+            let mut seq = self.cached.remove(i);
+            seq.swapped_time = Some(cur_time);
             seq.clear_block_table(); //reallocate block table since previous gpu blocks were freed
 
             if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
@@ -544,7 +564,6 @@ impl Scheduler {
             }
 
             // Swap in data from CPU (if swapped out previously)
-            let mut seq = self.cached.remove(i);
             match self.block_manager.swap_in(&mut seq) {
                 Ok(_) => {
                     seq.status = SequenceStatus::Running;
@@ -561,34 +580,46 @@ impl Scheduler {
     }
 
     // swap out one sequence a time
-    pub fn try_swap_out(&mut self, preempt_ids: Vec<usize>) {
-        for idx in preempt_ids.into_iter().rev() {
-            let mut seq = &mut self.running[idx];
-            // If sequence has blocks, attempt to swap to CPU.
-            // If cannot swap, fallback.
-            if !seq.block_table.is_empty()
-                && seq.output_len() > 0
-                && seq.status == SequenceStatus::Running
-                && self.block_manager.can_swap_out(&seq)
-            {
-                // make sure we have identical number of blocks when swapping in
-                // for decoding
-                if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
-                    continue;
+    pub fn try_swap_out(&mut self, idx: usize, is_running: bool) {
+        if (is_running && idx >= self.running.len()) || (!is_running && idx >= self.cached.len()) {
+            return;
+        }
+
+        let mut seq = if is_running {
+            &mut self.running[idx]
+        } else {
+            &mut self.cached[idx]
+        };
+
+        // If sequence has blocks, attempt to swap to CPU.
+        // If cannot swap, fallback.
+        if !seq.block_table.is_empty()
+            && seq.output_len() > 0
+            && (seq.status == SequenceStatus::Running || seq.status == SequenceStatus::Cached)
+            && self.block_manager.can_swap_out(&seq)
+        {
+            // make sure we have identical number of blocks when swapping in
+            // for decoding
+            if let Err(_) = self.block_manager.ensure_allocate(&mut seq) {
+                return;
+            }
+            match self.block_manager.swap_out(&mut seq) {
+                Ok(_) => {
+                    let mut seq = if is_running {
+                        self.running.remove(idx)
+                    } else {
+                        // Even though the cached sequence swapped out,
+                        // no need remove it from cached list since it can be recoved
+                        self.cached.remove(idx)
+                    };
+                    seq.status = SequenceStatus::Swapped;
+                    // seq.num_cached_tokens = seq.len();
+                    self.block_manager.deallocate(&seq);
+                    // block table need to be reallocated when swapping in
+                    self.cached.push(seq.clone());
                 }
-                match self.block_manager.swap_out(&mut seq) {
-                    Ok(_) => {
-                        let mut seq = self.running.remove(idx);
-                        seq.status = SequenceStatus::Swapped;
-                        // seq.num_cached_tokens = seq.len();
-                        self.block_manager.deallocate(&seq);
-                        // block table need to be reallocated when swapping in
-                        self.cached.push(seq.clone());
-                        break;
-                    }
-                    Err(e) => {
-                        crate::log_warn!("Swap out failed for seq {}: {:?}", seq.id, e);
-                    }
+                Err(e) => {
+                    crate::log_warn!("Swap out failed for seq {}: {:?}", seq.id, e);
                 }
             }
         }
@@ -674,15 +705,24 @@ impl Scheduler {
             // We have the data. Can we allocate space for it?
             if !self.block_manager.can_allocate(&self.transferred[idx]) {
                 // Not enough memory right now. Put data back and try later.
-                // This part is tricky. The `finished_data` is already
-                // removed. We need to re-insert it.
-                // This logic should be improved, e.g., by peeking.
+
+                // KvCache not sufficent, try if we can swap-out cached seq
+                if let Some((pos, s)) = self
+                    .cached
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.status == SequenceStatus::Cached)
+                {
+                    crate::log_warn!("Insufficient KvCache, trying to swap out cached Seq {} for receiving KvCache for Seq {}!", s.id, seq_id);
+                    self.try_swap_out(pos, true);
+                    break;
+                }
+
                 crate::log_warn!(
                     "KvCache Transfer: Seq {} prefill finished on PD server, but no blocks to receive. Will retry.",
                     seq_id
                 );
                 // For simplicity, we just break and retry next cycle.
-                // A robust impl would re-queue `finished_data`.
                 break;
             }
 
@@ -713,12 +753,12 @@ impl Scheduler {
                         let transfer_duration = now - sending_time;
 
                         if transfer_duration > 10000 {
-                            // Log a warning when a sequence takes an unusually long time to arrive.
+                            // Log a warning when a sequence takes an unusually long time to receive and swap-in.
                             // Possible causes: insufficient KV cache on server or client, or low communication bandwidth.
                             crate::log_warn!(
-                                "KvCache Transfer: Seq {} prefill finished, but receive (with swap-in) time was unexpectedly long ({} ms).",
+                                "KvCache Transfer: Seq {} prefill finished, but receive (with swap-in) time was unexpectedly long ({} s).",
                                 seq.id,
-                                transfer_duration
+                                transfer_duration / 1000
                             );
                         } else {
                             crate::log_info!(
@@ -727,6 +767,10 @@ impl Scheduler {
                                 transfer_duration
                             );
                         };
+
+                        // Since KVCache Transfer involved here, the prefill speed might not accurate
+                        // since receive remote kvcache requires sufficient local cache memory (sometime pending for kvcache)
+                        // The actual prefill speed need to exclude the transfer time, for simplicity we didn't do that
 
                         self.block_manager.try_release_remote_kvcache(seq.id)?;
                     } else {
