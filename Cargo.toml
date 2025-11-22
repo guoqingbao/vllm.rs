@@ -48,6 +48,7 @@ axum = { version = "0.7.4", features = ["tokio"] }
 flume = "0.10.14"
 utoipa = { version = "4.2", features = ["axum_extras"] }
 colored = { version = "3.0.0" }
+tower-http = { version = "0.6.6", features = ["cors"] }
 
 [lib]
 name = "vllm_rs"

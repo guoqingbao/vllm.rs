@@ -7,6 +7,7 @@ use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use serde_json::json;
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
@@ -172,6 +173,11 @@ async fn main() -> Result<()> {
             engine: engine.clone(),
             econfig: econfig.clone(),
         };
+        // CORS config
+        let cors = CorsLayer::new()
+            .allow_origin(Any) // same as "*"
+            .allow_methods(Any)
+            .allow_headers(Any);
         // Build axum app
         let app = Router::new()
             .route(
@@ -195,6 +201,7 @@ async fn main() -> Result<()> {
                 }),
             )
             .route("/v1/chat/completions", post(chat_completion))
+            .layer(cors)
             .with_state(Arc::new(server_data));
 
         let addr = if args.pd_server {
