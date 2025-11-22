@@ -165,3 +165,12 @@ class Engine:
         """
         Return: total number of available kvcache tokens
         """
+
+    def start_server(
+        self,
+        port: int,
+        with_ui_server: bool,
+    ):
+        """
+        Start the API server with optional start of Chat UI server
+        """

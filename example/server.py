@@ -1,203 +1,7 @@
 import argparse
-import asyncio
-import json
-import time
 import sys
-# pip install fastapi uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse, JSONResponse
-from vllm_rs import Engine, Message, EngineConfig, SamplingParams, GenerationOutput, GenerationConfig, PdConfig, PdMethod, PdRole
-import uvicorn
 import warnings
-
-def current_millis():
-    return int(time.time() * 1000)
-
-def performance_metric(outputs: GenerationOutput, total_tokens: int, cached_tokens: int, stream: bool):
-    decode_time_taken = 0.0
-    prompt_time_taken = 0.0
-    total_decoded_tokens = 0
-    total_prompt_tokens = 0
-
-    for output in outputs:
-        total_prompt_tokens += output.prompt_length
-        total_decoded_tokens += output.decoded_length
-
-        prompt_latency = (output.decode_start_time - output.prompt_start_time) / 1000.0
-        prompt_time_taken = max(prompt_time_taken, prompt_latency)
-
-        decode_latency = (current_millis() - output.decode_start_time) / 1000.0
-        decode_time_taken = max(decode_time_taken, decode_latency)
-
-    if stream:
-        print(f"\n--- Performance Metrics [seq_id {outputs[0].seq_id}]---")
-    else:
-        print(f"\n--- Performance Metrics [{len(outputs)} reqeusts]---")
-
-    if cached_tokens > 0:
-        print(f"\n--- Context Cache Usage [{cached_tokens}/{total_tokens} tokens cached]---")
-
-    print(
-        f"⏱️ Prompt tokens: {total_prompt_tokens} in {prompt_time_taken:.2f}s "
-        f"({total_prompt_tokens / max(prompt_time_taken, 0.001):.2f} tokens/s)"
-    )
-    print(
-        f"⏱️ Decoded tokens: {total_decoded_tokens} in {decode_time_taken:.2f}s "
-        f"({total_decoded_tokens / max(decode_time_taken, 0.001):.2f} tokens/s)"
-    )
-
-
-def create_app(cfg, dtype):
-    engine = Engine(cfg, dtype)
-    app = FastAPI()
-
-    @app.get("/v1/models")
-    async def list_models():
-        #dummy model name
-        return JSONResponse({
-            "object": "list",
-            "data": [
-                {
-                    "id": "default",
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": "vllm.rs",
-                    "permission": []
-                }
-            ]
-        })
-
-    # chat completion for single and batch requests
-    def chat_complete(params, messages):
-        prompts = [engine.apply_chat_template(params, [Message("user", m["content"])], True) for m in messages]
-        outputs = engine.generate_sync([params] * len(prompts), prompts)
-        performance_metric(outputs, False, 0, False)
-        return outputs
-
-    # chat stream: stream response to single request
-    async def chat_stream(params, messages):
-        all_messages = [Message(m["role"], m["content"]) for m in messages]
-        prompt = engine.apply_chat_template(params, all_messages, False)
-        return prompt, engine
-
-    @app.post("/v1/chat/completions")
-    async def chat(request: Request):
-        body = await request.json()
-        params = SamplingParams(body.get("temperature", 1.0),
-                                body.get("max_tokens", cfg.max_tokens),
-                                body.get("ignore_eos", False),
-                                body.get("top_k", None),
-                                body.get("top_p", None),
-                                body.get("session_id", None))
-        use_stream = body.get("stream", False)
-        if use_stream:
-            prompt, engine = await chat_stream(params, body["messages"])
-
-            async def streamer():
-                stream = None
-                done_item = None
-                g_seq_id = 0
-                try:
-                    (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-                    g_seq_id = seq_id
-                    for item in stream:
-                        if await request.is_disconnected():
-                            print(
-                                f"⛔️ Client has disconnected, stop streaming [seq_id {seq_id}].")
-                            stream.cancel()
-                            return
-                        if item.datatype == "TOKEN":
-                            try:
-                                yield "data: " + json.dumps({
-                                    "id": "seq" + str(seq_id),
-                                    "object": "chat.completion.chunk",
-                                    "model": "default",
-                                    "created": int(time.time()),
-                                    "choices": [{
-                                        "delta": {
-                                            "content": item.data
-                                        },
-                                        "index": 0,
-                                    }],
-                                }) + "\n\n"
-                            except Exception as send_err:
-                                print(
-                                    f"⛔️ Sending token to client failed: {send_err}")
-                                stream.cancel()
-                                return  # Stop streaming
-                        elif item.datatype == "ERROR":
-                            raise Exception(item.data)
-                        elif item.datatype == "DONE":
-                            prompt_start_time, decode_start_time, decode_finish_time, decoded_length = item.data
-                            done_item = item.data
-                            yield "data: " + json.dumps({
-                                "id": "seq" + str(seq_id),
-                                "object": "chat.completion.chunk",
-                                "model": "default",
-                                "created": int(time.time()),
-                                "choices": [{
-                                    "delta": {},
-                                    "index": 0,
-                                    "finish_reason": "length" if decoded_length >= params.max_tokens else "stop",
-                                }],
-                                "usage": {
-                                    "prompt_tokens": prompt_length,
-                                    "completion_tokens": decoded_length,
-                                    "total_tokens": prompt_length + decoded_length
-                                }
-                            }) + "\n\n"
-                        
-                    yield "data: [DONE]\n\n"
-                    if done_item != None:
-                        prompt_start_time, decode_start_time, decode_finish_time, decoded_length = done_item
-                        output = type("GenerationOutput", (), {
-                            "seq_id": seq_id,
-                            "decode_output": "",
-                            "prompt_length": prompt_length,
-                            "prompt_start_time": prompt_start_time,
-                            "decode_start_time": decode_start_time,
-                            "decode_finish_time": decode_finish_time,
-                            "decoded_length": decoded_length,
-                        })()
-                        performance_metric([output], cfg.max_num_seqs * cfg.max_model_len, engine.get_num_cached_tokens(), True)
-                except asyncio.CancelledError:
-                    print("⛔️ Client disconnected. Cancelling stream.")
-                    if stream != None:
-                        stream.cancel()
-                    # Don’t yield error — client already disconnected
-                except Exception as e:
-                    print(f"⛔️ Stream error: {e}")
-                    if stream != None:
-                        stream.cancel()
-                    # Yield an assistant-style error message
-                    yield "data: " + json.dumps({
-                        "id": "seq" + str(g_seq_id),
-                        "object": "chat.completion.chunk",
-                        "model": "default",
-                        "created": int(time.time()),
-                        "choices": [{
-                            "delta": {},
-                            "index": 0,
-                            "error": {
-                                "message": f"[⛔️ Stream Error] {str(e)}",
-                            },
-                        }]
-                    }) + "\n\n"
-
-                    yield "data: [DONE]\n\n"
-                    return
-
-            return StreamingResponse(streamer(), media_type="text/event-stream")
-        else:
-            outputs = chat_complete(params, body["messages"])
-            choices = [
-                {"message": {"role": "assistant", "content": output.decode_output}}
-                for output in outputs
-            ]
-            return JSONResponse({"choices": choices})
-
-    return app
-
+from vllm_rs import Engine, EngineConfig, GenerationConfig, PdConfig, PdMethod, PdRole
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Chat Server")
@@ -224,9 +28,9 @@ def parse_args():
     parser.add_argument("--pd-client", action="store_true")
     parser.add_argument("--pd-url", help="Url like `192.168.1.100:8888` \
         used for TCP/IP communication between PD server and client", type=str, default=None)
+    parser.add_argument("--ui-server", action="store_true")
 
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
@@ -240,8 +44,6 @@ def main():
         warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
     else:
         max_model_len = args.max_model_len
-
-    assert not args.pd_client, "PD Client is not available on Python due to Python Global Lock! Use Rust PD Client instead!"
 
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
@@ -273,14 +75,8 @@ def main():
         pd_config=pd_config,
     )
 
-    app = create_app(cfg, args.dtype)
-
-    if args.pd_server:
-        print("\033[95m", "\n🚀 PD server started, waiting for prefill request(s)...")
-        uvicorn.run(app, host=args.host, port=0)
-    else:
-        print("\033[95m", "\nServer url: http://0.0.0.0:" + str(args.port) + "/v1")
-        uvicorn.run(app, host=args.host, port=args.port)
+    engine = Engine(cfg, args.dtype)
+    engine.start_server(args.port, args.ui_server) # this will block
 
 
 if __name__ == "__main__":

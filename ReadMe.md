@@ -15,7 +15,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**) – Superior than Python counterparts
 * 🧠 **Minimalist Core** – Core logic written in **<3000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
-* 🤖 **Built-in Chatbot/API Server** – Native Rust server for both CUDA and Metal
+* 🤖 **Built-in API Server and ChatGPT-like Web UI** – Native Rust server for both CUDA and Metal
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
 * 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
@@ -34,10 +34,6 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **75.91** tokens/s  |
 
 > **Metal (Apple Silicon, M4)**
-  </details>
-
-  <details>
-    <summary>More details</summary>
 
 > Models: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
 > Concurrent Requests: 1 - 128；
@@ -52,7 +48,6 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
-</details>
 
 ### Performance Comparison
 
@@ -83,59 +78,37 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
-### 🌐✨ API Server + Built-in ChatGPT-like Web Server (new)
-   💡 Install Rust compiler first, run the following command(s) and then open the provided web server url
-
-```shell
-# Metal / MacOS
-cargo run --features metal --release -- --w /Users/path/Downloads/Qwen3-0.6B --ui-server --context-cache
-```
-
-```shell
-# CUDA (single gpu)
- cargo run --release --features cuda -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache
-
-# CUDA (multi-gpu)
-./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server
-
-# CUDA (flash attention for decoding, slow build in first time, fast batching performance)
-./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
-
-# CUDA (PD server), paired running with following PD client
-./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 260000 --max-num-seqs 2 --pd-server
-# CUDA (PD client)
-./run.sh --release --features cuda,nccl,flash-context --d 2,3 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 260000 --max-num-seqs 2 --ui-server --pd-client --port 8000 --context-cache
-```
-
 
 ## 📘 Usage in Python
 
 ### 📦 Install with pip
-   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support)
+   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support) (or use Rust mode)
 
-   💡 2. Prebuilt package has native support of `context cache` using flash attention (built with `flash-context` feature), `fp8-kvcache` feature is not compatible with `flash-context`, manual build required to use FP8 KvCache.
+   💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
 ```shell
-# You might need to install NCCL library on CUDA
-python3 -m pip install vllm_rs fastapi uvicorn
+# NCCL library required on CUDA (Single Card under Rust mode does not require NCCL)
+python3 -m pip install vllm_rs
 ```
 
-### 🌐✨ API Server
+### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
-💡You can use **any client compatible with the OpenAI API** to interact.
+💡You can use **any client compatible with the OpenAI API** to interact
+
+💡Start with `--ui-server` will also start ChatGPT-like web server, no external chat client required in that case.
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
-
-🤖 <a href="python/ReadMe.md">Here are notes on using Context-cache with clients</a>
 
   <details open>
     <summary>Single GPU + GGUF model</summary>
 
 ```bash
-# Default client configuration (if the client and API Server are on the same system):
-# openai.base_url = http://localhost:8000/v1/
-# openai.api_key = "EMPTY"
-# `--m`: model_id, `--f`: GGUF file name
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-tokens 32768 --max-model-len 128000
+# This will start both API server and Web Server (ChatGPT-like UI)
+# API Server: http://localhost:8000/v1/ (API Key: empty)
+# Web Server (click to open ChatGPT-like Web page): http://localhost:8001
+# Web UI uses http://localhost:8000/v1/ by default, you might change that in UI's `Settings` page if API server port changed.
+```
+```bash
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --ui-server --context-cache
 ```
 
   </details>
@@ -144,7 +117,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
     <summary>Multi-GPU + Safetensors model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-model-len 64000
+python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-model-len 256000 --max-num-seqs 2 --ui-server --context-cache
 ```
 
   </details>
@@ -154,7 +127,7 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-mod
 
 ```bash
 # Load as Q4K format, enable maximum context length:
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1 --ui-server --context-cache
 ```
 
   </details>
@@ -168,18 +141,6 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
   </details>
 
-  <details>
-    <summary>Multi-GPU + GGUF model + Context-Cache</summary>
-
-When context cache is enabled, pass `session_id` in the `extra_body` field when sending requests through the OpenAI API.
-
-`session_id` stays unchanged during one conversation; new conversations need a new `session_id`. No other settings need to be changed.
-
-```bash
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 64000 --max-num-seqs 8 --context-cache
-```
-
-  </details>
 
 ### 🤖✨ Interactive Chat and Batch Processing
 
@@ -197,9 +158,7 @@ python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-3
     <summary>Chat with local unquantized model</summary>
 
 ```bash
-
 python3 -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
-
 ```
 
   </details>
@@ -227,32 +186,8 @@ python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-mo
 
   </details>
 
-#### 🐍 Python API
+🤖 <a href="python/ReadMe.md">Here are notes on using API interface and Context-cache in Python</a>
 
-  <details>
-    <summary>Details</summary>
-
-```python
-from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-engine = Engine(cfg, "bf16")
-params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-
-# Synchronous batch generation
-outputs = engine.generate_sync([params,params], [prompt, prompt])
-print(outputs)
-
-params.session_id = xxx  # Pass session_id to enable context cache
-
-# Single-request streaming generation
-(seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-for item in stream:
-   # item.datatype == "TOKEN"
-   print(item.data)
-```
-
-  </details>
 
 ## 📘 Usage (Rust)
 
@@ -274,18 +209,24 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
   ```bash
   # run.sh script help generate the standalone runner
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --server --port 8000 --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --port 8000 --fp8-kvcache
   ```
 
   </details>
 
-> Multi-GPU server (other option: **PD server**)
+---
+
+> API server + **ChatGPT-like Web UI** (other option: **PD server**)
 
   <details open>
     <summary>Serve unquantized model with multiple GPUs</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+  # Remove `flash-attn` feature will enable built-in context cache, making it supports V100 and Metal (metal need additionally remove `graph` feature) platforms
+  # Replace "--ui-server" with "--server" will only start API server
+  ```
+  ```bash
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
   ```
 
   </details>
@@ -294,7 +235,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
     <summary>Serve GGUF models</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
   ```
 
   </details>
@@ -303,28 +244,24 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
     <summary>Serve ISQ model</summary>
 
   ```bash
-# disable flash-context feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+# Disabled flash-context feature to use fp8-kvcache
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
   ```
 
   </details>
 
   <details>
-    <summary>Enable Context-Cache</summary>
-
-  Using built-in context cache, without Flash Attention, supports V100 and Metal platforms:
-
-  ```bash
-  ./run.sh --release --features cuda,nccl --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
-  ```
+    <summary>High-performance prefill solution</summary>
 
   Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
   ```
 
   </details>
+
+---
 
 > MacOS/Metal platform
 
@@ -337,11 +274,11 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
   </details>
 
-  <details>
+  <details open>
     <summary>Run unquantized as Q6K model with context-cache</summary>
 
   ```bash
-  cargo run --release --features metal -- --server --w /path/Qwen3-0.6B --isq q6k --context-cache
+  cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k --context-cache
   ```
 
   </details>
@@ -350,6 +287,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
   <details>
     <summary>Start PD server</summary>
+  Metal/MacOS Platform or PD Server/PD Client not within same OS, `--pd-url` is required for both server and client（e.g., 0.0.0.0:8100）
 
   No need to specify `port`, since the server does not directly handle user requests.
   The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`。
@@ -357,24 +295,29 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
   ```bash
-  python3 -m vllm_rs.server --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --server --pd-server
+  python3 -m vllm_rs.server --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
   ```
   </details>
 
   <details>
     <summary>Start PD client</summary>
 
-  Use **Rust** PD client since Python Global Lock will block decoding during PD server prefilling (if PD Client and PD server within same OS system).
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
   ```
+
+  Or, start with prebuild Python package:
+  ```bash
+  python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+  ```
+
   </details>
 
   <details>
@@ -449,7 +392,6 @@ maturin build --release --features metal,python
 ```bash
 # the package you built
 pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
-pip install fastapi uvicorn
 ```
 
 
@@ -507,7 +449,6 @@ pip install fastapi uvicorn
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
-* [ ] PD Client for Python (Python GIL issue)
 * [x] Built-in ChatGPT-like Web Server
 ---
 

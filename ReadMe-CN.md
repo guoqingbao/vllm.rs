@@ -15,7 +15,7 @@
 * 🚀 **高性能** (支持**上下文缓存、PD分离**) – 性能优于Python同类推理框架
 * 🧠 **极简核心** – 核心逻辑仅 **<3000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
-* 🤖 **内置聊天/API 服务** – Rust 原生实现的聊天与 API 服务
+* 🤖 **内置API 服务与ChatGPT风格网页** – Rust 原生实现的聊天与 API/Web 服务
 * 🐍 **轻量 Python 接口** – 使用 PyO3 构建的 Python 聊天接口
 * 🤝 **欢迎贡献** – 欢迎提交 PR、问题或给项目点亮 ⭐！
 
@@ -34,8 +34,6 @@
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)** | **75.91** tokens/s  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
-  <details>
-    <summary>展开详情</summary>
 
    > 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
    > 并发请求数: 1 - 128；
@@ -49,8 +47,6 @@
    | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
    | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
    | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
-
-  </details>
 
 ### 性能对比
 
@@ -80,43 +76,20 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
-### 🌐✨ API 服务器 + 内置ChatGPT风格Web对话服务
-   💡 需要先安装Rust编译器，运行以下命令并点击Web对话服务URL
-
-```shell
-# MacOS
-cargo run --features metal --release -- --w /Users/path/Downloads/Qwen3-0.6B --ui-server --context-cache
-```
-
-```shell
-# CUDA (单卡)
- cargo run --release --features cuda -- --f /path/Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache
-
-# CUDA (多卡)
-./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server
-
-# CUDA (Flash attention用于decoding, 首次编译慢但并发性能高)
-./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
-
-# CUDA (PD 服务器), 需要与以下PD客户端一同使用
-./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 260000 --max-num-seqs 2 --pd-server
-# CUDA (PD 客户端)
-./run.sh --release --features cuda,nccl,flash-context --d 2,3 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 260000 --max-num-seqs 2 --ui-server --pd-client --port 8000 --context-cache
-```
-
-
 ## 📘 使用方法（Python）
 ### 📦 从pip安装
-   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装
+   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
    
    💡 2. 预编译包`context cache` 依赖于Flash attention, 如需FP8 KvCache，请重新编译并去除`flash-context`特性
 ```shell
-# 多卡需要安装NCCL库
-python3 -m pip install vllm_rs fastapi uvicorn
+# CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
+python3 -m pip install vllm_rs
 ```
 
 ### 🌐✨ API Server
-   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互。
+   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互
+   
+   💡使用`--ui-server`会同时启动ChatGPT风格网页, 此时无需其它客户端。
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
@@ -125,13 +98,15 @@ python3 -m pip install vllm_rs fastapi uvicorn
   <details open>
     <summary>单卡 + GGUF模型</summary>
 
-   ```bash
-   # 客户端默认配置（如客户端与API Server在同一系统）：
-   # openai.base_url = "http://localhost:8000/v1/"
-   # openai.api_key = "EMPTY"
+  ```bash
+  # 以下命令行会同时启动API server 与 Web Server (类ChatGPT网页)
+  # API Server: http://localhost:8000/v1/ (API Key: empty)
+  # Web Server (点击启动类ChatGPT网页): http://localhost:8001
+  # 内置类ChatGPT网页默认使用 http://localhost:8000/v1/ API地址，如API Server启动为非8000端口，需在网页Settings页面进行重新配置
+  ```
 
-   # `--m`: model_id, `--f`: GGUF文件名
-   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  ```bash
+  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache
    ```
   </details>
 
@@ -139,7 +114,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
     <summary>多GPU + 本地GGUF模型</summary>
 
    ```bash
-   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --max-model-len 64000
+   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --max-model-len 128000 --ui-server --context-cache
    ```
   </details>
 
@@ -148,7 +123,7 @@ python3 -m pip install vllm_rs fastapi uvicorn
 
    ```bash
    # 同时将权重量化为Q4K格式，启用最长上下文：
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 262144 --max-num-seqs 1
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --context-cache
    ```
   </details>
 
@@ -158,16 +133,6 @@ python3 -m pip install vllm_rs fastapi uvicorn
 ```bash
 python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ```
-
-  </details>
-
-   <details>
-    <summary>多GPU + GGUF模型 + 上下文缓存</summary>
-   
-   ```bash
-   # 缓存上下文启用时，通过OpenAI API发起请求时在`extra_body`字段里传入`session_id`，`session_id`在对话过程中保持不变，新对话需要启用新的`session_id`，无需改变其它设置
-   python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --host 0.0.0.0 --port 8000 --max-model-len 128000 --max-num-seqs 4 --context-cache
-   ```
   </details>
 
 ### 🤖✨ 交互式聊天与批处理
@@ -202,32 +167,6 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    ```
   </details>
 
-
-#### 🐍 Python API
-  <details>
-    <summary>详情</summary>
-
-   ```python
-   from vllm_rs import Engine, EngineConfig, SamplingParams, Message
-   cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
-   engine = Engine(cfg, "bf16")
-   params = SamplingParams(temperature=0.6, max_tokens=256)
-   prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
-
-   同步批量生成
-   outputs = engine.generate_sync([params,params], [prompt, prompt])
-   print(outputs)
-
-   params.session_id = xxx #传入session_id以使用上下文缓存功能
-
-   单请求流式生成
-   (seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
-   for item in stream:
-      # item.datatype == "TOKEN"
-      print(item.data)
-   ```
-  </details>
-
 ## 📘 使用方法（Rust）
 
 使用 `--i` 启用交互模式 🤖，`--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
@@ -242,21 +181,24 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
   </details>
 
   <details open>
-    <summary>多卡推理 + 高性能Context Cache</summary>
+    <summary>多卡推理 + CUDA Graph + Flash attention + FP8 kvcache</summary>
 
    ```bash
-   # 需使用run.sh生成独立runner，启用flash-context特性需要Ampere+以上设备，编译时间较长
-   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --i
+   # 需使用run.sh生成独立runner
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --port 8000 --fp8-kvcache
    ```
   </details>
 
-> 多卡推理 server 服务
+---
+
+> 多卡推理 API Server + **ChatGPT风格网页**
 
   <details open>
     <summary>运行未量化Qwen3-30B-A3B模型</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-context --d 0,1,2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --server --port 8000
+   # 去除 `flash-context`即可在V100上使用，进一步去除`graph`特性即可在Metal/MacOS上使用
+   ./run.sh --release --features cuda,nccl,graph,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 256000 --max-num-seqs 2 --ui-server --port 8000
    ```
   </details>
 
@@ -264,7 +206,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>多卡运行Qwen3-30B-A3B量化模型</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-attn --server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   ./run.sh --release --features cuda,nccl,graph,flash-attn --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
    ```
   </details>
 
@@ -278,18 +220,15 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
   </details>
 
    <details>
-    <summary>进一步使用Context-Cache功能</summary>
-
-   使用内置Context-cache，不依赖Flash Attention，支持V100, Metal平台
-   ```bash
-   ./run.sh --release --features cuda,nccl --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
-   ```
+    <summary>高性能Prefill方案</summary>
 
    使用Flash Attention做context-cache及decoding（需要Ampere+硬件，编译耗时时长，长文本Prefill性能最高）
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --context-cache
+   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
    ```
   </details>
+
+---
 
 > MacOS/Metal平台
 
@@ -297,7 +236,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>运行Q2K量化模型</summary>
 
    ```bash
-   cargo run --release --features metal -- --server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+   cargo run --release --features metal -- --ui-server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
    ```
   </details>
 
@@ -305,7 +244,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>将未量化模型运行为Q6K量化模型，同时使用Context-cache</summary>
 
    ```bash
-   cargo run --release --features metal -- --i --w /path/Qwen3-0.6B --isq q6k
+   cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k --context-cache
    ```
   </details>
 
@@ -314,6 +253,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
   <details>
     <summary>启动PD服务器</summary>
+   Metal/MacOS平台或PD服务器与PD客户端不在同一OS，服务器与客户端需要同时指定`--pd-url`（例如0.0.0.0:8100）
 
    无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
@@ -321,7 +261,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
    ```
 
-   PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs fastapi uvicorn)
+   PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs)
    ```bash
    python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
    ```
@@ -330,9 +270,13 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
   <details>
     <summary>启动PD客户端</summary>
 
-   PD客户端当前仅支持Rust版本，Python PD客户端由于Python全局锁，会导致PD Server处理长文本时影响PD客户端（如果Server/Client处于同一操作系统），客户端可使用相同模型的量化格式，加快小批量decoding处理
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --server --port 8000 --pd-client
+   ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+   ```
+
+  PD客户端还可使用预编译Python包启动 (依赖：pip install vllm_rs)
+  ```bash
+   python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
    ```
   </details>
 
@@ -401,7 +345,6 @@ maturin build --release --features metal,python
 
 ```bash
 pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
-pip install fastapi uvicorn
 ```
 
 
@@ -458,7 +401,6 @@ pip install fastapi uvicorn
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
-* [ ] PD Client for Python（Python全局锁问题）
 * [x] 内置 ChatGPT风格 Web 网页服务
 
 ## 📚 参考项目

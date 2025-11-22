@@ -228,15 +228,10 @@ async fn main() -> Result<()> {
 
         if args.ui_server {
             tasks.push(tokio::spawn(async move {
-                // From your standalone crate:
-                start_ui_server((args.port + 1) as u16, "dist")
+                start_ui_server((args.port + 1) as u16)
                     .await
                     .unwrap();
             }));
-            // vllm_rs::log_warn!(
-            //     "🚀 Web Chat UI url (click to open) http://localhost:{}",
-            //     args.port + 1
-            // );
         }
 
         futures::future::try_join_all(tasks)
