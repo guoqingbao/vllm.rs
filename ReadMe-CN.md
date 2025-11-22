@@ -80,6 +80,30 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
+### 🌐✨ API 服务器 + 内置ChatGPT风格Web对话服务
+   💡 需要先安装Rust编译器，运行以下命令并点击Web对话服务URL
+
+```shell
+# MacOS
+cargo run --features metal --release -- --w /Users/path/Downloads/Qwen3-0.6B --ui-server --context-cache
+```
+
+```shell
+# CUDA (单卡)
+ cargo run --release --features cuda -- --f /path/Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache
+
+# CUDA (多卡)
+./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server
+
+# CUDA (Flash attention用于decoding, 首次编译慢但并发性能高)
+./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
+
+# CUDA (PD 服务器), 需要与以下PD客户端一同使用
+./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 260000 --max-num-seqs 2 --pd-server
+# CUDA (PD 客户端)
+./run.sh --release --features cuda,nccl,flash-context --d 2,3 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 260000 --max-num-seqs 2 --ui-server --pd-client --port 8000 --context-cache
+```
+
 
 ## 📘 使用方法（Python）
 ### 📦 从pip安装
@@ -406,6 +430,7 @@ pip install fastapi uvicorn
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |    |
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|    |
 | `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |    |
+| `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |    |
 
 ## 📌 项目状态
 
@@ -434,6 +459,7 @@ pip install fastapi uvicorn
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
 * [ ] PD Client for Python（Python全局锁问题）
+* [x] 内置 ChatGPT风格 Web 网页服务
 
 ## 📚 参考项目
 

@@ -83,6 +83,30 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
+### 🌐✨ API Server + Built-in ChatGPT-like Web Server (new)
+   💡 Install Rust compiler first, run the following command(s) and then open the provided web server url
+
+```shell
+# Metal / MacOS
+cargo run --features metal --release -- --w /Users/path/Downloads/Qwen3-0.6B --ui-server --context-cache
+```
+
+```shell
+# CUDA (single gpu)
+ cargo run --release --features cuda -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache
+
+# CUDA (multi-gpu)
+./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server
+
+# CUDA (flash attention for decoding, slow build in first time, fast batching performance)
+./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
+
+# CUDA (PD server), paired running with following PD client
+./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 260000 --max-num-seqs 2 --pd-server
+# CUDA (PD client)
+./run.sh --release --features cuda,nccl,flash-context --d 2,3 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 260000 --max-num-seqs 2 --ui-server --pd-client --port 8000 --context-cache
+```
+
 
 ## 📘 Usage in Python
 
@@ -454,6 +478,7 @@ pip install fastapi uvicorn
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |    |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |    |
 | `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |    |
+| `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |    |
 
 ## 📌 Project Status
 
@@ -483,6 +508,7 @@ pip install fastapi uvicorn
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
 * [ ] PD Client for Python (Python GIL issue)
+* [x] Built-in ChatGPT-like Web Server
 ---
 
 ## 📚 References

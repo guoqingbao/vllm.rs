@@ -236,4 +236,7 @@ pub struct Args {
 
     #[arg(long)]
     pub pd_url: Option<String>, //Url for PD server mode (server in remote)
+
+    #[arg(long, default_value_t = false)]
+    pub ui_server: bool, //Start the web chat
 }

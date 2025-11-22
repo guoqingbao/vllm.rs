@@ -5,6 +5,7 @@ use candle_core::Result;
 use clap::Parser;
 use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use rustchatui::start_ui_server;
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -116,7 +117,7 @@ async fn main() -> Result<()> {
     }
 
     #[cfg(not(feature = "cuda"))]
-    if args.pd_url.is_none() {
+    if (args.pd_server || args.pd_client) && args.pd_url.is_none() {
         candle_core::bail!("Non-CUDA platform does not support LocalIPC, please provide pd-url (e.g., 0.0.0.0:8100)!");
     }
 
@@ -162,13 +163,13 @@ async fn main() -> Result<()> {
         args.seed,
         Some(context_cache),
         Some(args.fp8_kvcache),
-        Some(args.server || !interactive),
+        Some(args.server || args.ui_server || !interactive),
         args.cpu_mem_fold,
         pd_config,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    if args.server || args.pd_server {
+    if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
             econfig: econfig.clone(),
@@ -217,7 +218,31 @@ async fn main() -> Result<()> {
             format!("0.0.0.0:{}", args.port)
         };
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        return Ok(axum::serve(listener, app).await?);
+
+        let mut tasks = Vec::new();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                eprintln!("Chat API server error: {e:?}");
+            }
+        }));
+
+        if args.ui_server {
+            tasks.push(tokio::spawn(async move {
+                // From your standalone crate:
+                start_ui_server((args.port + 1) as u16, "dist")
+                    .await
+                    .unwrap();
+            }));
+            // vllm_rs::log_warn!(
+            //     "🚀 Web Chat UI url (click to open) http://localhost:{}",
+            //     args.port + 1
+            // );
+        }
+
+        futures::future::try_join_all(tasks)
+            .await
+            .map_err(candle_core::Error::wrap)?;
+        return Ok(());
     }
 
     if !interactive && args.prompts.is_none() {
