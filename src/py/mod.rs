@@ -123,7 +123,9 @@ impl Engine {
             // Optional UI server
             if with_ui_server {
                 tasks.push(tokio::spawn(async move {
-                    start_ui_server((port + 1) as u16).await.unwrap();
+                    start_ui_server((port + 1) as u16, Some(port as u16), None, None)
+                        .await
+                        .unwrap();
                 }));
             }
 

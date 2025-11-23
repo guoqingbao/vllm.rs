@@ -232,7 +232,9 @@ async fn main() -> Result<()> {
 
         if args.ui_server {
             tasks.push(tokio::spawn(async move {
-                start_ui_server((args.port + 1) as u16).await.unwrap();
+                start_ui_server((args.port + 1) as u16, Some(args.port as u16), None, None)
+                    .await
+                    .unwrap();
             }));
         }
 

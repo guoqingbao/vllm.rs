@@ -102,7 +102,6 @@ python3 -m pip install vllm_rs
   # 以下命令行会同时启动API server 与 Web Server (类ChatGPT网页)
   # API Server: http://localhost:8000/v1/ (API Key: empty)
   # Web Server (点击启动类ChatGPT网页): http://localhost:8001
-  # 内置类ChatGPT网页默认使用 http://localhost:8000/v1/ API地址，如API Server启动为非8000端口，需在网页Settings页面进行重新配置
   ```
 
   ```bash
