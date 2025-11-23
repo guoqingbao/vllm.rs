@@ -83,6 +83,20 @@ pub struct Delta {
     pub content: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct UsageQuery {
+    pub session_id: Option<String>,
+    // pub user_id: Option<String>,
+    // pub detail: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsageResponse {
+    pub token_used: u64,
+    pub max_model_len: u64,
+    pub available_kvcache_tokens: u64,
+}
+
 pub struct ServerData {
     pub engine: Arc<RwLock<LLMEngine>>,
     pub econfig: EngineConfig,
@@ -111,6 +125,7 @@ impl ErrorToResponse for JsonError {}
 pub enum ChatResponder {
     Streamer(Sse<Streamer>),
     Completion(ChatCompletionResponse),
+    Usage(UsageResponse),
     ModelError(String),
     InternalError(String),
     ValidationError(String),
@@ -121,6 +136,7 @@ impl IntoResponse for ChatResponder {
         match self {
             ChatResponder::Streamer(s) => s.into_response(),
             ChatResponder::Completion(s) => Json(s).into_response(),
+            ChatResponder::Usage(s) => Json(s).into_response(),
             ChatResponder::InternalError(e) => {
                 JsonError::new(e).to_response(http::StatusCode::INTERNAL_SERVER_ERROR)
             }

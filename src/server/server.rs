@@ -5,13 +5,14 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage,
+    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage, UsageQuery,
+    UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
 use axum::{
-    extract::{Json, State},
+    extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
 };
 use std::env;
@@ -333,4 +334,30 @@ pub async fn chat_completion(
 
         ChatResponder::Completion(response)
     }
+}
+
+#[utoipa::path(
+    get,
+    tag = "vllm-rs",
+    path = "/v1/usage",
+    request_body = UsageQuery,
+    responses((status = 200, description = "Token Usage Request"))
+)]
+pub async fn get_usage(
+    State(state): State<Arc<ServerData>>,
+    Query(request): Query<UsageQuery>,
+) -> ChatResponder {
+    let engine = state.engine.read();
+    let stats = match engine.get_usage_stats(request.session_id.clone()) {
+        Ok(s) => s,
+        Err(e) => {
+            return ChatResponder::InternalError(format!("Failed to obtain usage status {:?}", e));
+        }
+    };
+
+    ChatResponder::Usage(UsageResponse {
+        token_used: stats.token_used,
+        max_model_len: stats.max_model_len,
+        available_kvcache_tokens: stats.available_kvcache_tokens,
+    })
 }

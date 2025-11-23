@@ -2,7 +2,10 @@ use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
-use crate::server::{server::chat_completion, ServerData};
+use crate::server::{
+    server::{chat_completion, get_usage},
+    ServerData,
+};
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
@@ -91,6 +94,7 @@ impl Engine {
                 }),
             )
             .route("/v1/chat/completions", post(chat_completion))
+            .route("/v1/usage", get(get_usage))
             .layer(cors)
             .with_state(Arc::new(server_data));
 

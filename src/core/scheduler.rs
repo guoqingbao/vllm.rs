@@ -213,6 +213,26 @@ impl Scheduler {
         }
     }
 
+    pub fn get_seq_token_usage(&self, seq_id: usize) -> Result<usize> {
+        // search waiting
+        if let Some(item) = self.waiting.iter().find(|x| x.id == seq_id) {
+            return Ok(item.len());
+        }
+
+        // search running
+        if let Some(item) = self.running.iter().find(|x| x.id == seq_id) {
+            return Ok(item.len());
+        }
+
+        // search cached
+        if let Some(item) = self.cached.iter().find(|x| x.id == seq_id) {
+            return Ok(item.len());
+        }
+
+        // if nothing found
+        Ok(0)
+    }
+
     /// Postprocess output tokens and modify sequences by indexes
     pub fn postprocess(
         &mut self,

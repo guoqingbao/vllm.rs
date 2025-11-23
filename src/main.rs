@@ -15,7 +15,10 @@ use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
 use vllm_rs::server::Args;
-use vllm_rs::server::{server::chat_completion, ServerData};
+use vllm_rs::server::{
+    server::{chat_completion, get_usage},
+    ServerData,
+};
 use vllm_rs::transfer::{PdConfig, PdMethod, PdRole};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
@@ -202,6 +205,7 @@ async fn main() -> Result<()> {
                 }),
             )
             .route("/v1/chat/completions", post(chat_completion))
+            .route("/v1/usage", get(get_usage))
             .layer(cors)
             .with_state(Arc::new(server_data));
 
@@ -228,9 +232,7 @@ async fn main() -> Result<()> {
 
         if args.ui_server {
             tasks.push(tokio::spawn(async move {
-                start_ui_server((args.port + 1) as u16)
-                    .await
-                    .unwrap();
+                start_ui_server((args.port + 1) as u16).await.unwrap();
             }));
         }
 

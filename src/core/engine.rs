@@ -10,6 +10,7 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
 use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
+use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
@@ -1160,6 +1161,35 @@ impl LLMEngine {
                     self.free_resources();
                 }
                 candle_core::bail!("{:?}", e)
+            }
+        }
+    }
+
+    pub fn get_usage_stats(&self, session_id: Option<String>) -> Result<UsageResponse> {
+        match session_id {
+            Some(sid) => {
+                let available_kvcache_tokens = self.scheduler.get_available_kv_tokens() as u64;
+                let max_model_len = self
+                    .econfig
+                    .max_model_len
+                    .ok_or_else(|| candle_core::Error::msg("max_model_len not set!"))?
+                    as u64;
+                let token_used = if let Some((seq_id, _)) =
+                    self.active_sessions.iter().find(|(_, v)| *v == sid)
+                {
+                    self.scheduler.get_seq_token_usage(*seq_id)?
+                } else {
+                    candle_core::bail!("Seq with session_id {} not found", sid)
+                } as u64;
+
+                Ok(UsageResponse {
+                    token_used,
+                    max_model_len,
+                    available_kvcache_tokens,
+                })
+            }
+            _ => {
+                candle_core::bail!("No session_id provided")
             }
         }
     }
