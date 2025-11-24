@@ -988,9 +988,11 @@ impl LLMEngine {
         log: bool,
     ) -> String {
         let mut prompt_template = self.template.clone();
+        let mut context_cached = false;
         if let Some(session_id) = &params.session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
+                context_cached = true;
                 prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
             } else {
                 prompt_template.set_messages(messages);
@@ -999,7 +1001,7 @@ impl LLMEngine {
             prompt_template.set_messages(messages);
         }
         let prompt_processed = prompt_template
-            .apply_chat_template(log)
+            .apply_chat_template(log, !context_cached)
             .map_err(candle_core::Error::wrap);
         let prompt = if prompt_processed.is_ok() {
             prompt_processed.unwrap()

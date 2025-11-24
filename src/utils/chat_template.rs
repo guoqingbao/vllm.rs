@@ -93,7 +93,11 @@ impl ChatTemplate {
         self.messages.clear()
     }
 
-    pub fn apply_chat_template(&self, log: bool) -> Result<String, ApplyChatTemplateError> {
+    pub fn apply_chat_template(
+        &self,
+        log: bool,
+        enable_thinking: bool,
+    ) -> Result<String, ApplyChatTemplateError> {
         if self.chat_template.is_none() {
             return Err(ApplyChatTemplateError::GetTemplateError(
                 minijinja::Error::new(minijinja::ErrorKind::CannotDeserialize, "Not found!"),
@@ -124,7 +128,7 @@ impl ChatTemplate {
               add_generation_prompt => self.add_generation_prompt,
               bos_token => self.bos_token,
               eos_token => self.eos_token,
-              enable_thinking => self.enable_thinking,
+              enable_thinking => self.enable_thinking && enable_thinking,
             })
             .map_err(ApplyChatTemplateError::RenderTemplateError)
     }
