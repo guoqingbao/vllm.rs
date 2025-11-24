@@ -486,13 +486,15 @@ impl LLMEngine {
                     };
                     // Release GPU cached, not swapped out
                     if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
-                        self.scheduler.release_cache(seq_id);
-                        if self.econfig.server_mode.unwrap_or(true) {
-                            crate::log_warn!(
-                                "🗑️ Seq {} - cache removed (session id {})!\n",
-                                seq_id,
-                                session_id
-                            );
+                        if !self.scheduler.try_swap_out_by_id(seq_id, false) {
+                            self.scheduler.release_cache(seq_id);
+                            if self.econfig.server_mode.unwrap_or(true) {
+                                crate::log_warn!(
+                                    "🗑️ Seq {} - cache removed (session id {})!\n",
+                                    seq_id,
+                                    session_id
+                                );
+                            }
                         }
                     }
                 }
@@ -540,7 +542,8 @@ impl LLMEngine {
                 );
             }
             if self.scheduler.has_cache(&session_id) {
-                self.scheduler.get_cache(&session_id, token_ids)?
+                self.scheduler
+                    .get_cache(&session_id, token_ids, &self.active_sessions)?
             } else {
                 let seq = Sequence::new(token_ids, self.econfig.block_size, params);
                 let seq_id = self.scheduler.add(seq);
@@ -625,7 +628,7 @@ impl LLMEngine {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
         // Get scheduled sequence indexes and prefill flag
-        let (scheduled_ids, is_prefill) = match self.scheduler.schedule() {
+        let (scheduled_ids, is_prefill) = match self.scheduler.schedule(&self.active_sessions) {
             Ok((ids, prefill)) => (ids, prefill),
             Err(_) => (vec![], true),
         };
@@ -870,15 +873,17 @@ impl LLMEngine {
                 && (!self.econfig.server_mode.unwrap_or(true) || !has_tokens_left))
         {
             if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
-                self.scheduler.release_cache(seq_id);
                 // We only release GPU kvcache, not the swapped CPU cache
                 if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
-                    if self.econfig.server_mode.unwrap_or(true) {
-                        crate::log_warn!(
-                            "🗑️ Seq {} - cache removed (session id {})!\n",
-                            seq_id,
-                            session_id
-                        );
+                    if !self.scheduler.try_swap_out_by_id(seq_id, false) {
+                        self.scheduler.release_cache(seq_id);
+                        if self.econfig.server_mode.unwrap_or(true) {
+                            crate::log_warn!(
+                                "🗑️ Seq {} - cache removed (session id {})!\n",
+                                seq_id,
+                                session_id
+                            );
+                        }
                     }
                 } else {
                     self.active_sessions.push_back((seq_id, session_id));
