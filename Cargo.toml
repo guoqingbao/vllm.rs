@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.4.14"
+version = "0.4.15"
 edition = "2021"
 default-run = "vllm-rs"
 
@@ -49,7 +49,7 @@ flume = "0.10.14"
 utoipa = { version = "4.2", features = ["axum_extras"] }
 colored = { version = "3.0.0" }
 tower-http = { version = "0.6.6", features = ["cors"] }
-rustchatui = { git = "https://github.com/guoqingbao/rustchatui.git", version="0.1.10" }
+rustchatui = { git = "https://github.com/guoqingbao/rustchatui.git", version="0.1.11" }
 
 [lib]
 name = "vllm_rs"

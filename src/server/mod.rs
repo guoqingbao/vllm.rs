@@ -94,7 +94,7 @@ pub struct UsageQuery {
 pub struct UsageResponse {
     pub token_used: usize,
     pub max_model_len: usize,
-    pub available_kvcache_tokens: usize,
+    pub used_kvcache_tokens: usize,
     pub total_kv_cache_tokens: usize,
 }
 

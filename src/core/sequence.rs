@@ -7,8 +7,9 @@ pub enum SequenceStatus {
     Waiting,
     Running,
     Finished,
-    Cached,  //Finished but resources not freed
-    Swapped, //Finished and kv cache swapped to CPU memory
+    Cached,        //Finished but resources not freed
+    Swapped,       //kv cache swapped to CPU memory (may not finished)
+    FinishSwapped, //Finished and kv cache swapped to CPU memory
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

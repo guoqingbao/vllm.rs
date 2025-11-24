@@ -358,7 +358,7 @@ pub async fn get_usage(
     ChatResponder::Usage(UsageResponse {
         token_used: stats.token_used,
         max_model_len: stats.max_model_len,
-        available_kvcache_tokens: stats.available_kvcache_tokens,
+        used_kvcache_tokens: stats.used_kvcache_tokens,
         total_kv_cache_tokens: stats.total_kv_cache_tokens,
     })
 }

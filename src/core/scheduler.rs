@@ -132,7 +132,10 @@ impl Scheduler {
         let mut preempt_ids = Vec::new();
 
         for (idx, seq) in self.running.iter().enumerate() {
-            if !self.block_manager.can_append(seq) {
+            if !self.block_manager.can_append(seq)
+                && seq.status != SequenceStatus::Swapped
+                && seq.status != SequenceStatus::FinishSwapped
+            {
                 preempt_ids.push(idx);
             }
         }
@@ -149,18 +152,25 @@ impl Scheduler {
                 || (self.running.is_empty() && self.kv_cache_usage_percent() <= 0.3f32))
         {
             self.try_swap_in();
-        } else if !preempt_ids.is_empty() && self.running.len() > 1 {
+        } else if !preempt_ids.is_empty() || self.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD
+        {
             // Requests unable to be processed at the current moment
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            if let Some((idx, _)) = preempt_ids
-                .iter()
-                .map(|&i| (i, &self.running[i]))
-                .min_by_key(|(_, seq)| seq.id)
-            // swap-out the oldest sequence
-            {
-                self.try_swap_out(idx, true);
+            // If we have cached sequence, we swap them out to CPU first
+            if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache() {
+                crate::log_warn!("Swap out cached Seq {} ({} tokens)!", s_id, s_len);
+            } else if !preempt_ids.is_empty() && self.running.len() > 1 {
+                if let Some((idx, _)) = preempt_ids
+                    .iter()
+                    .map(|&i| (i, &self.running[i]))
+                    .min_by_key(|(_, seq)| seq.id)
+                // swap-out the oldest sequence
+                {
+                    crate::log_warn!("Trying to swap out preempt Seq {:?}", self.running[idx].id);
+                    self.try_swap_out(idx, true);
+                }
             }
         }
 
@@ -323,6 +333,21 @@ impl Scheduler {
         self.cached_seqs.iter().any(|(_, v)| v == session_id)
     }
 
+    // Get number of cached tokens for this session
+    pub fn get_cached_status(&self, session_id: &String) -> SequenceStatus {
+        let seq_map_entry = self
+            .cached_seqs
+            .iter()
+            .find(|(_, v)| v == session_id)
+            .map(|(id, _)| *id);
+        if let Some(target_seq_id) = seq_map_entry {
+            if let Some(i) = self.cached.iter().position(|s| s.id == target_seq_id) {
+                return self.cached[i].status;
+            }
+        }
+        SequenceStatus::Finished
+    }
+
     pub fn get_cache(&mut self, session_id: &String, new_tokens_ids: Vec<u32>) -> Result<usize> {
         let seq_map_entry = self
             .cached_seqs
@@ -332,7 +357,7 @@ impl Scheduler {
         if let Some(target_seq_id) = seq_map_entry {
             let cache_index = self.cached.iter().position(|s| s.id == target_seq_id);
             if let Some(i) = cache_index {
-                // Found it in GPU memory
+                // Found it in GPU memory or Swap memory
                 crate::log_info!(
                     "\nSeq {} - continued with {} new tokens ({} cached tokens, session_id {})\n",
                     target_seq_id,
@@ -341,7 +366,9 @@ impl Scheduler {
                     session_id.clone()
                 );
                 let mut seq = self.cached.remove(i);
-                if seq.status == SequenceStatus::Swapped && !self.block_manager.can_swap_in(&seq) {
+                if seq.status == SequenceStatus::FinishSwapped
+                    && !self.block_manager.can_swap_in(&seq)
+                {
                     self.cached.push(seq);
                     candle_core::bail!("Seq {} swapped out but currently no resources to swap in for execution, please request later!", target_seq_id);
                 }
@@ -354,13 +381,18 @@ impl Scheduler {
                     .expect("Time went backwards")
                     .as_millis() as usize;
 
+                if seq.status == SequenceStatus::FinishSwapped {
+                    seq.clear_block_table(); //reallocate block table since previous gpu blocks were freed
+                    seq.swapped_time = Some(seq.created_time);
+                }
+
                 let mut failed_reason = None;
                 if let Err(e) = self.block_manager.ensure_allocate(&mut seq) {
                     failed_reason = Some(e);
                 }
 
-                // Swap in data from CPU (if swapped previously)
-                if seq.status == SequenceStatus::Swapped && failed_reason.is_none() {
+                // Swap in data from CPU (if swapped out previously)
+                if seq.status == SequenceStatus::FinishSwapped && failed_reason.is_none() {
                     if let Err(e) = self.block_manager.swap_in(&mut seq) {
                         // swap in failed: mark finished and free gpu blocks
                         crate::log_warn!("Failed to swap in seq {}: {:?}", seq.id, e);
@@ -451,12 +483,13 @@ impl Scheduler {
     pub fn release_cache(&mut self, seq_id: usize) {
         if let Some(pos) = self.cached.iter().position(|seq| seq.id == seq_id) {
             let mut seq = self.cached.remove(pos);
-            seq.status = SequenceStatus::Finished;
-            self.block_manager.deallocate(&seq);
             // also free cpu swap
-            if seq.status == SequenceStatus::Swapped {
+            if seq.status == SequenceStatus::Swapped || seq.status == SequenceStatus::FinishSwapped
+            {
                 self.block_manager.free_cpu_swap_for_seq(seq_id);
             }
+            seq.status = SequenceStatus::Finished;
+            self.block_manager.deallocate(&seq);
         }
         if let Some(pos) = self.cached_seqs.iter().position(|(id, _)| *id == seq_id) {
             self.cached_seqs.remove(pos);
@@ -572,15 +605,21 @@ impl Scheduler {
             .as_millis() as usize;
 
         for i in 0..self.cached.len() {
-            let seq = &self.cached[i];
-            if seq.status != SequenceStatus::Swapped
-                || cur_time - seq.swapped_time().unwrap_or(cur_time) < SWAP_COOLING_PERIOD
-            {
+            let (status, swapped_time, seq_id, seq_len) = {
+                let seq = &self.cached[i];
+                (
+                    seq.status,
+                    seq.swapped_time().unwrap_or(cur_time),
+                    seq.id,
+                    seq.len(),
+                )
+            };
+            if status != SequenceStatus::Swapped || cur_time - swapped_time < SWAP_COOLING_PERIOD {
                 continue;
             }
 
-            if !self.block_manager.can_swap_in(&seq)
-                || (available_kvcache_tokens - seq.len() < MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP)
+            if !self.block_manager.can_swap_in(&self.cached[i])
+                || (available_kvcache_tokens - seq_len < MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP)
             {
                 if !self.running.is_empty() {
                     // Wait for swap in
@@ -588,20 +627,13 @@ impl Scheduler {
                 }
 
                 // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((pos, s)) = self
-                    .cached
-                    .iter()
-                    .enumerate()
-                    .find(|(_, s)| s.status == SequenceStatus::Cached)
-                {
-                    crate::log_warn!("Insufficient KvCache, trying to swap out cached Seq {} for swapping in Seq {}!", s.id, seq.id);
-                    if !self.try_swap_out(pos, false) {
-                        // We force drop this sequence since it was already finished but still ocuppy kvcache
-                        let mut seq = self.cached.remove(pos);
-                        seq.status = SequenceStatus::Finished;
-                        self.block_manager.deallocate(&seq);
-                        self.running.push(seq);
-                    }
+                if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache() {
+                    crate::log_warn!(
+                        "Swap out cached Seq {} ({} tokens) for swap-in Seq {}!",
+                        s_id,
+                        s_len,
+                        seq_id
+                    );
                     break;
                 }
 
@@ -651,7 +683,6 @@ impl Scheduler {
         // If sequence has blocks, attempt to swap to CPU.
         // If cannot swap, fallback.
         if !seq.block_table.is_empty()
-            && seq.output_len() > 0
             && (seq.status == SequenceStatus::Running || seq.status == SequenceStatus::Cached)
             && self.block_manager.can_swap_out(&seq)
         {
@@ -669,7 +700,11 @@ impl Scheduler {
                         // no need remove it from cached list since it can be recoved
                         self.cached.remove(idx)
                     };
-                    seq.status = SequenceStatus::Swapped;
+                    if seq.status == SequenceStatus::Running {
+                        seq.status = SequenceStatus::Swapped;
+                    } else {
+                        seq.status = SequenceStatus::FinishSwapped
+                    }
                     // seq.num_cached_tokens = seq.len();
                     self.block_manager.deallocate(&seq);
                     // block table need to be reallocated when swapping in
@@ -684,6 +719,29 @@ impl Scheduler {
         return false;
     }
 
+    pub fn try_swap_out_oldest_cache(&mut self) -> Option<(usize, usize)> {
+        if let Some((pos, _)) = self
+            .cached
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.status == SequenceStatus::Cached)
+            .min_by_key(|(_, s)| s.id)
+        // <-- smallest sequence id
+        {
+            let (seq_id, seq_len) = (self.cached[pos].id, self.cached[pos].len());
+            if !self.try_swap_out(pos, false) {
+                crate::log_warn!(
+                    "Unable to swap out Seq {}, force release it's resources!",
+                    seq_id
+                );
+                self.release_cache(seq_id);
+            }
+            Some((seq_id, seq_len))
+        } else {
+            None
+        }
+    }
+
     pub fn swap_out_or_cache(&mut self, idx: usize, v: String) {
         let kvcache_usage_percentage = self.kv_cache_usage_percent();
         let mut seq = &mut self.running[idx];
@@ -696,7 +754,7 @@ impl Scheduler {
             match self.block_manager.swap_out(seq) {
                 Ok(_) => {
                     let mut seq = self.running.remove(idx);
-                    seq.status = SequenceStatus::Swapped;
+                    seq.status = SequenceStatus::FinishSwapped;
                     self.block_manager.deallocate(&seq);
                     // block table need to be reallocated when swapping in
                     self.cached.push(seq.clone());
@@ -731,6 +789,7 @@ impl Scheduler {
 
     pub fn is_suitable_for_transfer(&self, seq: &Sequence) -> bool {
         if seq.status == SequenceStatus::Swapped // swapped out sequence
+            || seq.status == SequenceStatus::FinishSwapped // swapped out and finished sequence
             || seq.len() < PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD // prefill length < 128
             || (self.cfg.flash_context.unwrap_or(false) // Context-cache request
             && self.cached_seqs.iter().position(|(id, _)| id == &seq.id).is_some())
@@ -766,20 +825,13 @@ impl Scheduler {
                 // Not enough memory right now. Put data back and try later.
 
                 // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((pos, s)) = self
-                    .cached
-                    .iter()
-                    .enumerate()
-                    .find(|(_, s)| s.status == SequenceStatus::Cached)
-                {
-                    crate::log_warn!("Insufficient KvCache, trying to swap out cached Seq {} for receiving KvCache for Seq {}!", s.id, seq_id);
-                    if !self.try_swap_out(pos, false) {
-                        // We force drop this sequence since it was already finished but still ocuppy kvcache
-                        let mut seq = self.cached.remove(pos);
-                        seq.status = SequenceStatus::Finished;
-                        self.block_manager.deallocate(&seq);
-                        self.running.push(seq);
-                    }
+                if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache() {
+                    crate::log_warn!(
+                        "Swap out cached Seq {} ({} tokens) for Seq {} KvCache receiving!",
+                        s_id,
+                        s_len,
+                        seq_id
+                    );
                     break;
                 }
 

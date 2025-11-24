@@ -3,7 +3,7 @@ use super::runner::{ModelRunner, RunnerType, Seqs};
 use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
-use crate::core::sequence::DecodeSequence;
+use crate::core::sequence::{DecodeSequence, SequenceStatus};
 use crate::core::GenerationOutput;
 use crate::models::layers::distributed::Comm;
 #[cfg(feature = "nccl")]
@@ -484,13 +484,16 @@ impl LLMEngine {
                         active_session_reqeusts.push_back((seq_id, session_id));
                         continue;
                     };
-                    self.scheduler.release_cache(seq_id);
-                    if self.econfig.server_mode.unwrap_or(true) {
-                        crate::log_warn!(
-                            "🗑️ Seq {} - cache removed (session id {})!\n",
-                            seq_id,
-                            session_id
-                        );
+                    // Release GPU cached, not swapped out
+                    if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
+                        self.scheduler.release_cache(seq_id);
+                        if self.econfig.server_mode.unwrap_or(true) {
+                            crate::log_warn!(
+                                "🗑️ Seq {} - cache removed (session id {})!\n",
+                                seq_id,
+                                session_id
+                            );
+                        }
                     }
                 }
 
@@ -779,7 +782,9 @@ impl LLMEngine {
                                 s.len(),
                                 time_costs as f32 / 1000f32,
                                 s.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
-                                if s.num_cached_tokens > 0 {
+                                if let Some(_) =
+                                    self.active_sessions.iter().position(|(id, _)| *id == s.id)
+                                {
                                     ", cache included"
                                 } else {
                                     ""
@@ -866,12 +871,17 @@ impl LLMEngine {
         {
             if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
                 self.scheduler.release_cache(seq_id);
-                if self.econfig.server_mode.unwrap_or(true) {
-                    crate::log_warn!(
-                        "🗑️ Seq {} - cache removed (session id {})!\n",
-                        seq_id,
-                        session_id
-                    );
+                // We only release GPU kvcache, not the swapped CPU cache
+                if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
+                    if self.econfig.server_mode.unwrap_or(true) {
+                        crate::log_warn!(
+                            "🗑️ Seq {} - cache removed (session id {})!\n",
+                            seq_id,
+                            session_id
+                        );
+                    }
+                } else {
+                    self.active_sessions.push_back((seq_id, session_id));
                 }
             }
         }
@@ -1216,7 +1226,7 @@ impl LLMEngine {
                 Ok(UsageResponse {
                     token_used,
                     max_model_len,
-                    available_kvcache_tokens,
+                    used_kvcache_tokens: total_kv_cache_tokens - available_kvcache_tokens,
                     total_kv_cache_tokens,
                 })
             }
