@@ -466,18 +466,48 @@ impl LLMEngine {
             params.max_tokens = Some(max_model_len - length);
         }
 
-        let remain_tokens = (self.econfig.max_num_seqs * max_model_len) as isize
-            - self.get_num_cached_tokens() as isize;
+        let tokens_required = length.div_ceil(self.econfig.block_size) * self.econfig.block_size;
+        let available_tokens = self.scheduler.get_available_kv_tokens();
 
-        if remain_tokens < 1
-            || (length.div_ceil(self.econfig.block_size) * self.econfig.block_size) as isize
-                >= remain_tokens
-        {
-            candle_core::bail!(
-                "Remaining {} kvcache tokens, but your prompt length is {}, please request later!",
-                remain_tokens,
-                length
-            );
+        if tokens_required >= available_tokens {
+            // Release cache for unactive sessions
+            let mut active_session_reqeusts = VecDeque::<(usize, String)>::new();
+            while !self.active_sessions.is_empty() {
+                crate::log_warn!(
+                    "Cached status: {} sessions: {:?} ({} tokens cached).",
+                    self.active_sessions.len(),
+                    self.active_sessions,
+                    self.get_num_cached_tokens(),
+                );
+                if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
+                    if self.active_requests.contains(&seq_id) {
+                        active_session_reqeusts.push_back((seq_id, session_id));
+                        continue;
+                    };
+                    self.scheduler.release_cache(seq_id);
+                    if self.econfig.server_mode.unwrap_or(true) {
+                        crate::log_warn!(
+                            "🗑️ Seq {} - cache removed (session id {})!\n",
+                            seq_id,
+                            session_id
+                        );
+                    }
+                }
+
+                if self.scheduler.get_available_kv_tokens() + 1 > tokens_required {
+                    break;
+                }
+            }
+
+            // Push back active session requests
+            self.active_sessions.extend(active_session_reqeusts);
+            if tokens_required > self.scheduler.get_available_kv_tokens() {
+                candle_core::bail!(
+                    "Remaining {} kvcache tokens, but your prompt length requires {}, please request later!",
+                    self.scheduler.get_available_kv_tokens(),
+                    tokens_required
+                );
+            }
         }
 
         if let Some(gen_cfg) = &self.econfig.generation_cfg {
@@ -1168,24 +1198,26 @@ impl LLMEngine {
     pub fn get_usage_stats(&self, session_id: Option<String>) -> Result<UsageResponse> {
         match session_id {
             Some(sid) => {
-                let available_kvcache_tokens = self.scheduler.get_available_kv_tokens() as u64;
+                let available_kvcache_tokens = self.scheduler.get_available_kv_tokens();
                 let max_model_len = self
                     .econfig
                     .max_model_len
-                    .ok_or_else(|| candle_core::Error::msg("max_model_len not set!"))?
-                    as u64;
+                    .ok_or_else(|| candle_core::Error::msg("max_model_len not set!"))?;
                 let token_used = if let Some((seq_id, _)) =
                     self.active_sessions.iter().find(|(_, v)| *v == sid)
                 {
                     self.scheduler.get_seq_token_usage(*seq_id)?
                 } else {
                     candle_core::bail!("Seq with session_id {} not found", sid)
-                } as u64;
+                };
+
+                let total_kv_cache_tokens = self.scheduler.get_total_kv_tokens();
 
                 Ok(UsageResponse {
                     token_used,
                     max_model_len,
                     available_kvcache_tokens,
+                    total_kv_cache_tokens,
                 })
             }
             _ => {

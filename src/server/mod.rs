@@ -92,9 +92,10 @@ pub struct UsageQuery {
 
 #[derive(Debug, Serialize)]
 pub struct UsageResponse {
-    pub token_used: u64,
-    pub max_model_len: u64,
-    pub available_kvcache_tokens: u64,
+    pub token_used: usize,
+    pub max_model_len: usize,
+    pub available_kvcache_tokens: usize,
+    pub total_kv_cache_tokens: usize,
 }
 
 pub struct ServerData {

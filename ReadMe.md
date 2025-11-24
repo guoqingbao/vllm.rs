@@ -102,9 +102,11 @@ python3 -m pip install vllm_rs
     <summary>Single GPU + GGUF model</summary>
 
 ```bash
-# This will start both API server and Web Server (ChatGPT-like UI)
-# API Server: http://localhost:8000/v1/ (API Key: empty)
-# Web Server (click to open ChatGPT-like Web page): http://localhost:8001
+# The following command will start both the API Server and the Web Server (ChatGPT-style UI)
+# Please use the arrow keys to select the access mode (Local Access / Remote Access);
+# If the server and the web client are not on the same machine, Remote Access is recommended.
+# API Server example: http://<IP>:8000/v1/ (API Key: empty)
+# Web Server (click to open the ChatGPT-style page): http://<IP>:8001
 ```
 ```bash
 python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --ui-server --context-cache

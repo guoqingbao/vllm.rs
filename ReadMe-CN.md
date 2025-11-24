@@ -99,9 +99,11 @@ python3 -m pip install vllm_rs
     <summary>单卡 + GGUF模型</summary>
 
   ```bash
-  # 以下命令行会同时启动API server 与 Web Server (类ChatGPT网页)
-  # API Server: http://localhost:8000/v1/ (API Key: empty)
-  # Web Server (点击启动类ChatGPT网页): http://localhost:8001
+  # 以下命令将同时启动 API Server 和 Web Server（ChatGPT 类网页界面）
+  # 请通过方向键选择访问模式（本地访问 Local Access / 远程访问 Remote Access）；
+  # 若 Server 与运行网页的客户端不在同一主机上，建议选择远程访问 Remote Access。
+  # API Server 地址示例: http://<IP>:8000/v1/（API Key: 无）
+  # Web Server（点击打开 ChatGPT 类网页）: http://<IP>:8001
   ```
 
   ```bash
