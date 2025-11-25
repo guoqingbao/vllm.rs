@@ -99,17 +99,15 @@ python3 -m pip install vllm_rs
 ðŸ’¡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
   <details open>
-    <summary>Single GPU + GGUF model</summary>
+    <summary>Single GPU + ISQ GGUF model</summary>
+    
+The following command will start both the API Server and the Web Server (ChatGPT-style UI)
 
+Please use the arrow keys to select the access mode (Local Access / Remote Access);
+
+If the server and the web client usage are not on the same machine, Remote Access is recommended.
 ```bash
-# The following command will start both the API Server and the Web Server (ChatGPT-style UI)
-# Please use the arrow keys to select the access mode (Local Access / Remote Access);
-# If the server and the web client are not on the same machine, Remote Access is recommended.
-# API Server example: http://<IP>:8000/v1/ (API Key: empty)
-# Web Server (click to open the ChatGPT-style page): http://<IP>:8001
-```
-```bash
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --ui-server --context-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 128000 --max-num-seqs 1 --ui-server --context-cache
 ```
 
   </details>
@@ -150,7 +148,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
 ```bash
 # Context-cache automatically enabled under chat mode
-python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+python3 -m vllm_rs.chat --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k
 ```
 
   </details>
@@ -160,16 +158,6 @@ python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-3
 
 ```bash
 python3 -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
-```
-
-  </details>
-
-  <details open>
-    <summary>Chat with model quantized instantly (ISQ)</summary>
-
-```bash
-# Enable maximum context (262144 tokens), two ranks (`--d 0,1`)
-python3 -m vllm_rs.chat --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
 ```
 
   </details>
@@ -200,7 +188,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Single GPU + built-in Context Cache</summary>
 
   ```bash
-  cargo run --release --features cuda --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  cargo run --release --features cuda --i --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k
   ```
 
   </details>
@@ -221,18 +209,24 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
 
   <details open>
     <summary>Serve unquantized model with multiple GPUs</summary>
+    
+Remove `flash-attn` feature will enable built-in context cache, making it supports V100 and Metal (metal need additionally remove `graph` feature) platforms
 
+Replace "--ui-server" with "--server" will only start API server
   ```bash
-  # Remove `flash-attn` feature will enable built-in context cache, making it supports V100 and Metal (metal need additionally remove `graph` feature) platforms
-  # Replace "--ui-server" with "--server" will only start API server
-  ```
-  ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
   ```
 
   </details>
 
   <details open>
+    <summary>Serve ISQ model</summary>
+
+  ```bash
+# Disabled flash-context feature to use fp8-kvcache
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
+  ```
+  <details>
     <summary>Serve GGUF models</summary>
 
   ```bash
@@ -240,15 +234,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   ```
 
   </details>
-
-  <details>
-    <summary>Serve ISQ model</summary>
-
-  ```bash
-# Disabled flash-context feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
-  ```
-
+  
   </details>
 
   <details>
