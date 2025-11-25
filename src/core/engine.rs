@@ -842,21 +842,22 @@ impl LLMEngine {
         if indices.is_empty()
             && self.scheduler.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD + 0.01f32
         {
-            if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
-                crate::log_error!(
-                    "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
-                    oldest_seq_id
-                );
-                self.cancelled_sequences.push(*oldest_seq_id);
-                self.check_canceled(Some(
-                    "Unable to schedule task(s), this request has been dropped!".to_string(),
-                ));
-                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
-                    self.free_resources();
+            if !self.try_release_cache() {
+                if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
+                    crate::log_error!(
+                        "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
+                        oldest_seq_id
+                    );
+                    self.cancelled_sequences.push(*oldest_seq_id);
+                    self.check_canceled(Some(
+                        "Unable to schedule task(s), this request has been dropped!".to_string(),
+                    ));
+                    if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
+                        self.free_resources();
+                    }
                 }
             }
         }
-        self.check_cache();
         self.check_canceled(None);
         if self.econfig.server_mode.unwrap_or(true) && is_running {
             self.may_print_decoding_throughput(&indices);
@@ -864,32 +865,37 @@ impl LLMEngine {
         Ok(indices.len())
     }
 
-    pub fn check_cache(&mut self) {
+    pub fn try_release_cache(&mut self) -> bool {
         //kvcache approach 95%, we need release cached requests
-        let has_tokens_left = self.econfig.max_num_seqs * self.econfig.max_model_len.unwrap()
-            > (self.get_num_cached_tokens() as f32 * 1.05) as usize;
-        if self.active_sessions.len() > 0
-            && (self.active_sessions.len() > self.econfig.max_num_seqs
-                && (!self.econfig.server_mode.unwrap_or(true) || !has_tokens_left))
-        {
-            if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
-                // We only release GPU kvcache, not the swapped CPU cache
-                if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
-                    if !self.scheduler.try_swap_out_by_id(seq_id, false) {
-                        self.scheduler.release_cache(seq_id);
-                        if self.econfig.server_mode.unwrap_or(true) {
-                            crate::log_warn!(
-                                "🗑️ Seq {} - cache removed (session id {})!\n",
-                                seq_id,
-                                session_id
-                            );
-                        }
+        crate::log_warn!(
+            "Cached status: {} sessions: {:?} ({} tokens cached).",
+            self.active_sessions.len(),
+            self.active_sessions,
+            self.get_num_cached_tokens(),
+        );
+        let mut active_session_reqeusts = VecDeque::new();
+        if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
+            if self.active_requests.contains(&seq_id) {
+                active_session_reqeusts.push_back((seq_id, session_id.clone()));
+            };
+            // Release GPU cached, not swapped out
+            if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
+                if !self.scheduler.try_swap_out_by_id(seq_id, false) {
+                    self.scheduler.release_cache(seq_id);
+                    if self.econfig.server_mode.unwrap_or(true) {
+                        crate::log_warn!(
+                            "🗑️ Seq {} - cache removed (session id {})!\n",
+                            seq_id,
+                            session_id
+                        );
                     }
-                } else {
-                    self.active_sessions.push_back((seq_id, session_id));
+                    return true;
                 }
             }
         }
+        // Push back active session requests
+        self.active_sessions.extend(active_session_reqeusts);
+        false
     }
 
     pub fn check_canceled(&mut self, reason: Option<String>) {

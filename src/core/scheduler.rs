@@ -983,11 +983,16 @@ impl Scheduler {
     pub fn get_cpu_swap_usage(&self) -> (f32, f32) {
         const SIZE_IN_GB: usize = 1024 * 1024 * 1024;
         let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
-        let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
-        (
-            self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
-            cpu_kvcache_memory_gb,
-        )
+        if cfg!(feature = "metal") {
+            // Metal use unified memory, no cpu swap memory used
+            (0f32, 0f32)
+        } else {
+            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
+            (
+                self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
+                cpu_kvcache_memory_gb,
+            )
+        }
     }
 
     pub fn print_free_blocks(&self) {
