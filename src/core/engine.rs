@@ -1229,12 +1229,34 @@ impl LLMEngine {
                 };
 
                 let total_kv_cache_tokens = self.scheduler.get_total_kv_tokens();
+                let (swap_used, total_swap_memory) = self.scheduler.get_cpu_swap_usage();
+
+                let mut session_status = "Waiting".to_string();
+                if self.scheduler.has_cache(&sid) {
+                    let status = self.scheduler.get_cached_status(&sid).to_string();
+                    if status == "FinishSwapped" {
+                        session_status = "Swapped".to_string();
+                    } else {
+                        session_status = status.clone();
+                    }
+                } else if let Some((seq_id, _)) =
+                    self.active_sessions.iter().find(|(_, v)| v == &sid)
+                {
+                    if self.active_requests.contains(&seq_id) {
+                        session_status = "Running".to_string();
+                    }
+                } else {
+                    session_status = "Finished".to_string()
+                }
 
                 Ok(UsageResponse {
                     token_used,
                     max_model_len,
                     used_kvcache_tokens: total_kv_cache_tokens - available_kvcache_tokens,
                     total_kv_cache_tokens,
+                    swap_used,
+                    total_swap_memory,
+                    session_status,
                 })
             }
             _ => {

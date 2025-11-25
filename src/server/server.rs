@@ -360,5 +360,8 @@ pub async fn get_usage(
         max_model_len: stats.max_model_len,
         used_kvcache_tokens: stats.used_kvcache_tokens,
         total_kv_cache_tokens: stats.total_kv_cache_tokens,
+        swap_used: stats.swap_used,
+        total_swap_memory: stats.total_swap_memory,
+        session_status: stats.session_status,
     })
 }

@@ -96,6 +96,9 @@ pub struct UsageResponse {
     pub max_model_len: usize,
     pub used_kvcache_tokens: usize,
     pub total_kv_cache_tokens: usize,
+    pub swap_used: f32,
+    pub total_swap_memory: f32,
+    pub session_status: String,
 }
 
 pub struct ServerData {

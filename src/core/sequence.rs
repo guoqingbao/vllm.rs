@@ -1,6 +1,7 @@
 // src/core/sequence.rs
 use crate::utils::config::SamplingParams;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SequenceStatus {
@@ -10,6 +11,20 @@ pub enum SequenceStatus {
     Cached,        //Finished but resources not freed
     Swapped,       //kv cache swapped to CPU memory (may not finished)
     FinishSwapped, //Finished and kv cache swapped to CPU memory
+}
+
+impl fmt::Display for SequenceStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            SequenceStatus::Waiting => "Waiting",
+            SequenceStatus::Running => "Running",
+            SequenceStatus::Finished => "Finished",
+            SequenceStatus::Cached => "Cached",
+            SequenceStatus::Swapped => "Swapped",
+            SequenceStatus::FinishSwapped => "FinishSwapped",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

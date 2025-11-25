@@ -347,6 +347,7 @@ impl Scheduler {
             if let Some(i) = self.cached.iter().position(|s| s.id == target_seq_id) {
                 return self.cached[i].status;
             }
+            return SequenceStatus::Running;
         }
         SequenceStatus::Finished
     }
@@ -977,6 +978,16 @@ impl Scheduler {
     pub fn get_total_kv_tokens(&self) -> usize {
         let total_blocks = self.block_manager.get_num_total_blocks();
         total_blocks * self.block_manager.get_block_size()
+    }
+
+    pub fn get_cpu_swap_usage(&self) -> (f32, f32) {
+        const SIZE_IN_GB: usize = 1024 * 1024 * 1024;
+        let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
+        let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
+        (
+            self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
+            cpu_kvcache_memory_gb,
+        )
     }
 
     pub fn print_free_blocks(&self) {
