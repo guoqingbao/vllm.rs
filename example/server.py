@@ -41,7 +41,6 @@ def main():
     if args.max_model_len is None:
         if max_num_seqs > 0:
             max_model_len =  max_model_len // max_num_seqs
-        warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
     else:
         max_model_len = args.max_model_len
 
@@ -76,6 +75,10 @@ def main():
     )
 
     engine = Engine(cfg, args.dtype)
+
+    max_kvcache_tokens = max_model_len * max_num_seqs
+    if args.max_model_len is None:
+        warnings.warn(f"Warning: max_model_len is not given, default to {max_model_len}, max kvcache tokens {max_kvcache_tokens}.")
     engine.start_server(args.port, args.ui_server) # this will block
 
 

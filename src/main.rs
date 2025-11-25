@@ -53,13 +53,19 @@ async fn main() -> Result<()> {
         "You selected both interactive and server mode, which is not valid!"
     );
 
+    // Align with Python interface
+    let default_max_model_len = if cfg!(target_os = "macos") {
+        32768
+    } else {
+        32768 * 2
+    };
+
     let max_model_len = if args.max_model_len.is_none() {
         let max_model_len = if args.interactive {
-            32768
+            default_max_model_len
         } else {
-            32768 / max_num_seqs
+            default_max_model_len / max_num_seqs
         };
-        tracing::warn!("max_model_len is not given, default to {max_model_len}.");
         Some(max_model_len)
     } else {
         args.max_model_len
@@ -172,6 +178,17 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
+
+    if args.max_model_len.is_none() {
+        println!(
+            "\n{} is not given, default to {}, max kvcache tokens {}.\n",
+            format!("Warn: max_model_len").yellow().bold(),
+            format!("{}", max_model_len.unwrap_or(32768)).red().bold(),
+            format!("{}", max_model_len.unwrap_or(32768) * args.max_num_seqs)
+                .red()
+                .bold(),
+        );
+    }
     if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
