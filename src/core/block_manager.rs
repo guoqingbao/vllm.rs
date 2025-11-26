@@ -103,9 +103,12 @@ impl BlockManager {
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available, retry later!"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
+        }
+        if let Some(last_block_id) = seq.block_table.last() {
+            let _ = self.try_clear_blocks(vec![*last_block_id]);
         }
         Ok(())
     }
@@ -136,7 +139,7 @@ impl BlockManager {
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available, retry later!"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
         }
@@ -144,13 +147,18 @@ impl BlockManager {
     }
 
     pub fn ensure_allocate(&mut self, seq: &mut Sequence) -> Result<()> {
+        let mut new_blocks = Vec::new();
         for _ in seq.block_table.len()..seq.num_blocks() {
             let block_id = self
                 .free_block_ids
                 .pop_front()
-                .ok_or_else(|| candle_core::Error::msg("No free blocks available"))?;
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available, retry later!"))?;
             self.allocate_block(block_id);
             seq.block_table.push(block_id as u32);
+            new_blocks.push(block_id as u32);
+        }
+        if !new_blocks.is_empty() {
+            let _ = self.try_clear_blocks(new_blocks);
         }
         Ok(())
     }
@@ -266,6 +274,18 @@ impl BlockManager {
         MessageType::CheckKvCacheRelease,
         (seq_id),
         MessageType::CheckKvCacheReleaseResponse,
+        bool
+    );
+
+    // Zero specific blocks
+    def_broadcast_message_to_runners!(
+        pub,
+        try_clear_blocks,
+        clear_blocks,
+        (block_ids: Vec<u32>),
+        MessageType::ClearBlocks,
+        (block_ids.clone()),
+        MessageType::ClearBlocksResponse,
         bool
     );
 

@@ -299,6 +299,17 @@ fn main() -> anyhow::Result<()> {
                     false,
                 )?;
             }
+            Ok(MessageType::ClearBlocks(block_ids)) => {
+                let ret = runner.clear_blocks(block_ids);
+                if ret.is_err() {
+                    vllm_rs::log_error!("ClearBlocks failed: {:?}", ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::ClearBlocksResponse(ret.is_ok()),
+                    false,
+                )?;
+            }
             Err(e) => {
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {
                     vllm_rs::log_error!("Runner exit with error: {:?}", e);

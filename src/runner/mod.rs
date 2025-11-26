@@ -211,6 +211,8 @@ pub enum MessageType {
     CheckKvCacheRelease(usize),
     CheckKvCacheReleaseResponse(bool),
 
+    ClearBlocks(Vec<u32>),
+    ClearBlocksResponse(bool),
     /// shutdown subprocesses
     Shutdown,
 }
