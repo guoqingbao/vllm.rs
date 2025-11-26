@@ -541,12 +541,26 @@ impl LLMEngine {
                     self.get_num_cached_tokens(),
                 );
             }
-            if self.scheduler.has_cache(&session_id) {
-                self.scheduler
-                    .get_cache(&session_id, token_ids, &self.active_sessions)?
-            } else {
+
+            // Try to reuse cached sequence if available
+            let seq_id = match self.scheduler.get_cache(
+                &session_id,
+                token_ids.clone(),
+                &self.active_sessions,
+            ) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    crate::log_warn!("Get cache error: {:?}", e);
+                    None
+                }
+            };
+
+            let seq_id = seq_id.unwrap_or_else(|| {
+                // Cache miss: create new sequence
                 let seq = Sequence::new(token_ids, self.econfig.block_size, params);
-                let seq_id = self.scheduler.add(seq);
+                let id = self.scheduler.add(seq);
+
+                // Update active_sessions queue
                 if let Some(pos) = self
                     .active_sessions
                     .iter()
@@ -554,9 +568,11 @@ impl LLMEngine {
                 {
                     self.active_sessions.remove(pos);
                 }
-                self.active_sessions.push_back((seq_id, session_id.clone()));
-                seq_id
-            }
+                self.active_sessions.push_back((id, session_id.clone()));
+                id
+            });
+
+            seq_id
         } else {
             let seq = Sequence::new(token_ids, self.econfig.block_size, params);
             let seq_id = self.scheduler.add(seq);
