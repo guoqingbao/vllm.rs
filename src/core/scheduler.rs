@@ -315,7 +315,6 @@ impl Scheduler {
             }
 
             let seq = &mut self.running[idx];
-            seq.append_token(token);
 
             if self.eos_token_id.contains(&token)
                 || seq.output_len() >= seq.sampling_params.max_tokens.unwrap_or(16384)
@@ -328,6 +327,8 @@ impl Scheduler {
                     seq.status = SequenceStatus::Finished;
                     self.block_manager.deallocate(seq);
                 }
+            } else {
+                seq.append_token(token);
             }
         }
     }
@@ -686,7 +687,9 @@ impl Scheduler {
 
     // swap out one sequence a time
     pub fn try_swap_out(&mut self, idx: usize, is_running: bool) -> bool {
-        if (is_running && idx >= self.running.len()) || (!is_running && idx >= self.cached.len()) {
+        if (cfg!(feature = "metal") || is_running && idx >= self.running.len())
+            || (!is_running && idx >= self.cached.len())
+        {
             return false;
         }
 

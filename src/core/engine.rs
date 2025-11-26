@@ -543,16 +543,20 @@ impl LLMEngine {
             }
 
             // Try to reuse cached sequence if available
-            let seq_id = match self.scheduler.get_cache(
-                &session_id,
-                token_ids.clone(),
-                &self.active_sessions,
-            ) {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    crate::log_warn!("Get cache error: {:?}", e);
-                    None
+            let seq_id = if self.scheduler.has_cache(&session_id) {
+                match self.scheduler.get_cache(
+                    &session_id,
+                    token_ids.clone(),
+                    &self.active_sessions,
+                ) {
+                    Ok(id) => Some(id),
+                    Err(e) => {
+                        crate::log_warn!("Get cache error: {:?}", e);
+                        None
+                    }
                 }
+            } else {
+                None
             };
 
             let seq_id = seq_id.unwrap_or_else(|| {
@@ -873,8 +877,9 @@ impl LLMEngine {
                     }
                 }
             }
+        } else {
+            self.check_canceled(None);
         }
-        self.check_canceled(None);
         if self.econfig.server_mode.unwrap_or(true) && is_running {
             self.may_print_decoding_throughput(&indices);
         }
@@ -1010,11 +1015,9 @@ impl LLMEngine {
         log: bool,
     ) -> String {
         let mut prompt_template = self.template.clone();
-        let mut context_cached = false;
         if let Some(session_id) = &params.session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
-                context_cached = true;
                 prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
             } else {
                 prompt_template.set_messages(messages);
@@ -1023,7 +1026,7 @@ impl LLMEngine {
             prompt_template.set_messages(messages);
         }
         let prompt_processed = prompt_template
-            .apply_chat_template(log, !context_cached)
+            .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);
         let prompt = if prompt_processed.is_ok() {
             prompt_processed.unwrap()

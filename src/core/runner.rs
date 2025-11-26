@@ -265,19 +265,14 @@ impl ModelRunner {
         let num_cpu_blocks =
             (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize;
         #[cfg(not(feature = "cuda"))]
-        let num_cpu_blocks = 1; // dummy cpu kvcache on Metal
+        let num_cpu_blocks = 1;
+
+        let sync_alloc = true;
 
         #[allow(unused)]
+        #[cfg(feature = "cuda")]
         let sync_alloc = if let Some(p_cfg) = &econfig.pd_config {
-            #[cfg(feature = "cuda")]
-            {
-                matches!(p_cfg.role, crate::transfer::PdRole::Server)
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                // Mark Tensor created on Metal always Shared
-                true
-            }
+            matches!(p_cfg.role, crate::transfer::PdRole::Server)
         } else {
             false
         };
