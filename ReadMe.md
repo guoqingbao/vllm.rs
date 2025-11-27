@@ -111,8 +111,8 @@ python3 -m pip install vllm_rs
 ```bash
 # CUDA
 python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
-# Metal/MacOS
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf --kv-fraction 0.5 --ui-server --fp8-kvcache
+# Metal/MacOS (response can be seriously degradated if GPU memory over 95% on MacOS, use a smaller `--max-model-len` or `--kv-fraction` parameter)
+python3 -m vllm_rs.server --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --max-model-len 32768 --ui-server
 ```
 
   </details>
@@ -203,7 +203,10 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Single GPU + built-in Context Cache</summary>
 
   ```bash
-  cargo run --release --features cuda --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  # CUDA
+  cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  # Metal/MacOS
+  cargo run --release --features metal -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
   ```
 
   </details>
@@ -273,7 +276,8 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Run GGUF quantized model</summary>
 
   ```bash
-  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --fp8-kvcache
+   # Use `--fp8-kvcache` to enable fp8 kvcache (slight acuracy and performance slow down)
+   cargo run --release --features metal -- --ui-server --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --context-cache --fp8-kvcache
   ```
 
   </details>
@@ -282,7 +286,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Run unquantized as Q6K model with context-cache</summary>
 
   ```bash
-  cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k --context-cache
+  cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k
   ```
 
   </details>

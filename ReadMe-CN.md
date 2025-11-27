@@ -110,7 +110,7 @@ python3 -m pip install vllm_rs
   # CUDA
   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
   # Metal/MacOS
-  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf --kv-fraction 0.5 --ui-server --fp8-kvcache
+  python3 -m vllm_rs.server --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --max-model-len 32768 --ui-server
    ```
   </details>
 
@@ -180,7 +180,10 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>单卡推理 + 内置Context Cache</summary>
 
    ```bash
+   # CUDA
    cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.8
+   # Metal/MacOS (当MacOS GPU 内存使用超过95%时响应会非常慢，使用更小的`--max-model-len` 或 `--kv-fraction`减少显存占用)
+   cargo run --release --features metal -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
    ```
   </details>
 
@@ -240,7 +243,8 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>运行Q2K量化模型</summary>
 
    ```bash
-   cargo run --release --features metal -- --ui-server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf --fp8-kvcache
+   # 使用 `--fp8-kvcache`参数启用fp8 kvcache (精度与速度略有下降)
+   cargo run --release --features metal -- --ui-server --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --context-cache --fp8-kvcache
    ```
   </details>
 
@@ -248,7 +252,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>将未量化模型运行为Q6K量化模型，同时使用Context-cache</summary>
 
    ```bash
-   cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k --context-cache
+   cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k
    ```
   </details>
 

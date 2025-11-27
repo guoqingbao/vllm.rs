@@ -42,17 +42,6 @@ def parse_args():
 
 
 def build_engine_config(args, num_of_prompts, context_cache):
-    # if args.max_model_len is None:
-    #     if args.i:
-    #         max_model_len = 32768
-    #     elif num_of_prompts > 0:
-    #         max_model_len = 32768 // num_of_prompts
-    #     else:
-    #         max_model_len = 32768 // args.max_num_seqs
-    #     warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
-    # else:
-    #     max_model_len = args.max_model_len
-
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)
@@ -140,7 +129,7 @@ def main():
     else:
         sampling_params.append(params)
 
-    total_available_tokens = econfig.max_num_seqs * econfig.max_model_len
+    total_available_tokens = engine.get_available_kv_tokens()
     tokens_left = total_available_tokens
     chat_history = []
     session_id = str(uuid.uuid4())
