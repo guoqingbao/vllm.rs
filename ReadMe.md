@@ -109,7 +109,10 @@ python3 -m pip install vllm_rs
 # Web Server (click to open the ChatGPT-style page): http://<IP>:8001
 ```
 ```bash
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.8 --ui-server --context-cache
+# CUDA
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
+# Metal/MacOS
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf --kv-fraction 0.5 --ui-server --fp8-kvcache
 ```
 
   </details>
@@ -210,7 +213,7 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
 
   ```bash
   # run.sh script help generate the standalone runner, use kv-fraction to control kvcache usage (percent of remaining gpu memory after model loading)
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --kv-fraction 0.8 --port 8000 --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --kv-fraction 0.7 --port 8000 --fp8-kvcache
   ```
 
   </details>
@@ -264,13 +267,13 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
 
 ---
 
-> MacOS/Metal platform
+> **MacOS/Metal platform**
 
   <details open>
-    <summary>Run Q2K quantized model</summary>
+    <summary>Run GGUF quantized model</summary>
 
   ```bash
-  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf
+  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --fp8-kvcache
   ```
 
   </details>

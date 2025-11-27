@@ -107,7 +107,10 @@ python3 -m pip install vllm_rs
   ```
 
   ```bash
-  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache
+  # CUDA
+  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
+  # Metal/MacOS
+  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf --kv-fraction 0.5 --ui-server --fp8-kvcache
    ```
   </details>
 
@@ -237,7 +240,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>运行Q2K量化模型</summary>
 
    ```bash
-   cargo run --release --features metal -- --ui-server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf
+   cargo run --release --features metal -- --ui-server --f /path/DeepSeek-R1-Distill-Llama-8B-Q2_K.gguf --fp8-kvcache
    ```
   </details>
 

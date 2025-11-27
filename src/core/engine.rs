@@ -136,7 +136,13 @@ impl LLMEngine {
             vec![0]
         };
 
-        let kv_fraction = econfig.kv_fraction.unwrap_or(0.7) as f64;
+        let kv_fraction = econfig
+            .kv_fraction
+            .unwrap_or(if cfg!(feature = "flash-attn") {
+                0.7
+            } else {
+                0.5
+            }) as f64;
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");

@@ -252,7 +252,7 @@ impl EngineConfig {
             && fp8_kvcache.unwrap_or(false)
             && (cfg!(feature = "metal") || cfg!(feature = "flash-context"))
         {
-            panic!("Error: context-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context`).");
+            panic!("Error: context-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context` (`--context-cache`)).");
         }
 
         Self {
