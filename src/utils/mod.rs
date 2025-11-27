@@ -105,6 +105,83 @@ pub fn get_kvcache_blocks(
     (num_gpu_blocks, total_memory_bytes)
 }
 
+pub fn update_kvcache_config(
+    econfig: &mut EngineConfig,
+    config: &config::Config,
+    dtype: DType,
+    usage_fraction: f64,
+) {
+    const SIZE_IN_MB: f32 = (1024 * 1024) as f32;
+
+    let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+    let gpu_memory_left = match crate::utils::max_usable_memory(&device_ids, usage_fraction) {
+        Ok(v) => v,
+        _ => 0,
+    };
+    let gpu_memory_left = gpu_memory_left.div_ceil(128 * 1024 * 1024) * 128 * 1024 * 1024; // Aligned to 128 MB
+
+    let config_model_len = econfig
+        .config_model_len
+        .unwrap_or(econfig.max_model_len.unwrap_or(32768));
+    let block_size = econfig.block_size;
+    let num_shards = econfig.num_shards.unwrap_or(1);
+
+    let dsize = dtype.size_in_bytes();
+    let head_dim = config
+        .head_dim
+        .unwrap_or(config.hidden_size / config.num_attention_heads);
+
+    let per_block = block_size
+        * (config.num_key_value_heads / num_shards)
+        * head_dim
+        * dsize
+        * 2
+        * config.num_hidden_layers;
+
+    let num_blocks = gpu_memory_left as usize / per_block;
+    let total_capacity = num_blocks * block_size;
+
+    // descending possible model lengths
+    let candidates = [
+        config_model_len,
+        config_model_len / 2,
+        config_model_len / 4,
+        config_model_len / 8,
+        16 * 1024,
+        8 * 1024,
+        1024,
+    ];
+
+    let (max_num_seqs, max_model_len) = candidates
+        .iter()
+        .find_map(|&len| (total_capacity > len).then(|| ((total_capacity.div_ceil(len)), len)))
+        .unwrap_or((1, 1024)); // fallback
+
+    use colored::Colorize;
+    if econfig.max_model_len.is_none() {
+        println!(
+            "\n{} is not given, auto decided to {}, Max usable kvcache tokens {}.\n",
+            format!("Warn: max_model_len").yellow().bold(),
+            format!("{}", max_model_len).red().bold(),
+            format!("{}", total_capacity).red().bold(),
+        );
+    }
+
+    crate::log_warn!(
+        "Allocating {} KV blocks ({:.2} MB) for [{} x {} tokens]",
+        num_blocks,
+        gpu_memory_left as f32 / SIZE_IN_MB,
+        max_num_seqs,
+        max_model_len,
+    );
+
+    econfig.num_blocks = num_blocks;
+    econfig.max_num_seqs = max_num_seqs;
+    econfig.max_model_len = Some(max_model_len);
+    econfig.kvcache_memory_bytes = gpu_memory_left as usize;
+    econfig.max_num_batched_tokens = total_capacity;
+}
+
 pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     ct: &candle_core::quantized::gguf_file::Content,
     reader: &mut R,
@@ -710,4 +787,174 @@ pub fn get_dtype(dtype: Option<String>) -> DType {
         }
     };
     dtype
+}
+
+#[cfg(feature = "cuda")]
+pub fn max_usable_memory(gpu_ids: &[usize], usage_fraction: f64) -> Result<u64> {
+    let mut usable_values = Vec::new();
+    use candle_core::backend::BackendDevice;
+    use candle_core::cuda_backend::cudarc::driver::sys;
+    use candle_core::cuda_backend::CudaDevice;
+    for &id in gpu_ids {
+        // Create a CUDA context for that device
+        let _ = CudaDevice::new(id)?;
+
+        unsafe {
+            let mut free: usize = 0;
+            let mut total: usize = 0;
+
+            sys::lib()
+                .cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize)
+                .result()
+                .map_err(|e| candle_core::Error::Msg(format!("cuMemGetInfo_v2 failed: {e:?}")))?; // convert CUDA error to Rust error
+
+            let max_usage = (total as f64 * usage_fraction) as u64;
+            let usable = std::cmp::max(
+                max_usage as isize - (total - free) as isize,
+                (free as f64 * usage_fraction) as isize,
+            ) as u64;
+
+            usable_values.push(usable);
+        }
+    }
+
+    usable_values
+        .into_iter()
+        .min()
+        .ok_or_else(|| candle_core::Error::msg("No GPUs provided"))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn max_usable_memory(
+    _: &[usize],
+    usage_fraction: f64, // e.g., 0.9 → 90%
+) -> Result<u64> {
+    let devices = metal::Device::all();
+    if devices.is_empty() {
+        candle_core::bail!("No Metal GPUs found");
+    }
+
+    let mut usable_values = Vec::new();
+
+    for dev in devices {
+        // recommendedMaxWorkingSetSize is the closest to usable memory
+        let total = dev.recommended_max_working_set_size();
+        let usable = (total as f64 * usage_fraction) as u64;
+
+        usable_values.push(usable);
+    }
+
+    usable_values
+        .into_iter()
+        .min()
+        .ok_or_else(|| candle_core::Error::msg("No GPUs provided"))
+}
+
+pub fn prepare_engine_config(
+    econfig: &EngineConfig,
+    config: &Config,
+    dtype: DType,
+    config_tokenizer: &TokenizerConfig,
+    generation_cfg: &mut Option<GenerationConfig>,
+) -> (EngineConfig, bool) {
+    let mut econfig = econfig.clone();
+    let config_model_len = config.max_model_len.unwrap_or(
+        config_tokenizer
+            .model_max_length
+            .unwrap_or(config.max_position_embeddings as f64) as usize,
+    );
+
+    econfig.config_model_len = Some(config_model_len);
+
+    if econfig.max_model_len.is_none() || econfig.max_model_len.unwrap() < config_model_len {
+        crate::log_warn!(
+            "This model has maximum context {} but the current config is {:?}!",
+            config_model_len,
+            econfig.max_model_len
+        );
+    }
+
+    assert!(
+        config.architectures.len() == 1,
+        "Only one architecture is supported at the moment!"
+    );
+
+    match (&generation_cfg, &mut econfig.generation_cfg) {
+        (Some(gen_cfg), None) => {
+            econfig.generation_cfg = Some(gen_cfg.clone());
+        }
+        (Some(gen_cfg), Some(egen_cfg)) => {
+            if egen_cfg.frequency_penalty.is_none() {
+                egen_cfg.frequency_penalty = gen_cfg.frequency_penalty;
+            }
+            if egen_cfg.presence_penalty.is_none() {
+                egen_cfg.presence_penalty = gen_cfg.presence_penalty;
+            }
+            if egen_cfg.temperature.is_none() {
+                egen_cfg.temperature = gen_cfg.temperature;
+                egen_cfg.top_p = gen_cfg.top_p;
+                egen_cfg.top_k = gen_cfg.top_k;
+            }
+        }
+        _ => {
+            crate::log_warn!("No generation config found for this model!");
+        }
+    }
+
+    let mut device_ids = econfig.device_ids.clone().unwrap_or_default();
+    if device_ids.is_empty() {
+        device_ids.push(0);
+    }
+    let num_shards = device_ids.len();
+    econfig.device_ids = Some(device_ids);
+
+    let (num_blocks, kvcache_memory_bytes) = get_kvcache_blocks(
+        econfig.max_num_seqs,
+        econfig.max_model_len.unwrap_or(32768),
+        econfig.block_size,
+        &config,
+        num_shards,
+        if econfig.fp8_kvcache.unwrap_or(false) {
+            DType::U8
+        } else {
+            dtype
+        },
+    );
+
+    econfig.num_blocks = num_blocks;
+    econfig.kvcache_memory_bytes = kvcache_memory_bytes;
+    econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
+    econfig.num_shards = Some(num_shards);
+
+    #[cfg(not(feature = "nccl"))]
+    assert!(
+        num_shards == 1,
+        "Multi-rank inference is only available when `nccl` feature is enabled!"
+    );
+
+    #[cfg(feature = "nccl")]
+    let use_runner = if num_shards > 1 {
+        // if !econfig.flash_context.unwrap_or(false) {
+        //     crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if context-cache or flash-context feature built-in!");
+        //     econfig.flash_context = Some(true);
+        // }
+        true
+    } else {
+        if cfg!(feature = "flash-context") || cfg!(feature = "python") {
+            econfig.flash_context.unwrap_or(false)
+        } else {
+            false
+        }
+    };
+
+    #[cfg(not(feature = "nccl"))]
+    assert!(
+        num_shards == 1,
+        "Multi-gpu inference is only available when `cuda` and `nccl` features enabled!"
+    );
+    #[cfg(not(feature = "nccl"))]
+    let use_runner = num_shards > 1;
+
+    crate::log_warn!("Check use_runner {:?}", use_runner);
+    (econfig, use_runner)
 }

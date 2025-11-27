@@ -55,6 +55,7 @@ class EngineConfig:
     tokenizer: Optional[str]
     tokenizer_config: Optional[str]
     num_blocks: Optional[int]
+    kv_fraction: Optional[float]
     cpu_mem_fold: Optional[float]
     max_num_seqs: Optional[int]
     max_model_len: Optional[int]

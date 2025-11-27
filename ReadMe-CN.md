@@ -115,7 +115,7 @@ python3 -m pip install vllm_rs
     <summary>多GPU + 本地GGUF模型</summary>
 
    ```bash
-   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --max-model-len 128000 --ui-server --context-cache
+   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --ui-server --context-cache
    ```
   </details>
 
@@ -177,7 +177,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>单卡推理 + 内置Context Cache</summary>
 
    ```bash
-   cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+   cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.8
    ```
   </details>
 
@@ -186,7 +186,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
    ```bash
    # 需使用run.sh生成独立runner
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --port 8000 --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --port 8000 --fp8-kvcache
    ```
   </details>
 
@@ -199,7 +199,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
    ```bash
    # 去除 `flash-context`即可在V100上使用，进一步去除`graph`特性即可在Metal/MacOS上使用
-   ./run.sh --release --features cuda,nccl,graph,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 256000 --max-num-seqs 2 --ui-server --port 8000
+   ./run.sh --release --features cuda,nccl,graph,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-num-seqs 2 --ui-server --port 8000
    ```
   </details>
 
@@ -207,7 +207,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>多卡运行Qwen3-30B-A3B量化模型</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,graph,flash-attn --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 262144 --context-cache
+   ./run.sh --release --features cuda,nccl,graph,flash-attn --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --context-cache
    ```
   </details>
 
@@ -216,7 +216,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
    ```bash
    # 去除`flash-context`以使用fp8 kvcache
-   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --server --port 8000 --fp8-kvcache
+   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --server --port 8000 --fp8-kvcache
    ```
   </details>
 
@@ -225,7 +225,7 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
    使用Flash Attention做context-cache及decoding（需要Ampere+硬件，编译耗时时长，长文本Prefill性能最高）
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
+   ./run.sh --release --features cuda,nccl,flash-attn,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --port 8000 --context-cache
    ```
   </details>
 
@@ -259,12 +259,12 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
    # PD服务器使用`flash-context`加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
-   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
+   ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --pd-server
    ```
 
    PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs)
    ```bash
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --d 0,1 --pd-server
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --pd-server
    ```
   </details>
 
@@ -272,12 +272,12 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
     <summary>启动PD客户端</summary>
 
    ```bash
-   ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+   ./run.sh --release --features cuda,nccl,flash-context --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
    ```
 
   PD客户端还可使用预编译Python包启动 (依赖：pip install vllm_rs)
   ```bash
-   python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+   python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
    ```
   </details>
 
@@ -375,6 +375,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|    |
 | `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |    |
 | `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |    |
+| `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |    |
 
 ## 📌 项目状态
 

@@ -36,34 +36,40 @@ def parse_args():
     parser.add_argument("--context-cache", action="store_true")
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
+    parser.add_argument("--kv-fraction", type=float, default=None)
 
     return parser.parse_args()
 
 
 def build_engine_config(args, num_of_prompts, context_cache):
-    if args.max_model_len is None:
-        if args.i:
-            max_model_len = 32768
-        elif num_of_prompts > 0:
-            max_model_len = 32768 // num_of_prompts
-        else:
-            max_model_len = 32768 // args.max_num_seqs
-        warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
-    else:
-        max_model_len = args.max_model_len
+    # if args.max_model_len is None:
+    #     if args.i:
+    #         max_model_len = 32768
+    #     elif num_of_prompts > 0:
+    #         max_model_len = 32768 // num_of_prompts
+    #     else:
+    #         max_model_len = 32768 // args.max_num_seqs
+    #     warnings.warn(f"max_model_len is not given, default to {max_model_len}.")
+    # else:
+    #     max_model_len = args.max_model_len
 
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)
 
     assert args.m or args.w or args.f, "Must provide model_id or weight_path or weight_file!"
+    if args.max_model_len != None:
+        args.max_tokens=args.max_model_len if args.max_tokens > args.max_model_len else args.max_tokens
+    
+    assert args.max_model_len == None or args.kv_fraction == None, "You provided both max_model_len and kv_fraction!"
+    
     return EngineConfig(
         model_id=args.m,
         weight_path=args.w,
         weight_file=args.f,
         max_num_seqs=args.max_num_seqs,
-        max_model_len=max_model_len,
-        max_tokens=max_model_len if args.max_tokens > max_model_len else args.max_tokens,
+        max_model_len=args.max_model_len,
+        max_tokens=args.max_tokens,
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
@@ -71,6 +77,7 @@ def build_engine_config(args, num_of_prompts, context_cache):
         fp8_kvcache=args.fp8_kvcache,
         server_mode=False,
         cpu_mem_fold=args.cpu_mem_fold,
+        kv_fraction=args.kv_fraction,
     )
 
 def show_tokens_left(tokens_left: int, total_tokens: int):

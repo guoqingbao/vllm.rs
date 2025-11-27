@@ -146,11 +146,13 @@ pub struct EngineConfig {
     pub hf_token: Option<String>,
     pub hf_token_path: Option<String>,
     pub num_blocks: usize,
+    pub kv_fraction: Option<f32>, // After loading the model, the remaining percent of gpu used for kvcache
     pub cpu_mem_fold: Option<f32>, // the percentage of gpu kvcache: 0.1x to 10x, default 1.0x
     pub kvcache_memory_bytes: usize,
     pub block_size: usize,
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
+    pub config_model_len: Option<usize>,
     pub max_model_len: Option<usize>,
     pub max_tokens: Option<usize>,
     pub isq: Option<String>,
@@ -183,6 +185,8 @@ pub struct EngineConfig {
     pub num_blocks: usize,
     #[pyo3(get, set)]
     pub cpu_mem_fold: Option<f32>,
+    #[pyo3(get, set)]
+    pub kv_fraction: Option<f32>,
     pub block_size: usize,
     pub kvcache_memory_bytes: usize,
     #[pyo3(get, set)]
@@ -191,6 +195,8 @@ pub struct EngineConfig {
     pub max_num_batched_tokens: usize,
     #[pyo3(get, set)]
     pub max_model_len: Option<usize>,
+    #[pyo3(get, set)]
+    pub config_model_len: Option<usize>,
     #[pyo3(get, set)]
     pub max_tokens: Option<usize>,
     #[pyo3(get, set)]
@@ -222,6 +228,7 @@ impl EngineConfig {
         hf_token: Option<String>,
         hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
+        config_model_len: Option<usize>,
         max_model_len: Option<usize>,
         max_tokens: Option<usize>,
         isq: Option<String>,
@@ -233,6 +240,7 @@ impl EngineConfig {
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
+        kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -255,11 +263,13 @@ impl EngineConfig {
             hf_token_path,
             num_blocks: 128, //placeholder
             cpu_mem_fold,
+            kv_fraction,
             kvcache_memory_bytes: 0, //placeholder
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder
-            max_model_len,                                             //placeholder
+            config_model_len,
+            max_model_len, //placeholder
             max_tokens,
             isq,
             num_shards,
