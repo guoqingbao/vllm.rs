@@ -267,6 +267,7 @@ impl ModelRunner {
         #[cfg(not(feature = "cuda"))]
         let num_cpu_blocks = 1;
 
+        #[cfg(not(feature = "cuda"))]
         let sync_alloc = true;
 
         #[allow(unused)]

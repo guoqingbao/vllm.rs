@@ -70,7 +70,7 @@ impl Scheduler {
     /// Schedule sequences and return their indexes in `running` along with prefill flag
     pub fn schedule(
         &mut self,
-        active_sessions: &VecDeque<(usize, String)>,
+        active_sessions: &mut VecDeque<(usize, String)>,
     ) -> Result<(Vec<usize>, bool)> {
         let mut scheduled_ids = Vec::new();
         let mut num_tokens = 0;
@@ -162,8 +162,14 @@ impl Scheduler {
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
             // If we have cached sequence, we swap them out to CPU first
-            if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions) {
-                crate::log_warn!("Swap out cached Seq {} ({} tokens)!", s_id, s_len);
+            if let Some((is_swapped, s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions)
+            {
+                crate::log_warn!(
+                    "{} cached Seq {} ({} tokens)!",
+                    if is_swapped { "Swap out" } else { "Release" },
+                    s_id,
+                    s_len
+                );
             } else if !preempt_ids.is_empty() && self.running.len() > 1 {
                 if let Some((idx, _)) = preempt_ids
                     .iter()
@@ -357,7 +363,7 @@ impl Scheduler {
         &mut self,
         session_id: &String,
         new_tokens_ids: Vec<u32>,
-        active_sessions: &VecDeque<(usize, String)>,
+        active_sessions: &mut VecDeque<(usize, String)>,
     ) -> Result<usize> {
         let seq_map_entry = self
             .cached_seqs
@@ -379,8 +385,15 @@ impl Scheduler {
                 if seq.status == SequenceStatus::FinishSwapped
                     && !self.block_manager.can_swap_in(&seq)
                 {
-                    if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions) {
-                        crate::log_warn!("Swap out cached Seq {} ({} tokens)!", s_id, s_len);
+                    if let Some((is_swapped, s_id, s_len)) =
+                        self.try_swap_out_oldest_cache(active_sessions)
+                    {
+                        crate::log_warn!(
+                            "{} cached Seq {} ({} tokens)!",
+                            if is_swapped { "Swap out" } else { "Release" },
+                            s_id,
+                            s_len
+                        );
                     } else {
                         self.cached.push(seq);
                         candle_core::bail!("Seq {} swapped out but currently no resources to swap in for execution, please request later!", target_seq_id);
@@ -454,17 +467,21 @@ impl Scheduler {
         let is_pd_server = self.is_pd_server();
         let mut remove_ids = Vec::new();
         for i in 0..self.running.len() {
-            let seq: &mut Sequence = &mut self.running[i];
+            let (status, seq_id) = (self.running[i].status, self.running[i].id);
             if !is_pd_server
-                && (seq.status == SequenceStatus::Cached
-                    || seq.status == SequenceStatus::FinishSwapped)
+                && (status == SequenceStatus::Cached || status == SequenceStatus::FinishSwapped)
             {
+                let seq: &mut Sequence = &mut self.running[i];
                 seq.output_ids.clear();
-                remove_ids.push(seq.id);
+                remove_ids.push(seq_id);
                 self.cached.push(seq.clone());
             }
-            if is_pd_server && seq.status == SequenceStatus::Finished {
-                self.print_free_blocks();
+            if status == SequenceStatus::Finished {
+                // This seq marked as finised and no need to cache, release cache if available
+                self.release_cache(seq_id);
+                if is_pd_server {
+                    self.print_free_blocks();
+                }
             }
         }
         self.running.retain(|s| !remove_ids.contains(&s.id));
@@ -614,7 +631,7 @@ impl Scheduler {
         }
     }
 
-    pub fn try_swap_in(&mut self, active_sessions: &VecDeque<(usize, String)>) {
+    pub fn try_swap_in(&mut self, active_sessions: &mut VecDeque<(usize, String)>) {
         let available_kvcache_tokens = self.get_available_kv_tokens();
         let cur_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -644,9 +661,12 @@ impl Scheduler {
                 }
 
                 // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions) {
+                if let Some((is_swapped, s_id, s_len)) =
+                    self.try_swap_out_oldest_cache(active_sessions)
+                {
                     crate::log_warn!(
-                        "Swap out cached Seq {} ({} tokens) for swap-in Seq {}!",
+                        "{} cached Seq {} ({} tokens) for swap-in Seq {}!",
+                        if is_swapped { "Swap out" } else { "Releae" },
                         s_id,
                         s_len,
                         seq_id
@@ -740,8 +760,8 @@ impl Scheduler {
 
     pub fn try_swap_out_oldest_cache(
         &mut self,
-        active_sessions: &VecDeque<(usize, String)>,
-    ) -> Option<(usize, usize)> {
+        active_sessions: &mut VecDeque<(usize, String)>,
+    ) -> Option<(bool, usize, usize)> {
         if let Some((pos, _)) = self
             .cached
             .iter()
@@ -751,18 +771,21 @@ impl Scheduler {
         // <-- smallest sequence id
         {
             let (seq_id, seq_len) = (self.cached[pos].id, self.cached[pos].len());
-            if !self.try_swap_out(pos, false) {
+            if self.try_swap_out(pos, false) {
+                Some((true, seq_id, seq_len))
+            } else {
                 crate::log_warn!(
-                    "Unable to swap out Seq {}, force release it's resources!",
-                    seq_id
+                    "Unable to swap out Seq {}, force release it's resources ({} tokens)!",
+                    seq_id,
+                    seq_len
                 );
                 self.release_cache(seq_id);
-            } else if let Some((_, v)) = active_sessions.iter().find(|(k, _)| *k == seq_id) {
-                if !self.cached_seqs.iter().any(|(_, v_)| v_ == v) {
-                    self.cached_seqs.push_back((seq_id, v.clone()));
+                if let Some(pos) = active_sessions.iter().position(|(k, _)| k == &seq_id) {
+                    active_sessions.remove(pos);
                 }
+
+                Some((false, seq_id, seq_len))
             }
-            Some((seq_id, seq_len))
         } else {
             None
         }
@@ -843,7 +866,7 @@ impl Scheduler {
     /// Client: Check for finished prefills and move them to the running queue.
     pub fn try_receive_kvcache(
         &mut self,
-        active_sessions: &VecDeque<(usize, String)>,
+        active_sessions: &mut VecDeque<(usize, String)>,
     ) -> Result<()> {
         let mut finished_seq_ids = Vec::new();
         let cur_time = SystemTime::now()
@@ -868,9 +891,12 @@ impl Scheduler {
                 // Not enough memory right now. Put data back and try later.
 
                 // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions) {
+                if let Some((is_swapped, s_id, s_len)) =
+                    self.try_swap_out_oldest_cache(active_sessions)
+                {
                     crate::log_warn!(
-                        "Swap out cached Seq {} ({} tokens) for Seq {} KvCache receiving!",
+                        "{} cached Seq {} ({} tokens) for Seq {} KvCache receiving!",
+                        if is_swapped { "Swap out" } else { "Release" },
                         s_id,
                         s_len,
                         seq_id

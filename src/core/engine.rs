@@ -471,41 +471,7 @@ impl LLMEngine {
 
         if tokens_required >= available_tokens {
             // Release cache for unactive sessions
-            let mut active_session_reqeusts = VecDeque::<(usize, String)>::new();
-            while !self.active_sessions.is_empty() {
-                crate::log_warn!(
-                    "Cached status: {} sessions: {:?} ({} tokens cached).",
-                    self.active_sessions.len(),
-                    self.active_sessions,
-                    self.get_num_cached_tokens(),
-                );
-                if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
-                    if self.active_requests.contains(&seq_id) {
-                        active_session_reqeusts.push_back((seq_id, session_id));
-                        continue;
-                    };
-                    // Release GPU cached, not swapped out
-                    if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
-                        if !self.scheduler.try_swap_out_by_id(seq_id, false) {
-                            self.scheduler.release_cache(seq_id);
-                            if self.econfig.server_mode.unwrap_or(true) {
-                                crate::log_warn!(
-                                    "🗑️ Seq {} - cache removed (session id {})!\n",
-                                    seq_id,
-                                    session_id
-                                );
-                            }
-                        }
-                    }
-                }
-
-                if self.scheduler.get_available_kv_tokens() + 1 > tokens_required {
-                    break;
-                }
-            }
-
-            // Push back active session requests
-            self.active_sessions.extend(active_session_reqeusts);
+            let _ = self.try_release_cache(tokens_required);
             if tokens_required > self.scheduler.get_available_kv_tokens() {
                 candle_core::bail!(
                     "Remaining {} kvcache tokens, but your prompt length requires {}, please request later!",
@@ -547,7 +513,7 @@ impl LLMEngine {
                 match self.scheduler.get_cache(
                     &session_id,
                     token_ids.clone(),
-                    &self.active_sessions,
+                    &mut self.active_sessions,
                 ) {
                     Ok(id) => Some(id),
                     Err(e) => {
@@ -648,7 +614,7 @@ impl LLMEngine {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
         // Get scheduled sequence indexes and prefill flag
-        let (scheduled_ids, is_prefill) = match self.scheduler.schedule(&self.active_sessions) {
+        let (scheduled_ids, is_prefill) = match self.scheduler.schedule(&mut self.active_sessions) {
             Ok((ids, prefill)) => (ids, prefill),
             Err(_) => (vec![], true),
         };
@@ -862,7 +828,7 @@ impl LLMEngine {
         if indices.is_empty()
             && self.scheduler.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD + 0.01f32
         {
-            if !self.try_release_cache() {
+            if !self.try_release_cache(0) {
                 if let Some(oldest_seq_id) = self.active_requests.clone().iter().min() {
                     crate::log_error!(
                         "Unable to schedule task(s), drop the oldest active request (seq_id: {:?})",
@@ -872,9 +838,9 @@ impl LLMEngine {
                     self.check_canceled(Some(
                         "Unable to schedule task(s), this request has been dropped!".to_string(),
                     ));
-                    if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
-                        self.free_resources();
-                    }
+                }
+                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
+                    self.free_resources();
                 }
             }
         } else {
@@ -886,18 +852,13 @@ impl LLMEngine {
         Ok(indices.len())
     }
 
-    pub fn try_release_cache(&mut self) -> bool {
-        //kvcache approach 95%, we need release cached requests
-        crate::log_warn!(
-            "Cached status: {} sessions: {:?} ({} tokens cached).",
-            self.active_sessions.len(),
-            self.active_sessions,
-            self.get_num_cached_tokens(),
-        );
+    pub fn try_release_cache(&mut self, tokens_required: usize) -> bool {
+        let initial_available_tokens = self.get_available_kv_tokens();
         let mut active_session_reqeusts = VecDeque::new();
-        if let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
+        while let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
             if self.active_requests.contains(&seq_id) {
                 active_session_reqeusts.push_back((seq_id, session_id.clone()));
+                continue;
             };
             // Release GPU cached, not swapped out
             if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
@@ -910,13 +871,24 @@ impl LLMEngine {
                             session_id
                         );
                     }
-                    return true;
+                } else {
+                    // Swapped out but still in cached sessions
+                    crate::log_warn!(
+                        "Swapped out cache for Seq {} (session_id {}).",
+                        seq_id,
+                        session_id,
+                    );
+                    active_session_reqeusts.push_back((seq_id, session_id.clone()));
                 }
+            }
+            if self.scheduler.get_available_kv_tokens() > tokens_required {
+                break;
             }
         }
         // Push back active session requests
         self.active_sessions.extend(active_session_reqeusts);
-        false
+
+        initial_available_tokens - self.get_available_kv_tokens() > 0
     }
 
     pub fn check_canceled(&mut self, reason: Option<String>) {
@@ -1229,9 +1201,6 @@ impl LLMEngine {
         match self.add_request(params, &prompt, RequestType::Stream) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
-                if self.scheduler.kv_cache_usage_percent() > 0.99f32 {
-                    self.free_resources();
-                }
                 candle_core::bail!("{:?}", e)
             }
         }

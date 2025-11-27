@@ -169,7 +169,9 @@ impl Sequence {
     }
 
     pub fn is_finished(&self) -> bool {
-        self.status == SequenceStatus::Finished || self.status == SequenceStatus::Cached
+        self.status == SequenceStatus::Finished
+            || self.status == SequenceStatus::Cached
+            || self.status == SequenceStatus::FinishSwapped
     }
 
     pub fn num_blocks(&self) -> usize {
