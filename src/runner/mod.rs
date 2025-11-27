@@ -213,6 +213,8 @@ pub enum MessageType {
 
     ClearBlocks(Vec<u32>),
     ClearBlocksResponse(bool),
+
+    UsableMemoryLeft(EngineConfig),
     /// shutdown subprocesses
     Shutdown,
 }
@@ -265,6 +267,23 @@ pub fn receive_local(stream: &mut LocalStream, use_json: bool) -> std::io::Resul
     stream.write_all(&[1])?;
     stream.flush()?;
     Ok(message)
+}
+
+pub fn send_and_expect_ack(
+    stream: &mut LocalStream,
+    msg: &MessageType,
+    stage: &str,
+    rank: usize,
+) -> candle_core::Result<()> {
+    use interprocess::TryClone;
+    send_local(&mut vec![stream.try_clone()?], msg, true)?;
+
+    crate::log_info!("Waiting runner {} {} response...", rank, stage);
+
+    match receive_local(stream, false)? {
+        MessageType::InitAck(true) => Ok(()),
+        _ => candle_core::bail!("Runner {} failed during {}", rank, stage),
+    }
 }
 
 ///

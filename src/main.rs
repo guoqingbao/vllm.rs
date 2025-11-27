@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         32768 * 2
     };
 
-    let max_model_len = if args.max_model_len.is_none() {
+    let max_model_len = if args.max_model_len.is_none() && interactive {
         let max_model_len = if args.interactive {
             default_max_model_len
         } else {
@@ -68,6 +68,11 @@ async fn main() -> Result<()> {
         };
         Some(max_model_len)
     } else {
+        // if not set under server mode, the backend will auto decide
+        assert!(
+            args.max_model_len == None || args.kv_fraction == None,
+            "You provided both max_model_len and kv_fraction!"
+        );
         args.max_model_len
     };
 
@@ -163,6 +168,7 @@ async fn main() -> Result<()> {
         args.hf_token,
         args.hf_token_path,
         Some(std::cmp::max(max_num_seqs, prompts.len())),
+        None,
         max_model_len,
         Some(args.max_tokens),
         args.isq.clone(),
@@ -174,21 +180,12 @@ async fn main() -> Result<()> {
         Some(args.fp8_kvcache),
         Some(args.server || args.ui_server || !interactive),
         args.cpu_mem_fold,
+        args.kv_fraction,
         pd_config,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
 
-    if args.max_model_len.is_none() {
-        println!(
-            "\n{} is not given, default to {}, max kvcache tokens {}.\n",
-            format!("Warn: max_model_len").yellow().bold(),
-            format!("{}", max_model_len.unwrap_or(32768)).red().bold(),
-            format!("{}", max_model_len.unwrap_or(32768) * args.max_num_seqs)
-                .red()
-                .bold(),
-        );
-    }
     if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),

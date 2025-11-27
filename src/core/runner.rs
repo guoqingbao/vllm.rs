@@ -74,6 +74,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
+        stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = match model_type {
             ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
@@ -171,7 +172,27 @@ impl ModelRunner {
             }
         };
 
-        let (gpu_kv_cache, cpu_kv_cache) = Self::init_kv_cache(econfig, config, dtype, &device)?;
+        let mut econfig = econfig.clone();
+        let (gpu_kv_cache, cpu_kv_cache) = if let Some(s) = stream {
+            use crate::runner::{receive_local, send_local, MessageType};
+            use interprocess::TryClone;
+            send_local(
+                &mut vec![s.try_clone()?],
+                &MessageType::InitAck(true),
+                false,
+            )?;
+            let msg = receive_local(&mut s.try_clone()?, true)?;
+            if let MessageType::UsableMemoryLeft(ecfg) = msg {
+                econfig = ecfg.clone(); // Update Engine config
+                let (gpu_kv_cache, cpu_kv_cache) =
+                    Self::init_kv_cache(&econfig, config, dtype, &device)?;
+                (gpu_kv_cache, cpu_kv_cache)
+            } else {
+                Self::init_kv_cache(&econfig, config, dtype, &device)?
+            }
+        } else {
+            Self::init_kv_cache(&econfig, config, dtype, &device)?
+        };
 
         let (temperature, top_k, top_p) = if econfig.generation_cfg.is_some() {
             (

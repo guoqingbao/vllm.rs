@@ -244,6 +244,10 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub fp8_kvcache: bool, //kv cache and attention with quantization
 
+    // After model loading, the percentage of the remaining gpu memory for kvcache
+    #[arg(long, default_value = None)]
+    pub kv_fraction: Option<f32>,
+
     #[arg(long, default_value = None)]
     pub cpu_mem_fold: Option<f32>, //the percentage of cpu vs. gpu kvcache size
 

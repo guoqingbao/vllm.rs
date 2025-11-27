@@ -9,7 +9,9 @@ use crate::models::layers::distributed::Comm;
 #[cfg(feature = "nccl")]
 use crate::models::layers::distributed::Id;
 use crate::models::layers::VarBuilderX;
-use crate::runner::{receive_local, send_local, MessageType, RunnerInitRequest};
+use crate::runner::{
+    receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
+};
 use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
@@ -18,8 +20,8 @@ use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
-use crate::utils::{chat_template::ChatTemplate, get_kvcache_blocks};
-use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
+use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
+use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner, update_kvcache_config};
 use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
 use colored::Colorize;
@@ -98,25 +100,14 @@ impl LLMEngine {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
-        let mut econfig = econfig.clone();
-        let config_model_len = config.max_model_len.unwrap_or(
-            config_tokenizer
-                .model_max_length
-                .unwrap_or(config.max_position_embeddings as f64) as usize,
+        let (mut econfig, use_runner) = prepare_engine_config(
+            econfig,
+            &config,
+            dtype,
+            &config_tokenizer,
+            &mut generation_cfg,
         );
-
-        econfig.max_model_len = Some(std::cmp::min(
-            econfig.max_model_len.unwrap_or(4096),
-            config_model_len,
-        ));
-
-        if econfig.max_model_len.unwrap() < config_model_len {
-            log_warn!(
-                "***This model has maximum context {} but only {} is set to use in Engine config!***",
-                config_model_len,
-                econfig.max_model_len.unwrap()
-            );
-        }
+        config.fp8_kvcache = econfig.fp8_kvcache;
 
         assert!(
             config.architectures.len() == 1,
@@ -126,54 +117,6 @@ impl LLMEngine {
         let (model_type, default_chat_template, is_rope_i) =
             crate::utils::get_arch_rope(&tokenizer, config.architectures[0].clone())?;
         log_info!("Use ROPE interleaved {is_rope_i}");
-
-        match (&generation_cfg, &mut econfig.generation_cfg) {
-            (Some(gen_cfg), None) => {
-                econfig.generation_cfg = Some(gen_cfg.clone());
-            }
-            (Some(gen_cfg), Some(egen_cfg)) => {
-                if egen_cfg.frequency_penalty.is_none() {
-                    egen_cfg.frequency_penalty = gen_cfg.frequency_penalty;
-                }
-                if egen_cfg.presence_penalty.is_none() {
-                    egen_cfg.presence_penalty = gen_cfg.presence_penalty;
-                }
-                if egen_cfg.temperature.is_none() {
-                    egen_cfg.temperature = gen_cfg.temperature;
-                    egen_cfg.top_p = gen_cfg.top_p;
-                    egen_cfg.top_k = gen_cfg.top_k;
-                }
-            }
-            _ => {
-                crate::log_warn!("No generation config found for this model!");
-            }
-        }
-
-        let mut device_ids = econfig.device_ids.clone().unwrap_or_default();
-        if device_ids.is_empty() {
-            device_ids.push(0);
-        }
-
-        let num_shards = device_ids.len();
-
-        let (num_blocks, kvcache_memory_bytes) = get_kvcache_blocks(
-            econfig.max_num_seqs,
-            econfig.max_model_len.unwrap_or(4096),
-            econfig.block_size,
-            &config,
-            num_shards,
-            if econfig.fp8_kvcache.unwrap_or(false) {
-                DType::U8
-            } else {
-                dtype
-            },
-        );
-
-        econfig.num_blocks = num_blocks;
-        econfig.kvcache_memory_bytes = kvcache_memory_bytes;
-        econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
-        econfig.num_shards = Some(num_shards);
-        config.fp8_kvcache = econfig.fp8_kvcache;
 
         let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
             matches!(p_cfg.role, PdRole::Server)
@@ -187,45 +130,19 @@ impl LLMEngine {
 
         log_info!("{:?}\n", config);
 
-        log_warn!(
-            "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
-            econfig.max_num_batched_tokens,
-            num_blocks,
-            econfig.block_size,
-            (num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize
-        );
-
-        #[cfg(not(feature = "nccl"))]
-        assert!(
-            num_shards == 1,
-            "Multi-rank inference is only available when `nccl` feature is enabled!"
-        );
-
-        #[cfg(feature = "nccl")]
-        let use_runner = if num_shards > 1 {
-            // if !econfig.flash_context.unwrap_or(false) {
-            //     crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if context-cache or flash-context feature built-in!");
-            //     econfig.flash_context = Some(true);
-            // }
-            true
+        let device_ids = if let Some(ids) = &econfig.device_ids {
+            ids.clone()
         } else {
-            if cfg!(feature = "flash-context") || cfg!(feature = "python") {
-                econfig.flash_context.unwrap_or(false)
-            } else {
-                false
-            }
+            vec![0]
         };
 
-        #[cfg(not(feature = "nccl"))]
-        assert!(
-            num_shards == 1,
-            "Multi-gpu inference is only available when `cuda` and `nccl` features enabled!"
-        );
-        #[cfg(not(feature = "nccl"))]
-        let use_runner = num_shards > 1;
-
-        log_warn!("Check use_runner {:?}", use_runner);
-
+        let kv_fraction = econfig
+            .kv_fraction
+            .unwrap_or(if cfg!(feature = "flash-attn") {
+                0.7
+            } else {
+                0.5
+            }) as f64;
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
@@ -243,6 +160,9 @@ impl LLMEngine {
             } else {
                 None
             };
+            if econfig.max_model_len.is_none() {
+                update_kvcache_config(&mut econfig, &config.clone(), dtype, kv_fraction);
+            }
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -265,6 +185,7 @@ impl LLMEngine {
                 device.clone(),
                 reporter,
                 transfer,
+                None,
             )?;
 
             if !is_pd_server {
@@ -314,19 +235,21 @@ impl LLMEngine {
             }
 
             let progress_sock_name = format!("{}@vllm-rs-progress", unique_id);
-            let progress_handle =
-                spawn_progress_thread(num_shards, config.num_hidden_layers, progress_sock_name);
+            let progress_handle = spawn_progress_thread(
+                econfig.num_shards.unwrap_or(1),
+                config.num_hidden_layers,
+                progress_sock_name,
+            );
             heartbeat_worker(Some(device_ids.len()), false, stop_flag.clone(), unique_id);
             use rayon::iter::IndexedParallelIterator;
             use rayon::iter::IntoParallelRefIterator;
             use rayon::iter::ParallelIterator;
+            let engine_config = std::sync::OnceLock::<EngineConfig>::new();
             let runner_streams: Result<Vec<LocalStream>> = device_ids
                 .par_iter()
                 .enumerate()
                 .map(|(rank, dev_id)| {
                     let model_type = model_type.clone();
-                    let config = config.clone();
-                    let econfig = econfig.clone();
                     let sock_name = format!("{}@vllm-rs-runner-{}", unique_id, rank);
                     let listener = ListenerOptions::new()
                         .name(
@@ -359,10 +282,10 @@ impl LLMEngine {
                     let init_msg = MessageType::Init(RunnerInitRequest {
                         rank,
                         dev_id: *dev_id,
-                        num_shards,
+                        num_shards: econfig.num_shards.unwrap_or(1),
                         model_type,
-                        config,
-                        econfig,
+                        config: config.clone(),
+                        econfig: econfig.clone(),
                         model_pathes: model_pathes.clone(),
                         is_gguf,
                         dtype: dtype.into(),
@@ -371,20 +294,29 @@ impl LLMEngine {
                         nccl_id: crate::runner::NcclId(nccl_id.clone()),
                     });
 
-                    send_local(&mut vec![stream.try_clone()?], &init_msg, true)?;
+                    send_and_expect_ack(&mut stream, &init_msg, "initialize", rank)?;
 
-                    crate::log_info!("Waiting runner {} response...", rank);
+                    if econfig.max_model_len.is_none() {
+                        let ecfg = engine_config.get_or_init(|| {
+                            let mut econfig = econfig.clone();
+                            update_kvcache_config(
+                                &mut econfig,
+                                &config.clone(),
+                                dtype,
+                                kv_fraction,
+                            );
+                            econfig
+                        });
 
-                    if let MessageType::InitAck(ack) = receive_local(&mut stream, false)? {
-                        if !ack {
-                            candle_core::bail!("Runner {} failed to initialize", rank);
-                        }
-                    } else {
-                        candle_core::bail!("Runner {} unable to initialize", rank);
+                        send_and_expect_ack(
+                            &mut stream,
+                            &MessageType::UsableMemoryLeft(ecfg.clone()),
+                            "init kvcache",
+                            rank,
+                        )?;
                     }
 
                     crate::log_info!("Runner {} started!", rank);
-
                     Ok(stream)
                 })
                 .collect();
@@ -392,11 +324,32 @@ impl LLMEngine {
             if let Ok(Some(handle)) = progress_handle.join() {
                 let _ = handle.join();
             }
+            if let Some(cfg) = engine_config.get() {
+                econfig = cfg.clone();
+            } else if econfig.max_model_len.is_none() {
+                candle_core::bail!("Unable to update EngineConfig!");
+            }
             RunnerType::Process(runner_streams?)
         };
 
+        if econfig.max_model_len.is_none() {
+            println!(
+                "\n{} is not given, default to {}, Max usable kvcache tokens {}.\n",
+                format!("Warn: max_model_len").yellow().bold(),
+                format!("{}", 32768).red().bold(),
+                format!("{}", 32768 * econfig.max_num_seqs).red().bold(),
+            );
+            econfig.max_model_len = Some(32768);
+        }
         let runners = Arc::new(RwLock::new(runners));
         let scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+        log_warn!(
+            "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
+            econfig.max_num_batched_tokens,
+            econfig.num_blocks,
+            econfig.block_size,
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize
+        );
         log_warn!("Model loaded.\n");
 
         let template = ChatTemplate::new(

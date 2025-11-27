@@ -103,13 +103,16 @@ python3 -m pip install vllm_rs
 
 ```bash
 # The following command will start both the API Server and the Web Server (ChatGPT-style UI)
-# Please use the arrow keys to select the access mode (Local Access / Remote Access);
-# If the server and the web client are not on the same machine, Remote Access is recommended.
+# Use the arrow keys to select the access mode (Local Access / Remote Access);
+# Use Remote Access if the server and the web client usage are not on the same machine.
 # API Server example: http://<IP>:8000/v1/ (API Key: empty)
 # Web Server (click to open the ChatGPT-style page): http://<IP>:8001
 ```
 ```bash
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --max-model-len 128000 --max-num-seqs 1 --ui-server --context-cache
+# CUDA
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
+# Metal/MacOS
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q2_K.gguf --kv-fraction 0.5 --ui-server --fp8-kvcache
 ```
 
   </details>
@@ -118,7 +121,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
     <summary>Multi-GPU + Safetensors model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-model-len 256000 --max-num-seqs 2 --ui-server --context-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --context-cache
 ```
 
   </details>
@@ -209,8 +212,8 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
     <summary>Multi-GPU + CUDA Graph + Flash attention + FP8 kvcache</summary>
 
   ```bash
-  # run.sh script help generate the standalone runner
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 100000 --port 8000 --fp8-kvcache
+  # run.sh script help generate the standalone runner, use kv-fraction to control kvcache usage (percent of remaining gpu memory after model loading)
+  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --kv-fraction 0.7 --port 8000 --fp8-kvcache
   ```
 
   </details>
@@ -257,20 +260,20 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
 
   ```bash
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --context-cache
+  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --context-cache
   ```
 
   </details>
 
 ---
 
-> MacOS/Metal platform
+> **MacOS/Metal platform**
 
   <details open>
-    <summary>Run Q2K quantized model</summary>
+    <summary>Run GGUF quantized model</summary>
 
   ```bash
-  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf
+  cargo run --release --features metal -- --i --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --fp8-kvcache
   ```
 
   </details>
@@ -296,12 +299,12 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
+  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
   ```bash
-  python3 -m vllm_rs.server --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --max-model-len 200000 --max-num-seqs 2 --pd-server
+  python3 -m vllm_rs.server --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
   </details>
 
@@ -311,12 +314,12 @@ Use `--i` to enable interactive mode ðŸ¤–, `--server` to enable service mode ðŸŒ
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   Or, start with prebuild Python package:
   ```bash
-  python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 200000 --max-num-seqs 2 --ui-server --port 8000 --pd-client
+  python3 -m vllm_rs.server --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   </details>
@@ -422,6 +425,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |    |
 | `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |    |
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |    |
+| `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |    |
 
 ## ðŸ“Œ Project Status
 

@@ -131,6 +131,11 @@ fn main() -> anyhow::Result<()> {
                 init_req.dtype.into(),
                 &device,
             )?;
+            let stream_kv = if init_req.econfig.max_model_len.is_none() {
+                Some(stream.try_clone()?)
+            } else {
+                None
+            };
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
@@ -143,6 +148,7 @@ fn main() -> anyhow::Result<()> {
                 device,
                 progress_reporter,
                 transfer,
+                stream_kv,
             )?;
 
             vllm_rs::log_info!(
