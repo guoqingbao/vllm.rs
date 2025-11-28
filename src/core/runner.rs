@@ -67,7 +67,7 @@ impl ModelRunner {
         model_type: ModelType,
         vb: &VarBuilderX,
         comm: Rc<Comm>,
-        econfig: &EngineConfig,
+        econfig: &mut EngineConfig,
         config: &Config,
         dtype: DType,
         is_rope_i: bool,
@@ -172,7 +172,6 @@ impl ModelRunner {
             }
         };
 
-        let mut econfig = econfig.clone();
         let (gpu_kv_cache, cpu_kv_cache) = if let Some(s) = stream {
             use crate::runner::{receive_local, send_local, MessageType};
             use interprocess::TryClone;
@@ -183,7 +182,7 @@ impl ModelRunner {
             )?;
             let msg = receive_local(&mut s.try_clone()?, true)?;
             if let MessageType::UsableMemoryLeft(ecfg) = msg {
-                econfig = ecfg.clone(); // Update Engine config
+                *econfig = ecfg.clone(); // Update Engine config
                 let (gpu_kv_cache, cpu_kv_cache) =
                     Self::init_kv_cache(&econfig, config, dtype, &device)?;
                 (gpu_kv_cache, cpu_kv_cache)
@@ -191,6 +190,10 @@ impl ModelRunner {
                 Self::init_kv_cache(&econfig, config, dtype, &device)?
             }
         } else {
+            if econfig.max_model_len.is_none() {
+                use crate::utils::update_kvcache_config;
+                update_kvcache_config(econfig, &config.clone(), dtype);
+            }
             Self::init_kv_cache(&econfig, config, dtype, &device)?
         };
 

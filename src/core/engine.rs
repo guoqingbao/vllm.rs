@@ -136,13 +136,6 @@ impl LLMEngine {
             vec![0]
         };
 
-        let kv_fraction = econfig
-            .kv_fraction
-            .unwrap_or(if cfg!(feature = "flash-attn") {
-                0.7
-            } else {
-                0.5
-            }) as f64;
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
@@ -160,9 +153,7 @@ impl LLMEngine {
             } else {
                 None
             };
-            if econfig.max_model_len.is_none() {
-                update_kvcache_config(&mut econfig, &config.clone(), dtype, kv_fraction);
-            }
+
             let mut model_runner = ModelRunner::new(
                 model_type,
                 &vb,
@@ -178,7 +169,7 @@ impl LLMEngine {
                     )
                     .unwrap(),
                 ),
-                &econfig,
+                &mut econfig,
                 &config,
                 dtype,
                 is_rope_i,
@@ -299,12 +290,7 @@ impl LLMEngine {
                     if econfig.max_model_len.is_none() {
                         let ecfg = engine_config.get_or_init(|| {
                             let mut econfig = econfig.clone();
-                            update_kvcache_config(
-                                &mut econfig,
-                                &config.clone(),
-                                dtype,
-                                kv_fraction,
-                            );
+                            update_kvcache_config(&mut econfig, &config.clone(), dtype);
                             econfig
                         });
 

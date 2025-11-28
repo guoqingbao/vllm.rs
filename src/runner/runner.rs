@@ -136,12 +136,13 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            let mut econfig = init_req.econfig.clone();
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
                 &vb,
                 comm,
-                &init_req.econfig,
+                &mut econfig,
                 &init_req.config,
                 init_req.dtype.into(),
                 init_req.is_rope_i,

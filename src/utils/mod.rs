@@ -105,20 +105,22 @@ pub fn get_kvcache_blocks(
     (num_gpu_blocks, total_memory_bytes)
 }
 
-pub fn update_kvcache_config(
-    econfig: &mut EngineConfig,
-    config: &config::Config,
-    dtype: DType,
-    usage_fraction: f64,
-) {
+pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config, dtype: DType) {
     const SIZE_IN_MB: f32 = (1024 * 1024) as f32;
-
+    let kv_fraction = econfig
+        .kv_fraction
+        .unwrap_or(if cfg!(feature = "flash-attn") {
+            0.7
+        } else {
+            0.5
+        }) as f64;
     let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
-    let gpu_memory_left = match crate::utils::max_usable_memory(&device_ids, usage_fraction) {
+    let gpu_memory_left = match crate::utils::max_usable_memory(&device_ids, kv_fraction) {
         Ok(v) => v,
         _ => 0,
     };
-    let gpu_memory_left = gpu_memory_left.div_ceil(128 * 1024 * 1024) * 128 * 1024 * 1024; // Aligned to 128 MB
+    let mut gpu_memory_left =
+        (gpu_memory_left.div_ceil(128 * 1024 * 1024) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
 
     let config_model_len = econfig
         .config_model_len
@@ -138,8 +140,8 @@ pub fn update_kvcache_config(
         * 2
         * config.num_hidden_layers;
 
-    let num_blocks = gpu_memory_left as usize / per_block;
-    let total_capacity = num_blocks * block_size;
+    let mut num_blocks = gpu_memory_left / per_block;
+    let mut total_capacity = num_blocks * block_size;
 
     // descending possible model lengths
     let candidates = [
@@ -152,11 +154,18 @@ pub fn update_kvcache_config(
         1024,
     ];
 
-    let (max_num_seqs, max_model_len) = candidates
+    let (mut max_num_seqs, max_model_len) = candidates
         .iter()
         .find_map(|&len| (total_capacity > len).then(|| ((total_capacity.div_ceil(len)), len)))
         .unwrap_or((1, 1024)); // fallback
 
+    // Avoid use too much GPU memory for small models
+    if max_num_seqs > 8 {
+        max_num_seqs = 8;
+        total_capacity = max_num_seqs * max_model_len;
+        num_blocks = total_capacity as usize / block_size;
+        gpu_memory_left = num_blocks * per_block;
+    }
     use colored::Colorize;
     if econfig.max_model_len.is_none() {
         println!(
