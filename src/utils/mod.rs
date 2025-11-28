@@ -838,25 +838,10 @@ pub fn max_usable_memory(
     _: &[usize],
     usage_fraction: f64, // e.g., 0.9 → 90%
 ) -> Result<u64> {
-    let devices = metal::Device::all();
-    if devices.is_empty() {
-        candle_core::bail!("No Metal GPUs found");
-    }
-
-    let mut usable_values = Vec::new();
-
-    for dev in devices {
-        // recommendedMaxWorkingSetSize is the closest to usable memory
-        let total = dev.recommended_max_working_set_size();
-        let usable = (total as f64 * usage_fraction) as u64;
-
-        usable_values.push(usable);
-    }
-
-    usable_values
-        .into_iter()
-        .min()
-        .ok_or_else(|| candle_core::Error::msg("No GPUs provided"))
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    Ok((sys.available_memory() as f64 * usage_fraction) as u64)
 }
 
 pub fn prepare_engine_config(
