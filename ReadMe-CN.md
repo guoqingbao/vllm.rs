@@ -81,6 +81,11 @@
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
    
    💡 2. 预编译包`context cache` 依赖于Flash attention, 如需FP8 KvCache，请重新编译并去除`flash-context`特性
+   
+   ⬇️ 仅适用于 `单 GPU（CUDA）`的其他预编译 Python 包（压缩包），下载链接：
+   1. [不含 `nccl` 功能的包](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL.tar.gz)
+
+   2. [不含 `nccl` 和 `flash-attn` 功能的包](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL-and-flash-attn.tar.gz)
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
 python3 -m pip install vllm_rs
@@ -92,8 +97,6 @@ python3 -m pip install vllm_rs
    💡使用`--ui-server`会同时启动ChatGPT风格网页, 此时无需其它客户端。
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
-
-   🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
 
   <details open>
     <summary>单卡 + GGUF模型</summary>
@@ -170,6 +173,9 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
    ```
   </details>
+
+   🤖 <a href="python/ReadMe.md">这里包含客户端使用Context-cache的注意事项</a>
+
 
 ## 📘 使用方法（Rust）
 

@@ -85,8 +85,14 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
    💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support) (or use Rust mode)
 
    💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
+
+   ⬇️ Other prebuild (compressed) Python packages for `Single GPU` only (CUDA), download links:
+   1. [Package without `nccl` feature](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL.tar.gz)
+
+   2. [Package without `nccl` and `flash-attn` features](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL-and-flash-attn.tar.gz)
+
 ```shell
-# NCCL library required on CUDA (Single Card under Rust mode does not require NCCL)
+# NCCL library is required for CUDA. (For single GPU usage, you may choose other prebuilt packages or Rust mode.)
 python3 -m pip install vllm_rs
 ```
 
