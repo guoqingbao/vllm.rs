@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
         } else {
             PdRole::Client
         };
-        let pd_method = if args.pd_url.is_some() {
+        let pd_method = if args.pd_url.is_some() && &args.pd_url.clone().unwrap()[0..4] == "tcp:" {
             PdMethod::RemoteTcp
         } else {
             PdMethod::LocalIpc

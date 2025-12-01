@@ -371,7 +371,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.5, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
-| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |
+| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP of sockets in a common file-path(used when the PD server and client are on different machines) |    |
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
