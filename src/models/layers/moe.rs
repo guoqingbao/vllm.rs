@@ -187,15 +187,17 @@ impl FusedMoeGGUF {
     pub fn new_repack(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
-        let gate = linear_no_bias(
-            cfg.hidden_size,
-            num_experts,
-            vb.pp("ffn_gate_inp"),
-            Shard::default(),
-            &None,
-            &None,
-            DType::F32,
-        )?;
+
+        let gate_ws = match &vb.pp("ffn_gate_inp").0 {
+            Either::Right(v) => v
+                .get((num_experts, cfg.hidden_size), "weight")?
+                .dequantize(v.device())?,
+            _ => {
+                panic!("Invalid varbuilder!");
+            }
+        };
+
+        let gate = Linear::new(gate_ws, None, &None);
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (
@@ -286,15 +288,16 @@ impl FusedMoeGGUF {
         }
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
-        let gate = linear_no_bias(
-            cfg.hidden_size,
-            num_experts,
-            vb.pp("ffn_gate_inp"),
-            Shard::default(),
-            &None,
-            &None,
-            DType::F32,
-        )?;
+        let gate_ws = match &vb.pp("ffn_gate_inp").0 {
+            Either::Right(v) => v
+                .get((num_experts, cfg.hidden_size), "weight")?
+                .dequantize(v.device())?,
+            _ => {
+                panic!("Invalid varbuilder!");
+            }
+        };
+
+        let gate = Linear::new(gate_ws, None, &None);
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (
