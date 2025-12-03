@@ -496,6 +496,7 @@ impl ModelRunner {
         Tensor::from_vec(flat, (len, max_len), &self.device)
     }
 
+    #[allow(non_snake_case)]
     fn prepare_prefill(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
         let mut input_ids: Vec<u32> = Vec::new();
         let mut positions = Vec::new();
@@ -504,7 +505,11 @@ impl ModelRunner {
         let mut max_seqlen_q = 0;
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
-        const CHUNK_SIZE: usize = 8192;
+        let CHUNK_SIZE: usize = if self.config.flash_context.unwrap_or(false) {
+            2048
+        } else {
+            8192
+        };
         let mut max_context_len = 0;
         for seq in seqs {
             let seqlen = seq.len();

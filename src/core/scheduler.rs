@@ -22,6 +22,7 @@ pub struct Scheduler {
     cfg: EngineConfig,
     cached_seqs: VecDeque<(usize, String)>,
     pd_config: Option<PdConfig>,
+    is_last_prefill: bool,
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
@@ -52,6 +53,7 @@ impl Scheduler {
             cfg: econfig.clone(),
             cached_seqs: VecDeque::new(),
             pd_config: econfig.pd_config.clone(),
+            is_last_prefill: false,
         }
     }
 
@@ -111,6 +113,8 @@ impl Scheduler {
             if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
                 || num_tokens + seq.len() >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
+                // interleaved scheduling
+                || (self.is_last_prefill && self.running.len() > 0)
             {
                 // Put it back and break out if cannot schedule more
                 self.waiting.push_front(seq);
@@ -127,6 +131,7 @@ impl Scheduler {
         }
 
         if !scheduled_ids.is_empty() {
+            self.is_last_prefill = true;
             return Ok((scheduled_ids, true));
         }
 
@@ -208,6 +213,7 @@ impl Scheduler {
             decode_ids.push(idx);
         }
 
+        self.is_last_prefill = false;
         Ok((decode_ids, false))
     }
 
@@ -544,13 +550,18 @@ impl Scheduler {
         self.waiting.retain(|seq| seq.id != seq_id);
     }
 
+    #[allow(non_snake_case)]
     pub fn filter_prefill_finished(
         &mut self,
         scheduled_ids: &Vec<usize>,
     ) -> (Vec<usize>, Vec<usize>) {
         let mut finished_seqs = Vec::new();
         let mut remove_ids = Vec::new();
-        const CHUNK_SIZE: usize = 8192;
+        let CHUNK_SIZE: usize = if self.cfg.flash_context.unwrap_or(false) {
+            2048
+        } else {
+            8192
+        };
         for (i, id) in scheduled_ids.iter().enumerate() {
             if *id < self.running.len() {
                 let seq = &self.running[*id];
