@@ -17,6 +17,7 @@ use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
+use colored::Colorize;
 use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
 use either::Either;
 use std::collections::HashMap;
@@ -151,13 +152,19 @@ pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config
         config_model_len / 8,
         16 * 1024,
         8 * 1024,
+        4 * 1024,
         1024,
     ];
 
     let (mut max_num_seqs, max_model_len) = candidates
         .iter()
         .find_map(|&len| (total_capacity > len).then(|| ((total_capacity.div_ceil(len)), len)))
-        .unwrap_or((1, 1024)); // fallback
+        .unwrap_or((0, 1024)); // fallback
+
+    if num_blocks == 0 || max_num_seqs == 0 {
+        println!("{}", format!("Insufficient GPU memory (left {:.02} MB) for allocating KvCache, please free GPU resouces and retry!", gpu_memory_left / 1024 / 1024).red().bold());
+        assert!(num_blocks > 0 && max_num_seqs > 0);
+    }
 
     // Avoid use too much GPU memory for small models
     if max_num_seqs > 8 {
@@ -166,7 +173,7 @@ pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config
         num_blocks = total_capacity as usize / block_size;
         gpu_memory_left = num_blocks * per_block;
     }
-    use colored::Colorize;
+
     if econfig.max_model_len.is_none() {
         println!(
             "\n{} is not given, auto decided to {}, Max usable kvcache tokens {}.\n",
@@ -887,6 +894,13 @@ pub fn max_usable_memory(
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
+    let usable_in_mb = sys.available_memory() / 1024 / 1024;
+    crate::log_warn!(
+        "max_usable_memory {} MB, usable for KvCache {:.02} (user `kv-fraction` setting {})",
+        usable_in_mb,
+        usable_in_mb as f64 * usage_fraction,
+        usage_fraction
+    );
     Ok((sys.available_memory() as f64 * usage_fraction) as u64)
 }
 
