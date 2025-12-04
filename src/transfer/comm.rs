@@ -5,7 +5,7 @@ use candle_core::Result;
 use interprocess::local_socket::traits::Listener;
 use interprocess::local_socket::traits::Stream;
 use interprocess::local_socket::{
-    GenericNamespaced, ListenerOptions, Stream as LocalStream, ToNsName,
+    GenericFilePath, GenericNamespaced, ListenerOptions, Stream as LocalStream, ToFsName, ToNsName,
 };
 use interprocess::TryClone;
 use parking_lot::{Mutex, RwLock};
@@ -16,6 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
 /// An internal enum to abstract over the two stream types.
 /// It implements Read and Write to be used generically.
 enum CommStream {
@@ -177,41 +178,95 @@ impl Communicator {
     /// Blocks until a connection is established based on role and config.
     /// On success, it populates `self.stream`.
     fn establish_connection(&self) -> Result<()> {
-        let (read_stream, write_stream) = if let Some(url) = &self.config.url {
-            // --- Remote (TCP) Mode ---
-            match self.role {
-                PdRole::Client => {
-                    let stream = TcpStream::connect(url)?;
-                    stream.set_nodelay(true)?;
-                    crate::log_info!(
-                        "[PD Client Rank {}] Connected to TCP server at {}",
-                        self.rank,
-                        url
-                    );
-                    (
-                        CommStream::Remote(stream.try_clone()?),
-                        CommStream::Remote(stream),
-                    )
+        let (read_stream, write_stream) = if let Ok(url) =
+            Url::parse(&self.config.url.clone().unwrap())
+        {
+            match url.scheme() {
+                "tcp" => {
+                    // --- Remote (TCP) Mode ---
+                    match self.role {
+                        PdRole::Client => {
+                            let stream = TcpStream::connect(url.to_string())?;
+                            stream.set_nodelay(true)?;
+                            crate::log_info!(
+                                "[PD Client Rank {}] Connected to TCP server at {}",
+                                self.rank,
+                                url
+                            );
+                            (
+                                CommStream::Remote(stream.try_clone()?),
+                                CommStream::Remote(stream),
+                            )
+                        }
+                        PdRole::Server => {
+                            let listener = TcpListener::bind(url.to_string())?;
+                            crate::log_info!(
+                                "[PD Server Rank {}] TCP listener bound. Waiting for client on {}",
+                                self.rank,
+                                url
+                            );
+                            let (stream, addr) = listener.accept()?;
+                            stream.set_nodelay(true)?;
+                            crate::log_info!(
+                                "[PD Server Rank {}] Accepted TCP connection from {}",
+                                self.rank,
+                                addr
+                            );
+                            // Split the TCP stream by cloning its handle
+                            (
+                                CommStream::Remote(stream.try_clone()?),
+                                CommStream::Remote(stream),
+                            )
+                        }
+                    }
                 }
-                PdRole::Server => {
-                    let listener = TcpListener::bind(url)?;
-                    crate::log_info!(
-                        "[PD Server Rank {}] TCP listener bound. Waiting for client on {}",
-                        self.rank,
-                        url
-                    );
-                    let (stream, addr) = listener.accept()?;
-                    stream.set_nodelay(true)?;
-                    crate::log_info!(
-                        "[PD Server Rank {}] Accepted TCP connection from {}",
-                        self.rank,
-                        addr
-                    );
-                    // Split the TCP stream by cloning its handle
-                    (
-                        CommStream::Remote(stream.try_clone()?),
-                        CommStream::Remote(stream),
-                    )
+                "file" => {
+                    // --- FS (IPC) Mode, potentially on remote shared FS ---
+                    let sock_name = format!("{}@vllm-rs-transfer-{}", url.path(), self.rank);
+                    let fs_name = sock_name.clone().to_fs_name::<GenericFilePath>()?;
+                    match self.role {
+                        PdRole::Client => {
+                            // Retry connecting to the local socket
+                            loop {
+                                match LocalStream::connect(fs_name.clone()) {
+                                    Ok(stream) => {
+                                        if self.rank == 0 {
+                                            crate::log_info!(
+                                                "PD Client: Connected to FS IPC server at {}",
+                                                sock_name
+                                            );
+                                        }
+
+                                        break (
+                                            CommStream::Local(stream.try_clone()?),
+                                            CommStream::Local(stream),
+                                        );
+                                    }
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                        // Server might not be ready, wait and retry
+                                        std::thread::sleep(Duration::from_millis(500));
+                                        continue;
+                                    }
+                                    Err(e) => return Err(e.into()), // Other error
+                                }
+                            }
+                        }
+                        PdRole::Server => {
+                            let listener = ListenerOptions::new().name(fs_name).create_sync()?;
+                            let stream = listener.accept()?;
+                            if self.rank == 0 {
+                                crate::log_info!("PD Server: Accepted FS IPC connection",);
+                            }
+                            // Split the LocalStream by cloning its handle
+                            (
+                                CommStream::Local(stream.try_clone()?),
+                                CommStream::Local(stream),
+                            )
+                        }
+                    }
+                }
+                _ => {
+                    panic!("{} is not a supported URL scheme", url.scheme());
                 }
             }
         } else {
