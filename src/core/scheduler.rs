@@ -42,13 +42,14 @@ impl Scheduler {
             block_manager: BlockManager::new(
                 runners,
                 econfig.num_blocks,
-                (econfig.cpu_mem_fold.unwrap_or(1.0f32) * econfig.num_blocks as f32) as usize,
+                (econfig.cpu_mem_fold.unwrap_or(0.5f32) * econfig.num_blocks as f32) as usize,
                 econfig.block_size,
             ),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
-                EosTokenId::Single(eos) => vec![*eos],
-                EosTokenId::Multiple(eos) => eos.into_iter().map(|x| *x).collect(),
+                Some(EosTokenId::Single(eos)) => vec![*eos],
+                Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
+                _ => vec![],
             },
             cfg: econfig.clone(),
             cached_seqs: VecDeque::new(),
@@ -1028,7 +1029,7 @@ impl Scheduler {
             // Metal use unified memory, no cpu swap memory used
             (0f32, 0f32)
         } else {
-            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
+            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(0.5f32);
             (
                 self.block_manager.get_cpu_swap_usage() * cpu_kvcache_memory_gb,
                 cpu_kvcache_memory_gb,
@@ -1045,7 +1046,7 @@ impl Scheduler {
         let kvcache_memory_gb = self.cfg.kvcache_memory_bytes as f32 / SIZE_IN_GB as f32;
         #[cfg(feature = "cuda")]
         let cpu_swap_log = {
-            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(1.0f32);
+            let cpu_kvcache_memory_gb = kvcache_memory_gb * self.cfg.cpu_mem_fold.unwrap_or(0.5f32);
             format!(
                 "CPU swap used {:.1}% ({:.2}GB/{:.2}GB)",
                 self.block_manager.get_cpu_swap_usage() * 100.0f32,

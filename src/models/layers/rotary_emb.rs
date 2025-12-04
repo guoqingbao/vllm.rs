@@ -19,9 +19,10 @@ impl RotaryEmbedding {
             .partial_rotary_factor
             .map(|factor| (factor * dim as f32) as usize)
             .unwrap_or(dim);
+        let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
         let inv_freq: Vec<_> = (0..rotary_dim)
             .step_by(2)
-            .map(|i| 1f32 / cfg.rope_theta.powf(i as f64 / rotary_dim as f64) as f32)
+            .map(|i| 1f32 / rope_theta.powf(i as f64 / rotary_dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
         let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
@@ -128,8 +129,8 @@ impl ScalingRotaryEmbedding {
                     if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))) =
                         rope_scaling.get("factor")
                     {
-                        let inv_freq: Vec<_> =
-                            calculate_default_inv_freq(cfg.rope_theta, rotary_dim);
+                        let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
+                        let inv_freq: Vec<_> = calculate_default_inv_freq(rope_theta, rotary_dim);
                         let inv_freq = Tensor::new(inv_freq.as_slice(), dev)?;
                         let idx_theta = (Tensor::arange(
                             0,
@@ -176,8 +177,8 @@ impl ScalingRotaryEmbedding {
                                 (original_max_position_embeddings / low_freq_factor) as f32;
                             let high_freq_wavelen =
                                 (original_max_position_embeddings / high_freq_factor) as f32;
-
-                            let inv_freq = calculate_default_inv_freq(cfg.rope_theta, rotary_dim)
+                            let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
+                            let inv_freq = calculate_default_inv_freq(rope_theta, rotary_dim)
                                 .into_iter()
                                 .map(|freq| {
                                     let wavelen = 2. * std::f32::consts::PI / freq;
@@ -235,15 +236,15 @@ impl ScalingRotaryEmbedding {
                             "Dynamic rope_type requires either alpha or factor to be set"
                         )
                     };
-
+                    let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
                     let (rope_theta, max_seq_len) = if rope_scaling.contains_key("alpha") {
                         let max_len = cfg.max_position_embeddings as u32;
-                        let rope_theta = (cfg.rope_theta * scaling_factor as f64)
+                        let rope_theta = (rope_theta * scaling_factor as f64)
                             .powf(rotary_dim as f64 / (rotary_dim - 2) as f64);
                         (rope_theta, max_len)
                     } else {
                         let max_len = (original_max_position_embeddings * scaling_factor) as u32;
-                        let rope_theta = (cfg.rope_theta
+                        let rope_theta = (rope_theta
                             * ((scaling_factor * max_len as f64
                                 / original_max_position_embeddings)
                                 - (scaling_factor - 1f64)))
@@ -291,10 +292,11 @@ impl ScalingRotaryEmbedding {
                             RopeScaling(Either::Left(ScalingValue(Either::Left(beta_slow)))),
                             Some(RopeScaling(Either::Left(ScalingValue(Either::Left(factor))))),
                         ) => {
+                            let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
                             let embed = YarnRotaryEmbedding::new_yarn(
                                 dtype,
                                 dev,
-                                cfg.rope_theta as f32,
+                                rope_theta as f32,
                                 rotary_dim,
                                 cfg.max_position_embeddings,
                                 original_max_position_embeddings as usize,

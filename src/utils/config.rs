@@ -109,7 +109,7 @@ pub struct RopeScaling(#[serde(with = "either::serde_untagged")] pub Either<Scal
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
-    pub architectures: Vec<String>,
+    pub architectures: Option<Vec<String>>,
     pub head_dim: Option<usize>,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
@@ -120,21 +120,23 @@ pub struct Config {
     pub intermediate_size: usize,
     pub rms_norm_eps: f64,
     pub vocab_size: Option<usize>,
-    pub rope_theta: f64,
+    pub rope_theta: Option<f64>,
     pub attention_bias: Option<bool>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: EosTokenId,
+    pub eos_token_id: Option<EosTokenId>,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
     pub partial_rotary_factor: Option<f32>,
     pub hidden_act: candle_nn::Activation,
+    #[serde(alias = "rope_parameters")]
     pub rope_scaling: Option<HashMap<String, RopeScaling>>,
     pub quant: Option<String>,
     pub moe_cfg: Option<MoEConfig>,
     pub fp8_kvcache: Option<bool>,
     pub quantization_config: Option<QuantConfig>,
+    pub is_multi_model: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -411,6 +413,9 @@ pub struct GenerationConfig {
 
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+
+    pub bos_token_id: Option<usize>,
+    pub eos_token_id: Option<EosTokenId>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]

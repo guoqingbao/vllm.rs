@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
             top_k: args.top_k,
             frequency_penalty: args.frequency_penalty,
             presence_penalty: args.presence_penalty,
+            bos_token_id: None,
+            eos_token_id: None,
         })
     } else {
         None

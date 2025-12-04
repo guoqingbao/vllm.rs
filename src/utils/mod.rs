@@ -405,7 +405,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     };
 
     let cfg = Config {
-        architectures: vec![arch.clone()],
+        architectures: Some(vec![arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
         num_key_value_heads: head_count_kv,
@@ -416,11 +416,11 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         intermediate_size: feed_forward_length,
         rms_norm_eps,
         vocab_size,
-        rope_theta: rope_freq_base as f64,
+        rope_theta: Some(rope_freq_base as f64),
         attention_bias: None,
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
-        eos_token_id,
+        eos_token_id: Some(eos_token_id),
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
@@ -431,9 +431,24 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         moe_cfg: mod_cfg,
         fp8_kvcache: None,
         quantization_config: None,
+        is_multi_model: None,
     };
 
     Ok(cfg)
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DummyMultiModelConfig {
+    architectures: Option<Vec<String>>,
+    text_config: Option<Config>,
+    vision_config: Option<serde_json::Value>,
+}
+
+fn is_multi_model(config_path: &PathBuf) -> Result<DummyMultiModelConfig> {
+    let config: DummyMultiModelConfig =
+        serde_json::from_slice(&std::fs::read(config_path).map_err(candle_core::Error::wrap)?)
+            .map_err(candle_core::Error::wrap)?;
+    Ok(config)
 }
 
 pub fn init_config_tokenizer(
@@ -455,9 +470,32 @@ pub fn init_config_tokenizer(
         loader.prepare_model_weights(econfig.hf_token.clone(), econfig.hf_token_path.clone())?;
     if !is_gguf {
         let config_path = model_pathes.get_config_filename();
-        let mut config: Config =
+        let mut config: Config = if let Ok(cfg) = is_multi_model(&config_path) {
+            if cfg.text_config.is_some() && cfg.vision_config.is_some() {
+                crate::log_warn!("Multimodel model {:?} detected!", cfg.architectures);
+                let mut config: Config = cfg.text_config.unwrap();
+                config.architectures = cfg.architectures.clone();
+                config.is_multi_model = Some(true);
+                // Remap rope_theta in rope_scaling to config file
+                if let Some(scaling) = &config.rope_scaling {
+                    if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(v))))) =
+                        scaling.get("rope_theta")
+                    {
+                        config.rope_theta = Some(*v);
+                    }
+                }
+                config
+            } else {
+                serde_json::from_slice(
+                    &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
+                )
+                .map_err(candle_core::Error::wrap)?
+            }
+        } else {
             serde_json::from_slice(&std::fs::read(&config_path).map_err(candle_core::Error::wrap)?)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(candle_core::Error::wrap)?
+        };
+
         if let Some(qcfg) = &config.quantization_config {
             assert!(
                 qcfg.quant_method == "gptq" || qcfg.quant_method == "awq",
@@ -473,8 +511,9 @@ pub fn init_config_tokenizer(
             #[cfg(not(feature = "cuda"))]
             candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
         }
+        let architectures = config.architectures.as_ref().unwrap();
         if matches!(
-            config.architectures[0].as_str(),
+            architectures[0].as_str(),
             "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM"
         ) {
             let moe_cfg: MoEConfig = serde_json::from_slice(
@@ -561,9 +600,10 @@ pub fn init_config_tokenizer(
             bos_token: bos,
             eos_token: eos,
         };
+        let archs = config.architectures.as_ref().unwrap();
 
         let generation_cfg = if matches!(
-            config.architectures[0].as_str(),
+            archs[0].as_str(),
             "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4"
         ) {
             //default repetition penalty for glm4 models
@@ -573,6 +613,8 @@ pub fn init_config_tokenizer(
                 top_k: None,
                 frequency_penalty: Some(1.2),
                 presence_penalty: Some(1.2),
+                bos_token_id: None,
+                eos_token_id: None,
             })
         } else {
             None
@@ -683,8 +725,11 @@ pub fn get_arch_rope(
     let rope_key_map: HashMap<&str, bool> = [
         ("Qwen2ForCausalLM", false),
         ("Qwen3ForCausalLM", false),
+        ("Qwen3ForConditionalGeneration", false),
         ("MistralForCausalLM", false),
+        ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
+        ("LlamaForConditionalGeneration", false),
         ("Glm4ForCausalLM", true),
         ("glm4", true),
         ("qwen2", false),
@@ -713,6 +758,7 @@ pub fn get_arch_rope(
         ),
         "LlamaForCausalLM"
         | "MistralForCausalLM"
+        | "Mistral3ForConditionalGeneration"
         | "LlamaForConditionalGeneration"
         | "llama"
         | "mistral"
@@ -852,11 +898,20 @@ pub fn prepare_engine_config(
     generation_cfg: &mut Option<GenerationConfig>,
 ) -> (EngineConfig, bool) {
     let mut econfig = econfig.clone();
-    let config_model_len = config.max_model_len.unwrap_or(
-        config_tokenizer
-            .model_max_length
-            .unwrap_or(config.max_position_embeddings as f64) as usize,
-    );
+
+    let config_model_len =
+        config
+            .max_model_len
+            .unwrap_or(if let Some(l) = config_tokenizer.model_max_length {
+                if l < 10000000.0 {
+                    // Sometime this value is invalid
+                    l as usize
+                } else {
+                    config.max_position_embeddings
+                }
+            } else {
+                config.max_position_embeddings
+            });
 
     econfig.config_model_len = Some(config_model_len);
 
@@ -869,7 +924,7 @@ pub fn prepare_engine_config(
     }
 
     assert!(
-        config.architectures.len() == 1,
+        config.architectures.as_ref().unwrap().len() == 1,
         "Only one architecture is supported at the moment!"
     );
 
