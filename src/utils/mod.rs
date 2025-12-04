@@ -8,6 +8,7 @@ pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod heartbeat;
+pub mod image;
 pub mod logits_processor;
 pub mod progress;
 use crate::utils::config::MoEConfig;
@@ -432,6 +433,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         fp8_kvcache: None,
         quantization_config: None,
         is_multi_model: None,
+        extra_config_json: None,
     };
 
     Ok(cfg)
@@ -476,6 +478,8 @@ pub fn init_config_tokenizer(
                 let mut config: Config = cfg.text_config.unwrap();
                 config.architectures = cfg.architectures.clone();
                 config.is_multi_model = Some(true);
+                config.extra_config_json =
+                    Some(std::fs::read_to_string(&config_path).map_err(candle_core::Error::wrap)?);
                 // Remap rope_theta in rope_scaling to config file
                 if let Some(scaling) = &config.rope_scaling {
                     if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(v))))) =

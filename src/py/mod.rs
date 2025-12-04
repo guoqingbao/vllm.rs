@@ -147,7 +147,7 @@ impl Engine {
         params: SamplingParams,
         messages: Vec<Message>,
         log: bool,
-    ) -> String {
+    ) -> (String, Option<String>) {
         self.engine
             .read()
             .apply_chat_template(&params, &messages, log)
@@ -187,11 +187,12 @@ impl Engine {
         &mut self,
         params: SamplingParams,
         prompt: String,
+        prompt_uuid: Option<String>,
     ) -> PyResult<(usize, usize, EngineStream)> {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, prompt)
+                .generate_stream(&params, prompt, prompt_uuid)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 

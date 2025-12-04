@@ -5,12 +5,13 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage, UsageQuery,
-    UsageResponse,
+    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, MessageContent, ServerData, Usage,
+    UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
+use crate::utils::image::{ImageProcessConfig, ImageProcessor};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -46,15 +47,23 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
+    let img_cfg = ImageProcessConfig::default(
+        "[IMG]".to_string(),
+        "[IMG_BREAK]".to_string(),
+        "[IMG_END]".to_string(),
+        2,
+        14,
+        1540,
+    );
 
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| Message::new(m.role.clone(), m.content.clone()))
+        .map(|m| convert_chat_msg(m, &img_cfg).unwrap())
         .collect();
 
-    let prompt = {
-        let engine = data.engine.read();
+    let (prompt, prompt_uuid) = {
+        let mut engine = data.engine.write();
         engine.apply_chat_template(&params, &messages, false)
     };
 
@@ -70,7 +79,7 @@ pub async fn chat_completion(
         }
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, prompt) {
+            match e.generate_stream(&params, prompt, prompt_uuid) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
@@ -255,7 +264,7 @@ pub async fn chat_completion(
         let (receivers, tokenizer) = {
             let mut e = data.engine.write();
             (
-                match e.generate_sync(&vec![params.clone()], vec![prompt.clone()]) {
+                match e.generate_sync(&vec![params.clone()], vec![prompt.clone()], vec![None]) {
                     Ok(receivers) => receivers,
                     Err(e) => {
                         crate::log_error!("Completion generation failed: {:?}", e);
@@ -297,7 +306,7 @@ pub async fn chat_completion(
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: output.decode_output,
+                    content: MessageContentType::PureText(output.decode_output),
                 },
                 finish_reason: Some("stop".to_string()),
             });
@@ -364,4 +373,80 @@ pub async fn get_usage(
         total_swap_memory: stats.total_swap_memory,
         session_status: stats.session_status,
     })
+}
+
+use crate::server::MessageContentType;
+use candle_core::Result;
+use image::DynamicImage;
+// load from url
+pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
+    let bytes = reqwest::blocking::get(url)?
+        .bytes()
+        .map_err(candle_core::Error::wrap)?;
+    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
+    Ok(img)
+}
+
+// load from "data:image/jpeg;base64,XXXXX"
+pub fn load_image_from_base64(data: &str) -> Result<DynamicImage> {
+    let base64_part = data.split(",").last().unwrap_or(data);
+    let bytes = base64::decode(base64_part).map_err(candle_core::Error::wrap)?;
+    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
+    Ok(img)
+}
+
+pub fn convert_chat_msg(msg: &ChatMessage, cfg: &ImageProcessConfig) -> Result<Message> {
+    let role = msg.role.clone();
+    let mut prompt = String::new();
+    let mut images: Vec<DynamicImage> = vec![];
+
+    match &msg.content {
+        MessageContentType::PureText(text) => {
+            prompt.push_str(text);
+        }
+        MessageContentType::Multi(items) => {
+            for item in items {
+                match item {
+                    MessageContent::Text { text } => {
+                        prompt.push_str(text);
+                    }
+                    MessageContent::ImageUrl { image_url } => {
+                        let img = load_image_from_url(image_url)?;
+                        let placeholder = format!("<image:{}>", images.len());
+                        prompt.push_str(&placeholder);
+                        images.push(img);
+                    }
+                    MessageContent::ImageBase64 { image_base64 } => {
+                        let img = load_image_from_base64(image_base64)?;
+                        let placeholder = format!("<image:{}>", images.len());
+                        prompt.push_str(&placeholder);
+                        images.push(img);
+                    }
+                }
+                prompt.push(' '); // keep spacing readable
+            }
+        }
+    }
+
+    use candle_core::Tensor;
+    pub fn tensor_raw(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+        let shape = t.dims().to_vec();
+        let data: Vec<f32> = t.to_vec1()?;
+        // Convert to Vec<u8> without copying element-by-element
+        Ok((bytemuck::cast_vec(data), shape))
+    }
+
+    if !images.is_empty() {
+        let processor = ImageProcessor::new(cfg);
+        let (images_tensor, _) = processor.process_inputs(&mut prompt, &mut images)?;
+        let (images_raw, images_shape) = tensor_raw(&images_tensor)?;
+        Ok(Message::new(
+            role,
+            prompt.trim().to_owned(),
+            Some(images_raw),
+            Some(images_shape),
+        ))
+    } else {
+        Ok(Message::new(role, prompt.trim().to_owned(), None, None))
+    }
 }

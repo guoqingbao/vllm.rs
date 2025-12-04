@@ -11,6 +11,7 @@ use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
     models::llama::LLaMaForCausalLM,
+    models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::qwen3::Qwen3ForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     utils::config::{Config, EngineConfig, ModelType},
@@ -35,6 +36,7 @@ pub enum Model {
     Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
+    Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     // Gemma(GemmaForCausalLM),
     // Phi(PhiForCausalLM),
     // Mistral(MistralForCausalLM),
@@ -113,6 +115,17 @@ impl ModelRunner {
                 &device,
                 Arc::clone(&reporter),
             )?)),
+            ModelType::Mistral3VL => {
+                Model::Mistral3VL(Arc::new(Mistral3ForConditionalGeneration::new(
+                    vb,
+                    comm.clone(),
+                    config,
+                    dtype,
+                    is_rope_i,
+                    &device,
+                    Arc::clone(&reporter),
+                )?))
+            }
             // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
             // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,
@@ -131,8 +144,15 @@ impl ModelRunner {
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        embeded_inputs,
+                    )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -142,8 +162,15 @@ impl ModelRunner {
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        embeded_inputs,
+                    )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -153,8 +180,15 @@ impl ModelRunner {
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        embeded_inputs,
+                    )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -164,11 +198,21 @@ impl ModelRunner {
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata)
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        embeded_inputs,
+                    )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+            Model::Mistral3VL(_) => {
+                panic!("CUDA Graph is not implemented for Multimodal models!s")
             }
         };
 
@@ -445,28 +489,76 @@ impl ModelRunner {
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
+                false,
             )?,
             Model::Qwen3MoE(model) => model.forward(
                 &input_ids,
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
+                false,
             )?,
             Model::LLaMa(model) => model.forward(
                 &input_ids,
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
+                false,
             )?,
             Model::GLM4(model) => model.forward(
                 &input_ids,
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
+                false,
             )?,
-            // _ => {
-            //     candle_core::bail!("Unsupported model type for forward pass");
-            // }
+            Model::Mistral3VL(model) => {
+                pub fn bytes_to_tensor_f32(
+                    bytes: &[u8],
+                    shape: &[usize],
+                    device: &Device,
+                ) -> Result<Tensor> {
+                    // reinterpret &[u8] → &[f32] (no copying, just view cast)
+                    let floats: &[f32] = bytemuck::cast_slice(bytes);
+
+                    // then rebuild tensor on the desired device
+                    Tensor::from_slice(floats, shape, device)
+                }
+
+                if let Seqs::SeqRefs(s) = &seqs {
+                    // We do not batch multimodel prefill
+                    let (pixel_values, image_sizes) = if let Some(images) = &s[0].images {
+                        let mut vec_tensors = Vec::new();
+                        let mut image_sizes = Vec::new();
+                        for (img, shape) in images {
+                            vec_tensors.push(bytes_to_tensor_f32(&img, shape, &self.device)?);
+                            image_sizes.push((shape[1] as u32, shape[2] as u32));
+                        }
+                        (Some(Tensor::cat(&vec_tensors, 0)?), Some(image_sizes))
+                    } else {
+                        (None, None)
+                    };
+                    model.forward(
+                        &input_ids,
+                        &positions,
+                        Some(&self.get_kv_cache()),
+                        &input_metadata,
+                        pixel_values,
+                        image_sizes,
+                    )?
+                } else {
+                    model.forward(
+                        &input_ids,
+                        &positions,
+                        Some(&self.get_kv_cache()),
+                        &input_metadata,
+                        None,
+                        None,
+                    )?
+                }
+            } // _ => {
+              //     candle_core::bail!("Unsupported model type for forward pass");
+              // }
         };
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
         Ok(output_ids)
@@ -751,6 +843,7 @@ impl ModelRunner {
             Model::Qwen3MoE(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),
+            Model::Mistral3VL(model) => model.get_vocab_size(),
         }
     }
 

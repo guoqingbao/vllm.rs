@@ -1,12 +1,12 @@
 [package]
 name = "vllm-rs"
-version = "0.5.11"
+version = "0.5.12"
 edition = "2021"
 default-run = "vllm-rs"
 
 [dependencies]
-candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "c74bcd5" }
-candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "c74bcd5" }
+candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "27cfdef" }
+candle-nn = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "27cfdef" }
 serde = { version = "1.0.190", features = ["serde_derive"] }
 tokenizers = {version = "0.21.2", features = ["http"] }
 hf-hub = "0.4.1"
@@ -35,7 +35,7 @@ ahash = "0.8.11"
 reedline = "0.40.0"
 pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py38"], optional = true }
 parking_lot = "0.12.4"
-attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.7", rev = "1a21d2f" }
+attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.1.7", rev = "753f0a6" }
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
@@ -52,6 +52,9 @@ colored = { version = "3.0.0" }
 tower-http = { version = "0.6.6", features = ["cors"] }
 rustchatui = { git = "https://github.com/guoqingbao/rustchatui.git", version="0.1.16" }
 sysinfo = "0.37.2"
+image = { version = "0.25.6", default-features = false, features = ['bmp', 'gif', 'jpeg', 'png', 'tiff', 'webp'] }
+reqwest = { version = "0.12.24", features = ["blocking", "json", "rustls-tls"]}
+bytemuck = "1.24.0"
 
 [lib]
 name = "vllm_rs"

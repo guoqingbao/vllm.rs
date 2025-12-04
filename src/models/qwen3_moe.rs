@@ -369,12 +369,17 @@ impl Qwen3MoEForCausalLM {
         })
     }
 
+    pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.embed_tokens.forward(xs)
+    }
+
     pub fn forward(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
+        embeded_inputs: bool,
     ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
@@ -395,7 +400,11 @@ impl Qwen3MoEForCausalLM {
             self.config.sliding_window,
             input_metadata.is_prefill,
         );
-        let mut xs = self.embed_tokens.forward(input_ids)?;
+        let mut xs = if embeded_inputs {
+            input_ids.to_owned()
+        } else {
+            self.embed_tokens.forward(input_ids)?
+        };
 
         if let Some(kv_caches) = kv_caches {
             for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {

@@ -25,10 +25,34 @@ pub struct ChatCompletionRequest {
     pub session_id: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+pub enum MessageContent {
+    // pure text (classic chat format)
+    #[serde(alias = "input_text")]
+    Text { text: String },
+
+    // URL image: "image_url": "https://..."
+    #[serde(alias = "image_url")]
+    ImageUrl { image_url: String },
+
+    // Base64 format: "data:image/jpeg;base64,xxxxx"
+    #[serde(alias = "image_base64")]
+    ImageBase64 { image_base64: String },
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum MessageContentType {
+    PureText(String),
+    Multi(Vec<MessageContent>),
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: String,
+    // #[serde(untagged)]
+    pub content: MessageContentType,
 }
 
 #[derive(Serialize)]

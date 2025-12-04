@@ -276,11 +276,12 @@ async fn main() -> Result<()> {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
-            let msg = Message::new("user".to_string(), prompt.clone());
+            let msg = Message::new("user".to_string(), prompt.clone(), None);
             let param = SamplingParams::new_with_max_tokens(args.max_tokens);
             let e = engine.read();
-            let prompt = e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
-            prompt_processed.push(prompt);
+            let (prompt, prompt_uuid) =
+                e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
+            prompt_processed.push((prompt, prompt_uuid));
             params.push(param);
         }
         if let Some(max_model_len) = args.max_model_len {
@@ -332,7 +333,7 @@ async fn main() -> Result<()> {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
                     if !trimmed.is_empty() {
-                        let msg = Message::new("user".to_string(), trimmed.to_string());
+                        let msg = Message::new("user".to_string(), trimmed.to_string(), None);
                         chat_history.push(msg.clone());
                         prompt_processed.clear();
                         let e = engine.read();
@@ -380,7 +381,11 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, prompt_processed[0].clone()) {
+                    match e.generate_stream(
+                        &request_params,
+                        prompt_processed[0].0.clone(),
+                        prompt_processed[0].1.clone(),
+                    ) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -507,7 +512,7 @@ async fn main() -> Result<()> {
             all_decode_time_taken += duration;
 
             if interactive {
-                let msg = Message::new("assistant".to_string(), decode_output.to_string());
+                let msg = Message::new("assistant".to_string(), decode_output.to_string(), None);
                 chat_history.push(msg.clone());
             }
         }
