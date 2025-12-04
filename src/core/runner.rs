@@ -287,7 +287,7 @@ impl ModelRunner {
         let num_gpu_blocks = econfig.num_blocks;
         #[cfg(feature = "cuda")]
         let num_cpu_blocks =
-            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize;
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5f32)) as usize;
         #[cfg(not(feature = "cuda"))]
         let num_cpu_blocks = 1;
 
@@ -894,22 +894,10 @@ impl ModelRunner {
                 return Ok(true);
             }
 
-            let block_size_bytes = gpu_cache[0].0.elem_count() / gpu_cache[0].0.dim(0)?
-                * gpu_cache[0].0.dtype().size_in_bytes();
-
             for i in 0..gpu_cache.len() {
                 cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
                 cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
             }
-
-            // Log the total memory cleared
-            let total_mb_bytes_cleared =
-                (block_size_bytes * block_ids.len() * gpu_cache.len() * 2) as f32 / 1024.0 / 1024.0;
-
-            crate::log_info!(
-                "ClearBlock: {:.2} MB KV cached blocks zeroed out on GPU!",
-                total_mb_bytes_cleared
-            );
 
             Ok(true)
         }

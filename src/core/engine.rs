@@ -16,6 +16,7 @@ use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
+use crate::utils::config::EosTokenId;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::progress::{progress_worker, ProgressReporter};
@@ -49,7 +50,6 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::{task, time::sleep};
-
 pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -109,13 +109,31 @@ impl LLMEngine {
         );
         config.fp8_kvcache = econfig.fp8_kvcache;
 
+        // In case config file missing bos and eos configuratioin
+        if let Some(gcfg) = &generation_cfg {
+            if config.bos_token_id.is_none() && gcfg.bos_token_id.is_some() {
+                config.bos_token_id = gcfg.bos_token_id.clone();
+            }
+            if config.eos_token_id.is_none() && gcfg.eos_token_id.is_some() {
+                config.eos_token_id = gcfg.eos_token_id.clone();
+            }
+        }
+        if config.eos_token_id.is_none() {
+            if let Some(eos) = &config_tokenizer.eos_token {
+                if let Some(token) = tokenizer.get_vocab(true).get(eos).copied() {
+                    config.eos_token_id = Some(EosTokenId::Single(token));
+                };
+            }
+        }
         assert!(
-            config.architectures.len() == 1,
+            config.architectures.is_some() && config.architectures.as_ref().unwrap().len() == 1,
             "Only one architecture is supported at the moment!"
         );
 
-        let (model_type, default_chat_template, is_rope_i) =
-            crate::utils::get_arch_rope(&tokenizer, config.architectures[0].clone())?;
+        let (model_type, default_chat_template, is_rope_i) = crate::utils::get_arch_rope(
+            &tokenizer,
+            config.architectures.as_ref().unwrap()[0].clone(),
+        )?;
         log_info!("Use ROPE interleaved {is_rope_i}");
 
         let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
@@ -334,7 +352,7 @@ impl LLMEngine {
             econfig.max_num_batched_tokens,
             econfig.num_blocks,
             econfig.block_size,
-            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(1.0f32)) as usize
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5f32)) as usize
         );
         log_warn!("Model loaded.\n");
 
