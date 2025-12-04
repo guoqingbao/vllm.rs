@@ -466,6 +466,8 @@ impl GenerationConfig {
             top_k,
             frequency_penalty,
             presence_penalty,
+            bos_token_id: None,
+            eos_token_id: None,
         }
     }
 }
