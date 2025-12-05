@@ -768,6 +768,11 @@ pub fn get_arch_rope(
         | "mistral"
         | "llama2"
         | "llama3" => {
+            let model_type = if arch == "Mistral3ForConditionalGeneration" {
+                ModelType::Mistral3VL
+            } else {
+                ModelType::LLaMa
+            };
             if let Some(_) = tokenizer
                 .get_vocab(true)
                 .get("<|start_header_id|>")
@@ -775,12 +780,12 @@ pub fn get_arch_rope(
             {
                 //llama3
                 (
-                    ModelType::LLaMa,
+                    model_type,
                     "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
                 )
             } else {
                 //llama2
-                (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
+                (model_type, "[INST] {} [/INST]".to_string())
             }
         }
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (

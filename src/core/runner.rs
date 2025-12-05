@@ -211,8 +211,18 @@ impl ModelRunner {
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
             }
-            Model::Mistral3VL(_) => {
-                panic!("CUDA Graph is not implemented for Multimodal models!s")
+            Model::Mistral3VL(m) => {
+                // panic!("CUDA Graph is not implemented for Multimodal models!")
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata,
+                                    _: bool| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None, None)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
             }
         };
 

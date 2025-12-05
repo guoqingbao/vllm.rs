@@ -118,7 +118,7 @@ impl MultiModalProjector {
         )?;
 
         let linear_2 = TensorParallelRowLinear::load_with_hints(
-            cfg.vision_config.hidden_size,
+            cfg.text_config.hidden_size,
             cfg.text_config.hidden_size,
             if is_qvar_builder {
                 vb.pp("ln2")
@@ -254,13 +254,8 @@ impl Mistral3ForConditionalGeneration {
             input_embeds = x_flat.reshape(input_embeds.shape())?;
         }
 
-        self.text_model.forward(
-            &input_embeds,
-            positions,
-            kv_caches,
-            input_metadata,
-            pixel_values.is_some(),
-        )
+        self.text_model
+            .forward(&input_embeds, positions, kv_caches, input_metadata, true)
     }
 
     pub fn get_vocab_size(&self) -> usize {

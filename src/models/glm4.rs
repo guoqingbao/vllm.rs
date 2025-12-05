@@ -184,11 +184,6 @@ impl GLM4ForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        let vb = if config.is_multi_model.is_some_and(|x| x) && !is_qvar_builder {
-            vb.pp("language_model")
-        } else {
-            vb.clone()
-        };
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,

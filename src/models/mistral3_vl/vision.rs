@@ -152,13 +152,11 @@ struct AttentionLayer {
 
 impl AttentionLayer {
     fn new(vb: VarBuilderX, comm: Rc<Comm>, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
-        let key_map: HashMap<&str, &str> = [
-            ("attention_norm", "attn_norm"),
-            ("post_attention_norm", "ffn_norm"),
-        ]
-        .iter()
-        .cloned()
-        .collect();
+        let key_map: HashMap<&str, &str> =
+            [("attention_norm", "attn_norm"), ("ffn_norm", "ffn_norm")]
+                .iter()
+                .cloned()
+                .collect();
         let is_qvar_builder = vb.is_qvar_builder();
 
         let norm = rms_norm(
@@ -187,9 +185,9 @@ impl AttentionLayer {
             cfg.hidden_size,
             1e-5,
             if is_qvar_builder {
-                vb.pp(key_map["post_attention_norm"])
+                vb.pp(key_map["ffn_norm"])
             } else {
-                vb.pp("post_attention_norm")
+                vb.pp("ffn_norm")
             },
             if is_qvar_builder { DType::F32 } else { dtype },
         )?;
@@ -229,7 +227,6 @@ struct Transformer {
 impl Transformer {
     fn new(vb: VarBuilderX, comm: Rc<Comm>, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
-        let vb = vb.pp("layers");
         for idx in 0..cfg.num_hidden_layers {
             let layer =
                 AttentionLayer::new(vb.pp(&format!("layers.{}", idx)), comm.clone(), cfg, dtype)?;
