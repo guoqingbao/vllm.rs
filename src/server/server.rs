@@ -1,7 +1,8 @@
 // src/server/server.rs
 use super::{
+    convert_chat_message,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder,
+    ChatResponder, MessageContentType,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
@@ -11,6 +12,7 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
+
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -46,17 +48,16 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
+    let img_cfg = {
+        let e = data.engine.read();
+        e.img_cfg.clone()
+    };
 
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| Message::new(m.role.clone(), m.content.clone()))
+        .map(|m| convert_chat_message(m, &img_cfg).unwrap())
         .collect();
-
-    let prompt = {
-        let engine = data.engine.read();
-        engine.apply_chat_template(&params, &messages, false)
-    };
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,7 +71,7 @@ pub async fn chat_completion(
         }
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, prompt) {
+            match e.generate_stream(&params, &messages) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
@@ -255,7 +256,7 @@ pub async fn chat_completion(
         let (receivers, tokenizer) = {
             let mut e = data.engine.write();
             (
-                match e.generate_sync(&vec![params.clone()], vec![prompt.clone()]) {
+                match e.generate_sync(&vec![params.clone()], &vec![messages]) {
                     Ok(receivers) => receivers,
                     Err(e) => {
                         crate::log_error!("Completion generation failed: {:?}", e);
@@ -297,7 +298,7 @@ pub async fn chat_completion(
                 index: 0,
                 message: ChatMessage {
                     role: "assistant".to_string(),
-                    content: output.decode_output,
+                    content: MessageContentType::PureText(output.decode_output),
                 },
                 finish_reason: Some("stop".to_string()),
             });

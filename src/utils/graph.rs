@@ -96,6 +96,7 @@ pub trait CudaGraphModule {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
+        embeded_inputs: bool,
     ) -> Result<Tensor>;
     fn report_graph_pool_usage(&self) -> Result<()>;
 }
@@ -124,6 +125,7 @@ where
         &'a Tensor,
         Option<&'a Vec<(Tensor, Tensor)>>,
         &'a InputMetadata,
+        bool,
     ) -> Result<Tensor>,
 {
     module: M,
@@ -142,6 +144,7 @@ where
         &'a Tensor,
         Option<&'a Vec<(Tensor, Tensor)>>,
         &'a InputMetadata,
+        bool,
     ) -> Result<Tensor>,
 {
     pub fn new(module: M, device: Arc<CudaDevice>) -> Self {
@@ -257,6 +260,7 @@ where
         &'a Tensor,
         Option<&'a Vec<(Tensor, Tensor)>>,
         &'a InputMetadata,
+        bool,
     ) -> Result<Tensor>,
 {
     fn start_capture(&mut self, bs: usize) -> Result<()> {
@@ -308,8 +312,15 @@ where
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
+        embeded_inputs: bool,
     ) -> Result<Tensor> {
-        (self.module)(input_ids, positions, kv_caches, input_metadata)
+        (self.module)(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+        )
     }
 
     fn report_graph_pool_usage(&self) -> Result<()> {
@@ -402,9 +413,13 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             };
 
             self.model.start_capture(bs)?;
-            let out =
-                self.model
-                    .forward(&input_ids_bs, &positions_bs, kv_caches, &input_metadata)?;
+            let out = self.model.forward(
+                &input_ids_bs,
+                &positions_bs,
+                kv_caches,
+                &input_metadata,
+                false,
+            )?;
             // println!("Graph capturing for output shape {:?}", out.shape());
             self.model.end_capture()?;
             outputs.insert(bs, out);
@@ -494,6 +509,7 @@ pub type ModelFn = dyn for<'a> Fn(
         &'a Tensor,
         Option<&'a Vec<(Tensor, Tensor)>>,
         &'a InputMetadata,
+        bool,
     ) -> Result<Tensor>
     + Send
     + Sync;
@@ -504,6 +520,7 @@ pub type CudaGraphFn = Box<
             &'a Tensor,
             Option<&'a Vec<(Tensor, Tensor)>>,
             &'a InputMetadata,
+            bool,
         ) -> Result<Tensor>
         + Send
         + Sync,

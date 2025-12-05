@@ -137,6 +137,7 @@ pub struct Config {
     pub fp8_kvcache: Option<bool>,
     pub quantization_config: Option<QuantConfig>,
     pub is_multi_model: Option<bool>,
+    pub extra_config_json: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -396,6 +397,7 @@ pub enum ModelType {
     Yi,
     StableLM,
     DeepSeek,
+    Mistral3VL,
 }
 
 #[cfg_attr(feature = "python", pyclass)]

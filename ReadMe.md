@@ -74,7 +74,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Qwen2 Moe
 * ✅ Qwen3 Moe
 * ✅ Mistral v1, v2
-* ✅ Mistral-3 Reasoning (3B, 8B, 14B)
+* ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodel)
 * ✅ GLM4 (0414, **Not ChatGLM**)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
@@ -117,9 +117,29 @@ python3 -m pip install vllm_rs
 ```
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
 # Metal/MacOS (response can be seriously degradated if GPU memory over 95% on MacOS, use a smaller `--max-model-len` or `--kv-fraction` parameter)
 python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --isq q4k --max-model-len 32768 --ui-server
+```
+
+  </details>
+
+  <details open>
+    <summary>Multimodel(Mistral-3 VL, with images)</summary>
+
+```bash
+# Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+# Request format:
+# {
+#   "type": "image_url",
+#   "image_url": "https://..."
+# }
+# or
+# {
+#   "type": "image_base64",
+#   "image_base64": "data:image/jpeg;base64,xxxxx"
+# }
+python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --ui-server
 ```
 
   </details>

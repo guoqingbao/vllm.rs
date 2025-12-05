@@ -16,9 +16,10 @@ use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::EosTokenId;
 use crate::utils::config::{EngineConfig, SamplingParams};
+use crate::utils::config::{EosTokenId, ModelType};
 use crate::utils::heartbeat::heartbeat_worker;
+use crate::utils::image::ImageProcessConfig;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
@@ -90,6 +91,9 @@ pub struct LLMEngine {
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
+    is_multimodel: bool,
+    model_name: String,
+    pub img_cfg: Option<ImageProcessConfig>,
 }
 
 impl LLMEngine {
@@ -173,7 +177,7 @@ impl LLMEngine {
             };
 
             let mut model_runner = ModelRunner::new(
-                model_type,
+                model_type.clone(),
                 &vb,
                 #[cfg(not(feature = "nccl"))]
                 Rc::new(Comm::default()),
@@ -366,6 +370,36 @@ impl LLMEngine {
             true,
         );
 
+        let img_cfg = match model_type {
+            ModelType::Mistral3VL => {
+                use crate::models::mistral3_vl::Mistral3Config;
+                assert!(
+                    config.extra_config_json.is_some(),
+                    "Multimodel missing vision config!"
+                );
+                let mut cfg: Mistral3Config =
+                    serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                        .map_err(candle_core::Error::wrap)?;
+
+                let img_cfg = ImageProcessConfig::default(
+                    "[IMG]".to_string(),
+                    "[IMG_BREAK]".to_string(),
+                    "[IMG_END]".to_string(),
+                    cfg.spatial_merge_size,
+                    cfg.vision_config.patch_size,
+                    cfg.vision_config.image_size,
+                );
+                Some(img_cfg)
+            }
+            _ => None,
+        };
+
+        let model_name = if let Some(archs) = &config.architectures {
+            archs[0].to_string()
+        } else {
+            "default".to_string()
+        };
+
         let engine = Arc::new(RwLock::new(Self {
             runners,
             scheduler,
@@ -383,6 +417,9 @@ impl LLMEngine {
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
+            is_multimodel: config.is_multi_model.unwrap_or(false),
+            img_cfg,
+            model_name,
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -393,6 +430,7 @@ impl LLMEngine {
         params: &SamplingParams,
         prompt: &str,
         request_type: &RequestType,
+        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
     ) -> Result<(usize, usize)> {
         let tokens = self
             .tokenizer
@@ -471,6 +509,7 @@ impl LLMEngine {
                     &session_id,
                     token_ids.clone(),
                     &mut self.active_sessions,
+                    images,
                 ) {
                     Ok(id) => Some(id),
                     Err(e) => {
@@ -484,7 +523,7 @@ impl LLMEngine {
 
             let seq_id = seq_id.unwrap_or_else(|| {
                 // Cache miss: create new sequence
-                let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+                let seq = Sequence::new(token_ids, self.econfig.block_size, params, images);
                 let id = self.scheduler.add(seq);
 
                 // Update active_sessions queue
@@ -501,7 +540,7 @@ impl LLMEngine {
 
             seq_id
         } else {
-            let seq = Sequence::new(token_ids, self.econfig.block_size, params);
+            let seq = Sequence::new(token_ids, self.econfig.block_size, params, images);
             let seq_id = self.scheduler.add(seq);
             seq_id
         };
@@ -526,8 +565,9 @@ impl LLMEngine {
         params: &SamplingParams,
         prompt: &str,
         request_type: RequestType,
+        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
-        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type)?;
+        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type, images)?;
         let (tx, rx) = channel(4096);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
@@ -937,21 +977,38 @@ impl LLMEngine {
         has_requests_to_cancel
     }
 
-    pub fn apply_chat_template(
-        &self,
+    fn apply_chat_template(
+        &mut self,
         params: &SamplingParams,
         messages: &Vec<Message>,
         log: bool,
-    ) -> String {
+    ) -> (String, Option<Vec<(Vec<u8>, Vec<usize>)>>) {
+        let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
+        let mut context_cache_reqeust = false;
         if let Some(session_id) = &params.session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
+                context_cache_reqeust = true;
                 prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
-            } else {
-                prompt_template.set_messages(messages);
+            }
+        }
+
+        if context_cache_reqeust {
+            // only collect images from last message
+            if let (Some(image_values), Some(shape)) = (
+                &messages[messages.len() - 1].image_values,
+                &messages[messages.len() - 1].image_shape,
+            ) {
+                collected_images.push((image_values.clone(), shape.clone()));
             }
         } else {
+            // collect images from all messages
+            for m in messages {
+                if let (Some(image_values), Some(shape)) = (&m.image_values, &m.image_shape) {
+                    collected_images.push((image_values.clone(), shape.clone()));
+                }
+            }
             prompt_template.set_messages(messages);
         }
         let prompt_processed = prompt_template
@@ -983,7 +1040,14 @@ impl LLMEngine {
                 prompt.replace("\n", "")
             );
         }
-        prompt
+        (
+            prompt,
+            if collected_images.is_empty() {
+                None
+            } else {
+                Some(collected_images)
+            },
+        )
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1005,15 +1069,16 @@ impl LLMEngine {
     pub fn generate_sync(
         &mut self,
         params: &Vec<SamplingParams>,
-        prompts: Vec<String>,
+        message_list: &Vec<Vec<Message>>,
     ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
-        if params.len() != prompts.len() {
+        if params.len() != message_list.len() {
             candle_core::bail!("size of sampling parameters is not match with size of prompts!");
         }
         let mut receivers = Vec::new();
-        for (param, prompt) in params.iter().zip(prompts.iter()) {
+        for (param, messages) in params.iter().zip(message_list.iter()) {
+            let (prompt, images) = self.apply_chat_template(param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, prompt, RequestType::Completion)
+                self.add_request(param, &prompt, RequestType::Completion, &images)
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1153,9 +1218,10 @@ impl LLMEngine {
     pub fn generate_stream(
         &mut self,
         params: &SamplingParams,
-        prompt: String,
+        messages: &Vec<Message>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        match self.add_request(params, &prompt, RequestType::Stream) {
+        let (prompt, images) = self.apply_chat_template(params, messages, false);
+        match self.add_request(params, &prompt, RequestType::Stream, &images) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)
@@ -1261,5 +1327,9 @@ impl LLMEngine {
                 tokio::task::yield_now().await;
             }
         });
+    }
+
+    pub fn get_model_info(&self) -> (bool, String) {
+        (self.is_multimodel, self.model_name.clone())
     }
 }

@@ -66,6 +66,13 @@ impl Engine {
             engine: self.engine.clone(),
             econfig: self.econfig.clone(),
         };
+
+        let (is_multimodel, model_name) = {
+            let e = self.engine.read();
+            e.get_model_info()
+        };
+        let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
+
         // CORS config
         let cors = CorsLayer::new()
             .allow_origin(Any) // same as "*"
@@ -75,19 +82,25 @@ impl Engine {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async {
+                get(|| async move {
+                    let m = if *is_multimodel {
+                        vec!["text", "image"]
+                    } else {
+                        vec!["text"]
+                    };
                     Json(json!({
                         "object": "list",
                         "data": [
                             {
-                                "id": "default",
+                                "id": model_name,
                                 "object": "model",
                                 "created": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_millis() as i64,
                                 "owned_by": "vllm.rs",
-                                "permission": []
+                                "permission": [],
+                                "modalities": m,
                             }
                         ]
                     }))
@@ -141,30 +154,21 @@ impl Engine {
         Ok(())
     }
 
-    #[pyo3(text_signature = "($self, messages, log)")]
-    pub fn apply_chat_template(
-        &self,
-        params: SamplingParams,
-        messages: Vec<Message>,
-        log: bool,
-    ) -> String {
-        self.engine
-            .read()
-            .apply_chat_template(&params, &messages, log)
-    }
-
-    #[pyo3(name = "generate_sync", text_signature = "($self, params, prompts)")]
+    #[pyo3(
+        name = "generate_sync",
+        text_signature = "($self, params, message_list)"
+    )]
     pub fn generate_sync(
         &mut self,
         params: Vec<SamplingParams>,
-        prompts: Vec<String>,
+        message_list: Vec<Vec<Message>>,
     ) -> PyResult<Vec<GenerationOutput>> {
         tokio::task::block_in_place(|| {
             GLOBAL_RT.block_on(async {
                 let (receivers, tokenizer) = {
                     let mut engine = self.engine.write();
                     (
-                        engine.generate_sync(&params, prompts).map_err(|e| {
+                        engine.generate_sync(&params, &message_list).map_err(|e| {
                             PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                         })?,
                         Arc::new(engine.tokenizer.clone()),
@@ -182,16 +186,16 @@ impl Engine {
         })
     }
 
-    #[pyo3(name = "generate_stream", text_signature = "($self)")]
+    #[pyo3(name = "generate_stream", text_signature = "($self, params, messages)")]
     pub fn generate_stream(
         &mut self,
         params: SamplingParams,
-        prompt: String,
+        messages: Vec<Message>,
     ) -> PyResult<(usize, usize, EngineStream)> {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, prompt)
+                .generate_stream(&params, &messages)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 
@@ -328,8 +332,18 @@ impl EngineStream {
 #[pymethods]
 impl Message {
     #[new]
-    pub fn new(role: String, content: String) -> Self {
-        Message { role, content }
+    pub fn new(
+        role: String,
+        content: String,
+        image_values: Option<Vec<u8>>,
+        image_shape: Option<Vec<usize>>,
+    ) -> Self {
+        Message {
+            role,
+            content,
+            image_values,
+            image_shape,
+        }
     }
 }
 

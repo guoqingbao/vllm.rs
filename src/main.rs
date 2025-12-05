@@ -187,7 +187,11 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-
+    let (is_multimodel, model_name) = {
+        let e = engine.read();
+        e.get_model_info()
+    };
+    let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
     if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
@@ -202,19 +206,25 @@ async fn main() -> Result<()> {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async {
+                get(|| async move {
+                    let m = if *is_multimodel {
+                        vec!["text", "image"]
+                    } else {
+                        vec!["text"]
+                    };
                     Json(json!({
                         "object": "list",
                         "data": [
                             {
-                                "id": "default",
+                                "id": model_name,
                                 "object": "model",
                                 "created": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_millis() as i64,
                                 "owned_by": "vllm.rs",
-                                "permission": []
+                                "permission": [],
+                                "modalities": m,
                             }
                         ]
                     }))
@@ -268,19 +278,16 @@ async fn main() -> Result<()> {
     }
 
     let mut params = Vec::new();
-
-    let mut prompt_processed = Vec::new();
+    let mut message_list = Vec::new();
     // let mut rng = rand::rng();
     if !interactive && prompts.len() > 0 {
         if prompts.len() > 1 {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
-            let msg = Message::new("user".to_string(), prompt.clone());
+            let msg = Message::new("user".to_string(), prompt.clone(), None, None);
             let param = SamplingParams::new_with_max_tokens(args.max_tokens);
-            let e = engine.read();
-            let prompt = e.apply_chat_template(&param, &vec![msg], !args.batch.is_some());
-            prompt_processed.push(prompt);
+            message_list.push(vec![msg]);
             params.push(param);
         }
         if let Some(max_model_len) = args.max_model_len {
@@ -332,15 +339,8 @@ async fn main() -> Result<()> {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
                     if !trimmed.is_empty() {
-                        let msg = Message::new("user".to_string(), trimmed.to_string());
+                        let msg = Message::new("user".to_string(), trimmed.to_string(), None, None);
                         chat_history.push(msg.clone());
-                        prompt_processed.clear();
-                        let e = engine.read();
-                        prompt_processed.push(e.apply_chat_template(
-                            &request_params,
-                            &chat_history,
-                            false,
-                        ));
                     } else {
                         print!("\n No prompt was given.");
                         continue;
@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, prompt_processed[0].clone()) {
+                    match e.generate_stream(&request_params, &chat_history) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
                     (
-                        e.generate_sync(&params, prompt_processed.clone())?,
+                        e.generate_sync(&params, &message_list)?,
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
@@ -507,7 +507,12 @@ async fn main() -> Result<()> {
             all_decode_time_taken += duration;
 
             if interactive {
-                let msg = Message::new("assistant".to_string(), decode_output.to_string());
+                let msg = Message::new(
+                    "assistant".to_string(),
+                    decode_output.to_string(),
+                    None,
+                    None,
+                );
                 chat_history.push(msg.clone());
             }
         }

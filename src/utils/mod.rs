@@ -8,6 +8,7 @@ pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod heartbeat;
+pub mod image;
 pub mod logits_processor;
 pub mod progress;
 use crate::utils::config::MoEConfig;
@@ -439,6 +440,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         fp8_kvcache: None,
         quantization_config: None,
         is_multi_model: None,
+        extra_config_json: None,
     };
 
     Ok(cfg)
@@ -483,6 +485,8 @@ pub fn init_config_tokenizer(
                 let mut config: Config = cfg.text_config.unwrap();
                 config.architectures = cfg.architectures.clone();
                 config.is_multi_model = Some(true);
+                config.extra_config_json =
+                    Some(std::fs::read_to_string(&config_path).map_err(candle_core::Error::wrap)?);
                 // Remap rope_theta in rope_scaling to config file
                 if let Some(scaling) = &config.rope_scaling {
                     if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(v))))) =
@@ -531,7 +535,7 @@ pub fn init_config_tokenizer(
         }
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
-        let config_tokenizer: TokenizerConfig = {
+        let mut config_tokenizer: TokenizerConfig = {
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
                 Ok(f) => serde_json::from_slice(&f).map_err(candle_core::Error::wrap)?,
                 _ => {
@@ -563,6 +567,19 @@ pub fn init_config_tokenizer(
         } else {
             None
         };
+
+        // Handle jinja chat template
+        if config_tokenizer.chat_template.is_none() {
+            if let Some(dir) = Path::new(&config_path).parent() {
+                if dir.join("chat_template.jinja").exists() {
+                    crate::log_warn!("Try loading chat template from chat_template.jinja");
+                    config_tokenizer.chat_template = Some(
+                        std::fs::read_to_string(&dir.join("chat_template.jinja"))
+                            .map_err(candle_core::Error::wrap)?,
+                    );
+                }
+            }
+        }
 
         Ok((
             model_pathes,
@@ -771,6 +788,11 @@ pub fn get_arch_rope(
         | "mistral"
         | "llama2"
         | "llama3" => {
+            let model_type = if arch == "Mistral3ForConditionalGeneration" {
+                ModelType::Mistral3VL
+            } else {
+                ModelType::LLaMa
+            };
             if let Some(_) = tokenizer
                 .get_vocab(true)
                 .get("<|start_header_id|>")
@@ -778,12 +800,12 @@ pub fn get_arch_rope(
             {
                 //llama3
                 (
-                    ModelType::LLaMa,
+                    model_type,
                     "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
                 )
             } else {
                 //llama2
-                (ModelType::LLaMa, "[INST] {} [/INST]".to_string())
+                (model_type, "[INST] {} [/INST]".to_string())
             }
         }
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (

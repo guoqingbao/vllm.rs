@@ -52,8 +52,10 @@ impl Qwen3DecoderLayer {
                 vb.pp("mlp").clone()
             },
             comm.clone(),
-            config,
+            config.hidden_size,
             config.intermediate_size,
+            &config.quantization_config,
+            &config.quant,
             false,
             dtype,
             "",
@@ -152,11 +154,6 @@ impl Qwen3ForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        let vb = if config.is_multi_model.is_some_and(|x| x) && !is_qvar_builder {
-            vb.pp("language_model")
-        } else {
-            vb.clone()
-        };
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -249,12 +246,17 @@ impl Qwen3ForCausalLM {
         })
     }
 
+    pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.embed_tokens.forward(xs)
+    }
+
     pub fn forward(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
+        embeded_inputs: bool,
     ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
@@ -275,8 +277,11 @@ impl Qwen3ForCausalLM {
             self.config.sliding_window,
             input_metadata.is_prefill,
         );
-        let mut xs = self.embed_tokens.forward(input_ids)?;
-
+        let mut xs = if embeded_inputs {
+            input_ids.to_owned()
+        } else {
+            self.embed_tokens.forward(input_ids)?
+        };
         if let Some(kv_caches) = kv_caches {
             for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
                 xs = layer.forward(
