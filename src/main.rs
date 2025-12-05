@@ -187,9 +187,9 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    let is_multimodel = {
+    let (is_multimodel, model_name) = {
         let e = engine.read();
-        e.is_multimodel()
+        e.get_model_info()
     };
     let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
     if args.server || args.ui_server || args.pd_server {
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
                         "object": "list",
                         "data": [
                             {
-                                "id": "default",
+                                "id": model_name,
                                 "object": "model",
                                 "created": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)

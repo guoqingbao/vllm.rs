@@ -66,6 +66,13 @@ impl Engine {
             engine: self.engine.clone(),
             econfig: self.econfig.clone(),
         };
+
+        let (is_multimodel, model_name) = {
+            let e = self.engine.read();
+            e.get_model_info()
+        };
+        let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
+
         // CORS config
         let cors = CorsLayer::new()
             .allow_origin(Any) // same as "*"
@@ -75,19 +82,25 @@ impl Engine {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async {
+                get(|| async move {
+                    let m = if *is_multimodel {
+                        vec!["text", "image"]
+                    } else {
+                        vec!["text"]
+                    };
                     Json(json!({
                         "object": "list",
                         "data": [
                             {
-                                "id": "default",
+                                "id": model_name,
                                 "object": "model",
                                 "created": std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_millis() as i64,
                                 "owned_by": "vllm.rs",
-                                "permission": []
+                                "permission": [],
+                                "modalities": m,
                             }
                         ]
                     }))
@@ -139,18 +152,6 @@ impl Engine {
         });
 
         Ok(())
-    }
-
-    #[pyo3(text_signature = "($self, messages, log)")]
-    pub fn apply_chat_template(
-        &self,
-        params: SamplingParams,
-        messages: Vec<Message>,
-        log: bool,
-    ) -> (String, Option<String>) {
-        self.engine
-            .read()
-            .apply_chat_template(&params, &messages, log)
     }
 
     #[pyo3(
@@ -331,8 +332,18 @@ impl EngineStream {
 #[pymethods]
 impl Message {
     #[new]
-    pub fn new(role: String, content: String) -> Self {
-        Message { role, content }
+    pub fn new(
+        role: String,
+        content: String,
+        image_values: Option<Vec<u8>>,
+        image_shape: Option<Vec<usize>>,
+    ) -> Self {
+        Message {
+            role,
+            content,
+            image_values,
+            image_shape,
+        }
     }
 }
 

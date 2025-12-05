@@ -92,6 +92,7 @@ pub struct LLMEngine {
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
     is_multimodel: bool,
+    model_name: String,
     pub img_cfg: Option<ImageProcessConfig>,
 }
 
@@ -393,6 +394,12 @@ impl LLMEngine {
             _ => None,
         };
 
+        let model_name = if let Some(archs) = &config.architectures {
+            archs[0].to_string()
+        } else {
+            "default".to_string()
+        };
+
         let engine = Arc::new(RwLock::new(Self {
             runners,
             scheduler,
@@ -412,6 +419,7 @@ impl LLMEngine {
             stop_flag: stop_flag.clone(),
             is_multimodel: config.is_multi_model.unwrap_or(false),
             img_cfg,
+            model_name,
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -1321,7 +1329,7 @@ impl LLMEngine {
         });
     }
 
-    pub fn is_multimodel(&self) -> bool {
-        self.is_multimodel
+    pub fn get_model_info(&self) -> (bool, String) {
+        (self.is_multimodel, self.model_name.clone())
     }
 }

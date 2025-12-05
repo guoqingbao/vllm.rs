@@ -9,6 +9,8 @@ pub struct Message {
     pub role: String,
     #[pyo3(get)]
     pub content: String,
+    pub image_values: Option<Vec<u8>>,   // pixel values
+    pub image_shape: Option<Vec<usize>>, // pixel values
 }
 
 #[cfg(not(feature = "python"))]
@@ -37,14 +39,12 @@ impl Message {
     }
 }
 
-#[cfg(not(feature = "python"))]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PlainMessage {
     pub role: String,
     pub content: String,
 }
 
-#[cfg(not(feature = "python"))]
 impl PlainMessage {
     pub fn new(role: String, content: String) -> Self {
         PlainMessage { role, content }

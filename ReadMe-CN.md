@@ -72,7 +72,7 @@
 * ✅ Qwen2 Moe 系列（使用Qwen3 MoE流程+共享专家层）
 * ✅ Qwen3 MoE 系列
 * ✅ Mistral v1, v2
-* ✅ Mistral-3 Reasoning (3B, 8B, 14B)
+* ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
@@ -192,6 +192,26 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
    # Metal/MacOS (当MacOS GPU 内存使用超过95%时响应会非常慢，使用更小的`--max-model-len` 或 `--kv-fraction`减少显存占用)
    cargo run --release --features metal -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
    ```
+  </details>
+
+  <details open>
+    <summary>多模态 (Mistral-3 VL)</summary>
+
+```bash
+# 使用内置的ChatUI上传图片或对话中提到指定图片URL地址 (URL结尾为 '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+# 请求格式:
+# {
+#   "type": "image_url",
+#   "image_url": "https://..."
+# }
+# or
+# {
+#   "type": "image_base64",
+#   "image_base64": "data:image/jpeg;base64,xxxxx"
+# }
+python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --ui-server
+```
+
   </details>
 
   <details open>
