@@ -55,10 +55,9 @@ pub enum MessageContentType {
     Multi(Vec<MessageContent>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ChatMessage {
     pub role: String,
-    // #[serde(untagged)]
     pub content: MessageContentType,
 }
 
@@ -295,7 +294,10 @@ pub struct Args {
     pub ui_server: bool, //Start the web chat
 }
 
-pub fn convert_chat_message(msg: &ChatMessage, cfg: &ImageProcessConfig) -> Result<Message> {
+pub fn convert_chat_message(
+    msg: &ChatMessage,
+    cfg: &Option<ImageProcessConfig>,
+) -> Result<Message> {
     let role = msg.role.clone();
     let mut prompt = String::new();
     let mut images: Vec<DynamicImage> = vec![];
@@ -332,8 +334,8 @@ pub fn convert_chat_message(msg: &ChatMessage, cfg: &ImageProcessConfig) -> Resu
         }
     }
 
-    if !images.is_empty() {
-        let processor = ImageProcessor::new(cfg);
+    if !images.is_empty() && cfg.is_some() {
+        let processor = ImageProcessor::new(cfg.as_ref().unwrap());
         let (images_tensor, _) = processor.process_inputs(&mut prompt, &mut images)?;
         let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor)?;
         crate::log_info!(

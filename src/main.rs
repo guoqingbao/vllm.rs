@@ -187,7 +187,11 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-
+    let is_multimodel = {
+        let e = engine.read();
+        e.is_multimodel()
+    };
+    let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
     if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
@@ -202,7 +206,12 @@ async fn main() -> Result<()> {
         let app = Router::new()
             .route(
                 "/v1/models",
-                get(|| async {
+                get(|| async move {
+                    let m = if *is_multimodel {
+                        vec!["text", "image"]
+                    } else {
+                        vec!["text"]
+                    };
                     Json(json!({
                         "object": "list",
                         "data": [
@@ -214,7 +223,8 @@ async fn main() -> Result<()> {
                                     .unwrap()
                                     .as_millis() as i64,
                                 "owned_by": "vllm.rs",
-                                "permission": []
+                                "permission": [],
+                                "modalities": m,
                             }
                         ]
                     }))

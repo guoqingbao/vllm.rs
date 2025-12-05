@@ -16,9 +16,10 @@ use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::EosTokenId;
 use crate::utils::config::{EngineConfig, SamplingParams};
+use crate::utils::config::{EosTokenId, ModelType};
 use crate::utils::heartbeat::heartbeat_worker;
+use crate::utils::image::ImageProcessConfig;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
@@ -90,6 +91,8 @@ pub struct LLMEngine {
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
+    is_multimodel: bool,
+    pub img_cfg: Option<ImageProcessConfig>,
 }
 
 impl LLMEngine {
@@ -173,7 +176,7 @@ impl LLMEngine {
             };
 
             let mut model_runner = ModelRunner::new(
-                model_type,
+                model_type.clone(),
                 &vb,
                 #[cfg(not(feature = "nccl"))]
                 Rc::new(Comm::default()),
@@ -366,6 +369,30 @@ impl LLMEngine {
             true,
         );
 
+        let img_cfg = match model_type {
+            ModelType::Mistral3VL => {
+                use crate::models::mistral3_vl::Mistral3Config;
+                assert!(
+                    config.extra_config_json.is_some(),
+                    "Multimodel missing vision config!"
+                );
+                let mut cfg: Mistral3Config =
+                    serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                        .map_err(candle_core::Error::wrap)?;
+
+                let img_cfg = ImageProcessConfig::default(
+                    "[IMG]".to_string(),
+                    "[IMG_BREAK]".to_string(),
+                    "[IMG_END]".to_string(),
+                    cfg.spatial_merge_size,
+                    cfg.vision_config.patch_size,
+                    cfg.vision_config.image_size,
+                );
+                Some(img_cfg)
+            }
+            _ => None,
+        };
+
         let engine = Arc::new(RwLock::new(Self {
             runners,
             scheduler,
@@ -383,6 +410,8 @@ impl LLMEngine {
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
+            is_multimodel: config.is_multi_model.unwrap_or(false),
+            img_cfg,
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -472,6 +501,7 @@ impl LLMEngine {
                     &session_id,
                     token_ids.clone(),
                     &mut self.active_sessions,
+                    images,
                 ) {
                     Ok(id) => Some(id),
                     Err(e) => {
@@ -945,23 +975,32 @@ impl LLMEngine {
         messages: &Vec<Message>,
         log: bool,
     ) -> (String, Option<Vec<(Vec<u8>, Vec<usize>)>>) {
-        // collect images from all messages
         let mut collected_images = Vec::new();
-        for m in messages {
-            if let (Some(image_values), Some(shape)) = (&m.image_values, &m.image_shape) {
-                collected_images.push((image_values.clone(), shape.clone()));
-            }
-        }
-
         let mut prompt_template = self.template.clone();
+        let mut context_cache_reqeust = false;
         if let Some(session_id) = &params.session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
+                context_cache_reqeust = true;
                 prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
-            } else {
-                prompt_template.set_messages(messages);
+            }
+        }
+
+        if context_cache_reqeust {
+            // only collect images from last message
+            if let (Some(image_values), Some(shape)) = (
+                &messages[messages.len() - 1].image_values,
+                &messages[messages.len() - 1].image_shape,
+            ) {
+                collected_images.push((image_values.clone(), shape.clone()));
             }
         } else {
+            // collect images from all messages
+            for m in messages {
+                if let (Some(image_values), Some(shape)) = (&m.image_values, &m.image_shape) {
+                    collected_images.push((image_values.clone(), shape.clone()));
+                }
+            }
             prompt_template.set_messages(messages);
         }
         let prompt_processed = prompt_template
@@ -1280,5 +1319,9 @@ impl LLMEngine {
                 tokio::task::yield_now().await;
             }
         });
+    }
+
+    pub fn is_multimodel(&self) -> bool {
+        self.is_multimodel
     }
 }

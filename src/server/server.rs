@@ -6,13 +6,12 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, MessageContent, ServerData, Usage,
-    UsageQuery, UsageResponse,
+    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage, UsageQuery,
+    UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
-use crate::utils::image::ImageProcessConfig;
 
 use axum::{
     extract::{Json, Query, State},
@@ -49,36 +48,16 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
-    let img_cfg = ImageProcessConfig::default(
-        "[IMG]".to_string(),
-        "[IMG_BREAK]".to_string(),
-        "[IMG_END]".to_string(),
-        2,
-        14,
-        1540,
-    );
+    let img_cfg = {
+        let e = data.engine.read();
+        e.img_cfg.clone()
+    };
 
     let messages: Vec<Message> = request
         .messages
         .iter()
         .map(|m| convert_chat_message(m, &img_cfg).unwrap())
         .collect();
-
-    // Test case injection!
-    // let mut vs = Vec::new();
-    // vs.push(MessageContent::Text {
-    //     text: messages[1].content.clone(),
-    // });
-    // vs.push(MessageContent::ImageUrl { image_url: "https://im.marieclaire.com.tw/s1200c675h100b0webp100/assets/mc/202412/6752ABCF920001733471183.png".to_string() });
-
-    // let messages: Vec<Message> = vec![convert_chat_message(
-    //     &ChatMessage {
-    //         role: "user".to_string(),
-    //         content: MessageContentType::Multi(vs.clone()),
-    //     },
-    //     &img_cfg,
-    // )
-    // .unwrap()];
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

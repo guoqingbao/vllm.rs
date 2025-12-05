@@ -1,23 +1,27 @@
 use crate::utils::config::Config;
 use serde::Deserialize;
 
+pub fn default_num_channels() -> usize {
+    3
+}
+
+pub fn default_activation() -> candle_nn::Activation {
+    candle_nn::Activation::Silu
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct VisionConfig {
-    // #[serde(default = 1024)]
     pub hidden_size: usize,
-    // #[serde(default = 3)]
+    #[serde(default = "default_num_channels")]
     pub num_channels: usize,
     pub image_size: usize,
     pub patch_size: usize,
     pub rope_theta: f64,
-    // #[serde(default = 4096)]
     pub intermediate_size: usize,
-    // #[serde(default = 24)]
     pub num_hidden_layers: usize,
     pub head_dim: Option<usize>,
-    // #[serde(default = 16)]
     pub num_attention_heads: usize,
-    // #[serde(default = candle_nn::Activation::Silu)]
+    #[serde(default = "default_activation")]
     pub hidden_act: candle_nn::Activation,
 }
 
