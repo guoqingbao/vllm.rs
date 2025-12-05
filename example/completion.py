@@ -65,13 +65,13 @@ def run(args):
 
     sampling_params = []
     params = SamplingParams()
+    message_list = []
     for i in range(len(prompts)):
-        msg = Message("user", prompts[i])
-        prompts[i] = engine.apply_chat_template(params, [msg], args.batch == 1)
+        message_list.append([Message("user", prompts[i])])
         sampling_params.append(params)
 
     print("Start inference with", len(prompts), "prompts")
-    outputs: GenerationOutput = engine.generate_sync(sampling_params, prompts)
+    outputs: GenerationOutput = engine.generate_sync(sampling_params, message_list)
     outputs.sort(key=lambda o: o.seq_id)
 
     decode_time_taken = 0.0

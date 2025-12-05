@@ -110,8 +110,10 @@ impl Qwen3DecoderLayer {
                     vb.pp("mlp").clone()
                 },
                 comm.clone(),
-                config,
+                config.hidden_size,
                 config.intermediate_size,
+                &config.quantization_config,
+                &config.quant,
                 false,
                 dtype,
                 "",
@@ -148,8 +150,10 @@ impl Qwen3DecoderLayer {
                             vb.pp("mlp.shared_expert").clone()
                         },
                         comm.clone(),
-                        config,
+                        config.hidden_size,
                         intermediate_size,
+                        &config.quantization_config,
+                        &config.quant,
                         false,
                         dtype,
                         if is_qvar_builder { "_shexp" } else { "" },

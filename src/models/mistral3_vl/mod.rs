@@ -3,7 +3,7 @@ use crate::models::layers::distributed::{
 };
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::VarBuilderX;
-use crate::models::{self, llama::LLaMaForCausalLM};
+use crate::models::llama::LLaMaForCausalLM;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 mod config;
 mod vision;
+use attention_rs::ops::{NonZeroOp, SplitOp};
 pub use config::Mistral3Config;
 use vision::VisionModel;
 
@@ -227,9 +228,9 @@ impl Mistral3ForConditionalGeneration {
         pixel_values: Option<Tensor>,
         image_sizes: Option<Vec<(u32, u32)>>,
     ) -> Result<Tensor> {
-        let input_embeds = self.text_model.embed_forward(input_ids)?;
+        let mut input_embeds = self.text_model.embed_forward(input_ids)?;
 
-        if let Some(pixel_values) = pixel_values {
+        if let Some(pixel_values) = &pixel_values {
             let special_image_mask = input_ids
                 .eq(self.cfg.image_token_index as f64)?
                 .unsqueeze(D::Minus1)?

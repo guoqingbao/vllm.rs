@@ -34,16 +34,16 @@ from vllm_rs import Engine, EngineConfig, SamplingParams, Message
 cfg = EngineConfig(weight_path="/path/Qwen3-8B-Q2_K.gguf", max_model_len=4096)
 engine = Engine(cfg, "bf16")
 params = SamplingParams(temperature=0.6, max_tokens=256)
-prompt = engine.apply_chat_template([Message("user", "How are you?")], True)
+message = Message("user", "How are you?")]
 
 # Synchronous batch generation
-outputs = engine.generate_sync([params,params], [prompt, prompt])
+outputs = engine.generate_sync([params, params], [[message], [message]])
 print(outputs)
 
 params.session_id = xxx  # Pass session_id to enable context cache
 
 # Single-request streaming generation
-(seq_id, prompt_length, stream) = engine.generate_stream(params, prompt)
+(seq_id, prompt_length, stream) = engine.generate_stream(params, [message])
 for item in stream:
    # item.datatype == "TOKEN"
    print(item.data)

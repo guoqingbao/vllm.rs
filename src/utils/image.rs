@@ -41,7 +41,7 @@ pub fn preprocess_images(
 ) -> Vec<DynamicImage> {
     // First pass: determine final height/width after custom resize for each image
     let mut resized_imgs: Vec<DynamicImage> = Vec::new();
-    let filter = FilterType::Bilinear;
+    let filter = FilterType::Nearest;
 
     let mut final_h = 0;
     let mut final_w = 0;

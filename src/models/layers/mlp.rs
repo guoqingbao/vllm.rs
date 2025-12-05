@@ -2,7 +2,7 @@ use crate::models::layers::distributed::{
     shard, Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::VarBuilderX;
-use crate::utils::config::Config;
+use crate::utils::config::QuantConfig;
 use candle_core::{DType, Result, Tensor};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -17,13 +17,14 @@ impl MLP {
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
-        config: &Config,
+        hidden_size: usize,
         intermediate_size: usize,
+        quant_cfg: &Option<QuantConfig>,
+        quant: &Option<String>,
         gate_up_merged: bool,
         dtype: DType,
         suffix: &str,
     ) -> Result<Self> {
-        let hidden_size = config.hidden_size;
         let key_map: HashMap<&str, &str> = [
             ("gate_proj", "ffn_gate"),
             ("up_proj", "ffn_up"),
@@ -64,8 +65,8 @@ impl MLP {
             } else {
                 shard(0, comm.rank(), comm.world_size())
             },
-            &config.quantization_config,
-            &config.quant,
+            quant_cfg,
+            quant,
             dtype,
         )?;
 
@@ -91,8 +92,8 @@ impl MLP {
             } else {
                 shard(0, comm.rank(), comm.world_size())
             },
-            &config.quantization_config,
-            &config.quant,
+            quant_cfg,
+            quant,
             dtype,
         )?;
 
@@ -105,8 +106,8 @@ impl MLP {
                 vb.pp("down_proj")
             },
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            quant_cfg,
+            quant,
             dtype,
         )?;
 

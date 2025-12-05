@@ -128,14 +128,9 @@ class Engine:
         Create a vllm.rs engine with given engine config and dtype ("f16", "bf16", and "f32")
         """
 
-    def apply_chat_template(self, params: SamplingParams, messages: List[Message], log: bool) -> Tuple[str, Optional[str]]:
-        """
-        Apply chat template to given messages
-        """
-
     def generate_sync(self,
         params: List[SamplingParams],
-        prompts: List[str],
+        message_list: List[List[Message]],
     ) -> List[GenerationOutput]:
         """
         Chat completion using given prompts and sampling parameters
@@ -143,8 +138,7 @@ class Engine:
     def generate_stream(
         self,
         params: SamplingParams,
-        prompt: str,
-        uuid: Optional[str]
+        messages: List[Message],
     ) -> Tuple[int, int, EngineStream]:
         """
         Chat streaming using given prompts and sampling parameters.

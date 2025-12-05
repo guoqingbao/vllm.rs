@@ -62,11 +62,6 @@ pub async fn chat_completion(
         .map(|m| convert_chat_msg(m, &img_cfg).unwrap())
         .collect();
 
-    let (prompt, prompt_uuid) = {
-        let mut engine = data.engine.write();
-        engine.apply_chat_template(&params, &messages, false)
-    };
-
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -79,7 +74,7 @@ pub async fn chat_completion(
         }
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, prompt, prompt_uuid) {
+            match e.generate_stream(&params, &messages) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
@@ -264,7 +259,7 @@ pub async fn chat_completion(
         let (receivers, tokenizer) = {
             let mut e = data.engine.write();
             (
-                match e.generate_sync(&vec![params.clone()], vec![prompt.clone()], vec![None]) {
+                match e.generate_sync(&vec![params.clone()], &vec![messages]) {
                     Ok(receivers) => receivers,
                     Err(e) => {
                         crate::log_error!("Completion generation failed: {:?}", e);
@@ -380,7 +375,8 @@ use candle_core::Result;
 use image::DynamicImage;
 // load from url
 pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
-    let bytes = reqwest::blocking::get(url)?
+    let bytes = reqwest::blocking::get(url)
+        .map_err(candle_core::Error::wrap)?
         .bytes()
         .map_err(candle_core::Error::wrap)?;
     let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
@@ -389,8 +385,11 @@ pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
 
 // load from "data:image/jpeg;base64,XXXXX"
 pub fn load_image_from_base64(data: &str) -> Result<DynamicImage> {
+    use base64::prelude::{Engine as _, BASE64_STANDARD};
     let base64_part = data.split(",").last().unwrap_or(data);
-    let bytes = base64::decode(base64_part).map_err(candle_core::Error::wrap)?;
+    let bytes = BASE64_STANDARD
+        .decode(base64_part)
+        .map_err(candle_core::Error::wrap)?;
     let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
     Ok(img)
 }

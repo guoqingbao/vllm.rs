@@ -153,18 +153,21 @@ impl Engine {
             .apply_chat_template(&params, &messages, log)
     }
 
-    #[pyo3(name = "generate_sync", text_signature = "($self, params, prompts)")]
+    #[pyo3(
+        name = "generate_sync",
+        text_signature = "($self, params, message_list)"
+    )]
     pub fn generate_sync(
         &mut self,
         params: Vec<SamplingParams>,
-        prompts: Vec<String>,
+        message_list: Vec<Vec<Message>>,
     ) -> PyResult<Vec<GenerationOutput>> {
         tokio::task::block_in_place(|| {
             GLOBAL_RT.block_on(async {
                 let (receivers, tokenizer) = {
                     let mut engine = self.engine.write();
                     (
-                        engine.generate_sync(&params, prompts).map_err(|e| {
+                        engine.generate_sync(&params, &message_list).map_err(|e| {
                             PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                         })?,
                         Arc::new(engine.tokenizer.clone()),
@@ -182,17 +185,16 @@ impl Engine {
         })
     }
 
-    #[pyo3(name = "generate_stream", text_signature = "($self)")]
+    #[pyo3(name = "generate_stream", text_signature = "($self, params, messages)")]
     pub fn generate_stream(
         &mut self,
         params: SamplingParams,
-        prompt: String,
-        prompt_uuid: Option<String>,
+        messages: Vec<Message>,
     ) -> PyResult<(usize, usize, EngineStream)> {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, prompt, prompt_uuid)
+                .generate_stream(&params, &messages)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 

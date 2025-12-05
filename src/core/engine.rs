@@ -953,7 +953,7 @@ impl LLMEngine {
         has_requests_to_cancel
     }
 
-    pub fn apply_chat_template(
+    fn apply_chat_template(
         &mut self,
         params: &SamplingParams,
         messages: &Vec<Message>,
@@ -1036,18 +1036,16 @@ impl LLMEngine {
     pub fn generate_sync(
         &mut self,
         params: &Vec<SamplingParams>,
-        prompts: Vec<String>,
-        prompts_uuids: Vec<Option<String>>,
+        message_list: &Vec<Vec<Message>>,
     ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
-        if params.len() != prompts.len() {
+        if params.len() != message_list.len() {
             candle_core::bail!("size of sampling parameters is not match with size of prompts!");
         }
         let mut receivers = Vec::new();
-        for ((param, prompt), prompt_uuid) in
-            params.iter().zip(prompts.iter()).zip(prompts_uuids.iter())
-        {
+        for (param, messages) in params.iter().zip(message_list.iter()) {
+            let (prompt, prompt_uuid) = self.apply_chat_template(param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, prompt, RequestType::Completion, prompt_uuid.clone())
+                self.add_request(param, &prompt, RequestType::Completion, prompt_uuid.clone())
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1187,10 +1185,10 @@ impl LLMEngine {
     pub fn generate_stream(
         &mut self,
         params: &SamplingParams,
-        prompt: String,
-        uuid: Option<String>,
+        messages: &Vec<Message>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        match self.add_request(params, &prompt, RequestType::Stream, uuid) {
+        let (prompt, prompt_uuid) = self.apply_chat_template(params, messages, false);
+        match self.add_request(params, &prompt, RequestType::Stream, prompt_uuid) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)

@@ -173,14 +173,16 @@ impl AttentionLayer {
         )?;
         let mlp = MLP::new(
             vb.pp("feed_forward"),
-            comm,
-            cfg.into(),
+            comm.clone(),
+            cfg.hidden_size,
             cfg.intermediate_size,
+            &None,
+            &None,
             false,
             dtype,
             "",
         )?;
-        let attention = Attention::new(vb.pp("attention"), comm, cfg, dtype)?;
+        let attention = Attention::new(vb.pp("attention"), comm.clone(), cfg, dtype)?;
         let post_norm = rms_norm(
             cfg.hidden_size,
             1e-5,
@@ -332,6 +334,7 @@ pub fn conv2d_no_bias(
     Ok(candle_nn::Conv2d::new(ws, None, cfg))
 }
 
+#[allow(unused)]
 pub struct VisionModel {
     patch_conv: candle_nn::Conv2d,
     ln_pre: NormX,
@@ -405,7 +408,15 @@ impl VisionModel {
             patch_embeds.device(),
         )?;
 
-        causal_mask = (causal_mask * patch_embeds.dtype().finfo().min as f64)?;
+        use half::{bf16, f16};
+        let min_value = match patch_embeds.dtype() {
+            DType::F32 => f32::MIN as f64,
+            DType::F16 => f16::MIN.to_f64(),
+            DType::BF16 => bf16::MIN.to_f64(),
+            _ => candle_core::bail!("Not supported dtype!"),
+        };
+
+        causal_mask = (causal_mask * min_value)?;
 
         let block_end_idx: Vec<usize> = patch_embeds_list.iter().fold(Vec::new(), |mut acc, &x| {
             let new_sum = x + acc.last().copied().unwrap_or(0);

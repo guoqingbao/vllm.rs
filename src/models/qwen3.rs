@@ -52,8 +52,10 @@ impl Qwen3DecoderLayer {
                 vb.pp("mlp").clone()
             },
             comm.clone(),
-            config,
+            config.hidden_size,
             config.intermediate_size,
+            &config.quantization_config,
+            &config.quant,
             false,
             dtype,
             "",

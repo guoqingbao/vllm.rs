@@ -120,13 +120,11 @@ def main():
 
     prompt_processed = []
     params = SamplingParams()
-    prompt_uuids = []
+    message_list = []
     if not interactive:
         for prompt in prompts:
             msg = Message(role="user", content=remove_surrogates(prompt))
-            (processed, prompt_uuid) = engine.apply_chat_template(params, [msg], log=True)
-            prompt_processed.append(processed)
-            prompt_uuids.append(prompt_uuid)
+            message_list.append([msg])
             sampling_params.append(params)
     else:
         sampling_params.append(params)
@@ -149,8 +147,8 @@ def main():
                     params.session_id = session_id
                 else:
                     params.session_id = None
-                (prompt_processed, prompt_uuid) = [
-                    engine.apply_chat_template(params, chat_history, log=False)]
+                # (prompt_processed, prompt_uuid) = [
+                #     engine.apply_chat_template(params, chat_history, log=False)]
 
             except KeyboardInterrupt:
                 if chat_history:
@@ -176,8 +174,7 @@ def main():
             try:
                 done_item = None
                 output_text = ""
-                seq_id, prompt_length, stream = engine.generate_stream(
-                    params, prompt_processed[0], prompt_uuid)
+                seq_id, prompt_length, stream = engine.generate_stream(params, chat_history)
                 for item in stream:
                     if item.datatype == "TOKEN":
                         print(item.data, end="", flush=True)
@@ -231,7 +228,7 @@ def main():
                 print("\n⛔️", e, ", chat session closed!")
                 continue
         else:
-            outputs = engine.generate_sync(sampling_params, prompt_processed)
+            outputs = engine.generate_sync(sampling_params, message_list)
 
         if len(outputs) > 0:
             outputs.sort(key=lambda o: o.seq_id)

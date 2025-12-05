@@ -54,8 +54,10 @@ impl GLM4DecoderLayer {
                 vb.pp("mlp").clone()
             },
             comm.clone(),
-            config,
+            config.hidden_size,
             config.intermediate_size,
+            &config.quantization_config,
+            &config.quant,
             true, //gate and up merged
             dtype,
             "",
