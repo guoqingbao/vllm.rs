@@ -1,7 +1,8 @@
 // src/server/server.rs
 use super::{
+    convert_chat_message,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder,
+    ChatResponder, MessageContentType,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
@@ -11,7 +12,8 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
-use crate::utils::image::{ImageProcessConfig, ImageProcessor};
+use crate::utils::image::ImageProcessConfig;
+
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -59,8 +61,24 @@ pub async fn chat_completion(
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| convert_chat_msg(m, &img_cfg).unwrap())
+        .map(|m| convert_chat_message(m, &img_cfg).unwrap())
         .collect();
+
+    // Test case injection!
+    // let mut vs = Vec::new();
+    // vs.push(MessageContent::Text {
+    //     text: messages[1].content.clone(),
+    // });
+    // vs.push(MessageContent::ImageUrl { image_url: "https://im.marieclaire.com.tw/s1200c675h100b0webp100/assets/mc/202412/6752ABCF920001733471183.png".to_string() });
+
+    // let messages: Vec<Message> = vec![convert_chat_message(
+    //     &ChatMessage {
+    //         role: "user".to_string(),
+    //         content: MessageContentType::Multi(vs.clone()),
+    //     },
+    //     &img_cfg,
+    // )
+    // .unwrap()];
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -368,84 +386,4 @@ pub async fn get_usage(
         total_swap_memory: stats.total_swap_memory,
         session_status: stats.session_status,
     })
-}
-
-use crate::server::MessageContentType;
-use candle_core::Result;
-use image::DynamicImage;
-// load from url
-pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
-    let bytes = reqwest::blocking::get(url)
-        .map_err(candle_core::Error::wrap)?
-        .bytes()
-        .map_err(candle_core::Error::wrap)?;
-    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
-    Ok(img)
-}
-
-// load from "data:image/jpeg;base64,XXXXX"
-pub fn load_image_from_base64(data: &str) -> Result<DynamicImage> {
-    use base64::prelude::{Engine as _, BASE64_STANDARD};
-    let base64_part = data.split(",").last().unwrap_or(data);
-    let bytes = BASE64_STANDARD
-        .decode(base64_part)
-        .map_err(candle_core::Error::wrap)?;
-    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
-    Ok(img)
-}
-
-pub fn convert_chat_msg(msg: &ChatMessage, cfg: &ImageProcessConfig) -> Result<Message> {
-    let role = msg.role.clone();
-    let mut prompt = String::new();
-    let mut images: Vec<DynamicImage> = vec![];
-
-    match &msg.content {
-        MessageContentType::PureText(text) => {
-            prompt.push_str(text);
-        }
-        MessageContentType::Multi(items) => {
-            for item in items {
-                match item {
-                    MessageContent::Text { text } => {
-                        prompt.push_str(text);
-                    }
-                    MessageContent::ImageUrl { image_url } => {
-                        let img = load_image_from_url(image_url)?;
-                        let placeholder = format!("<image:{}>", images.len());
-                        prompt.push_str(&placeholder);
-                        images.push(img);
-                    }
-                    MessageContent::ImageBase64 { image_base64 } => {
-                        let img = load_image_from_base64(image_base64)?;
-                        let placeholder = format!("<image:{}>", images.len());
-                        prompt.push_str(&placeholder);
-                        images.push(img);
-                    }
-                }
-                prompt.push(' '); // keep spacing readable
-            }
-        }
-    }
-
-    use candle_core::Tensor;
-    pub fn tensor_raw(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-        let shape = t.dims().to_vec();
-        let data: Vec<f32> = t.to_vec1()?;
-        // Convert to Vec<u8> without copying element-by-element
-        Ok((bytemuck::cast_vec(data), shape))
-    }
-
-    if !images.is_empty() {
-        let processor = ImageProcessor::new(cfg);
-        let (images_tensor, _) = processor.process_inputs(&mut prompt, &mut images)?;
-        let (images_raw, images_shape) = tensor_raw(&images_tensor)?;
-        Ok(Message::new(
-            role,
-            prompt.trim().to_owned(),
-            Some(images_raw),
-            Some(images_shape),
-        ))
-    } else {
-        Ok(Message::new(role, prompt.trim().to_owned(), None, None))
-    }
 }

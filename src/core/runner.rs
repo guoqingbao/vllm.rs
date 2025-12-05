@@ -528,10 +528,7 @@ impl ModelRunner {
                     shape: &[usize],
                     device: &Device,
                 ) -> Result<Tensor> {
-                    // reinterpret &[u8] → &[f32] (no copying, just view cast)
                     let floats: &[f32] = bytemuck::cast_slice(bytes);
-
-                    // then rebuild tensor on the desired device
                     Tensor::from_slice(floats, shape, device)
                 }
 
@@ -541,8 +538,10 @@ impl ModelRunner {
                         let mut vec_tensors = Vec::new();
                         let mut image_sizes = Vec::new();
                         for (img, shape) in images {
-                            vec_tensors.push(bytes_to_tensor_f32(&img, shape, &self.device)?);
-                            image_sizes.push((shape[1] as u32, shape[2] as u32));
+                            let t = bytes_to_tensor_f32(&img, shape, &self.device)?;
+                            crate::log_info!("image tensor {:?}", t.shape());
+                            vec_tensors.push(t);
+                            image_sizes.push((shape[2] as u32, shape[3] as u32));
                         }
                         (Some(Tensor::cat(&vec_tensors, 0)?), Some(image_sizes))
                     } else {

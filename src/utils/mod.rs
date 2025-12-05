@@ -528,7 +528,7 @@ pub fn init_config_tokenizer(
         }
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
-        let config_tokenizer: TokenizerConfig = {
+        let mut config_tokenizer: TokenizerConfig = {
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
                 Ok(f) => serde_json::from_slice(&f).map_err(candle_core::Error::wrap)?,
                 _ => {
@@ -560,6 +560,19 @@ pub fn init_config_tokenizer(
         } else {
             None
         };
+
+        // Handle jinja chat template
+        if config_tokenizer.chat_template.is_none() {
+            if let Some(dir) = Path::new(&config_path).parent() {
+                if dir.join("chat_template.jinja").exists() {
+                    crate::log_warn!("Try loading chat template from chat_template.jinja");
+                    config_tokenizer.chat_template = Some(
+                        std::fs::read_to_string(&dir.join("chat_template.jinja"))
+                            .map_err(candle_core::Error::wrap)?,
+                    );
+                }
+            }
+        }
 
         Ok((
             model_pathes,

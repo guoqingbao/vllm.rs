@@ -90,7 +90,6 @@ pub struct LLMEngine {
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
-    image_bank: HashMap<String, Vec<(Option<Vec<u8>>, Option<Vec<usize>>)>>,
 }
 
 impl LLMEngine {
@@ -384,7 +383,6 @@ impl LLMEngine {
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
-            image_bank: HashMap::new(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -395,7 +393,7 @@ impl LLMEngine {
         params: &SamplingParams,
         prompt: &str,
         request_type: &RequestType,
-        prompt_uuid: Option<String>,
+        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
     ) -> Result<(usize, usize)> {
         let tokens = self
             .tokenizer
@@ -458,18 +456,6 @@ impl LLMEngine {
             session_id.clone()
         };
 
-        let images_raw = prompt_uuid
-            .and_then(|id| self.image_bank.remove(&id))
-            .unwrap_or_default();
-        let images = if images_raw.is_empty() {
-            None
-        } else {
-            let mut images = Vec::new();
-            for (img, shape) in images_raw {
-                images.push((img.unwrap(), shape.unwrap()))
-            }
-            Some(images)
-        };
         let seq_id = if let Some(session_id) = session_id {
             if self.econfig.server_mode.unwrap_or(true) {
                 crate::log_warn!(
@@ -541,9 +527,9 @@ impl LLMEngine {
         params: &SamplingParams,
         prompt: &str,
         request_type: RequestType,
-        uuid: Option<String>,
+        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
-        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type, uuid)?;
+        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type, images)?;
         let (tx, rx) = channel(4096);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
@@ -958,21 +944,14 @@ impl LLMEngine {
         params: &SamplingParams,
         messages: &Vec<Message>,
         log: bool,
-    ) -> (String, Option<String>) {
+    ) -> (String, Option<Vec<(Vec<u8>, Vec<usize>)>>) {
         // collect images from all messages
         let mut collected_images = Vec::new();
         for m in messages {
             if let (Some(image_values), Some(shape)) = (&m.image_values, &m.image_shape) {
-                collected_images.push((Some(image_values.clone()), Some(shape.clone())));
+                collected_images.push((image_values.clone(), shape.clone()));
             }
         }
-        let uuid = if collected_images.is_empty() {
-            None
-        } else {
-            let id = uuid::Uuid::new_v4().to_string();
-            self.image_bank.insert(id.clone(), collected_images);
-            Some(id)
-        };
 
         let mut prompt_template = self.template.clone();
         if let Some(session_id) = &params.session_id {
@@ -1014,7 +993,14 @@ impl LLMEngine {
                 prompt.replace("\n", "")
             );
         }
-        (prompt, uuid)
+        (
+            prompt,
+            if collected_images.is_empty() {
+                None
+            } else {
+                Some(collected_images)
+            },
+        )
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1043,9 +1029,9 @@ impl LLMEngine {
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            let (prompt, prompt_uuid) = self.apply_chat_template(param, messages, false);
+            let (prompt, images) = self.apply_chat_template(param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, &prompt, RequestType::Completion, prompt_uuid.clone())
+                self.add_request(param, &prompt, RequestType::Completion, &images)
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1187,8 +1173,8 @@ impl LLMEngine {
         params: &SamplingParams,
         messages: &Vec<Message>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        let (prompt, prompt_uuid) = self.apply_chat_template(params, messages, false);
-        match self.add_request(params, &prompt, RequestType::Stream, prompt_uuid) {
+        let (prompt, images) = self.apply_chat_template(params, messages, false);
+        match self.add_request(params, &prompt, RequestType::Stream, &images) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)

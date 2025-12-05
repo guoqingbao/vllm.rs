@@ -18,7 +18,7 @@ pub use config::Mistral3Config;
 use vision::VisionModel;
 
 struct PatchMerger {
-    merging_layer: ReplicatedLinear,
+    merge: ReplicatedLinear,
     spatial_merge_size: usize,
     patch_size: usize,
 }
@@ -26,7 +26,7 @@ struct PatchMerger {
 impl PatchMerger {
     fn new(cfg: &Mistral3Config, vb: VarBuilderX, dtype: DType) -> Result<Self> {
         Ok(Self {
-            merging_layer: ReplicatedLinear::load_no_bias(
+            merge: ReplicatedLinear::load_no_bias(
                 cfg.vision_config.hidden_size * cfg.spatial_merge_size.pow(2),
                 cfg.vision_config.hidden_size,
                 vb.pp("merging_layer"),
@@ -80,7 +80,7 @@ impl PatchMerger {
 
         let image_features = Tensor::cat(&permuted_tensor, 0)?;
 
-        self.merging_layer.forward(&image_features)
+        self.merge.forward(&image_features)
     }
 }
 
@@ -194,8 +194,6 @@ impl Mistral3ForConditionalGeneration {
             progress_reporter,
         )?;
 
-        assert_eq!(cfg.vision_feature_layer, -1);
-
         Ok(Self {
             vision_model,
             text_model,
@@ -205,7 +203,7 @@ impl Mistral3ForConditionalGeneration {
         })
     }
 
-    fn get_image_features(
+    fn vision_tower(
         &self,
         image_features: &Tensor,
         image_sizes: Vec<(u32, u32)>,
@@ -225,32 +223,27 @@ impl Mistral3ForConditionalGeneration {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
-        pixel_values: Option<Tensor>,
+        images: Option<Tensor>,
         image_sizes: Option<Vec<(u32, u32)>>,
     ) -> Result<Tensor> {
         let mut input_embeds = self.text_model.embed_forward(input_ids)?;
 
-        if let Some(pixel_values) = &pixel_values {
-            let special_image_mask = input_ids
-                .eq(self.cfg.image_token_index as f64)?
+        if let Some(image_tensor) = &images {
+            let image_mask = input_ids.eq(self.cfg.image_token_index as u32)?;
+            let image_mask = image_mask
                 .unsqueeze(D::Minus1)?
                 .broadcast_as(input_embeds.shape().clone())?
                 .to_dtype(DType::U32)?;
-            let mask_flat = special_image_mask.flatten_all()?;
-            // Nonzero before vision model to allow async processing all the way through logits.
-            let indices = mask_flat.nonzero()?.squeeze(1)?;
 
-            let image_sizes = image_sizes.unwrap();
+            let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
             let image_features =
-                self.get_image_features(&pixel_values.to_dtype(self.dtype)?, image_sizes)?;
+                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes.unwrap())?;
 
             let mut x_flat = input_embeds.flatten_all()?;
-            let src_flat = image_features.flatten_all()?;
+            let image_flat = image_features.flatten_all()?;
 
-            let current_vals = x_flat.gather(&indices, 0)?;
-            let diff = (src_flat - current_vals)?;
-            x_flat = x_flat.scatter_add(&indices, &diff, 0)?;
-
+            x_flat =
+                x_flat.scatter_add(&indices, &(image_flat - x_flat.gather(&indices, 0)?)?, 0)?;
             input_embeds = x_flat.reshape(input_embeds.shape())?;
         }
 

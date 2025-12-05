@@ -1,7 +1,53 @@
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Storage, Tensor};
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, Pixel};
-const PLACEHOLDER: &str = "<placeholder>";
+pub const IMAGE_PLACEHOLDER: &str = "<|VLLM-RS-IMAGE|>";
+const PLACEHOLDER: &str = "<|VLLM-RS-PLACEHOLDER|>";
+
+// load from url
+pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
+    let bytes = reqwest::blocking::get(url)
+        .map_err(candle_core::Error::wrap)?
+        .bytes()
+        .map_err(candle_core::Error::wrap)?;
+    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
+    Ok(img)
+}
+
+// load from "data:image/jpeg;base64,XXXXX"
+pub fn load_image_from_base64(data: &str) -> Result<DynamicImage> {
+    use base64::prelude::{Engine as _, BASE64_STANDARD};
+    let base64_part = data.split(",").last().unwrap_or(data);
+    let bytes = BASE64_STANDARD
+        .decode(base64_part)
+        .map_err(candle_core::Error::wrap)?;
+    let img = image::load_from_memory(&bytes).map_err(candle_core::Error::wrap)?;
+    Ok(img)
+}
+
+pub fn get_tensor_raw_data(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape = t.dims().to_vec();
+    // println!("tensor_raw shape {:?}, dtype {:?}", shape, t.dtype());
+    let (storage, _) = t.storage_and_layout();
+    let storage = match &*storage {
+        Storage::Cpu(p) => p,
+        _ => candle_core::bail!("t must be a cpu tensor"),
+    };
+    let bytes: Vec<u8> = match t.dtype() {
+        DType::F32 => {
+            let slice = storage.as_slice::<f32>()?;
+            bytemuck::cast_slice(slice).to_vec()
+        }
+        _ => {
+            return Err(candle_core::Error::Msg(
+                "unsupported dtype for tensor_raw".into(),
+            ));
+        }
+    };
+
+    Ok((bytes, shape))
+}
+
 fn image_resize(
     image: &DynamicImage,
     mut height: usize,
@@ -190,7 +236,7 @@ impl ImageProcessor {
             let t = Tensor::from_vec(data, (h as usize, w as usize, 3), &Device::Cpu)?;
 
             // Convert HWC → CHW without copying data manually
-            let t = t.permute((2, 0, 1))?; // [H, W, C] -> [C, H, W]
+            let t = t.permute((2, 0, 1))?.contiguous()?; // [H, W, C] -> [C, H, W]
 
             pixel_values.push(t.unsqueeze(0)?);
         }
@@ -206,15 +252,23 @@ impl ImageProcessor {
         let (pixel_values, image_sizes_all) =
             self.preprocess(images).expect("Preprocessing failed");
 
+        crate::log_info!(
+            "pixel_values tensor shape {:?}, image_sizes_all {:?}",
+            pixel_values.shape(),
+            image_sizes_all
+        );
         let mut image_sizes_all_iter = image_sizes_all.clone().into_iter();
         let mut replace_strings = Vec::new();
-        while prompt.contains(&self.cfg.image_token) {
+        while prompt.contains(IMAGE_PLACEHOLDER) {
             let (height, width) = image_sizes_all_iter.next().unwrap();
             let num_height_tokens =
                 (height as usize) / (self.cfg.patch_size * self.cfg.spatial_merge_size);
             let num_width_tokens =
                 (width as usize) / (self.cfg.patch_size * self.cfg.spatial_merge_size);
 
+            crate::log_info!(
+                "num_height_tokens {num_height_tokens}, num_width_tokens {num_width_tokens}"
+            );
             let mut replace_tokens = vec![
                 [
                     vec![self.cfg.image_token.clone(); num_width_tokens],
@@ -230,7 +284,7 @@ impl ImageProcessor {
             *replace_tokens.last_mut().unwrap() = self.cfg.image_end_token.clone();
 
             replace_strings.push(replace_tokens.join(""));
-            *prompt = prompt.replace(&self.cfg.image_token, PLACEHOLDER);
+            *prompt = prompt.replace(IMAGE_PLACEHOLDER, PLACEHOLDER);
         }
 
         while prompt.contains(PLACEHOLDER) {

@@ -4,10 +4,17 @@ pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
+use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
+use crate::utils::image::{
+    get_tensor_raw_data, load_image_from_base64, load_image_from_url, ImageProcessConfig,
+    ImageProcessor, IMAGE_PLACEHOLDER,
+};
 use axum::extract::Json;
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
+use candle_core::Result;
+use image::DynamicImage;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -286,4 +293,61 @@ pub struct Args {
 
     #[arg(long, default_value_t = false)]
     pub ui_server: bool, //Start the web chat
+}
+
+pub fn convert_chat_message(msg: &ChatMessage, cfg: &ImageProcessConfig) -> Result<Message> {
+    let role = msg.role.clone();
+    let mut prompt = String::new();
+    let mut images: Vec<DynamicImage> = vec![];
+
+    match &msg.content {
+        MessageContentType::PureText(text) => {
+            prompt.push_str(text);
+        }
+        MessageContentType::Multi(items) => {
+            for item in items {
+                match item {
+                    MessageContent::Text { text } => {
+                        prompt.push_str(text);
+                    }
+                    MessageContent::ImageUrl { image_url } => {
+                        let img = load_image_from_url(image_url)?;
+                        crate::log_info!(
+                            "chat image downloaded: {} x {}",
+                            img.width(),
+                            img.height()
+                        );
+                        prompt.push_str(&IMAGE_PLACEHOLDER);
+                        images.push(img);
+                    }
+                    MessageContent::ImageBase64 { image_base64 } => {
+                        let img = load_image_from_base64(image_base64)?;
+                        crate::log_info!("chat image decoded: {} x {}", img.width(), img.height());
+                        prompt.push_str(&IMAGE_PLACEHOLDER);
+                        images.push(img);
+                    }
+                }
+                prompt.push(' '); // keep spacing readable
+            }
+        }
+    }
+
+    if !images.is_empty() {
+        let processor = ImageProcessor::new(cfg);
+        let (images_tensor, _) = processor.process_inputs(&mut prompt, &mut images)?;
+        let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor)?;
+        crate::log_info!(
+            "{} images detected in the chat message, combined image shape {:?}",
+            images_shape[0],
+            images_shape
+        );
+        Ok(Message::new(
+            role,
+            prompt.trim().to_owned(),
+            Some(images_raw),
+            Some(images_shape),
+        ))
+    } else {
+        Ok(Message::new(role, prompt.trim().to_owned(), None, None))
+    }
 }

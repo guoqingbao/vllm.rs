@@ -451,10 +451,12 @@ impl VisionModel {
             .iter()
             .enumerate()
             .map(|(i, &size)| {
+                let patches_h = size.0 as usize / self.patch_size;
+                let patches_w = size.1 as usize / self.patch_size;
                 patch_embeds
                     .i(i)?
-                    .narrow(D::Minus2, 0, size.0 as usize / self.patch_size)?
-                    .narrow(D::Minus1, 0, size.1 as usize / self.patch_size)
+                    .narrow(D::Minus2, 0, patches_h)?
+                    .narrow(D::Minus1, 0, patches_w)
             })
             .collect::<Result<Vec<Tensor>>>()?;
         let patch_embeds = Tensor::cat(
@@ -465,8 +467,8 @@ impl VisionModel {
             0,
         )?
         .unsqueeze(0)?;
-        let patch_embeds = self.ln_pre.forward(&patch_embeds)?;
 
+        let patch_embeds = self.ln_pre.forward(&patch_embeds)?;
         let subsampled_positions =
             Some(self.position_ids_in_meshgrid(&patch_embeds_list, patch_embeds.device())?);
 

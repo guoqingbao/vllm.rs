@@ -141,7 +141,7 @@ impl Sequence {
         token_ids: Vec<u32>,
         block_size: usize,
         sampling_params: SamplingParams,
-        images: Option<Vec<(Vec<u8>, Vec<usize>)>>,
+        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
     ) -> Self {
         Self {
             id: 0, // Will be set by scheduler
@@ -159,7 +159,7 @@ impl Sequence {
             block_size,
             last_token: *token_ids.last().unwrap_or(&0),
             pd_first_token: None,
-            images,
+            images: images.clone(),
         }
     }
 
