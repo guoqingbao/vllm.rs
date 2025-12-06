@@ -3,10 +3,9 @@ use crate::models::layers::distributed::{
     Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::others::{rms_norm, NormX};
+use crate::models::layers::others::{conv2d_no_bias, rms_norm, NormX};
 use crate::models::layers::VarBuilderX;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
-use either::Either;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -305,30 +304,6 @@ impl RotaryEmbedding {
         let k_embed = candle_nn::rotary_emb::rope(k, cos, sin)?;
         Ok((q_embed, k_embed))
     }
-}
-
-pub fn conv2d_no_bias(
-    in_channels: usize,
-    out_channels: usize,
-    kernel_size: usize,
-    cfg: candle_nn::Conv2dConfig,
-    vb: VarBuilderX,
-) -> Result<candle_nn::Conv2d> {
-    let ws = match vb.0 {
-        Either::Left(v) => v.get(
-            (
-                out_channels,
-                in_channels / cfg.groups,
-                kernel_size,
-                kernel_size,
-            ),
-            "weight",
-        )?,
-        _ => {
-            todo!()
-        }
-    };
-    Ok(candle_nn::Conv2d::new(ws, None, cfg))
 }
 
 #[allow(unused)]
