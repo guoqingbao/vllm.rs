@@ -937,7 +937,11 @@ pub fn max_usable_memory(
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
-    let usable_in_mb = sys.available_memory() / 1024 / 1024;
+    let device = metal::Device::system_default().expect("No Metal device found");
+    let max_mem = device.recommended_max_working_set_size();
+    let alloc_mem = device.current_allocated_size();
+    let avail_mem = std::cmp::max(max_mem.saturating_sub(alloc_mem), sys.available_memory());
+    let usable_in_mb = avail_mem / 1024 / 1024;
     assert!(
         usable_in_mb > 0,
         "Insufficient GPU memory (left {:.02} MB)",
@@ -949,7 +953,7 @@ pub fn max_usable_memory(
         usable_in_mb as f64 * usage_fraction,
         usage_fraction
     );
-    Ok((sys.available_memory() as f64 * usage_fraction) as u64)
+    Ok((avail_mem as f64 * usage_fraction) as u64)
 }
 
 pub fn prepare_engine_config(
