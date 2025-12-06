@@ -122,7 +122,7 @@ pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config
         _ => 0,
     };
     let mut gpu_memory_left =
-        (gpu_memory_left.div_ceil(128 * 1024 * 1024) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
+        ((gpu_memory_left.div_ceil(128 * 1024 * 1024) - 1) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
 
     let config_model_len = econfig
         .config_model_len
@@ -876,11 +876,12 @@ pub fn get_dtype(dtype: Option<String>) -> DType {
 }
 
 #[cfg(feature = "cuda")]
-pub fn max_usable_memory(gpu_ids: &[usize], usage_fraction: f64) -> Result<u64> {
+pub fn max_usable_memory(gpu_ids: &[usize], kv_fraction: f64) -> Result<u64> {
     let mut usable_values = Vec::new();
     use candle_core::backend::BackendDevice;
     use candle_core::cuda_backend::cudarc::driver::sys;
     use candle_core::cuda_backend::CudaDevice;
+    const IN_GB: f64 = 1024f64 * 1024f64 * 1024f64;
     for &id in gpu_ids {
         // Create a CUDA context for that device
         let _ = CudaDevice::new(id)?;
@@ -893,13 +894,14 @@ pub fn max_usable_memory(gpu_ids: &[usize], usage_fraction: f64) -> Result<u64> 
                 .cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize)
                 .result()
                 .map_err(|e| candle_core::Error::Msg(format!("cuMemGetInfo_v2 failed: {e:?}")))?; // convert CUDA error to Rust error
-
-            let max_usage = (total as f64 * usage_fraction) as u64;
-            let usable = std::cmp::max(
-                max_usage as isize - (total - free) as isize,
-                (free as f64 * usage_fraction) as isize,
-            ) as u64;
-
+            let usable = (free as f64 * kv_fraction) as u64;
+            crate::log_warn!(
+                "GPU {}: total memory {:.02} GB, free {:.02} GB, allocate {:.02} GB for KvCache!",
+                id,
+                total as f64 / IN_GB,
+                free as f64 / IN_GB,
+                usable as f64 / IN_GB
+            );
             usable_values.push(usable);
         }
     }
