@@ -74,6 +74,7 @@
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
+* ✅ Gemma3 (多模态)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 

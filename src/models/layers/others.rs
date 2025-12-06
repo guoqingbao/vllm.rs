@@ -106,3 +106,27 @@ pub fn embedding(
     };
     Ok((Embedding::new(embeddings, hidden_size), vocab_size))
 }
+
+pub fn conv2d_no_bias(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    cfg: candle_nn::Conv2dConfig,
+    vb: VarBuilderX,
+) -> Result<candle_nn::Conv2d> {
+    let ws = match vb.0 {
+        Either::Left(v) => v.get(
+            (
+                out_channels,
+                in_channels / cfg.groups,
+                kernel_size,
+                kernel_size,
+            ),
+            "weight",
+        )?,
+        _ => {
+            todo!()
+        }
+    };
+    Ok(candle_nn::Conv2d::new(ws, None, cfg))
+}

@@ -76,6 +76,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodel)
 * ✅ GLM4 (0414, **Not ChatGLM**)
+* ✅ Gemma3 (Multimodel)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
