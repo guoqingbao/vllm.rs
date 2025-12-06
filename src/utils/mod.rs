@@ -938,6 +938,11 @@ pub fn max_usable_memory(
     let mut sys = System::new_all();
     sys.refresh_all();
     let usable_in_mb = sys.available_memory() / 1024 / 1024;
+    assert!(
+        usable_in_mb > 0,
+        "Insufficient GPU memory (left {:.02} MB)",
+        usable_in_mb
+    );
     crate::log_warn!(
         "max_usable_memory {} MB, usable for KvCache {:.02} (user `kv-fraction` setting {})",
         usable_in_mb,
