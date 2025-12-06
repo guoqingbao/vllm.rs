@@ -1,6 +1,4 @@
-use crate::models::layers::distributed::{
-    Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
-};
+use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::VarBuilderX;
 use crate::models::llama::LLaMaForCausalLM;
@@ -86,14 +84,14 @@ impl PatchMerger {
 
 struct MultiModalProjector {
     norm: NormX,
-    linear_1: TensorParallelColumnLinear,
-    linear_2: TensorParallelRowLinear,
+    linear_1: ReplicatedLinear,
+    linear_2: ReplicatedLinear,
     act: candle_nn::Activation,
     patch_merger: PatchMerger,
 }
 
 impl MultiModalProjector {
-    fn new(cfg: &Mistral3Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+    fn new(cfg: &Mistral3Config, vb: VarBuilderX, dtype: DType) -> Result<Self> {
         let is_qvar_builder = vb.is_qvar_builder();
         let norm = rms_norm(
             cfg.vision_config.hidden_size,
@@ -102,7 +100,7 @@ impl MultiModalProjector {
             if is_qvar_builder { DType::F32 } else { dtype },
         )?;
         let num_feature_layers = 1;
-        let linear_1 = TensorParallelColumnLinear::load_with_hints(
+        let linear_1 = ReplicatedLinear::load_b(
             cfg.vision_config.hidden_size * num_feature_layers,
             cfg.text_config.hidden_size,
             cfg.multimodal_projector_bias,
@@ -111,21 +109,20 @@ impl MultiModalProjector {
             } else {
                 vb.pp("linear_1")
             },
-            comm.clone(),
             &cfg.text_config.quantization_config,
             &cfg.text_config.quant,
             dtype,
         )?;
 
-        let linear_2 = TensorParallelRowLinear::load_with_hints(
+        let linear_2 = ReplicatedLinear::load_b(
             cfg.text_config.hidden_size,
             cfg.text_config.hidden_size,
+            cfg.multimodal_projector_bias,
             if is_qvar_builder {
                 vb.pp("ln2")
             } else {
                 vb.pp("linear_2")
             },
-            comm.clone(),
             &cfg.text_config.quantization_config,
             &cfg.text_config.quant,
             dtype,
@@ -181,8 +178,7 @@ impl Mistral3ForConditionalGeneration {
             comm.clone(),
             dtype,
         )?;
-        let mmproj =
-            MultiModalProjector::new(&cfg, vb.pp("multi_modal_projector"), comm.clone(), dtype)?;
+        let mmproj = MultiModalProjector::new(&cfg, vb.pp("multi_modal_projector"), dtype)?;
 
         let text_model = LLaMaForCausalLM::new(
             &vb.pp("language_model"),

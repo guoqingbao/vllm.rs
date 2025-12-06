@@ -122,7 +122,7 @@ pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config
         _ => 0,
     };
     let mut gpu_memory_left =
-        (gpu_memory_left.div_ceil(128 * 1024 * 1024) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
+        ((gpu_memory_left.div_ceil(128 * 1024 * 1024) - 1) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
 
     let config_model_len = econfig
         .config_model_len
@@ -341,7 +341,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
+            let mut beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
+            if !beta_fast.is_ok() {
+                beta_fast = md_get(format!("{arch}.rope.scaling.yarn_beta_fast").as_str());
+            }
             if beta_fast.is_ok() {
                 scaling_map.insert(
                     "beta_fast".to_string(),
@@ -351,12 +354,26 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
+            let mut beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
+            if !beta_slow.is_ok() {
+                beta_slow = md_get(format!("{arch}.rope.scaling.yarn_beta_slow").as_str());
+            }
             if beta_slow.is_ok() {
                 scaling_map.insert(
                     "beta_slow".to_string(),
                     RopeScaling(Either::Left(ScalingValue(Either::Left(
                         beta_slow.unwrap().to_f32()? as f64,
+                    )))),
+                );
+            }
+
+            let llama_4_scaling_beta =
+                md_get(format!("{arch}.rope.attention.temperature_scale").as_str());
+            if llama_4_scaling_beta.is_ok() {
+                scaling_map.insert(
+                    "llama_4_scaling_beta".to_string(),
+                    RopeScaling(Either::Left(ScalingValue(Either::Left(
+                        llama_4_scaling_beta.unwrap().to_f32()? as f64,
                     )))),
                 );
             }
@@ -760,6 +777,7 @@ pub fn get_arch_rope(
         ("qwen3", false),
         ("llama", true),
         ("mistral", true),
+        ("mistral3", false),
     ]
     .iter()
     .cloned()
@@ -786,6 +804,7 @@ pub fn get_arch_rope(
         | "LlamaForConditionalGeneration"
         | "llama"
         | "mistral"
+        | "mistral3"
         | "llama2"
         | "llama3" => {
             let model_type = if arch == "Mistral3ForConditionalGeneration" {
@@ -874,11 +893,12 @@ pub fn get_dtype(dtype: Option<String>) -> DType {
 }
 
 #[cfg(feature = "cuda")]
-pub fn max_usable_memory(gpu_ids: &[usize], usage_fraction: f64) -> Result<u64> {
+pub fn max_usable_memory(gpu_ids: &[usize], kv_fraction: f64) -> Result<u64> {
     let mut usable_values = Vec::new();
     use candle_core::backend::BackendDevice;
     use candle_core::cuda_backend::cudarc::driver::sys;
     use candle_core::cuda_backend::CudaDevice;
+    const IN_GB: f64 = 1024f64 * 1024f64 * 1024f64;
     for &id in gpu_ids {
         // Create a CUDA context for that device
         let _ = CudaDevice::new(id)?;
@@ -891,13 +911,14 @@ pub fn max_usable_memory(gpu_ids: &[usize], usage_fraction: f64) -> Result<u64> 
                 .cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize)
                 .result()
                 .map_err(|e| candle_core::Error::Msg(format!("cuMemGetInfo_v2 failed: {e:?}")))?; // convert CUDA error to Rust error
-
-            let max_usage = (total as f64 * usage_fraction) as u64;
-            let usable = std::cmp::max(
-                max_usage as isize - (total - free) as isize,
-                (free as f64 * usage_fraction) as isize,
-            ) as u64;
-
+            let usable = (free as f64 * kv_fraction) as u64;
+            crate::log_warn!(
+                "GPU {}: total memory {:.02} GB, free {:.02} GB, allocate {:.02} GB for KvCache!",
+                id,
+                total as f64 / IN_GB,
+                free as f64 / IN_GB,
+                usable as f64 / IN_GB
+            );
             usable_values.push(usable);
         }
     }
@@ -1042,4 +1063,22 @@ pub fn prepare_engine_config(
 
     crate::log_warn!("Check use_runner {:?}", use_runner);
     (econfig, use_runner)
+}
+
+pub fn get_llama4_attn_scale(
+    positions: &candle_core::Tensor,
+    llama_4_scaling_beta: f64,
+    original_max_position_embeddings: f64,
+) -> Result<candle_core::Tensor> {
+    let div = (positions.to_dtype(DType::F32)? / original_max_position_embeddings)?;
+    let floored = div.floor()?;
+
+    let one = floored.ones_like()?; // tensor filled with 1.0
+    let log_term = (one + floored)?.log()?;
+
+    let scaling = (1f64 + (llama_4_scaling_beta * &log_term)?)?;
+    scaling
+        .unsqueeze(candle_core::D::Minus1)?
+        .unsqueeze(0)?
+        .unsqueeze(0)
 }
