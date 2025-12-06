@@ -341,7 +341,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
+            let mut beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
+            if !beta_fast.is_ok() {
+                beta_fast = md_get(format!("{arch}.rope.scaling.yarn_beta_fast").as_str());
+            }
             if beta_fast.is_ok() {
                 scaling_map.insert(
                     "beta_fast".to_string(),
@@ -351,12 +354,26 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 );
             }
 
-            let beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
+            let mut beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
+            if !beta_slow.is_ok() {
+                beta_slow = md_get(format!("{arch}.rope.scaling.yarn_beta_slow").as_str());
+            }
             if beta_slow.is_ok() {
                 scaling_map.insert(
                     "beta_slow".to_string(),
                     RopeScaling(Either::Left(ScalingValue(Either::Left(
                         beta_slow.unwrap().to_f32()? as f64,
+                    )))),
+                );
+            }
+
+            let llama_4_scaling_beta =
+                md_get(format!("{arch}.rope.attention.temperature_scale").as_str());
+            if llama_4_scaling_beta.is_ok() {
+                scaling_map.insert(
+                    "llama_4_scaling_beta".to_string(),
+                    RopeScaling(Either::Left(ScalingValue(Either::Left(
+                        llama_4_scaling_beta.unwrap().to_f32()? as f64,
                     )))),
                 );
             }
