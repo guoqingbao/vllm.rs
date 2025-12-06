@@ -760,6 +760,7 @@ pub fn get_arch_rope(
         ("qwen3", false),
         ("llama", true),
         ("mistral", true),
+        ("mistral3", false),
     ]
     .iter()
     .cloned()
@@ -786,6 +787,7 @@ pub fn get_arch_rope(
         | "LlamaForConditionalGeneration"
         | "llama"
         | "mistral"
+        | "mistral3"
         | "llama2"
         | "llama3" => {
             let model_type = if arch == "Mistral3ForConditionalGeneration" {
@@ -1042,4 +1044,22 @@ pub fn prepare_engine_config(
 
     crate::log_warn!("Check use_runner {:?}", use_runner);
     (econfig, use_runner)
+}
+
+pub fn get_llama4_attn_scale(
+    positions: &candle_core::Tensor,
+    llama_4_scaling_beta: f64,
+    original_max_position_embeddings: f64,
+) -> Result<candle_core::Tensor> {
+    let div = (positions.to_dtype(DType::F32)? / original_max_position_embeddings)?;
+    let floored = div.floor()?;
+
+    let one = floored.ones_like()?; // tensor filled with 1.0
+    let log_term = (one + floored)?.log()?;
+
+    let scaling = (1f64 + (llama_4_scaling_beta * &log_term)?)?;
+    scaling
+        .unsqueeze(candle_core::D::Minus1)?
+        .unsqueeze(0)?
+        .unsqueeze(0)
 }

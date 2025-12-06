@@ -24,6 +24,7 @@ pub struct Attention {
     attn: PagedAttention,
     rotary_emb: Arc<ScalingRotaryEmbedding>,
     dtype: DType,
+    do_llama4_attn_scale: bool,
 }
 
 impl Attention {
@@ -158,6 +159,8 @@ impl Attention {
         let attention_heads = num_heads / comm.world_size();
         let kv_heads = num_kv_heads / comm.world_size();
 
+        let do_llama4_attn_scale = rotary_emb.get_original_max_position_embeddings().is_some()
+            && rotary_emb.get_llama_4_scaling_beta().is_some();
         Ok(Self {
             q_proj,
             k_proj,
@@ -180,6 +183,7 @@ impl Attention {
                 config.fp8_kvcache.unwrap_or(false),
             )?,
             dtype,
+            do_llama4_attn_scale,
         })
     }
 
@@ -226,7 +230,7 @@ impl Attention {
         // Apply rotary embeddings
         let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
 
-        let (q, k) = if q.dtype() != self.dtype {
+        let (mut q, k) = if q.dtype() != self.dtype {
             let q = q.to_dtype(self.dtype)?;
             let k = k.to_dtype(self.dtype)?;
             (q, k)
@@ -239,6 +243,19 @@ impl Attention {
         } else {
             v
         };
+
+        if self.do_llama4_attn_scale {
+            use crate::utils::get_llama4_attn_scale;
+            let scale = get_llama4_attn_scale(
+                &positions,
+                self.rotary_emb.get_llama_4_scaling_beta().unwrap(),
+                self.rotary_emb
+                    .get_original_max_position_embeddings()
+                    .unwrap() as f64,
+            )?
+            .to_dtype(q.dtype())?;
+            q = q.broadcast_mul(&scale)?;
+        }
 
         let y = self
             .attn

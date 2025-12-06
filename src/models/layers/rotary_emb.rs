@@ -8,10 +8,19 @@ pub struct RotaryEmbedding {
     cos: Tensor,
     is_rope_i: bool,
     rotary_dim: Option<usize>,
+    original_max_position_embeddings: Option<usize>,
+    llama_4_scaling_beta: Option<f64>,
 }
 
 impl RotaryEmbedding {
-    pub fn new(dtype: DType, cfg: &Config, dev: &Device, is_rope_i: bool) -> Result<Self> {
+    pub fn new(
+        dtype: DType,
+        cfg: &Config,
+        dev: &Device,
+        is_rope_i: bool,
+        original_max_position_embeddings: Option<usize>,
+        llama_4_scaling_beta: Option<f64>,
+    ) -> Result<Self> {
         let dim = cfg
             .head_dim
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
@@ -39,6 +48,8 @@ impl RotaryEmbedding {
             } else {
                 None
             },
+            original_max_position_embeddings,
+            llama_4_scaling_beta,
         })
     }
 
@@ -90,6 +101,15 @@ fn calculate_default_inv_freq(base: f64, dim: usize) -> Vec<f32> {
 
 #[derive(Debug, Clone)]
 pub struct ScalingRotaryEmbedding(RotaryEmbedding);
+
+impl ScalingRotaryEmbedding {
+    pub fn get_original_max_position_embeddings(&self) -> Option<usize> {
+        self.0.original_max_position_embeddings
+    }
+    pub fn get_llama_4_scaling_beta(&self) -> Option<f64> {
+        self.0.llama_4_scaling_beta
+    }
+}
 
 impl ScalingRotaryEmbedding {
     pub fn new(dtype: DType, cfg: &Config, dev: &Device, is_rope_i: bool) -> Result<Self> {
@@ -154,6 +174,10 @@ impl ScalingRotaryEmbedding {
                             } else {
                                 None
                             },
+                            original_max_position_embeddings: Some(
+                                original_max_position_embeddings as usize,
+                            ),
+                            llama_4_scaling_beta: None,
                         })
                     } else {
                         candle_core::bail!("Linear rope_type requires factor to be set");
@@ -203,6 +227,15 @@ impl ScalingRotaryEmbedding {
                             let freqs = t.matmul(&inv_freq)?;
                             let sin = freqs.sin()?.to_dtype(dtype)?;
                             let cos = freqs.cos()?.to_dtype(dtype)?;
+                            let llama_4_scaling_beta = if let Some(RopeScaling(Either::Left(
+                                ScalingValue(Either::Left(s)),
+                            ))) =
+                                rope_scaling.get("llama_4_scaling_beta")
+                            {
+                                Some(*s)
+                            } else {
+                                None
+                            };
                             Self(RotaryEmbedding {
                                 sin,
                                 cos,
@@ -212,6 +245,10 @@ impl ScalingRotaryEmbedding {
                                 } else {
                                     None
                                 },
+                                original_max_position_embeddings: Some(
+                                    original_max_position_embeddings as usize,
+                                ),
+                                llama_4_scaling_beta,
                             })
                         }
                         _ => {
@@ -219,7 +256,9 @@ impl ScalingRotaryEmbedding {
                         }
                     }
                 } else if rope_type == "default" {
-                    Self(RotaryEmbedding::new(dtype, cfg, dev, is_rope_i)?)
+                    Self(RotaryEmbedding::new(
+                        dtype, cfg, dev, is_rope_i, None, None,
+                    )?)
                 } else if rope_type == "dynamic" {
                     let scaling_factor = if let Some(RopeScaling(Either::Left(ScalingValue(
                         Either::Left(factor),
@@ -270,6 +309,10 @@ impl ScalingRotaryEmbedding {
                         } else {
                             None
                         },
+                        original_max_position_embeddings: Some(
+                            original_max_position_embeddings as usize,
+                        ),
+                        llama_4_scaling_beta: None,
                     })
                 } else if rope_type == "yarn" {
                     let default_one = RopeScaling(Either::Left(ScalingValue(Either::Left(1.0))));
@@ -306,6 +349,15 @@ impl ScalingRotaryEmbedding {
                                 *extrapolation_factor as f32,
                                 *factor as f32,
                             )?;
+                            let llama_4_scaling_beta = if let Some(RopeScaling(Either::Left(
+                                ScalingValue(Either::Left(s)),
+                            ))) =
+                                rope_scaling.get("llama_4_scaling_beta")
+                            {
+                                Some(*s)
+                            } else {
+                                None
+                            };
                             Self(RotaryEmbedding {
                                 sin: embed.sin,
                                 cos: embed.cos,
@@ -315,6 +367,10 @@ impl ScalingRotaryEmbedding {
                                 } else {
                                     None
                                 },
+                                original_max_position_embeddings: Some(
+                                    original_max_position_embeddings as usize,
+                                ),
+                                llama_4_scaling_beta,
                             })
                         }
                         _ => {
@@ -329,7 +385,9 @@ impl ScalingRotaryEmbedding {
                 candle_core::bail!("rope_type must be a string");
             }
         } else {
-            Ok(Self(RotaryEmbedding::new(dtype, cfg, dev, is_rope_i)?))
+            Ok(Self(RotaryEmbedding::new(
+                dtype, cfg, dev, is_rope_i, None, None,
+            )?))
         }
     }
 
