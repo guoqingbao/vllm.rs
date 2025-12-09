@@ -1,12 +1,13 @@
 // src/models/gemma3.rs
 
-use crate::models::layers::attention::Attention;
+use crate::models::layers::attention::{Attention, NaiveAttention};
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::others::{conv2d_no_bias, embedding, rms_norm, NormX};
-use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
+use crate::models::layers::others::{conv2d_no_bias, embedding, rms_norm, AvgPool2d, NormX};
+use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
+use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -23,6 +24,7 @@ use std::sync::Arc;
 //  Vision Components (SigLIP-like)
 // =========================================================================
 
+#[allow(dead_code)]
 struct Gemma3VisionEmbeddings {
     patch_embedding: Conv2d,
     position_embedding: candle_nn::Embedding,
@@ -67,7 +69,7 @@ impl Gemma3VisionEmbeddings {
         // pixel_values: [Batch, Channels, Height, Width]
         let patch_embeds = self.patch_embedding.forward(pixel_values)?;
         // Flatten: [Batch, EmbedDim, H', W'] -> [Batch, EmbedDim, NumPatches]
-        let (b, c, h, w) = patch_embeds.dims4()?;
+        let (b, _, _, _) = patch_embeds.dims4()?;
         let patch_embeds = patch_embeds.flatten_from(2)?.transpose(1, 2)?;
 
         // Create position ids
@@ -80,11 +82,23 @@ impl Gemma3VisionEmbeddings {
     }
 }
 
+struct DummyRotaryEmbedding {}
+
+impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
+    fn apply_rotary_emb_qkv(&self, q: &Tensor, k: &Tensor, _: &Tensor) -> Result<(Tensor, Tensor)> {
+        Ok((q.to_owned(), k.to_owned()))
+    }
+}
+
+unsafe impl Send for DummyRotaryEmbedding {}
+unsafe impl Sync for DummyRotaryEmbedding {}
+
 struct Gemma3VisionEncoderLayer {
-    self_attn: Attention,
+    self_attn: NaiveAttention,
     mlp: MLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
+    rotary_emb: Arc<DummyRotaryEmbedding>,
 }
 
 impl Gemma3VisionEncoderLayer {
@@ -92,19 +106,18 @@ impl Gemma3VisionEncoderLayer {
         let is_qvar_builder = vb.is_qvar_builder();
 
         // Vision Attention usually doesn't need rotary embeddings, just absolute pos provided in embeddings
-        // We reuse your Attention struct but might need to disable RoPE for vision if the struct enforces it.
         // For this snippet, assuming Attention can handle "None" for RoPE or we pass a dummy.
-        // Note: Real implementations often use a separate VisionAttention struct,
-        // but for style consistency we try to reuse.
-        let self_attn = Attention::new(
+        let self_attn = NaiveAttention::new(
             if is_qvar_builder {
                 vb.clone()
             } else {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            Arc::new(ScalingRotaryEmbedding::new_dummy(dtype, &vb.device())?), // Dummy RoPE
-            &config.to_generic_config(), // Helper to map vision config to generic
+            config.vision_config.num_attention_heads,
+            config.vision_config.hidden_size,
+            config.text_config.head_dim,
+            None,
             dtype,
         )?;
 
@@ -143,6 +156,7 @@ impl Gemma3VisionEncoderLayer {
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            rotary_emb: Arc::new(DummyRotaryEmbedding {}),
         })
     }
 
@@ -151,7 +165,8 @@ impl Gemma3VisionEncoderLayer {
         let xs = self.input_layernorm.forward(xs)?;
         // Vision encoder is usually bidirectional, no causal mask
         // We pass None for mask to imply full attention
-        let attn_output = self.self_attn.forward(&xs, None)?;
+        let trait_obj: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+        let attn_output = self.self_attn.forward(&xs, &trait_obj, &None, None)?;
         let xs = (attn_output + residual)?;
 
         let residual = &xs;
@@ -207,7 +222,7 @@ impl Gemma3VisionTransformer {
 struct Gemma3MultiModalProjector {
     projector: ReplicatedLinear,
     norm: NormX,
-    pool: AvgPool2d,
+    avg_pool: AvgPool2d,
     patches: usize,
 }
 
@@ -235,12 +250,12 @@ impl Gemma3MultiModalProjector {
         Ok(Self {
             projector,
             norm,
-            pool,
+            avg_pool,
             patches,
         })
     }
 
-    fn forward(&self, xs: &Tensor, image_sizes: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
         let (bs, _, seqlen) = xs.dims3()?;
         let mut out = xs.transpose(1, 2)?;
         out = out
@@ -276,6 +291,7 @@ impl Gemma3DecoderLayer {
         comm: Rc<Comm>,
         rotary_emb: Arc<ScalingRotaryEmbedding>,
         config: &Gemma3Config,
+        g_cfg: &Config,
         layer_idx: usize,
         dtype: DType,
     ) -> Result<Self> {
@@ -289,8 +305,6 @@ impl Gemma3DecoderLayer {
             None
         };
 
-        // Note: You must ensure your `Attention` struct supports logit_softcapping
-        // via a config injection or a dedicated field.
         let self_attn = Attention::new(
             if is_qvar_builder {
                 vb.clone()
@@ -298,8 +312,8 @@ impl Gemma3DecoderLayer {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            rotary_emb,
-            &config.to_generic_config_with_softcap(cfg.attn_logit_softcapping),
+            Some(rotary_emb),
+            &g_cfg,
             dtype,
         )?;
 
@@ -397,7 +411,7 @@ impl Gemma3DecoderLayer {
 // =========================================================================
 //  Main Model
 // =========================================================================
-
+#[allow(dead_code)]
 pub struct Gemma3ForConditionalGeneration {
     // Vision
     vision_tower: Option<Gemma3VisionTransformer>,
@@ -412,6 +426,7 @@ pub struct Gemma3ForConditionalGeneration {
     // Metadata
     device: Device,
     config: Gemma3Config,
+    g_cfg: Config,
     dtype: DType,
     vocab_size: usize,
     is_qvar_builder: bool,
@@ -422,6 +437,7 @@ impl Gemma3ForConditionalGeneration {
         vb: &VarBuilderX,
         comm: Rc<Comm>,
         config: &Gemma3Config,
+        g_cfg: Config,
         dtype: DType,
         is_rope_i: bool,
         device: &Device,
@@ -477,7 +493,7 @@ impl Gemma3ForConditionalGeneration {
             } else {
                 dtype
             },
-            &config.to_generic_config(),
+            &g_cfg,
             &vb.device(),
             is_rope_i,
         )?);
@@ -490,6 +506,7 @@ impl Gemma3ForConditionalGeneration {
                 comm.clone(),
                 rotary_emb.clone(),
                 config,
+                &g_cfg,
                 i,
                 dtype,
             )?;
@@ -530,6 +547,7 @@ impl Gemma3ForConditionalGeneration {
             dtype,
             vocab_size,
             is_qvar_builder,
+            g_cfg,
         })
     }
 
@@ -649,7 +667,7 @@ impl Gemma3ForConditionalGeneration {
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
 
-        let mut xs = self.norm.forward(&xs)?;
+        let xs = self.norm.forward(&xs)?;
 
         // Final Logit Softcapping (Gemma Specific)
         let logits = if self.is_qvar_builder {

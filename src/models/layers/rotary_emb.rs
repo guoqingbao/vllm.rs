@@ -2,6 +2,16 @@ use crate::utils::config::Config;
 use crate::utils::config::{RopeScaling, ScalingValue};
 use candle_core::{DType, Device, Result, Tensor, D};
 use either::Either;
+
+pub trait ApplyRotaryEmbedding {
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        positions: &Tensor,
+    ) -> Result<(Tensor, Tensor)>;
+}
+
 #[derive(Debug, Clone)]
 pub struct RotaryEmbedding {
     sin: Tensor,
@@ -52,8 +62,10 @@ impl RotaryEmbedding {
             llama_4_scaling_beta,
         })
     }
+}
 
-    pub fn apply_rotary_emb_qkv(
+impl ApplyRotaryEmbedding for RotaryEmbedding {
+    fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
         k: &Tensor,
@@ -91,7 +103,6 @@ impl RotaryEmbedding {
         Ok((q_embed, k_embed))
     }
 }
-
 fn calculate_default_inv_freq(base: f64, dim: usize) -> Vec<f32> {
     (0..dim)
         .step_by(2)

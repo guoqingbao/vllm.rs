@@ -40,7 +40,7 @@ impl Qwen3DecoderLayer {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            rotary_emb,
+            Some(rotary_emb),
             config,
             dtype,
         )?;

@@ -122,6 +122,8 @@ pub struct Config {
     pub vocab_size: Option<usize>,
     pub rope_theta: Option<f64>,
     pub attention_bias: Option<bool>,
+    pub attn_logit_softcapping: Option<f64>,
+    pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
     pub eos_token_id: Option<EosTokenId>,

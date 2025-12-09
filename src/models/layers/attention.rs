@@ -1,8 +1,8 @@
 use crate::models::layers::distributed::{
-    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
+    Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
-use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
+use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
@@ -22,7 +22,8 @@ pub struct Attention {
     num_kv_heads: usize,
     head_dim: usize,
     attn: PagedAttention,
-    rotary_emb: Arc<ScalingRotaryEmbedding>,
+    softcapping: Option<f64>,
+    rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
     dtype: DType,
     do_llama4_attn_scale: bool,
 }
@@ -31,7 +32,7 @@ impl Attention {
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
-        rotary_emb: Arc<ScalingRotaryEmbedding>,
+        rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
         config: &Config,
         dtype: DType,
     ) -> Result<Self> {
@@ -159,8 +160,13 @@ impl Attention {
         let attention_heads = num_heads / comm.world_size();
         let kv_heads = num_kv_heads / comm.world_size();
 
-        let do_llama4_attn_scale = rotary_emb.get_original_max_position_embeddings().is_some()
-            && rotary_emb.get_llama_4_scaling_beta().is_some();
+        let do_llama4_attn_scale = if let Some(rotary_emb) = &rotary_emb {
+            rotary_emb.get_original_max_position_embeddings().is_some()
+                && rotary_emb.get_llama_4_scaling_beta().is_some()
+        } else {
+            false
+        };
+
         Ok(Self {
             q_proj,
             k_proj,
@@ -182,6 +188,7 @@ impl Attention {
                 None,
                 config.fp8_kvcache.unwrap_or(false),
             )?,
+            softcapping: config.attn_logit_softcapping,
             dtype,
             do_llama4_attn_scale,
         })
@@ -228,7 +235,11 @@ impl Attention {
         };
 
         // Apply rotary embeddings
-        let (q, k) = self.rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?;
+        let (q, k) = if let Some(rotary_emb) = &self.rotary_emb {
+            rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?
+        } else {
+            (q, k)
+        };
 
         let (mut q, k) = if q.dtype() != self.dtype {
             let q = q.to_dtype(self.dtype)?;
@@ -245,16 +256,16 @@ impl Attention {
         };
 
         if self.do_llama4_attn_scale {
-            use crate::utils::get_llama4_attn_scale;
-            let scale = get_llama4_attn_scale(
-                &positions,
-                self.rotary_emb.get_llama_4_scaling_beta().unwrap(),
-                self.rotary_emb
-                    .get_original_max_position_embeddings()
-                    .unwrap() as f64,
-            )?
-            .to_dtype(q.dtype())?;
-            q = q.broadcast_mul(&scale)?;
+            if let Some(rotary_emb) = &self.rotary_emb {
+                use crate::utils::get_llama4_attn_scale;
+                let scale = get_llama4_attn_scale(
+                    &positions,
+                    rotary_emb.get_llama_4_scaling_beta().unwrap(),
+                    rotary_emb.get_original_max_position_embeddings().unwrap() as f64,
+                )?
+                .to_dtype(q.dtype())?;
+                q = q.broadcast_mul(&scale)?;
+            }
         }
 
         let y = self
@@ -267,10 +278,151 @@ impl Attention {
                 cache.map(|(k_, _)| k_.clone()),
                 cache.map(|(_, v_)| v_.clone()),
                 input_metadata,
-                None,
+                self.softcapping,
             )?
             .reshape((seq_len, ()))?;
 
         self.o_proj.forward(&y.to_dtype(xs.dtype())?)
+    }
+}
+
+pub struct NaiveAttention {
+    q_proj: ReplicatedLinear,
+    k_proj: ReplicatedLinear,
+    v_proj: ReplicatedLinear,
+    o_proj: ReplicatedLinear,
+    scale: f64,
+    num_heads: usize,
+    head_dim: usize,
+    softcapping: Option<f64>,
+}
+
+impl NaiveAttention {
+    pub fn new(
+        vb: VarBuilderX,
+        _comm: Rc<Comm>,
+        num_heads: usize,
+        hidden_size: usize,
+        head_dim: usize,
+        softcapping: Option<f64>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let key_map: HashMap<&str, &str> = [
+            ("q_proj", "attn_q"),
+            ("k_proj", "attn_k"),
+            ("v_proj", "attn_v"),
+            ("o_proj", "attn_output"),
+        ]
+        .iter()
+        .cloned()
+        .collect();
+        let is_qvar_builder = vb.is_qvar_builder();
+
+        let q_proj = ReplicatedLinear::load_no_bias(
+            hidden_size,
+            hidden_size,
+            if is_qvar_builder {
+                vb.pp(key_map["q_proj"])
+            } else {
+                vb.pp("q_proj")
+            },
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let k_proj = ReplicatedLinear::load_no_bias(
+            hidden_size,
+            hidden_size,
+            if is_qvar_builder {
+                vb.pp(key_map["k_proj"])
+            } else {
+                vb.pp("k_proj")
+            },
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let v_proj = ReplicatedLinear::load_no_bias(
+            hidden_size,
+            hidden_size,
+            if is_qvar_builder {
+                vb.pp(key_map["v_proj"])
+            } else {
+                vb.pp("v_proj")
+            },
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let o_proj = ReplicatedLinear::load_no_bias(
+            hidden_size,
+            hidden_size,
+            if is_qvar_builder {
+                vb.pp(key_map["o_proj"])
+            } else {
+                vb.pp("o_proj")
+            },
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let scale = (head_dim as f64).powf(-0.5);
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            scale,
+            num_heads,
+            head_dim,
+            softcapping,
+        })
+    }
+
+    pub fn forward(
+        &self,
+        xs: &Tensor,
+        emb: &Arc<dyn ApplyRotaryEmbedding>,
+        positions: &Option<Tensor>,
+        mask: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let (b, seq_len, _) = xs.dims3()?;
+        let q = self.q_proj.forward(xs)?;
+        let k = self.k_proj.forward(xs)?;
+        let v = self.v_proj.forward(xs)?;
+
+        let shape = (b, seq_len, self.num_heads, self.head_dim);
+        let q = q.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+        let k = k.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+        let v = v.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+
+        let (q, k) = if let Some(positions) = positions {
+            emb.apply_rotary_emb_qkv(&q, &k, positions)?
+        } else {
+            (q, k)
+        };
+        let mut attn = (q.matmul(&k.t()?)? * self.scale)?;
+
+        if let Some(sc) = self.softcapping {
+            attn = ((attn / sc)?.tanh()? * sc)?;
+        }
+
+        let attn = match mask {
+            None => attn,
+            Some(mask) => attn.broadcast_add(mask)?,
+        };
+
+        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+
+        self.o_proj.forward(
+            &attn
+                .matmul(&v)?
+                .transpose(1, 2)?
+                .reshape((b, seq_len, ()))?,
+        )
     }
 }

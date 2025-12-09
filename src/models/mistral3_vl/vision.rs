@@ -1,151 +1,19 @@
 use super::config::VisionConfig;
-use crate::models::layers::distributed::{
-    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
-};
+use crate::models::layers::attention::NaiveAttention;
+use crate::models::layers::distributed::Comm;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{conv2d_no_bias, rms_norm, NormX};
+use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use std::collections::HashMap;
 use std::rc::Rc;
-
-struct Attention {
-    q_proj: TensorParallelColumnLinear,
-    k_proj: TensorParallelColumnLinear,
-    v_proj: TensorParallelColumnLinear,
-    o_proj: TensorParallelRowLinear,
-    scale: f64,
-    num_heads: usize,
-    head_dim: usize,
-}
-
-impl Attention {
-    fn new(vb: VarBuilderX, comm: Rc<Comm>, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-        let num_heads = cfg.num_attention_heads;
-        let head_dim = cfg.head_dim();
-        let key_map: HashMap<&str, &str> = [
-            ("q_proj", "attn_q"),
-            ("k_proj", "attn_k"),
-            ("v_proj", "attn_v"),
-            ("o_proj", "attn_output"),
-        ]
-        .iter()
-        .cloned()
-        .collect();
-        let is_qvar_builder = vb.is_qvar_builder();
-
-        let q_proj = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            hidden_size,
-            false,
-            if is_qvar_builder {
-                vb.pp(key_map["q_proj"])
-            } else {
-                vb.pp("q_proj")
-            },
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let k_proj = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            hidden_size,
-            false,
-            if is_qvar_builder {
-                vb.pp(key_map["k_proj"])
-            } else {
-                vb.pp("k_proj")
-            },
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let v_proj = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            hidden_size,
-            false,
-            if is_qvar_builder {
-                vb.pp(key_map["v_proj"])
-            } else {
-                vb.pp("v_proj")
-            },
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let o_proj = TensorParallelRowLinear::load_with_hints(
-            hidden_size,
-            hidden_size,
-            if is_qvar_builder {
-                vb.pp(key_map["o_proj"])
-            } else {
-                vb.pp("o_proj")
-            },
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let scale = (head_dim as f64).powf(-0.5);
-        Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            scale,
-            num_heads,
-            head_dim,
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        emb: &RotaryEmbedding,
-        subsampled_positions: Option<&Tensor>,
-        mask: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let (b, patches, _) = xs.dims3()?;
-        let q = self.q_proj.forward(xs)?;
-        let k = self.k_proj.forward(xs)?;
-        let v = self.v_proj.forward(xs)?;
-
-        let shape = (b, patches, self.num_heads, self.head_dim);
-        let q = q.reshape(shape)?.transpose(1, 2)?.contiguous()?;
-        let k = k.reshape(shape)?.transpose(1, 2)?.contiguous()?;
-        let v = v.reshape(shape)?.transpose(1, 2)?.contiguous()?;
-
-        let (q, k) = emb.apply_rotary_emb_qkv(&q, &k, subsampled_positions)?;
-        let attn = (q.matmul(&k.t()?)? * self.scale)?;
-
-        let attn = match mask {
-            None => attn,
-            Some(mask) => attn.broadcast_add(mask)?,
-        };
-
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-
-        self.o_proj.forward(
-            &attn
-                .matmul(&v)?
-                .transpose(1, 2)?
-                .reshape((b, patches, ()))?,
-        )
-    }
-}
+use std::sync::Arc;
 
 struct AttentionLayer {
     norm: NormX,
     mlp: MLP,
-    attention: Attention,
+    attention: NaiveAttention,
     post_norm: NormX,
 }
 
@@ -179,7 +47,16 @@ impl AttentionLayer {
             dtype,
             "",
         )?;
-        let attention = Attention::new(vb.pp("attention"), comm.clone(), cfg, dtype)?;
+
+        let attention = NaiveAttention::new(
+            vb.pp("attention"),
+            comm.clone(),
+            cfg.num_attention_heads,
+            cfg.hidden_size,
+            cfg.head_dim(),
+            None,
+            dtype,
+        )?;
         let post_norm = rms_norm(
             cfg.hidden_size,
             1e-5,
@@ -201,8 +78,8 @@ impl AttentionLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        rotary_embed: &RotaryEmbedding,
-        subsampled_positions: Option<&Tensor>,
+        rotary_embed: &Arc<dyn ApplyRotaryEmbedding>,
+        subsampled_positions: &Option<Tensor>,
         mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let residual = xs;
@@ -237,8 +114,8 @@ impl Transformer {
     fn forward(
         &self,
         xs: &Tensor,
-        rotary_emb: &RotaryEmbedding,
-        subsampled_positions: Option<&Tensor>,
+        rotary_emb: &Arc<dyn ApplyRotaryEmbedding>,
+        subsampled_positions: &Option<Tensor>,
         mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let mut xs = xs.clone();
@@ -285,33 +162,35 @@ impl RotaryEmbedding {
         let sin = inv_freq.sin()?.to_dtype(dtype)?;
         Ok(Self { cos, sin })
     }
+}
 
+impl ApplyRotaryEmbedding for RotaryEmbedding {
     fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
         k: &Tensor,
-        subsampled_positions: Option<&Tensor>,
+        positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let (_b_sz, _h, _seq_len, _n_embd) = q.dims4()?;
-        let (cos, sin) = match subsampled_positions {
-            None => (&self.cos, &self.sin),
-            Some(pos) => (
-                &self.cos.index_select(pos, 0)?,
-                &self.sin.index_select(pos, 0)?,
-            ),
-        };
+        let (cos, sin) = (
+            &self.cos.index_select(positions, 0)?,
+            &self.sin.index_select(positions, 0)?,
+        );
         let q_embed = candle_nn::rotary_emb::rope(q, cos, sin)?;
         let k_embed = candle_nn::rotary_emb::rope(k, cos, sin)?;
         Ok((q_embed, k_embed))
     }
 }
 
+unsafe impl Send for RotaryEmbedding {}
+unsafe impl Sync for RotaryEmbedding {}
+
 #[allow(unused)]
 pub struct VisionModel {
     patch_conv: candle_nn::Conv2d,
     ln_pre: NormX,
     transformer: Transformer,
-    patch_positional_embedding: RotaryEmbedding,
+    patch_positional_embedding: Arc<RotaryEmbedding>,
     max_image_width: u32,
     patch_size: usize,
     dtype: DType,
@@ -337,8 +216,11 @@ impl VisionModel {
             dtype,
         )?;
         let transformer = Transformer::new(vb.pp("transformer"), comm, cfg, dtype)?;
-        let patch_positional_embedding =
-            RotaryEmbedding::new(cfg, vb.pp("patch_positional_embedding"), dtype)?;
+        let patch_positional_embedding = Arc::new(RotaryEmbedding::new(
+            cfg,
+            vb.pp("patch_positional_embedding"),
+            dtype,
+        )?);
         let max_image_width = (cfg.image_size / cfg.patch_size) as u32;
         Ok(Self {
             patch_conv,
@@ -455,10 +337,11 @@ impl VisionModel {
             &patch_embeds,
         )?;
 
+        let trait_obj: Arc<dyn ApplyRotaryEmbedding> = self.patch_positional_embedding.clone();
         self.transformer.forward(
             &patch_embeds,
-            &self.patch_positional_embedding,
-            subsampled_positions.as_ref(),
+            &trait_obj,
+            &subsampled_positions,
             Some(&attention_mask),
         )
     }

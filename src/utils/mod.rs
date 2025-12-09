@@ -443,6 +443,8 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         vocab_size,
         rope_theta: Some(rope_freq_base as f64),
         attention_bias: None,
+        attn_logit_softcapping: None,
+        final_logit_softcapping: None,
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
         eos_token_id: Some(eos_token_id),
