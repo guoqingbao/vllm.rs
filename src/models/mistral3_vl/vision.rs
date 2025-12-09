@@ -1,7 +1,5 @@
 use super::config::VisionConfig;
-use crate::models::layers::distributed::{
-    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
-};
+use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::VarBuilderX;
@@ -11,17 +9,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 struct Attention {
-    q_proj: TensorParallelColumnLinear,
-    k_proj: TensorParallelColumnLinear,
-    v_proj: TensorParallelColumnLinear,
-    o_proj: TensorParallelRowLinear,
+    q_proj: ReplicatedLinear,
+    k_proj: ReplicatedLinear,
+    v_proj: ReplicatedLinear,
+    o_proj: ReplicatedLinear,
     scale: f64,
     num_heads: usize,
     head_dim: usize,
 }
 
 impl Attention {
-    fn new(vb: VarBuilderX, comm: Rc<Comm>, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
+    fn new(vb: VarBuilderX, _: Rc<Comm>, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let head_dim = cfg.head_dim();
@@ -36,52 +34,46 @@ impl Attention {
         .collect();
         let is_qvar_builder = vb.is_qvar_builder();
 
-        let q_proj = TensorParallelColumnLinear::load_with_hints(
+        let q_proj = ReplicatedLinear::load_no_bias(
             hidden_size,
             hidden_size,
-            false,
             if is_qvar_builder {
                 vb.pp(key_map["q_proj"])
             } else {
                 vb.pp("q_proj")
             },
-            comm.clone(),
             &None,
             &None,
             dtype,
         )?;
 
-        let k_proj = TensorParallelColumnLinear::load_with_hints(
+        let k_proj = ReplicatedLinear::load_no_bias(
             hidden_size,
             hidden_size,
-            false,
             if is_qvar_builder {
                 vb.pp(key_map["k_proj"])
             } else {
                 vb.pp("k_proj")
             },
-            comm.clone(),
             &None,
             &None,
             dtype,
         )?;
 
-        let v_proj = TensorParallelColumnLinear::load_with_hints(
+        let v_proj = ReplicatedLinear::load_no_bias(
             hidden_size,
             hidden_size,
-            false,
             if is_qvar_builder {
                 vb.pp(key_map["v_proj"])
             } else {
                 vb.pp("v_proj")
             },
-            comm.clone(),
             &None,
             &None,
             dtype,
         )?;
 
-        let o_proj = TensorParallelRowLinear::load_with_hints(
+        let o_proj = ReplicatedLinear::load_no_bias(
             hidden_size,
             hidden_size,
             if is_qvar_builder {
@@ -89,7 +81,6 @@ impl Attention {
             } else {
                 vb.pp("o_proj")
             },
-            comm.clone(),
             &None,
             &None,
             dtype,
