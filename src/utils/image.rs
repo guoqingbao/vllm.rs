@@ -48,6 +48,11 @@ pub fn get_tensor_raw_data(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     Ok((bytes, shape))
 }
 
+pub fn bytes_to_tensor_f32(bytes: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
+    let floats: &[f32] = bytemuck::cast_slice(bytes);
+    Tensor::from_slice(floats, shape, device)
+}
+
 fn image_resize(
     image: &DynamicImage,
     mut height: usize,

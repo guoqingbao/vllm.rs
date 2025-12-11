@@ -11,6 +11,7 @@ pub mod heartbeat;
 pub mod image;
 pub mod logits_processor;
 pub mod progress;
+use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
 use crate::utils::config::{RopeScaling, ScalingValue};
@@ -468,7 +469,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 #[derive(Debug, serde::Deserialize)]
 struct DummyMultiModelConfig {
     architectures: Option<Vec<String>>,
-    text_config: Option<Config>,
+    text_config: Option<serde_json::Value>,
     vision_config: Option<serde_json::Value>,
 }
 
@@ -501,7 +502,26 @@ pub fn init_config_tokenizer(
         let mut config: Config = if let Ok(cfg) = is_multi_model(&config_path) {
             if cfg.text_config.is_some() && cfg.vision_config.is_some() {
                 crate::log_warn!("Multimodel model {:?} detected!", cfg.architectures);
-                let mut config: Config = cfg.text_config.unwrap();
+                let Some(mut config_value) = cfg.text_config else {
+                    panic!("Not supported model type {:?}", cfg.architectures);
+                };
+
+                let mut config: Config = match cfg.architectures.as_ref().unwrap()[0].as_str() {
+                    "Gemma3ForConditionalGeneration" => {
+                        let gemma3_cfg: Gemma3Config = serde_json::from_slice(
+                            &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
+                        )
+                        .map_err(candle_core::Error::wrap)?;
+                        config_value = serde_json::to_value(&gemma3_cfg.text_config)
+                            .map_err(candle_core::Error::wrap)?;
+                        let mut config: Config = serde_json::from_value(config_value)
+                            .map_err(candle_core::Error::wrap)?;
+                        config.eos_token_id = gemma3_cfg.eos_token_id;
+                        config
+                    }
+                    _ => serde_json::from_value(config_value).map_err(candle_core::Error::wrap)?,
+                };
+
                 config.architectures = cfg.architectures.clone();
                 config.is_multi_model = Some(true);
                 config.extra_config_json =
@@ -780,6 +800,7 @@ pub fn get_arch_rope(
         ("llama", true),
         ("mistral", true),
         ("mistral3", false),
+        ("Gemma3ForConditionalGeneration", true),
     ]
     .iter()
     .cloned()
@@ -832,6 +853,10 @@ pub fn get_arch_rope(
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
             ModelType::GLM4,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "Gemma3ForConditionalGeneration" => (
+            ModelType::Gemma3,
+            "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
         ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
     };

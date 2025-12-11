@@ -1,18 +1,21 @@
 // src/models/gemma3.rs
 
+use crate::models::gemma3::config::VisionConfig;
 use crate::models::layers::attention::{Attention, NaiveAttention};
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
+use crate::models::layers::linear::LinearX;
 use crate::models::layers::mask::get_attention_causal_mask;
-use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{conv2d_no_bias, embedding, rms_norm, AvgPool2d, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
-use crate::models::layers::VarBuilderX;
+use crate::models::layers::{mlp::MLP as TextMLP, VarBuilderX};
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig};
+use candle_nn::{Activation, Conv2d, Conv2dConfig};
+use either::Either;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 pub mod config;
 use attention_rs::ops::NonZeroOp;
 use config::Gemma3Config;
@@ -93,6 +96,48 @@ impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
 unsafe impl Send for DummyRotaryEmbedding {}
 unsafe impl Sync for DummyRotaryEmbedding {}
 
+pub struct MLP {
+    fc1: ReplicatedLinear,
+    fc2: ReplicatedLinear,
+    act: Activation,
+}
+
+impl MLP {
+    pub fn new(vb: VarBuilderX, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
+        let fc1 = ReplicatedLinear::load_b(
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            true,
+            vb.pp("fc1"),
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let fc2 = ReplicatedLinear::load_b(
+            cfg.intermediate_size,
+            cfg.hidden_size,
+            true,
+            vb.pp("fc2"),
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        Ok(Self {
+            fc1,
+            fc2,
+            act: cfg.hidden_act,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate_up = self.fc1.forward(xs)?;
+        let down = self.act.forward(&gate_up)?;
+        self.fc2.forward(&down)
+    }
+}
+
 struct Gemma3VisionEncoderLayer {
     self_attn: NaiveAttention,
     mlp: MLP,
@@ -107,6 +152,8 @@ impl Gemma3VisionEncoderLayer {
 
         // Vision Attention usually doesn't need rotary embeddings, just absolute pos provided in embeddings
         // For this snippet, assuming Attention can handle "None" for RoPE or we pass a dummy.
+        let mut key_mappings = HashMap::<String, String>::new();
+        key_mappings.insert("o_proj".into(), "out_proj".into());
         let self_attn = NaiveAttention::new(
             if is_qvar_builder {
                 vb.clone()
@@ -119,36 +166,25 @@ impl Gemma3VisionEncoderLayer {
             config.text_config.head_dim,
             None,
             dtype,
+            key_mappings,
         )?;
 
-        let mlp = MLP::new(
-            if is_qvar_builder {
-                vb.clone()
-            } else {
-                vb.pp("mlp").clone()
-            },
-            comm.clone(),
-            config.vision_config.hidden_size,
-            config.vision_config.intermediate_size,
-            &None, // Vision usually not quantized in the same way
-            &None,
-            false,
-            dtype,
-            "gelu_pytorch_tanh", // Gemma often uses approximation
-        )?;
+        let mlp = MLP::new(vb.pp("mlp").clone(), &config.vision_config, dtype)?;
 
         let input_layernorm = rms_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
-            vb.pp("input_layernorm"),
+            vb.pp("layer_norm1"),
             dtype,
+            false,
         )?;
 
         let post_attention_layernorm = rms_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
-            vb.pp("post_attention_layernorm"),
+            vb.pp("layer_norm2"),
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -201,6 +237,7 @@ impl Gemma3VisionTransformer {
             config.vision_config.layer_norm_eps,
             vb.pp("post_layernorm"),
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -220,7 +257,7 @@ impl Gemma3VisionTransformer {
 }
 
 struct Gemma3MultiModalProjector {
-    projector: ReplicatedLinear,
+    projector: LinearX,
     norm: NormX,
     avg_pool: AvgPool2d,
     patches: usize,
@@ -228,19 +265,27 @@ struct Gemma3MultiModalProjector {
 
 impl Gemma3MultiModalProjector {
     fn new(vb: VarBuilderX, config: &Gemma3Config, dtype: DType) -> Result<Self> {
-        let projector = ReplicatedLinear::load_no_bias(
-            config.vision_config.hidden_size,
-            config.text_config.hidden_size,
-            vb.pp("linear"),
-            &None,
-            &None,
-            dtype,
-        )?;
+        let ws = match &vb.0 {
+            Either::Left(v) => v.get(
+                (
+                    config.vision_config.hidden_size,
+                    config.text_config.hidden_size,
+                ),
+                "mm_input_projection_weight",
+            )?,
+            _ => {
+                todo!()
+            }
+        }
+        .to_dtype(dtype)?;
+
+        let projector = LinearX::new(ws, None, &None);
         let norm = rms_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
             vb.pp("mm_soft_emb_norm"),
             dtype,
+            true,
         )?;
 
         let patches = config.vision_config.image_size / config.vision_config.patch_size;
@@ -277,7 +322,7 @@ impl Gemma3MultiModalProjector {
 
 pub struct Gemma3DecoderLayer {
     self_attn: Attention,
-    mlp: MLP,
+    mlp: TextMLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     pre_feedforward_layernorm: NormX,
@@ -317,7 +362,7 @@ impl Gemma3DecoderLayer {
             dtype,
         )?;
 
-        let mlp = MLP::new(
+        let mlp = TextMLP::new(
             if is_qvar_builder {
                 vb.clone()
             } else {
@@ -326,11 +371,12 @@ impl Gemma3DecoderLayer {
             comm.clone(),
             cfg.hidden_size,
             cfg.intermediate_size,
+            &cfg.hidden_activation,
             &None,
             &None,
             false,
             dtype,
-            "gelu_pytorch_tanh", // Gemma standard
+            "",
         )?;
 
         let input_layernorm = rms_norm(
@@ -338,6 +384,7 @@ impl Gemma3DecoderLayer {
             cfg.rms_norm_eps,
             vb.pp("input_layernorm"),
             dtype,
+            true,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -345,6 +392,7 @@ impl Gemma3DecoderLayer {
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
             dtype,
+            true,
         )?;
 
         let pre_feedforward_layernorm = rms_norm(
@@ -352,12 +400,14 @@ impl Gemma3DecoderLayer {
             cfg.rms_norm_eps,
             vb.pp("pre_feedforward_layernorm"),
             dtype,
+            true,
         )?;
         let post_feedforward_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_feedforward_layernorm"),
             dtype,
+            true,
         )?;
 
         Ok(Self {
@@ -384,11 +434,13 @@ impl Gemma3DecoderLayer {
         let xs = self.input_layernorm.forward(xs)?;
 
         // Select appropriate mask based on layer type
-        let mask = if self.sliding_window.is_some() {
+        let mask = if sliding_attention_mask.is_some() {
             sliding_attention_mask
         } else {
             attention_mask
         };
+
+        //TODO: pass sliding mask to attention and perform local rope
 
         let attn_output = self
             .self_attn
@@ -429,6 +481,7 @@ pub struct Gemma3ForConditionalGeneration {
     g_cfg: Config,
     dtype: DType,
     vocab_size: usize,
+    embed_scale: f64,
     is_qvar_builder: bool,
 }
 
@@ -436,13 +489,19 @@ impl Gemma3ForConditionalGeneration {
     pub fn new(
         vb: &VarBuilderX,
         comm: Rc<Comm>,
-        config: &Gemma3Config,
-        g_cfg: Config,
+        g_cfg: &Config,
         dtype: DType,
         is_rope_i: bool,
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
+        assert!(
+            g_cfg.extra_config_json.is_some(),
+            "Invalid multimodel config file!"
+        );
+        let config: Gemma3Config = serde_json::from_str(g_cfg.extra_config_json.as_ref().unwrap())
+            .map_err(candle_core::Error::wrap)?;
+
         let reporter = progress_reporter.clone();
         let is_qvar_builder = vb.is_qvar_builder();
         let text_cfg = &config.text_config;
@@ -455,7 +514,7 @@ impl Gemma3ForConditionalGeneration {
             if is_qvar_builder {
                 vb.pp("model.embed_tokens")
             } else {
-                vb.pp("model.embed_tokens")
+                vb.pp("language_model.model.embed_tokens")
             },
             if is_qvar_builder || text_cfg.quant.is_some() {
                 DType::F32
@@ -464,12 +523,14 @@ impl Gemma3ForConditionalGeneration {
             },
         )?;
 
+        let embed_scale = (config.text_config.hidden_size as f64).sqrt();
+
         // 2. Vision & Projector (Optional load based on config)
         let vision_tower = if config.has_vision {
             Some(Gemma3VisionTransformer::new(
-                vb.pp("model.vision_tower"),
+                vb.pp("vision_tower.vision_model"),
                 comm.clone(),
-                config,
+                &config,
                 dtype,
             )?)
         } else {
@@ -478,8 +539,8 @@ impl Gemma3ForConditionalGeneration {
 
         let multi_modal_projector = if config.has_vision {
             Some(Gemma3MultiModalProjector::new(
-                vb.pp("model.multi_modal_projector"),
-                config,
+                vb.pp("multi_modal_projector"),
+                &config,
                 dtype,
             )?)
         } else {
@@ -502,10 +563,10 @@ impl Gemma3ForConditionalGeneration {
         let mut layers = Vec::new();
         for i in 0..text_cfg.num_hidden_layers {
             let layer = Gemma3DecoderLayer::new(
-                vb.pp(&format!("model.layers.{}", i)),
+                vb.pp(&format!("language_model.model.layers.{}", i)),
                 comm.clone(),
                 rotary_emb.clone(),
-                config,
+                &config,
                 &g_cfg,
                 i,
                 dtype,
@@ -518,15 +579,16 @@ impl Gemma3ForConditionalGeneration {
         let norm = rms_norm(
             text_cfg.hidden_size,
             text_cfg.rms_norm_eps,
-            vb.pp("model.norm"),
+            vb.pp("language_model.model.norm"),
             dtype,
+            true,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(
             text_cfg.hidden_size,
             vocab_size,
             if text_cfg.tie_word_embeddings {
-                vb.pp("model.embed_tokens")
+                vb.pp("language_model.model.embed_tokens")
             } else {
                 vb.pp("lm_head")
             },
@@ -546,8 +608,9 @@ impl Gemma3ForConditionalGeneration {
             config: config.clone(),
             dtype,
             vocab_size,
+            embed_scale,
             is_qvar_builder,
-            g_cfg,
+            g_cfg: g_cfg.clone(),
         })
     }
 
@@ -579,8 +642,7 @@ impl Gemma3ForConditionalGeneration {
     ) -> Result<Tensor> {
         let text_cfg = &self.config.text_config;
         // 1. Prepare Text Embeddings (Scaled)
-        let scale = (text_cfg.hidden_size as f64).sqrt();
-        let mut xs = (self.embed_tokens.forward(input_ids)? * scale)?;
+        let mut xs = (self.embed_tokens.forward(input_ids)? * self.embed_scale)?;
 
         // vision projection and embedding
         if let Some(image_tensor) = &images {
@@ -637,11 +699,17 @@ impl Gemma3ForConditionalGeneration {
 
         // 4. Pass through layers
         if let Some(kv_caches) = kv_caches {
-            for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
+            for ((k_cache, v_cache), (i, layer)) in
+                zip(kv_caches.iter(), self.layers.iter().enumerate())
+            {
                 xs = layer.forward(
                     &xs,
                     attention_mask.as_ref(),
-                    sliding_attention_mask.as_ref(),
+                    if i + 1 % self.config.text_config.sliding_window_pattern != 0 {
+                        sliding_attention_mask.as_ref()
+                    } else {
+                        None
+                    },
                     positions,
                     Some((k_cache, v_cache)),
                     input_metadata,
@@ -669,7 +737,6 @@ impl Gemma3ForConditionalGeneration {
 
         let xs = self.norm.forward(&xs)?;
 
-        // Final Logit Softcapping (Gemma Specific)
         let logits = if self.is_qvar_builder {
             self.lm_head.forward(&xs)?
         } else {
@@ -678,6 +745,7 @@ impl Gemma3ForConditionalGeneration {
                 .to_dtype(DType::F32)?
         };
 
+        // Final Logit Softcapping (Gemma Specific)
         if let Some(cap) = text_cfg.final_logit_softcapping {
             // tanh(logits / cap) * cap
             let scaled = (logits / cap)?;
@@ -686,5 +754,9 @@ impl Gemma3ForConditionalGeneration {
         } else {
             Ok(logits)
         }
+    }
+
+    pub fn get_vocab_size(&self) -> usize {
+        todo!()
     }
 }

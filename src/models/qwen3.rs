@@ -54,6 +54,7 @@ impl Qwen3DecoderLayer {
             comm.clone(),
             config.hidden_size,
             config.intermediate_size,
+            &config.hidden_act,
             &config.quantization_config,
             &config.quant,
             false,
@@ -78,6 +79,7 @@ impl Qwen3DecoderLayer {
                 vb.pp("input_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -89,6 +91,7 @@ impl Qwen3DecoderLayer {
                 vb.pp("post_attention_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -210,6 +213,7 @@ impl Qwen3ForCausalLM {
                 vb.pp("model.norm")
             },
             dtype,
+            false,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

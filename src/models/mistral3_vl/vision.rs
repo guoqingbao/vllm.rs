@@ -35,12 +35,14 @@ impl AttentionLayer {
                 vb.pp("attention_norm")
             },
             if is_qvar_builder { DType::F32 } else { dtype },
+            false,
         )?;
         let mlp = MLP::new(
             vb.pp("feed_forward"),
             comm.clone(),
             cfg.hidden_size,
             cfg.intermediate_size,
+            &cfg.hidden_act,
             &None,
             &None,
             false,
@@ -56,6 +58,7 @@ impl AttentionLayer {
             cfg.head_dim(),
             None,
             dtype,
+            HashMap::new(),
         )?;
         let post_norm = rms_norm(
             cfg.hidden_size,
@@ -66,6 +69,7 @@ impl AttentionLayer {
                 vb.pp("ffn_norm")
             },
             if is_qvar_builder { DType::F32 } else { dtype },
+            false,
         )?;
         Ok(Self {
             norm,
@@ -214,6 +218,7 @@ impl VisionModel {
             1e-5,
             vb.pp("ln_pre"), // qvar todo
             dtype,
+            false,
         )?;
         let transformer = Transformer::new(vb.pp("transformer"), comm, cfg, dtype)?;
         let patch_positional_embedding = Arc::new(RotaryEmbedding::new(

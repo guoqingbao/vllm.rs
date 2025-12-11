@@ -161,19 +161,17 @@ impl ScalingRotaryEmbedding {
                         rope_scaling.get("factor")
                     {
                         let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
+                        let model_len = (original_max_position_embeddings as f64 * *factor) as u32;
                         let inv_freq: Vec<_> = calculate_default_inv_freq(rope_theta, rotary_dim);
                         let inv_freq = Tensor::new(inv_freq.as_slice(), dev)?;
-                        let idx_theta = (Tensor::arange(
-                            0,
-                            (original_max_position_embeddings as f64 * *factor) as u32,
-                            &dev,
-                        )?
-                        .to_dtype(DType::F32)?
-                        .reshape((
-                            (original_max_position_embeddings as f64 * *factor) as usize,
-                            1,
-                        ))? / (*factor as f64))?
-                            .matmul(&inv_freq.reshape((1, inv_freq.elem_count()))?)?;
+                        let inv_freq = (inv_freq / *factor)?;
+
+                        let idx_theta = Tensor::arange(0, model_len, &dev)?
+                            .to_dtype(DType::F32)?
+                            .reshape((model_len as usize, 1))?;
+
+                        let idx_theta =
+                            idx_theta.matmul(&inv_freq.reshape((1, inv_freq.elem_count()))?)?;
                         let cos = idx_theta.cos()?.to_dtype(dtype)?;
                         let sin = idx_theta.sin()?.to_dtype(dtype)?;
                         Self(RotaryEmbedding {

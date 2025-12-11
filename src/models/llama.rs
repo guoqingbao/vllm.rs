@@ -53,6 +53,7 @@ impl LLaMaDecoderLayer {
             comm.clone(),
             config.hidden_size,
             config.intermediate_size,
+            &config.hidden_act,
             &config.quantization_config,
             &config.quant,
             false,
@@ -77,6 +78,7 @@ impl LLaMaDecoderLayer {
                 vb.pp("input_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -88,6 +90,7 @@ impl LLaMaDecoderLayer {
                 vb.pp("post_attention_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -211,6 +214,7 @@ impl LLaMaForCausalLM {
                 vb.pp("model.norm").clone()
             },
             dtype,
+            false,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

@@ -56,6 +56,7 @@ impl GLM4DecoderLayer {
             comm.clone(),
             config.hidden_size,
             config.intermediate_size,
+            &config.hidden_act,
             &config.quantization_config,
             &config.quant,
             true, //gate and up merged
@@ -82,6 +83,7 @@ impl GLM4DecoderLayer {
                 vb.pp("input_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -93,6 +95,7 @@ impl GLM4DecoderLayer {
                 vb.pp("post_attention_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_self_attn_layernorm = rms_norm(
@@ -104,6 +107,7 @@ impl GLM4DecoderLayer {
                 vb.pp("post_self_attn_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_mlp_layernorm = rms_norm(
@@ -115,6 +119,7 @@ impl GLM4DecoderLayer {
                 vb.pp("post_mlp_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -240,6 +245,7 @@ impl GLM4ForCausalLM {
                 vb.pp("model.norm")
             },
             dtype,
+            false,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

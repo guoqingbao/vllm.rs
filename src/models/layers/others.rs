@@ -28,7 +28,14 @@ impl NormX {
         }
     }
 }
-pub fn rms_norm(size: usize, eps: f64, vb: VarBuilderX, dtype: DType) -> Result<NormX> {
+
+pub fn rms_norm(
+    size: usize,
+    eps: f64,
+    vb: VarBuilderX,
+    dtype: DType,
+    is_gemma: bool,
+) -> Result<NormX> {
     let (weight, dtype) = match &vb.0 {
         Either::Left(vb) => (
             vb.get_with_hints(size, "weight", Shard::default())?
@@ -37,6 +44,8 @@ pub fn rms_norm(size: usize, eps: f64, vb: VarBuilderX, dtype: DType) -> Result<
         ),
         Either::Right(vb) => (vb.get(size, "weight")?.dequantize(vb.device())?, DType::F32),
     };
+
+    let weight = if is_gemma { (weight + 1.0)? } else { weight };
     Ok(NormX {
         norm: Either::Left(RmsNorm::new(weight, eps)),
         dtype,

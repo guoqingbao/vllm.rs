@@ -26,6 +26,7 @@ pub struct Attention {
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
     dtype: DType,
     do_llama4_attn_scale: bool,
+    is_gemma: bool,
 }
 
 impl Attention {
@@ -53,6 +54,9 @@ impl Attention {
         .cloned()
         .collect();
         let is_qvar_builder = vb.is_qvar_builder();
+
+        let is_gemma = config.architectures.as_ref().unwrap()[0]
+            == "Gemma3ForConditionalGeneration".to_string();
 
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
@@ -130,6 +134,7 @@ impl Attention {
             } else {
                 dtype
             },
+            is_gemma,
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -150,6 +155,7 @@ impl Attention {
             } else {
                 dtype
             },
+            is_gemma,
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
@@ -181,7 +187,7 @@ impl Attention {
             attn: PagedAttention::new(
                 attention_heads,
                 head_dim,
-                1. / ((head_dim as f32).sqrt()),
+                1. / ((if is_gemma { 256 } else { head_dim } as f32).sqrt()),
                 Some(kv_heads),
                 config.sliding_window,
                 vb.device().clone(),
@@ -191,6 +197,7 @@ impl Attention {
             softcapping: config.attn_logit_softcapping,
             dtype,
             do_llama4_attn_scale,
+            is_gemma,
         })
     }
 
@@ -223,13 +230,19 @@ impl Attention {
 
         let (q, k) = if self.q_norm.is_some() && self.k_norm.is_some() {
             //Per‑head RMSNorm in qwen3
-            let q_flat = q.flatten(0, 2)?; // (B*H, L, D) -> (BHL, D) after transpose later
-            let k_flat = k.flatten(0, 2)?;
-            let q_flat = self.q_norm.as_ref().unwrap().forward(&q_flat)?;
-            let k_flat = self.k_norm.as_ref().unwrap().forward(&k_flat)?;
-            let q = q_flat.reshape((1, self.num_heads, seq_len, self.head_dim))?;
-            let k = k_flat.reshape((1, self.num_kv_heads, seq_len, self.head_dim))?;
-            (q, k)
+            if self.is_gemma {
+                let q = self.q_norm.as_ref().unwrap().forward(&q)?;
+                let k = self.k_norm.as_ref().unwrap().forward(&k)?;
+                (q, k)
+            } else {
+                let q_flat = q.flatten(0, 2)?; // (B*H, L, D) -> (BHL, D) after transpose later
+                let k_flat = k.flatten(0, 2)?;
+                let q_flat = self.q_norm.as_ref().unwrap().forward(&q_flat)?;
+                let k_flat = self.k_norm.as_ref().unwrap().forward(&k_flat)?;
+                let q = q_flat.reshape((1, self.num_heads, seq_len, self.head_dim))?;
+                let k = k_flat.reshape((1, self.num_kv_heads, seq_len, self.head_dim))?;
+                (q, k)
+            }
         } else {
             (q, k)
         };
@@ -306,6 +319,7 @@ impl NaiveAttention {
         head_dim: usize,
         softcapping: Option<f64>,
         dtype: DType,
+        key_mappings: HashMap<String, String>,
     ) -> Result<Self> {
         let key_map: HashMap<&str, &str> = [
             ("q_proj", "attn_q"),
@@ -363,7 +377,11 @@ impl NaiveAttention {
             if is_qvar_builder {
                 vb.pp(key_map["o_proj"])
             } else {
-                vb.pp("o_proj")
+                if key_mappings.contains_key("o_proj") {
+                    vb.pp(&key_mappings["o_proj"])
+                } else {
+                    vb.pp("o_proj")
+                }
             },
             &None,
             &None,

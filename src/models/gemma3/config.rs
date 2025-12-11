@@ -1,3 +1,4 @@
+use crate::utils::config::EosTokenId;
 use crate::utils::config::QuantConfig;
 use crate::utils::config::RopeScaling;
 use candle_nn::Activation;
@@ -58,7 +59,7 @@ serde_default!(usize, sliding_window_pattern, 6);
 serde_default!(usize, num_attention_heads_text, 8);
 serde_default!(usize, num_key_value_heads, 4);
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TextConfig {
     #[serde(default = "attention_bias")]
     pub attention_bias: bool,
@@ -97,11 +98,17 @@ pub struct TextConfig {
     pub quant: Option<String>,
 }
 
+fn has_vision() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma3Config {
     pub text_config: TextConfig,
     pub vision_config: VisionConfig,
     pub image_token_index: usize,
     pub mm_tokens_per_image: usize,
+    pub eos_token_id: Option<EosTokenId>,
+    #[serde(default = "has_vision")]
     pub has_vision: bool,
 }

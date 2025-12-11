@@ -131,6 +131,7 @@ pub struct Config {
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
     pub partial_rotary_factor: Option<f32>,
+    #[serde(alias = "hidden_activation")]
     pub hidden_act: candle_nn::Activation,
     #[serde(alias = "rope_parameters")]
     pub rope_scaling: Option<HashMap<String, RopeScaling>>,
@@ -393,6 +394,7 @@ pub enum ModelType {
     Qwen3MoE,
     LLaMa,
     Gemma,
+    Gemma3,
     Phi,
     Mistral,
     GLM4,
