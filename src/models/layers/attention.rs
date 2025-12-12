@@ -2,7 +2,7 @@ use crate::models::layers::distributed::{
     Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
-use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
+use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
@@ -23,9 +23,7 @@ pub struct Attention {
     head_dim: usize,
     attn: PagedAttention,
     softcapping: Option<f64>,
-    rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
     dtype: DType,
-    do_llama4_attn_scale: bool,
     is_gemma: bool,
 }
 
@@ -33,8 +31,8 @@ impl Attention {
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
-        rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
         config: &Config,
+        sliding_window: Option<usize>,
         dtype: DType,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
@@ -166,13 +164,6 @@ impl Attention {
         let attention_heads = num_heads / comm.world_size();
         let kv_heads = num_kv_heads / comm.world_size();
 
-        let do_llama4_attn_scale = if let Some(rotary_emb) = &rotary_emb {
-            rotary_emb.get_original_max_position_embeddings().is_some()
-                && rotary_emb.get_llama_4_scaling_beta().is_some()
-        } else {
-            false
-        };
-
         Ok(Self {
             q_proj,
             k_proj,
@@ -183,20 +174,18 @@ impl Attention {
             num_heads: attention_heads,
             num_kv_heads: kv_heads,
             head_dim,
-            rotary_emb,
             attn: PagedAttention::new(
                 attention_heads,
                 head_dim,
                 1. / ((if is_gemma { 256 } else { head_dim } as f32).sqrt()),
                 Some(kv_heads),
-                config.sliding_window,
+                sliding_window,
                 vb.device().clone(),
                 None,
                 config.fp8_kvcache.unwrap_or(false),
             )?,
             softcapping: config.attn_logit_softcapping,
             dtype,
-            do_llama4_attn_scale,
             is_gemma,
         })
     }
@@ -204,6 +193,7 @@ impl Attention {
     pub fn forward(
         &self,
         xs: &Tensor,
+        rotary_emb: &Option<Arc<dyn ApplyRotaryEmbedding>>,
         attention_mask: Option<&Vec<Tensor>>,
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
@@ -248,7 +238,7 @@ impl Attention {
         };
 
         // Apply rotary embeddings
-        let (q, k) = if let Some(rotary_emb) = &self.rotary_emb {
+        let (q, k) = if let Some(rotary_emb) = &rotary_emb {
             rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?
         } else {
             (q, k)
@@ -268,13 +258,16 @@ impl Attention {
             v
         };
 
-        if self.do_llama4_attn_scale {
-            if let Some(rotary_emb) = &self.rotary_emb {
+        if let Some(rotary_emb) = &rotary_emb {
+            if let (Some(original_max_position_embeddings), Some(llama_4_scaling_beta)) = (
+                rotary_emb.get_original_max_position_embeddings(),
+                rotary_emb.get_llama_4_scaling_beta(),
+            ) {
                 use crate::utils::get_llama4_attn_scale;
                 let scale = get_llama4_attn_scale(
                     &positions,
-                    rotary_emb.get_llama_4_scaling_beta().unwrap(),
-                    rotary_emb.get_original_max_position_embeddings().unwrap() as f64,
+                    llama_4_scaling_beta,
+                    original_max_position_embeddings as f64,
                 )?
                 .to_dtype(q.dtype())?;
                 q = q.broadcast_mul(&scale)?;

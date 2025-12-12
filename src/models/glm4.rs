@@ -4,7 +4,7 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
-use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
+use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
@@ -24,6 +24,7 @@ pub struct GLM4DecoderLayer {
     post_attention_layernorm: NormX,
     post_self_attn_layernorm: NormX,
     post_mlp_layernorm: NormX,
+    rotary_emb: Arc<ScalingRotaryEmbedding>,
 }
 
 impl GLM4DecoderLayer {
@@ -42,8 +43,8 @@ impl GLM4DecoderLayer {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            Some(rotary_emb),
             config,
+            config.sliding_window,
             dtype,
         )?;
 
@@ -129,6 +130,7 @@ impl GLM4DecoderLayer {
             post_attention_layernorm,
             post_self_attn_layernorm,
             post_mlp_layernorm,
+            rotary_emb,
         })
     }
 
@@ -142,9 +144,15 @@ impl GLM4DecoderLayer {
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
-        let attn_output =
-            self.self_attn
-                .forward(&xs, attention_mask, positions, cache, input_metadata)?;
+        let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+        let attn_output = self.self_attn.forward(
+            &xs,
+            &Some(rope),
+            attention_mask,
+            positions,
+            cache,
+            input_metadata,
+        )?;
         let attn_output = self.post_self_attn_layernorm.forward(&attn_output)?;
         let xs = (attn_output + residual)?;
         let residual = &xs;
@@ -212,6 +220,7 @@ impl GLM4ForCausalLM {
             config,
             &vb.device(),
             is_rope_i,
+            config.rope_theta,
         )?);
 
         let mut layers = Vec::new();

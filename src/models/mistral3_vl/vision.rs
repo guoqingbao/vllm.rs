@@ -184,6 +184,14 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         let k_embed = candle_nn::rotary_emb::rope(k, cos, sin)?;
         Ok((q_embed, k_embed))
     }
+
+    fn get_original_max_position_embeddings(&self) -> Option<usize> {
+        None
+    }
+
+    fn get_llama_4_scaling_beta(&self) -> Option<f64> {
+        None
+    }
 }
 
 unsafe impl Send for RotaryEmbedding {}

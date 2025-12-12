@@ -800,7 +800,7 @@ pub fn get_arch_rope(
         ("llama", true),
         ("mistral", true),
         ("mistral3", false),
-        ("Gemma3ForConditionalGeneration", true),
+        ("Gemma3ForConditionalGeneration", false),
     ]
     .iter()
     .cloned()

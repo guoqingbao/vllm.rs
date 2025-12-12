@@ -6,7 +6,9 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX;
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::others::{conv2d_no_bias, embedding, rms_norm, AvgPool2d, NormX};
-use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
+use crate::models::layers::rotary_emb::{
+    ApplyRotaryEmbedding, RotaryEmbedding, ScalingRotaryEmbedding,
+};
 use crate::models::layers::{mlp::MLP as TextMLP, VarBuilderX};
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
@@ -90,6 +92,14 @@ struct DummyRotaryEmbedding {}
 impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
     fn apply_rotary_emb_qkv(&self, q: &Tensor, k: &Tensor, _: &Tensor) -> Result<(Tensor, Tensor)> {
         Ok((q.to_owned(), k.to_owned()))
+    }
+
+    fn get_original_max_position_embeddings(&self) -> Option<usize> {
+        None
+    }
+
+    fn get_llama_4_scaling_beta(&self) -> Option<f64> {
+        None
     }
 }
 
@@ -201,8 +211,8 @@ impl Gemma3VisionEncoderLayer {
         let xs = self.input_layernorm.forward(xs)?;
         // Vision encoder is usually bidirectional, no causal mask
         // We pass None for mask to imply full attention
-        let trait_obj: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
-        let attn_output = self.self_attn.forward(&xs, &trait_obj, &None, None)?;
+        let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+        let attn_output = self.self_attn.forward(&xs, &rope, &None, None)?;
         let xs = (attn_output + residual)?;
 
         let residual = &xs;
@@ -328,6 +338,8 @@ pub struct Gemma3DecoderLayer {
     pre_feedforward_layernorm: NormX,
     post_feedforward_layernorm: NormX,
     sliding_window: Option<usize>,
+    rotary_emb: Arc<ScalingRotaryEmbedding>,
+    rotary_emb_local: Arc<RotaryEmbedding>,
 }
 
 impl Gemma3DecoderLayer {
@@ -335,6 +347,7 @@ impl Gemma3DecoderLayer {
         vb: VarBuilderX,
         comm: Rc<Comm>,
         rotary_emb: Arc<ScalingRotaryEmbedding>,
+        rotary_emb_local: Arc<RotaryEmbedding>,
         config: &Gemma3Config,
         g_cfg: &Config,
         layer_idx: usize,
@@ -357,8 +370,8 @@ impl Gemma3DecoderLayer {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            Some(rotary_emb),
             &g_cfg,
+            sliding_window,
             dtype,
         )?;
 
@@ -418,6 +431,8 @@ impl Gemma3DecoderLayer {
             pre_feedforward_layernorm,
             post_feedforward_layernorm,
             sliding_window,
+            rotary_emb,
+            rotary_emb_local,
         })
     }
 
@@ -440,11 +455,15 @@ impl Gemma3DecoderLayer {
             attention_mask
         };
 
-        //TODO: pass sliding mask to attention and perform local rope
+        let rope: Arc<dyn ApplyRotaryEmbedding> = if self.sliding_window.is_some() {
+            self.rotary_emb_local.clone()
+        } else {
+            self.rotary_emb.clone()
+        };
 
-        let attn_output = self
-            .self_attn
-            .forward(&xs, mask, positions, cache, input_metadata)?;
+        let attn_output =
+            self.self_attn
+                .forward(&xs, &Some(rope), mask, positions, cache, input_metadata)?;
 
         let mut xs = self.post_attention_layernorm.forward(&attn_output)?;
         xs = (xs + residual)?;
@@ -557,6 +576,21 @@ impl Gemma3ForConditionalGeneration {
             &g_cfg,
             &vb.device(),
             is_rope_i,
+            g_cfg.rope_theta,
+        )?);
+
+        let rotary_emb_local = Arc::new(RotaryEmbedding::new(
+            if is_qvar_builder || text_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
+            &g_cfg,
+            &vb.device(),
+            is_rope_i,
+            Some(config.text_config.rope_local_base_freq),
+            None,
+            None,
         )?);
 
         // 4. Layers
@@ -566,6 +600,7 @@ impl Gemma3ForConditionalGeneration {
                 vb.pp(&format!("language_model.model.layers.{}", i)),
                 comm.clone(),
                 rotary_emb.clone(),
+                rotary_emb_local.clone(),
                 &config,
                 &g_cfg,
                 i,
@@ -716,11 +751,15 @@ impl Gemma3ForConditionalGeneration {
                 )?;
             }
         } else {
-            for layer in self.layers.iter() {
+            for (i, layer) in self.layers.iter().enumerate() {
                 xs = layer.forward(
                     &xs,
                     attention_mask.as_ref(),
-                    sliding_attention_mask.as_ref(),
+                    if i + 1 % self.config.text_config.sliding_window_pattern != 0 {
+                        sliding_attention_mask.as_ref()
+                    } else {
+                        None
+                    },
                     positions,
                     None,
                     input_metadata,
