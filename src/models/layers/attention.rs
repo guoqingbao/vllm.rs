@@ -32,6 +32,7 @@ impl Attention {
         vb: VarBuilderX,
         comm: Rc<Comm>,
         config: &Config,
+        attention_scale: Option<f32>,
         sliding_window: Option<usize>,
         dtype: DType,
     ) -> Result<Self> {
@@ -177,7 +178,7 @@ impl Attention {
             attn: PagedAttention::new(
                 attention_heads,
                 head_dim,
-                1. / ((if is_gemma { 256 } else { head_dim } as f32).sqrt()),
+                attention_scale.unwrap_or(1. / (head_dim as f32).sqrt()),
                 Some(kv_heads),
                 sliding_window,
                 vb.device().clone(),

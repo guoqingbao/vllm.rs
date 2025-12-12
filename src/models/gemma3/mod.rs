@@ -371,6 +371,7 @@ impl Gemma3DecoderLayer {
             },
             comm.clone(),
             &g_cfg,
+            Some(1. / (config.text_config.query_pre_attn_scalar as f32).sqrt()),
             sliding_window,
             dtype,
         )?;

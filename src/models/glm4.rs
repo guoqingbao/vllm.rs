@@ -44,6 +44,7 @@ impl GLM4DecoderLayer {
             },
             comm.clone(),
             config,
+            None,
             config.sliding_window,
             dtype,
         )?;

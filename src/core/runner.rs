@@ -224,7 +224,6 @@ impl ModelRunner {
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
             }
             Model::Mistral3VL(m) => {
-                // panic!("CUDA Graph is not implemented for Multimodal models!")
                 let model_arc = Arc::clone(m);
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,
@@ -238,7 +237,6 @@ impl ModelRunner {
             }
 
             Model::Gemma3(m) => {
-                // panic!("CUDA Graph is not implemented for Multimodal models!")
                 let model_arc = Arc::clone(m);
                 let closure = move |input_ids: &Tensor,
                                     positions: &Tensor,

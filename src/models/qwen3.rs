@@ -42,6 +42,7 @@ impl Qwen3DecoderLayer {
             },
             comm.clone(),
             config,
+            None,
             config.sliding_window,
             dtype,
         )?;

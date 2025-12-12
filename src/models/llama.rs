@@ -42,6 +42,7 @@ impl LLaMaDecoderLayer {
             },
             comm.clone(),
             config,
+            None,
             config.sliding_window,
             dtype,
         )?;
