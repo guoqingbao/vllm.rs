@@ -1,3 +1,5 @@
+use crate::utils::config::ModelType;
+use crate::utils::Config;
 use candle_core::{DType, Device, Result, Storage, Tensor};
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, Pixel};
@@ -89,35 +91,44 @@ pub fn preprocess_images(
     scale_factor: Option<f32>,
     mean: Option<[f32; 3]>,
     std: Option<[f32; 3]>,
+    abolute_resize: bool,
 ) -> Vec<DynamicImage> {
     // First pass: determine final height/width after custom resize for each image
     let mut resized_imgs: Vec<DynamicImage> = Vec::new();
-    let filter = FilterType::Nearest;
-
-    let mut final_h = 0;
-    let mut final_w = 0;
-
-    for img in images.iter() {
-        let (h, w) = img.dimensions();
-        let resized = image_resize(
-            img, h as usize, w as usize, max_height, max_width, patch_size, filter,
-        );
-        final_h = final_h.max(resized.height());
-        final_w = final_w.max(resized.width());
-        resized_imgs.push(resized);
-    }
-
-    // Second pass: pad to final_h × final_w
     let mut padded_imgs: Vec<DynamicImage> = Vec::new();
-    for img in resized_imgs {
-        if img.height() == final_h && img.width() == final_w {
-            padded_imgs.push(img);
-        } else {
-            // Pad with black (zeros)
-            let mut canvas = DynamicImage::new_rgb8(final_w, final_h).to_rgb8();
-            let rgb = img.to_rgb8();
-            image::imageops::overlay(&mut canvas, &rgb, 0, 0);
-            padded_imgs.push(DynamicImage::ImageRgb8(canvas));
+    let filter = FilterType::Triangle;
+
+    if abolute_resize {
+        for img in images.iter() {
+            let resized = img.resize_exact(max_width as u32, max_height as u32, filter);
+            padded_imgs.push(resized);
+        }
+    } else {
+        // resize in ratio and padding
+        let mut final_h = 0;
+        let mut final_w = 0;
+
+        for img in images.iter() {
+            let (h, w) = img.dimensions();
+            let resized = image_resize(
+                img, h as usize, w as usize, max_height, max_width, patch_size, filter,
+            );
+            final_h = final_h.max(resized.height());
+            final_w = final_w.max(resized.width());
+            resized_imgs.push(resized);
+        }
+
+        // Second pass: pad to final_h × final_w
+        for img in resized_imgs {
+            if img.height() == final_h && img.width() == final_w {
+                padded_imgs.push(img);
+            } else {
+                // Pad with black (zeros)
+                let mut canvas = DynamicImage::new_rgb8(final_w, final_h).to_rgb8();
+                let rgb = img.to_rgb8();
+                image::imageops::overlay(&mut canvas, &rgb, 0, 0);
+                padded_imgs.push(DynamicImage::ImageRgb8(canvas));
+            }
         }
     }
 
@@ -152,29 +163,34 @@ pub fn preprocess_images(
 
 #[derive(Clone)]
 pub struct ImageProcessConfig {
+    image_start_token: Option<String>,
     image_token: String,
-    image_break_token: String,
+    image_break_token: Option<String>,
     image_end_token: String,
     spatial_merge_size: usize,
     do_normalize: Option<bool>,
-    image_mean: Option<[f32; 3]>,
-    image_std: Option<[f32; 3]>,
+    pub image_mean: Option<[f32; 3]>,
+    pub image_std: Option<[f32; 3]>,
     max_height: usize,
     max_width: usize,
     patch_size: usize,
-    scale_factor: Option<f32>,
+    abolute_resize: bool,
+    pub scale_factor: Option<f32>,
 }
 
 impl ImageProcessConfig {
     pub fn default(
+        image_start_token: Option<String>,
         image_token: String,
-        image_break_token: String,
+        image_break_token: Option<String>,
         image_end_token: String,
         spatial_merge_size: usize,
         patch_size: usize,
         image_size: usize,
+        abolute_resize: bool,
     ) -> Self {
         ImageProcessConfig {
+            image_start_token,
             image_token,
             image_break_token,
             image_end_token,
@@ -185,6 +201,7 @@ impl ImageProcessConfig {
             max_height: image_size,
             max_width: image_size,
             patch_size,
+            abolute_resize,
             scale_factor: None,
         }
     }
@@ -225,6 +242,7 @@ impl ImageProcessor {
             self.cfg.scale_factor,
             image_mean,
             image_std,
+            self.cfg.abolute_resize,
         );
         let mut pixel_values = Vec::new();
         let mut image_sizes = Vec::new();
@@ -243,9 +261,9 @@ impl ImageProcessor {
             // Convert HWC → CHW without copying data manually
             let t = t.permute((2, 0, 1))?.contiguous()?; // [H, W, C] -> [C, H, W]
 
+            // let t = image_to_pixels(image, &Device::Cpu)?;
             pixel_values.push(t.unsqueeze(0)?);
         }
-
         Ok((Tensor::cat(&pixel_values, 0)?, image_sizes))
     }
 
@@ -277,7 +295,11 @@ impl ImageProcessor {
             let mut replace_tokens = vec![
                 [
                     vec![self.cfg.image_token.clone(); num_width_tokens],
-                    vec![self.cfg.image_break_token.clone()],
+                    if self.cfg.image_break_token.is_some() {
+                        vec![self.cfg.image_break_token.as_ref().unwrap().clone()]
+                    } else {
+                        vec![]
+                    }
                 ]
                 .concat();
                 num_height_tokens
@@ -286,8 +308,17 @@ impl ImageProcessor {
             .flatten()
             .collect::<Vec<_>>();
 
-            *replace_tokens.last_mut().unwrap() = self.cfg.image_end_token.clone();
+            if self.cfg.image_break_token.is_some() {
+                *replace_tokens.last_mut().unwrap() = self.cfg.image_end_token.clone();
+            } else {
+                replace_tokens.push(self.cfg.image_end_token.clone());
+            }
 
+            if let Some(start_token) = &self.cfg.image_start_token {
+                let mut vec_final = vec![start_token.clone()];
+                vec_final.extend(replace_tokens);
+                replace_tokens = vec_final.clone();
+            }
             replace_strings.push(replace_tokens.join(""));
             *prompt = prompt.replace(IMAGE_PLACEHOLDER, PLACEHOLDER);
         }
@@ -299,4 +330,61 @@ impl ImageProcessor {
 
         Ok((pixel_values, image_sizes_all))
     }
+}
+
+pub fn get_image_config(
+    model_type: ModelType,
+    config: &Config,
+) -> Result<Option<ImageProcessConfig>> {
+    let img_cfg = match model_type {
+        ModelType::Mistral3VL => {
+            use crate::models::mistral3_vl::Mistral3Config;
+            assert!(
+                config.extra_config_json.is_some(),
+                "Multimodel missing vision config!"
+            );
+            let cfg: Mistral3Config =
+                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                    .map_err(candle_core::Error::wrap)?;
+
+            let img_cfg = ImageProcessConfig::default(
+                None,
+                "[IMG]".to_string(),
+                Some("[IMG_BREAK]".to_string()),
+                "[IMG_END]".to_string(),
+                cfg.spatial_merge_size,
+                cfg.vision_config.patch_size,
+                cfg.vision_config.image_size,
+                false,
+            );
+            Some(img_cfg)
+        }
+        ModelType::Gemma3 => {
+            use crate::models::gemma3::config::Gemma3Config;
+            assert!(
+                config.extra_config_json.is_some(),
+                "Multimodel missing vision config!"
+            );
+            let cfg: Gemma3Config =
+                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                    .map_err(candle_core::Error::wrap)?;
+
+            let mut img_cfg = ImageProcessConfig::default(
+                Some("<start_of_image>".to_string()),
+                "<image_soft_token>".to_string(),
+                None,
+                "<end_of_image>".to_string(),
+                4,
+                cfg.vision_config.patch_size,
+                cfg.vision_config.image_size,
+                true,
+            );
+            img_cfg.scale_factor = Some(0.003921567);
+            img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
+            img_cfg.image_std = Some([0.5, 0.5, 0.5]);
+            Some(img_cfg)
+        }
+        _ => None,
+    };
+    Ok(img_cfg)
 }

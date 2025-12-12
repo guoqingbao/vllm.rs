@@ -2,7 +2,7 @@ use super::config::VisionConfig;
 use crate::models::layers::attention::NaiveAttention;
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::others::{conv2d_no_bias, rms_norm, NormX};
+use crate::models::layers::others::{conv2d, rms_norm, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
@@ -52,7 +52,6 @@ impl AttentionLayer {
 
         let attention = NaiveAttention::new(
             vb.pp("attention"),
-            comm.clone(),
             cfg.num_attention_heads,
             cfg.hidden_size,
             cfg.head_dim(),
@@ -214,12 +213,13 @@ impl VisionModel {
             stride: cfg.patch_size,
             ..Default::default()
         };
-        let patch_conv = conv2d_no_bias(
+        let patch_conv = conv2d(
             cfg.num_channels,
             cfg.hidden_size,
             cfg.patch_size,
             conv2d_cfg,
             vb.pp("patch_conv"), // qvar todo
+            false,
         )?;
         let ln_pre = rms_norm(
             cfg.hidden_size,

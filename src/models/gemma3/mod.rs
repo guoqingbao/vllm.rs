@@ -5,7 +5,7 @@ use crate::models::layers::attention::{Attention, NaiveAttention};
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX;
 use crate::models::layers::mask::get_attention_causal_mask;
-use crate::models::layers::others::{conv2d_no_bias, embedding, rms_norm, AvgPool2d, NormX};
+use crate::models::layers::others::{conv2d, embedding, layer_norm, rms_norm, AvgPool2d, NormX};
 use crate::models::layers::rotary_emb::{
     ApplyRotaryEmbedding, RotaryEmbedding, ScalingRotaryEmbedding,
 };
@@ -43,7 +43,7 @@ impl Gemma3VisionEmbeddings {
         let patch_size = config.vision_config.patch_size;
         let image_size = config.vision_config.image_size;
 
-        let patch_embedding = conv2d_no_bias(
+        let patch_embedding = conv2d(
             config.vision_config.num_channels,
             embed_dim,
             patch_size,
@@ -52,6 +52,7 @@ impl Gemma3VisionEmbeddings {
                 ..Default::default()
             },
             vb.pp("patch_embedding"),
+            true,
         )?;
 
         let num_patches = (image_size / patch_size).pow(2);
@@ -157,23 +158,23 @@ struct Gemma3VisionEncoderLayer {
 }
 
 impl Gemma3VisionEncoderLayer {
-    fn new(vb: VarBuilderX, comm: Rc<Comm>, config: &Gemma3Config, dtype: DType) -> Result<Self> {
+    fn new(vb: VarBuilderX, _comm: Rc<Comm>, config: &Gemma3Config, dtype: DType) -> Result<Self> {
         let is_qvar_builder = vb.is_qvar_builder();
 
         // Vision Attention usually doesn't need rotary embeddings, just absolute pos provided in embeddings
         // For this snippet, assuming Attention can handle "None" for RoPE or we pass a dummy.
         let mut key_mappings = HashMap::<String, String>::new();
         key_mappings.insert("o_proj".into(), "out_proj".into());
+        let head_dim = config.vision_config.hidden_size / config.vision_config.num_attention_heads;
         let self_attn = NaiveAttention::new(
             if is_qvar_builder {
                 vb.clone()
             } else {
                 vb.pp("self_attn").clone()
             },
-            comm.clone(),
             config.vision_config.num_attention_heads,
             config.vision_config.hidden_size,
-            config.text_config.head_dim,
+            head_dim,
             None,
             dtype,
             key_mappings,
@@ -181,20 +182,20 @@ impl Gemma3VisionEncoderLayer {
 
         let mlp = MLP::new(vb.pp("mlp").clone(), &config.vision_config, dtype)?;
 
-        let input_layernorm = rms_norm(
+        let input_layernorm = layer_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
+            true,
             vb.pp("layer_norm1"),
             dtype,
-            false,
         )?;
 
-        let post_attention_layernorm = rms_norm(
+        let post_attention_layernorm = layer_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
+            true,
             vb.pp("layer_norm2"),
             dtype,
-            false,
         )?;
 
         Ok(Self {
@@ -212,7 +213,7 @@ impl Gemma3VisionEncoderLayer {
         // Vision encoder is usually bidirectional, no causal mask
         // We pass None for mask to imply full attention
         let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
-        let attn_output = self.self_attn.forward(&xs, &rope, &None, None)?;
+        let attn_output = self.self_attn.forward(&xs, &rope, &None, None);
         let xs = (attn_output + residual)?;
 
         let residual = &xs;
@@ -242,12 +243,12 @@ impl Gemma3VisionTransformer {
             )?);
         }
 
-        let norm = rms_norm(
+        let norm = layer_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
+            true,
             vb.pp("post_layernorm"),
             dtype,
-            false,
         )?;
 
         Ok(Self {
@@ -289,7 +290,7 @@ impl Gemma3MultiModalProjector {
         }
         .to_dtype(dtype)?;
 
-        let projector = LinearX::new(ws, None, &None);
+        let projector = LinearX::new(ws.t()?, None, &None);
         let norm = rms_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
@@ -311,16 +312,29 @@ impl Gemma3MultiModalProjector {
     }
 
     fn forward(&self, xs: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
-        let (bs, _, seqlen) = xs.dims3()?;
+        // xs is [Batch, SeqLen (Patches), HiddenDim]
+        let (bs, _, hidden_dim) = xs.dims3()?;
+
+        // 1. Transpose to [Batch, Hidden, Patches] to prepare for spatial reshape
         let mut out = xs.transpose(1, 2)?;
+
+        // 2. Reshape to spatial grid [Batch, Hidden, GridH, GridW]
+        // self.patches is the grid size (e.g., 64 for 896/14)
         out = out
-            .reshape((bs, seqlen, self.patches, self.patches))?
+            .reshape((bs, hidden_dim, self.patches, self.patches))?
             .contiguous()?;
-        out = self
-            .avg_pool
-            .forward(&out)?
-            .flatten_from(2)?
-            .transpose(1, 2)?;
+
+        // 3. Pool [Batch, Hidden, PooledH, PooledW]
+        // If mm_tokens=256, kernel will be 4. 64->16.
+        out = self.avg_pool.forward(&out)?;
+
+        // 4. Flatten spatial dims back to sequence: [Batch, Hidden, NewSeqLen]
+        out = out.flatten_from(2)?;
+
+        // 5. Transpose back to transformer format: [Batch, NewSeqLen, Hidden]
+        out = out.transpose(1, 2)?;
+
+        // 6. Project
         out = self.norm.forward(&out)?;
         self.projector.forward(&out)
     }
@@ -684,7 +698,7 @@ impl Gemma3ForConditionalGeneration {
         self.multi_modal_projector
             .as_ref()
             .unwrap()
-            .forward(&selected_image_feature.squeeze(0)?, image_sizes)
+            .forward(&selected_image_feature, image_sizes)
     }
 
     pub fn forward(
@@ -713,7 +727,7 @@ impl Gemma3ForConditionalGeneration {
                 self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes.unwrap())?;
 
             let mut x_flat = xs.flatten_all()?;
-            let image_flat = image_features.flatten_all()?;
+            let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
 
             x_flat =
                 x_flat.scatter_add(&indices, &(image_flat - x_flat.gather(&indices, 0)?)?, 0)?;

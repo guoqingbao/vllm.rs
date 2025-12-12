@@ -119,28 +119,38 @@ pub fn embedding(
     Ok((Embedding::new(embeddings, hidden_size), vocab_size))
 }
 
-pub fn conv2d_no_bias(
+pub fn conv2d(
     in_channels: usize,
     out_channels: usize,
     kernel_size: usize,
     cfg: candle_nn::Conv2dConfig,
     vb: VarBuilderX,
+    bias: bool,
 ) -> Result<candle_nn::Conv2d> {
-    let ws = match vb.0 {
-        Either::Left(v) => v.get(
-            (
-                out_channels,
-                in_channels / cfg.groups,
-                kernel_size,
-                kernel_size,
-            ),
-            "weight",
-        )?,
+    let (ws, bs) = match vb.0 {
+        Either::Left(v) => {
+            let ws = v.get(
+                (
+                    out_channels,
+                    in_channels / cfg.groups,
+                    kernel_size,
+                    kernel_size,
+                ),
+                "weight",
+            )?;
+            let bs = if bias {
+                Some(v.get(out_channels, "bias")?)
+            } else {
+                None
+            };
+            (ws, bs)
+        }
         _ => {
             todo!()
         }
     };
-    Ok(candle_nn::Conv2d::new(ws, None, cfg))
+
+    Ok(candle_nn::Conv2d::new(ws, bs, cfg))
 }
 
 pub struct AvgPool2d {

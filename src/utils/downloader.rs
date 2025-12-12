@@ -147,6 +147,7 @@ impl Downloader {
             (Some(_), None, None) => {
                 //try download model anonymously
                 let loaded = self.download_model(None, hf_token.clone(), hf_token_path.clone());
+                // crate::log_warn!("Model pathes {:?}", loaded);
                 if loaded.is_ok() {
                     (loaded.unwrap(), false)
                 } else {

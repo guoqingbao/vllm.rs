@@ -307,7 +307,6 @@ pub struct NaiveAttention {
 impl NaiveAttention {
     pub fn new(
         vb: VarBuilderX,
-        _comm: Rc<Comm>,
         num_heads: usize,
         hidden_size: usize,
         head_dim: usize,
@@ -326,9 +325,10 @@ impl NaiveAttention {
         .collect();
         let is_qvar_builder = vb.is_qvar_builder();
 
-        let q_proj = ReplicatedLinear::load_no_bias(
+        let q_proj = ReplicatedLinear::load_b(
             hidden_size,
             hidden_size,
+            true,
             if is_qvar_builder {
                 vb.pp(key_map["q_proj"])
             } else {
@@ -339,9 +339,10 @@ impl NaiveAttention {
             dtype,
         )?;
 
-        let k_proj = ReplicatedLinear::load_no_bias(
+        let k_proj = ReplicatedLinear::load_b(
             hidden_size,
             hidden_size,
+            true,
             if is_qvar_builder {
                 vb.pp(key_map["k_proj"])
             } else {
@@ -352,9 +353,10 @@ impl NaiveAttention {
             dtype,
         )?;
 
-        let v_proj = ReplicatedLinear::load_no_bias(
+        let v_proj = ReplicatedLinear::load_b(
             hidden_size,
             hidden_size,
+            true,
             if is_qvar_builder {
                 vb.pp(key_map["v_proj"])
             } else {
@@ -365,9 +367,10 @@ impl NaiveAttention {
             dtype,
         )?;
 
-        let o_proj = ReplicatedLinear::load_no_bias(
+        let o_proj = ReplicatedLinear::load_b(
             hidden_size,
             hidden_size,
+            true,
             if is_qvar_builder {
                 vb.pp(key_map["o_proj"])
             } else {
