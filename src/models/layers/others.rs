@@ -37,11 +37,14 @@ pub fn rms_norm(
     is_gemma: bool,
 ) -> Result<NormX> {
     let (weight, dtype) = match &vb.0 {
-        Either::Left(vb) => (
-            vb.get_with_hints(size, "weight", Shard::default())?
-                .to_dtype(dtype)?,
-            dtype,
-        ),
+        Either::Left(vb) => {
+            let ws = vb.get_with_hints(size, "weight", Shard::default())?;
+            if ws.dtype() != dtype {
+                (ws.to_dtype(dtype)?, dtype)
+            } else {
+                (ws, dtype)
+            }
+        }
         Either::Right(vb) => (vb.get(size, "weight")?.dequantize(vb.device())?, DType::F32),
     };
 

@@ -386,8 +386,8 @@ impl Gemma3DecoderLayer {
             cfg.hidden_size,
             cfg.intermediate_size,
             &cfg.hidden_activation,
-            &None,
-            &None,
+            &g_cfg.quantization_config,
+            &g_cfg.quant,
             false,
             dtype,
             "",
@@ -397,7 +397,11 @@ impl Gemma3DecoderLayer {
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("input_layernorm"),
-            dtype,
+            if is_qvar_builder || g_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             true,
         )?;
 
@@ -405,7 +409,11 @@ impl Gemma3DecoderLayer {
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
-            dtype,
+            if is_qvar_builder || g_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             true,
         )?;
 
@@ -413,14 +421,22 @@ impl Gemma3DecoderLayer {
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("pre_feedforward_layernorm"),
-            dtype,
+            if is_qvar_builder || g_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             true,
         )?;
         let post_feedforward_layernorm = rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_feedforward_layernorm"),
-            dtype,
+            if is_qvar_builder || g_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             true,
         )?;
 
@@ -536,7 +552,7 @@ impl Gemma3ForConditionalGeneration {
             } else {
                 vb.pp("language_model.model.embed_tokens")
             },
-            if is_qvar_builder || text_cfg.quant.is_some() {
+            if is_qvar_builder || g_cfg.quant.is_some() {
                 DType::F32
             } else {
                 dtype
@@ -569,7 +585,7 @@ impl Gemma3ForConditionalGeneration {
 
         // 3. RoPE
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || text_cfg.quant.is_some() {
+            if is_qvar_builder || g_cfg.quant.is_some() {
                 DType::F32
             } else {
                 dtype
@@ -581,7 +597,7 @@ impl Gemma3ForConditionalGeneration {
         )?);
 
         let rotary_emb_local = Arc::new(RotaryEmbedding::new(
-            if is_qvar_builder || text_cfg.quant.is_some() {
+            if is_qvar_builder || g_cfg.quant.is_some() {
                 DType::F32
             } else {
                 dtype
@@ -616,7 +632,11 @@ impl Gemma3ForConditionalGeneration {
             text_cfg.hidden_size,
             text_cfg.rms_norm_eps,
             vb.pp("language_model.model.norm"),
-            dtype,
+            if is_qvar_builder || g_cfg.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             true,
         )?;
 
