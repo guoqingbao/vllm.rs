@@ -1,3 +1,4 @@
+pub mod gemma3;
 pub mod glm4;
 pub mod layers;
 pub mod llama;

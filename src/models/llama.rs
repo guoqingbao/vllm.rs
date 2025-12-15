@@ -4,7 +4,7 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
-use crate::models::layers::rotary_emb::ScalingRotaryEmbedding;
+use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
@@ -22,6 +22,7 @@ pub struct LLaMaDecoderLayer {
     mlp: MLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
+    rotary_emb: Arc<ScalingRotaryEmbedding>,
 }
 
 impl LLaMaDecoderLayer {
@@ -40,8 +41,9 @@ impl LLaMaDecoderLayer {
                 vb.pp("self_attn").clone()
             },
             comm.clone(),
-            rotary_emb,
             config,
+            None,
+            config.sliding_window,
             dtype,
         )?;
         let mlp = MLP::new(
@@ -53,6 +55,7 @@ impl LLaMaDecoderLayer {
             comm.clone(),
             config.hidden_size,
             config.intermediate_size,
+            &config.hidden_act,
             &config.quantization_config,
             &config.quant,
             false,
@@ -77,6 +80,7 @@ impl LLaMaDecoderLayer {
                 vb.pp("input_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -88,6 +92,7 @@ impl LLaMaDecoderLayer {
                 vb.pp("post_attention_layernorm").clone()
             },
             dtype,
+            false,
         )?;
 
         Ok(Self {
@@ -95,6 +100,7 @@ impl LLaMaDecoderLayer {
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            rotary_emb,
         })
     }
 
@@ -108,9 +114,15 @@ impl LLaMaDecoderLayer {
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
-        let attn_output =
-            self.self_attn
-                .forward(&xs, attention_mask, positions, cache, input_metadata)?;
+        let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+        let attn_output = self.self_attn.forward(
+            &xs,
+            &Some(rope),
+            attention_mask,
+            positions,
+            cache,
+            input_metadata,
+        )?;
         let xs = (attn_output + residual)?;
         let residual = &xs;
         let xs = self.post_attention_layernorm.forward(&xs)?;
@@ -177,6 +189,7 @@ impl LLaMaForCausalLM {
             config,
             &vb.device(),
             is_rope_i,
+            config.rope_theta,
         )?);
 
         let mut layers = Vec::new();
@@ -211,6 +224,7 @@ impl LLaMaForCausalLM {
                 vb.pp("model.norm").clone()
             },
             dtype,
+            false,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(

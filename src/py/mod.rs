@@ -67,11 +67,11 @@ impl Engine {
             econfig: self.econfig.clone(),
         };
 
-        let (is_multimodel, model_name) = {
+        let (has_vision, model_name) = {
             let e = self.engine.read();
             e.get_model_info()
         };
-        let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
+        let has_vision = Arc::new(has_vision); // wrap in Arc first
 
         // CORS config
         let cors = CorsLayer::new()
@@ -83,7 +83,7 @@ impl Engine {
             .route(
                 "/v1/models",
                 get(|| async move {
-                    let m = if *is_multimodel {
+                    let m = if *has_vision {
                         vec!["text", "image"]
                     } else {
                         vec!["text"]
@@ -416,6 +416,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            disable_flash_attn: None,
         }
     }
 }

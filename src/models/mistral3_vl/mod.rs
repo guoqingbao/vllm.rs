@@ -98,6 +98,7 @@ impl MultiModalProjector {
             cfg.text_config.rms_norm_eps,
             vb.pp("norm"),
             if is_qvar_builder { DType::F32 } else { dtype },
+            false,
         )?;
         let num_feature_layers = 1;
         let linear_1 = ReplicatedLinear::load_b(

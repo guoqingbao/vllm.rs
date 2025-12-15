@@ -28,15 +28,27 @@ impl NormX {
         }
     }
 }
-pub fn rms_norm(size: usize, eps: f64, vb: VarBuilderX, dtype: DType) -> Result<NormX> {
+
+pub fn rms_norm(
+    size: usize,
+    eps: f64,
+    vb: VarBuilderX,
+    dtype: DType,
+    is_gemma: bool,
+) -> Result<NormX> {
     let (weight, dtype) = match &vb.0 {
-        Either::Left(vb) => (
-            vb.get_with_hints(size, "weight", Shard::default())?
-                .to_dtype(dtype)?,
-            dtype,
-        ),
+        Either::Left(vb) => {
+            let ws = vb.get_with_hints(size, "weight", Shard::default())?;
+            if ws.dtype() != dtype {
+                (ws.to_dtype(dtype)?, dtype)
+            } else {
+                (ws, dtype)
+            }
+        }
         Either::Right(vb) => (vb.get(size, "weight")?.dequantize(vb.device())?, DType::F32),
     };
+
+    let weight = if is_gemma { (weight + 1.0)? } else { weight };
     Ok(NormX {
         norm: Either::Left(RmsNorm::new(weight, eps)),
         dtype,
@@ -105,4 +117,56 @@ pub fn embedding(
         }
     };
     Ok((Embedding::new(embeddings, hidden_size), vocab_size))
+}
+
+pub fn conv2d(
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    cfg: candle_nn::Conv2dConfig,
+    vb: VarBuilderX,
+    bias: bool,
+) -> Result<candle_nn::Conv2d> {
+    let (ws, bs) = match vb.0 {
+        Either::Left(v) => {
+            let ws = v.get(
+                (
+                    out_channels,
+                    in_channels / cfg.groups,
+                    kernel_size,
+                    kernel_size,
+                ),
+                "weight",
+            )?;
+            let bs = if bias {
+                Some(v.get(out_channels, "bias")?)
+            } else {
+                None
+            };
+            (ws, bs)
+        }
+        _ => {
+            todo!()
+        }
+    };
+
+    Ok(candle_nn::Conv2d::new(ws, bs, cfg))
+}
+
+pub struct AvgPool2d {
+    kernel_size: usize,
+    stride: usize,
+}
+
+impl AvgPool2d {
+    pub fn new(kernel_size: usize, stride: usize) -> Self {
+        Self {
+            kernel_size,
+            stride,
+        }
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        xs.avg_pool2d_with_stride(self.kernel_size, self.stride)
+    }
 }

@@ -4,6 +4,7 @@ use crate::models::layers::distributed::{
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
 use candle_core::{DType, Result, Tensor};
+use candle_nn::{Activation, Module};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -11,6 +12,7 @@ pub struct MLP {
     gate_proj: TensorParallelColumnLinear,
     up_proj: TensorParallelColumnLinear,
     down_proj: TensorParallelRowLinear,
+    activation: Activation,
 }
 
 impl MLP {
@@ -19,6 +21,7 @@ impl MLP {
         comm: Rc<Comm>,
         hidden_size: usize,
         intermediate_size: usize,
+        activation: &Activation,
         quant_cfg: &Option<QuantConfig>,
         quant: &Option<String>,
         gate_up_merged: bool,
@@ -115,6 +118,7 @@ impl MLP {
             gate_proj,
             up_proj,
             down_proj,
+            activation: activation.clone(),
         })
     }
 
@@ -122,6 +126,6 @@ impl MLP {
         let gate = self.gate_proj.forward(xs)?;
         let up = self.up_proj.forward(xs)?;
         self.down_proj
-            .forward(&(candle_nn::ops::silu(&gate)? * up)?)
+            .forward(&(self.activation.forward(&gate)? * up)?)
     }
 }

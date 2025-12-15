@@ -2,6 +2,19 @@ use crate::utils::config::Config;
 use crate::utils::config::{RopeScaling, ScalingValue};
 use candle_core::{DType, Device, Result, Tensor, D};
 use either::Either;
+
+pub trait ApplyRotaryEmbedding {
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        positions: &Tensor,
+    ) -> Result<(Tensor, Tensor)>;
+
+    fn get_original_max_position_embeddings(&self) -> Option<usize>;
+    fn get_llama_4_scaling_beta(&self) -> Option<f64>;
+}
+
 #[derive(Debug, Clone)]
 pub struct RotaryEmbedding {
     sin: Tensor,
@@ -18,6 +31,7 @@ impl RotaryEmbedding {
         cfg: &Config,
         dev: &Device,
         is_rope_i: bool,
+        rope_theta: Option<f64>,
         original_max_position_embeddings: Option<usize>,
         llama_4_scaling_beta: Option<f64>,
     ) -> Result<Self> {
@@ -28,7 +42,7 @@ impl RotaryEmbedding {
             .partial_rotary_factor
             .map(|factor| (factor * dim as f32) as usize)
             .unwrap_or(dim);
-        let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
+        let rope_theta = rope_theta.unwrap_or(10000.0);
         let inv_freq: Vec<_> = (0..rotary_dim)
             .step_by(2)
             .map(|i| 1f32 / rope_theta.powf(i as f64 / rotary_dim as f64) as f32)
@@ -52,8 +66,10 @@ impl RotaryEmbedding {
             llama_4_scaling_beta,
         })
     }
+}
 
-    pub fn apply_rotary_emb_qkv(
+impl ApplyRotaryEmbedding for RotaryEmbedding {
+    fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
         k: &Tensor,
@@ -90,6 +106,14 @@ impl RotaryEmbedding {
 
         Ok((q_embed, k_embed))
     }
+
+    fn get_original_max_position_embeddings(&self) -> Option<usize> {
+        self.original_max_position_embeddings
+    }
+
+    fn get_llama_4_scaling_beta(&self) -> Option<f64> {
+        self.llama_4_scaling_beta
+    }
 }
 
 fn calculate_default_inv_freq(base: f64, dim: usize) -> Vec<f32> {
@@ -103,16 +127,13 @@ fn calculate_default_inv_freq(base: f64, dim: usize) -> Vec<f32> {
 pub struct ScalingRotaryEmbedding(RotaryEmbedding);
 
 impl ScalingRotaryEmbedding {
-    pub fn get_original_max_position_embeddings(&self) -> Option<usize> {
-        self.0.original_max_position_embeddings
-    }
-    pub fn get_llama_4_scaling_beta(&self) -> Option<f64> {
-        self.0.llama_4_scaling_beta
-    }
-}
-
-impl ScalingRotaryEmbedding {
-    pub fn new(dtype: DType, cfg: &Config, dev: &Device, is_rope_i: bool) -> Result<Self> {
+    pub fn new(
+        dtype: DType,
+        cfg: &Config,
+        dev: &Device,
+        is_rope_i: bool,
+        rope_theta: Option<f64>,
+    ) -> Result<Self> {
         let dim = cfg
             .head_dim
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
@@ -150,19 +171,17 @@ impl ScalingRotaryEmbedding {
                         rope_scaling.get("factor")
                     {
                         let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
+                        let model_len = (original_max_position_embeddings as f64 * *factor) as u32;
                         let inv_freq: Vec<_> = calculate_default_inv_freq(rope_theta, rotary_dim);
                         let inv_freq = Tensor::new(inv_freq.as_slice(), dev)?;
-                        let idx_theta = (Tensor::arange(
-                            0,
-                            (original_max_position_embeddings as f64 * *factor) as u32,
-                            &dev,
-                        )?
-                        .to_dtype(DType::F32)?
-                        .reshape((
-                            (original_max_position_embeddings as f64 * *factor) as usize,
-                            1,
-                        ))? / (*factor as f64))?
-                            .matmul(&inv_freq.reshape((1, inv_freq.elem_count()))?)?;
+                        let inv_freq = (inv_freq / *factor)?;
+
+                        let idx_theta = Tensor::arange(0, model_len, &dev)?
+                            .to_dtype(DType::F32)?
+                            .reshape((model_len as usize, 1))?;
+
+                        let idx_theta =
+                            idx_theta.matmul(&inv_freq.reshape((1, inv_freq.elem_count()))?)?;
                         let cos = idx_theta.cos()?.to_dtype(dtype)?;
                         let sin = idx_theta.sin()?.to_dtype(dtype)?;
                         Self(RotaryEmbedding {
@@ -257,7 +276,7 @@ impl ScalingRotaryEmbedding {
                     }
                 } else if rope_type == "default" {
                     Self(RotaryEmbedding::new(
-                        dtype, cfg, dev, is_rope_i, None, None,
+                        dtype, cfg, dev, is_rope_i, rope_theta, None, None,
                     )?)
                 } else if rope_type == "dynamic" {
                     let scaling_factor = if let Some(RopeScaling(Either::Left(ScalingValue(
@@ -386,12 +405,14 @@ impl ScalingRotaryEmbedding {
             }
         } else {
             Ok(Self(RotaryEmbedding::new(
-                dtype, cfg, dev, is_rope_i, None, None,
+                dtype, cfg, dev, is_rope_i, rope_theta, None, None,
             )?))
         }
     }
+}
 
-    pub fn apply_rotary_emb_qkv(
+impl ApplyRotaryEmbedding for ScalingRotaryEmbedding {
+    fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
         k: &Tensor,
@@ -399,8 +420,15 @@ impl ScalingRotaryEmbedding {
     ) -> Result<(Tensor, Tensor)> {
         self.0.apply_rotary_emb_qkv(q, k, positions)
     }
-}
 
+    fn get_original_max_position_embeddings(&self) -> Option<usize> {
+        self.0.original_max_position_embeddings
+    }
+
+    fn get_llama_4_scaling_beta(&self) -> Option<f64> {
+        self.0.llama_4_scaling_beta
+    }
+}
 pub struct YarnRotaryEmbedding {
     pub sin: Tensor,
     pub cos: Tensor,

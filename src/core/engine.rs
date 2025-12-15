@@ -16,10 +16,9 @@ use crate::server::UsageResponse;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, SamplingParams};
-use crate::utils::config::{EosTokenId, ModelType};
+use crate::utils::config::{EngineConfig, EosTokenId, SamplingParams};
 use crate::utils::heartbeat::heartbeat_worker;
-use crate::utils::image::ImageProcessConfig;
+use crate::utils::image::{get_image_config, ImageProcessConfig};
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
@@ -91,7 +90,7 @@ pub struct LLMEngine {
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
-    is_multimodel: bool,
+    has_vision: bool,
     model_name: String,
     pub img_cfg: Option<ImageProcessConfig>,
 }
@@ -158,6 +157,13 @@ impl LLMEngine {
             vec![0]
         };
 
+        let arch = config.architectures.as_ref().unwrap()[0].clone();
+        let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
+            || arch == "Gemma3ForCausalLM".to_string();
+        // Gemma3 must use conventional attention
+        if is_gemma {
+            econfig.disable_flash_attn = Some(true);
+        }
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
@@ -370,29 +376,7 @@ impl LLMEngine {
             true,
         );
 
-        let img_cfg = match model_type {
-            ModelType::Mistral3VL => {
-                use crate::models::mistral3_vl::Mistral3Config;
-                assert!(
-                    config.extra_config_json.is_some(),
-                    "Multimodel missing vision config!"
-                );
-                let mut cfg: Mistral3Config =
-                    serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                        .map_err(candle_core::Error::wrap)?;
-
-                let img_cfg = ImageProcessConfig::default(
-                    "[IMG]".to_string(),
-                    "[IMG_BREAK]".to_string(),
-                    "[IMG_END]".to_string(),
-                    cfg.spatial_merge_size,
-                    cfg.vision_config.patch_size,
-                    cfg.vision_config.image_size,
-                );
-                Some(img_cfg)
-            }
-            _ => None,
-        };
+        let img_cfg = get_image_config(model_type, &config)?;
 
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()
@@ -417,7 +401,7 @@ impl LLMEngine {
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
-            is_multimodel: config.is_multi_model.unwrap_or(false),
+            has_vision: config.is_multi_model.unwrap_or(false),
             img_cfg,
             model_name,
         }));
@@ -649,7 +633,13 @@ impl LLMEngine {
                             let response = receive_local(&mut stream, false)?;
 
                             match response {
-                                MessageType::RunResponse(output_ids) => Ok(output_ids),
+                                MessageType::RunResponse(output_ids) => {
+                                    if output_ids.len() == 0 {
+                                        candle_core::bail!("Runner step error, no response!")
+                                    } else {
+                                        Ok(output_ids)
+                                    }
+                                }
                                 other => {
                                     candle_core::bail!("Unexpected response type: {:?}", other)
                                 }
@@ -1330,6 +1320,6 @@ impl LLMEngine {
     }
 
     pub fn get_model_info(&self) -> (bool, String) {
-        (self.is_multimodel, self.model_name.clone())
+        (self.has_vision, self.model_name.clone())
     }
 }

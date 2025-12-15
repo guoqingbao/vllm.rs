@@ -122,6 +122,8 @@ pub struct Config {
     pub vocab_size: Option<usize>,
     pub rope_theta: Option<f64>,
     pub attention_bias: Option<bool>,
+    pub attn_logit_softcapping: Option<f64>,
+    pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
     pub eos_token_id: Option<EosTokenId>,
@@ -129,6 +131,7 @@ pub struct Config {
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
     pub partial_rotary_factor: Option<f32>,
+    #[serde(alias = "hidden_activation")]
     pub hidden_act: candle_nn::Activation,
     #[serde(alias = "rope_parameters")]
     pub rope_scaling: Option<HashMap<String, RopeScaling>>,
@@ -167,6 +170,7 @@ pub struct EngineConfig {
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
+    pub disable_flash_attn: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -220,6 +224,7 @@ pub struct EngineConfig {
     pub server_mode: Option<bool>,
     #[pyo3(get, set)]
     pub pd_config: Option<PdConfig>,
+    pub disable_flash_attn: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -283,6 +288,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            disable_flash_attn: None,
         }
     }
 }
@@ -391,6 +397,7 @@ pub enum ModelType {
     Qwen3MoE,
     LLaMa,
     Gemma,
+    Gemma3,
     Phi,
     Mistral,
     GLM4,
