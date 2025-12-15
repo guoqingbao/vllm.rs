@@ -17,6 +17,7 @@ pub struct ModelPaths {
     pub config_filename: PathBuf,
     pub generation_config_filename: PathBuf,
     pub filenames: Vec<PathBuf>,
+    pub chat_template_filename: Option<PathBuf>,
 }
 
 impl ModelPaths {
@@ -34,6 +35,9 @@ impl ModelPaths {
     }
     pub fn get_generation_config_filename(&self) -> PathBuf {
         self.generation_config_filename.clone()
+    }
+    pub fn get_chat_template_filename(&self) -> Option<PathBuf> {
+        self.chat_template_filename.clone()
     }
 }
 
@@ -120,6 +124,14 @@ impl Downloader {
                             } else {
                                 "".into()
                             },
+                            chat_template_filename: if Path::new(path)
+                                .join("chat_template.json")
+                                .exists()
+                            {
+                                Some(Path::new(path).join("chat_template.json"))
+                            } else {
+                                None
+                            },
                         },
                         false,
                     )
@@ -140,6 +152,7 @@ impl Downloader {
                         }
                     },
                     generation_config_filename: "".into(),
+                    chat_template_filename: None,
                 },
                 true,
             ),
@@ -191,6 +204,41 @@ impl Downloader {
         Ok((paths, gguf))
     }
 
+    pub fn check_cache(&self) -> Option<PathBuf> {
+        let sanitized_id = std::path::Path::new(self.model_id.as_ref().unwrap())
+            .display()
+            .to_string()
+            .replace("/", "--");
+
+        let home_folder = if dirs::home_dir().is_some() {
+            let mut path = dirs::home_dir().unwrap();
+            path.push(".cache/huggingface/hub/");
+            if !path.exists() {
+                let _ = std::fs::create_dir_all(&path);
+            }
+            path
+        } else {
+            "./".into()
+        };
+
+        let cache_dir: std::path::PathBuf = std::env::var("HF_HUB_CACHE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or(home_folder.into());
+        let cache_path = cache_dir.join(format!("models--{sanitized_id}/"));
+        if !cache_path.join("refs/main").exists() {
+            return None;
+        }
+        let cache_id = std::fs::read_to_string(&cache_path.join("refs/main")).ok()?;
+        let cache_path = cache_path.join(format!("snapshots/{}/", cache_id));
+
+        if !cache_path.exists() {
+            return None;
+        }
+
+        crate::log_warn!("Cache found {:?}", cache_path);
+        Some(cache_path)
+    }
+
     pub fn download_model(
         &self,
         revision: Option<String>,
@@ -198,6 +246,38 @@ impl Downloader {
         hf_token_path: Option<String>,
     ) -> Result<ModelPaths> {
         assert!(self.model_id.is_some(), "No model id provided!");
+        let mut filenames = vec![];
+
+        if let Some(cache_path) = self.check_cache() {
+            let tokenizer_filename = cache_path.join("tokenizer.json");
+            let config_filename = cache_path.join("config.json");
+            let tokenizer_config_filename = cache_path.join("tokenizer_config.json");
+            let generation_config_filename = cache_path.join("generation_config.json");
+            let mut chat_template_filename = cache_path.join("chat_template.json");
+            if !chat_template_filename.exists() {
+                chat_template_filename = cache_path.join("chat_template.jinja");
+            }
+            let chat_template_filename = if !chat_template_filename.exists() {
+                Some(chat_template_filename)
+            } else {
+                None
+            };
+            for entry in std::fs::read_dir(&cache_path)? {
+                let path = entry?.path();
+                if path.extension() == Some("safetensors".as_ref()) {
+                    crate::log_warn!("Found cache: {}", path.display());
+                    filenames.push(path);
+                }
+            }
+            return Ok(ModelPaths {
+                tokenizer_filename,
+                tokenizer_config_filename,
+                config_filename,
+                filenames,
+                generation_config_filename,
+                chat_template_filename,
+            });
+        }
 
         let api = ApiBuilder::new()
             .with_progress(true)
@@ -227,7 +307,6 @@ impl Downloader {
             _ => "".into(),
         };
 
-        let mut filenames = vec![];
         for rfilename in api
             .info()
             .map_err(candle_core::Error::wrap)?
@@ -246,6 +325,7 @@ impl Downloader {
             config_filename,
             filenames,
             generation_config_filename,
+            chat_template_filename: None,
         })
     }
 
@@ -257,9 +337,24 @@ impl Downloader {
             self.model_id.as_ref().unwrap(),
         );
         let filename = self.weight_file.clone().unwrap();
+        let mut filenames = vec![];
+        if let Some(cache_path) = self.check_cache() {
+            let cached_gguf_file = cache_path.join(&filename);
+            if cached_gguf_file.exists() {
+                crate::log_warn!("Found cache: {}", cached_gguf_file.display());
+                filenames.push(cached_gguf_file.clone());
+                return Ok(ModelPaths {
+                    tokenizer_filename: "".into(),
+                    tokenizer_config_filename: "".into(),
+                    config_filename: "".into(),
+                    filenames,
+                    generation_config_filename: "".into(),
+                    chat_template_filename: None,
+                });
+            }
+        }
         let api = hf_hub::api::sync::Api::new().unwrap();
         let revision = revision.unwrap_or("main".to_string());
-        let mut filenames = vec![];
         let filename = api
             .repo(hf_hub::Repo::with_revision(
                 self.model_id.clone().unwrap(),
@@ -276,6 +371,7 @@ impl Downloader {
             config_filename: "".into(),
             filenames,
             generation_config_filename: "".into(),
+            chat_template_filename: None,
         })
     }
 }

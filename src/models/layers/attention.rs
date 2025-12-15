@@ -54,8 +54,9 @@ impl Attention {
         .collect();
         let is_qvar_builder = vb.is_qvar_builder();
 
-        let is_gemma = config.architectures.as_ref().unwrap()[0]
-            == "Gemma3ForConditionalGeneration".to_string();
+        let arch = config.architectures.as_ref().unwrap()[0].clone();
+        let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
+            || arch == "Gemma3ForCausalLM".to_string();
 
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,

@@ -414,7 +414,6 @@ impl LLMEngine {
             .encode_fast(prompt, true)
             .expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
-        println!("token_ids {:?}", token_ids);
         let length = token_ids.len();
         if let Some(max_model_len) = self.econfig.max_model_len {
             if length > max_model_len - 1 {

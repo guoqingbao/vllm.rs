@@ -617,6 +617,10 @@ pub fn init_config_tokenizer(
                             .map_err(candle_core::Error::wrap)?,
                     );
                 }
+            } else if let Some(f) = model_pathes.get_chat_template_filename() {
+                crate::log_warn!("Try loading chat template from chat_template.json");
+                config_tokenizer.chat_template =
+                    Some(std::fs::read_to_string(&f).map_err(candle_core::Error::wrap)?);
             }
         }
 
@@ -801,6 +805,7 @@ pub fn get_arch_rope(
         ("mistral", true),
         ("mistral3", false),
         ("Gemma3ForConditionalGeneration", false),
+        ("Gemma3ForCausalLM", false),
     ]
     .iter()
     .cloned()
@@ -854,7 +859,7 @@ pub fn get_arch_rope(
             ModelType::GLM4,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
-        "Gemma3ForConditionalGeneration" => (
+        "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
         ),
