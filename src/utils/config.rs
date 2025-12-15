@@ -170,6 +170,7 @@ pub struct EngineConfig {
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
+    pub disable_flash_attn: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -223,6 +224,7 @@ pub struct EngineConfig {
     pub server_mode: Option<bool>,
     #[pyo3(get, set)]
     pub pd_config: Option<PdConfig>,
+    pub disable_flash_attn: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -286,6 +288,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            disable_flash_attn: None,
         }
     }
 }

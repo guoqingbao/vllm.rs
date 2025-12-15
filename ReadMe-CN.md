@@ -74,7 +74,7 @@
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
-* ✅ Gemma3 (多模态)
+* ✅ Gemma3 (文本模型，不支持Flash Attention)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
@@ -439,6 +439,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
 * [x] 内置 ChatGPT风格 Web 网页服务
+* [ ] 修复Gemma3图片输入时的精度问题
 
 ## 📚 参考项目
 

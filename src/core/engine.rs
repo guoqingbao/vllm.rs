@@ -157,6 +157,13 @@ impl LLMEngine {
             vec![0]
         };
 
+        let arch = config.architectures.as_ref().unwrap()[0].clone();
+        let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
+            || arch == "Gemma3ForCausalLM".to_string();
+        // Gemma3 must use conventional attention
+        if is_gemma {
+            econfig.disable_flash_attn = Some(true);
+        }
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");

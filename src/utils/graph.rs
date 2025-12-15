@@ -410,6 +410,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 max_seqlen_q: 0,
                 max_seqlen_k: 0,
                 max_context_len: self.max_model_len,
+                disable_flash_attn: None,
             };
 
             self.model.start_capture(bs)?;

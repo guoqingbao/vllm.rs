@@ -416,6 +416,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            disable_flash_attn: None,
         }
     }
 }
