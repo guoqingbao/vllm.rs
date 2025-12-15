@@ -187,11 +187,11 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    let (is_multimodel, model_name) = {
+    let (has_vision, model_name) = {
         let e = engine.read();
         e.get_model_info()
     };
-    let is_multimodel = Arc::new(is_multimodel); // wrap in Arc first
+    let has_vision = Arc::new(has_vision); // wrap in Arc first
     if args.server || args.ui_server || args.pd_server {
         let server_data = ServerData {
             engine: engine.clone(),
@@ -207,7 +207,7 @@ async fn main() -> Result<()> {
             .route(
                 "/v1/models",
                 get(|| async move {
-                    let m = if *is_multimodel {
+                    let m = if *has_vision {
                         vec!["text", "image"]
                     } else {
                         vec!["text"]

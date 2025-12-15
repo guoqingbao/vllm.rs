@@ -74,9 +74,9 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Qwen2 Moe
 * ✅ Qwen3 Moe
 * ✅ Mistral v1, v2
-* ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodel)
+* ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
-* ✅ Gemma3 (Multimodel)
+* ✅ Gemma3 (Multimodal model)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
@@ -126,7 +126,7 @@ python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --isq q4k 
   </details>
 
   <details open>
-    <summary>Multimodel(Mistral-3 VL, with images)</summary>
+    <summary>Multimodal model (Mistral-3 VL, with images)</summary>
 
 ```bash
 # Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')

@@ -90,7 +90,7 @@ pub struct LLMEngine {
     active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
-    is_multimodel: bool,
+    has_vision: bool,
     model_name: String,
     pub img_cfg: Option<ImageProcessConfig>,
 }
@@ -394,7 +394,7 @@ impl LLMEngine {
             active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
-            is_multimodel: config.is_multi_model.unwrap_or(false),
+            has_vision: config.is_multi_model.unwrap_or(false),
             img_cfg,
             model_name,
         }));
@@ -1313,6 +1313,6 @@ impl LLMEngine {
     }
 
     pub fn get_model_info(&self) -> (bool, String) {
-        (self.is_multimodel, self.model_name.clone())
+        (self.has_vision, self.model_name.clone())
     }
 }
