@@ -1,10 +1,10 @@
 // src/models/gemma3.rs
 
-use crate::models::gemma3::config::VisionConfig;
 use crate::models::layers::attention::{Attention, NaiveAttention};
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX;
 use crate::models::layers::mask::get_attention_causal_mask;
+use crate::models::layers::mlp::NaiveMLP;
 use crate::models::layers::others::{conv2d, embedding, layer_norm, rms_norm, AvgPool2d, NormX};
 use crate::models::layers::rotary_emb::{
     ApplyRotaryEmbedding, RotaryEmbedding, ScalingRotaryEmbedding,
@@ -14,7 +14,7 @@ use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{Activation, Conv2d, Conv2dConfig};
+use candle_nn::{Conv2d, Conv2dConfig};
 use either::Either;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -107,51 +107,9 @@ impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
 unsafe impl Send for DummyRotaryEmbedding {}
 unsafe impl Sync for DummyRotaryEmbedding {}
 
-pub struct MLP {
-    fc1: ReplicatedLinear,
-    fc2: ReplicatedLinear,
-    act: Activation,
-}
-
-impl MLP {
-    pub fn new(vb: VarBuilderX, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
-        let fc1 = ReplicatedLinear::load_b(
-            cfg.hidden_size,
-            cfg.intermediate_size,
-            true,
-            vb.pp("fc1"),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let fc2 = ReplicatedLinear::load_b(
-            cfg.intermediate_size,
-            cfg.hidden_size,
-            true,
-            vb.pp("fc2"),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        Ok(Self {
-            fc1,
-            fc2,
-            act: cfg.hidden_act,
-        })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let gate_up = self.fc1.forward(xs)?;
-        let down = self.act.forward(&gate_up)?;
-        self.fc2.forward(&down)
-    }
-}
-
 struct Gemma3VisionEncoderLayer {
     self_attn: NaiveAttention,
-    mlp: MLP,
+    mlp: NaiveMLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     rotary_emb: Arc<DummyRotaryEmbedding>,
@@ -180,7 +138,15 @@ impl Gemma3VisionEncoderLayer {
             key_mappings,
         )?;
 
-        let mlp = MLP::new(vb.pp("mlp").clone(), &config.vision_config, dtype)?;
+        let mlp = NaiveMLP::new(
+            vb.pp("mlp").clone(),
+            config.vision_config.hidden_size,
+            config.vision_config.intermediate_size,
+            true,
+            &["fc1", "fc2"],
+            config.vision_config.hidden_act,
+            dtype,
+        )?;
 
         let input_layernorm = layer_norm(
             config.vision_config.hidden_size,

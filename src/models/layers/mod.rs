@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod deepstack;
 pub mod distributed;
 pub mod linear;
 pub mod mask;

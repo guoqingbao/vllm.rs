@@ -272,6 +272,27 @@ impl Qwen3ForCausalLM {
         input_metadata: &InputMetadata,
         embeded_inputs: bool,
     ) -> Result<Tensor> {
+        self.forward_with_deepstack(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            &None,
+            &None,
+        )
+    }
+
+    pub fn forward_with_deepstack(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+        visual_pos_masks: &Option<Tensor>,
+        deepstack_visual_embeds: &Option<Vec<Tensor>>,
+    ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
                 .cu_seqlens_q
@@ -297,7 +318,9 @@ impl Qwen3ForCausalLM {
             self.embed_tokens.forward(input_ids)?
         };
         if let Some(kv_caches) = kv_caches {
-            for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
+            for ((k_cache, v_cache), (i, layer)) in
+                zip(kv_caches.iter(), self.layers.iter().enumerate())
+            {
                 xs = layer.forward(
                     &xs,
                     attention_mask.as_ref(),
@@ -305,6 +328,14 @@ impl Qwen3ForCausalLM {
                     Some((k_cache, v_cache)),
                     input_metadata,
                 )?;
+                if let (Some(pos_mask), Some(deepstacks)) =
+                    (visual_pos_masks, deepstack_visual_embeds)
+                {
+                    use crate::models::layers::deepstack::ApplyDeepStack;
+                    if i < deepstacks.len() {
+                        xs = xs.apply_deep_stack(pos_mask, &deepstacks[i])?;
+                    }
+                }
             }
         } else {
             for layer in self.layers.iter() {
@@ -335,5 +366,9 @@ impl Qwen3ForCausalLM {
 
     pub fn get_vocab_size(&self) -> usize {
         self.vocab_size
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
     }
 }

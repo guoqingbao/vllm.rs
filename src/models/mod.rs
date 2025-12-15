@@ -5,3 +5,4 @@ pub mod llama;
 pub mod mistral3_vl;
 pub mod qwen3;
 pub mod qwen3_moe;
+pub mod qwen3_vl;

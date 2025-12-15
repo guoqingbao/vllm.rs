@@ -79,6 +79,70 @@ fn image_resize(
     image.resize_exact(resize_width as u32, resize_height as u32, filter)
 }
 
+pub fn to_tensor(images: &Vec<DynamicImage>) -> Result<(Tensor, Vec<(usize, usize)>)> {
+    let mut image_sizes = Vec::new();
+    let mut pixel_values = Vec::new();
+    for image in images.iter() {
+        let (width, height) = image.dimensions();
+        image_sizes.push((height as usize, width as usize));
+
+        let rgb = image.to_rgb32f(); // HWC f32
+        let (w, h) = rgb.dimensions();
+        let data = rgb.into_raw(); // Vec<f32> in HWC layout, FAST
+
+        // Build tensor from slice
+        let t = Tensor::from_vec(data, (h as usize, w as usize, 3), &Device::Cpu)?;
+
+        // Convert HWC → CHW without copying data manually
+        let t = t.permute((2, 0, 1))?.contiguous()?; // [H, W, C] -> [C, H, W]
+
+        // let t = image_to_pixels(image, &Device::Cpu)?;
+        pixel_values.push(t.unsqueeze(0)?);
+    }
+    Ok((Tensor::cat(&pixel_values, 0)?, image_sizes))
+}
+
+pub fn normalize(
+    images: &Vec<DynamicImage>,
+    mean: Option<[f32; 3]>,
+    std: Option<[f32; 3]>,
+) -> Vec<DynamicImage> {
+    images
+        .into_iter()
+        .map(|img| {
+            let mut rgb = img.to_rgb32f();
+            if let (Some(m), Some(s)) = (mean, std) {
+                for px in rgb.pixels_mut() {
+                    let c = px.channels_mut();
+                    c[0] = (c[0] - m[0]) / s[0];
+                    c[1] = (c[1] - m[1]) / s[1];
+                    c[2] = (c[2] - m[2]) / s[2];
+                }
+            }
+
+            DynamicImage::ImageRgb32F(rgb)
+        })
+        .collect()
+}
+
+pub fn rescale(images: &Vec<DynamicImage>, factor: Option<f32>) -> Vec<DynamicImage> {
+    images
+        .into_iter()
+        .map(|img| {
+            let mut rgb = img.to_rgb32f();
+
+            if let Some(scale) = factor {
+                for px in rgb.pixels_mut() {
+                    let c = px.channels_mut();
+                    c[0] *= scale;
+                    c[1] *= scale;
+                    c[2] *= scale;
+                }
+            }
+            DynamicImage::ImageRgb32F(rgb)
+        })
+        .collect()
+}
 /// Preprocess input DynamicImages:
 /// 1. Resize w/ custom rule (padding to uniform size)
 /// 2. Optional rescale
@@ -132,33 +196,7 @@ pub fn preprocess_images(
         }
     }
 
-    // Step 3: convert to f32, rescale + normalize if required
-    padded_imgs
-        .into_iter()
-        .map(|img| {
-            let mut rgb = img.to_rgb32f();
-
-            if let Some(scale) = scale_factor {
-                for px in rgb.pixels_mut() {
-                    let c = px.channels_mut();
-                    c[0] *= scale;
-                    c[1] *= scale;
-                    c[2] *= scale;
-                }
-            }
-
-            if let (Some(m), Some(s)) = (mean, std) {
-                for px in rgb.pixels_mut() {
-                    let c = px.channels_mut();
-                    c[0] = (c[0] - m[0]) / s[0];
-                    c[1] = (c[1] - m[1]) / s[1];
-                    c[2] = (c[2] - m[2]) / s[2];
-                }
-            }
-
-            DynamicImage::ImageRgb32F(rgb)
-        })
-        .collect()
+    normalize(&rescale(&padded_imgs, scale_factor), mean, std)
 }
 
 #[derive(Clone)]
@@ -168,7 +206,8 @@ pub struct ImageProcessConfig {
     image_break_token: Option<String>,
     image_end_token: String,
     spatial_merge_size: usize,
-    do_normalize: Option<bool>,
+    pub do_normalize: Option<bool>,
+    pub do_resize: Option<bool>,
     pub image_mean: Option<[f32; 3]>,
     pub image_std: Option<[f32; 3]>,
     max_height: usize,
@@ -176,6 +215,7 @@ pub struct ImageProcessConfig {
     patch_size: usize,
     abolute_resize: bool,
     pub scale_factor: Option<f32>,
+    pub resampling: Option<usize>,
 }
 
 impl ImageProcessConfig {
@@ -197,11 +237,13 @@ impl ImageProcessConfig {
             spatial_merge_size,
             image_mean: None,
             image_std: None,
+            do_resize: Some(true),
             do_normalize: Some(true),
             max_height: image_size,
             max_width: image_size,
             patch_size,
             abolute_resize,
+            resampling: None,
             scale_factor: None,
         }
     }
@@ -234,7 +276,7 @@ impl ImageProcessor {
             None
         };
 
-        let mut images = preprocess_images(
+        let images = preprocess_images(
             images,
             self.cfg.max_height,
             self.cfg.max_width,
@@ -244,27 +286,7 @@ impl ImageProcessor {
             image_std,
             self.cfg.abolute_resize,
         );
-        let mut pixel_values = Vec::new();
-        let mut image_sizes = Vec::new();
-
-        for image in images.iter_mut() {
-            let (width, height) = image.dimensions();
-            image_sizes.push((height as usize, width as usize));
-
-            let rgb = image.to_rgb32f(); // HWC f32
-            let (w, h) = rgb.dimensions();
-            let data = rgb.into_raw(); // Vec<f32> in HWC layout, FAST
-
-            // Build tensor from slice
-            let t = Tensor::from_vec(data, (h as usize, w as usize, 3), &Device::Cpu)?;
-
-            // Convert HWC → CHW without copying data manually
-            let t = t.permute((2, 0, 1))?.contiguous()?; // [H, W, C] -> [C, H, W]
-
-            // let t = image_to_pixels(image, &Device::Cpu)?;
-            pixel_values.push(t.unsqueeze(0)?);
-        }
-        Ok((Tensor::cat(&pixel_values, 0)?, image_sizes))
+        to_tensor(&images)
     }
 
     pub fn process_inputs(
@@ -387,4 +409,22 @@ pub fn get_image_config(
         _ => None,
     };
     Ok(img_cfg)
+}
+
+#[allow(dead_code)]
+pub trait ToFilter {
+    fn to_filter(self) -> Result<FilterType>;
+}
+
+impl ToFilter for Option<usize> {
+    fn to_filter(self) -> Result<FilterType> {
+        match self {
+            Some(0) => Ok(FilterType::Nearest),
+            Some(1) => Ok(FilterType::Lanczos3),
+            Some(2) | None => Ok(FilterType::Triangle), // BiLinear
+            Some(3) => Ok(FilterType::CatmullRom),      // BiCubic
+            Some(4) => Ok(FilterType::Nearest),
+            Some(x) => candle_core::bail!("Filter number {x} not supported"),
+        }
+    }
 }

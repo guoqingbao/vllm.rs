@@ -26,6 +26,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
+#[doc(hidden)]
+#[macro_export]
+macro_rules! serde_default {
+    ($t:ty, $name:ident, $v:expr) => {
+        fn $name() -> $t {
+            $v
+        }
+    };
+}
+
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
     crate::log_info!("{:}", Path::new(path).join(json_file).display());
     let jsfile = std::fs::File::open(Path::new(path).join(json_file))?;
@@ -793,6 +803,7 @@ pub fn get_arch_rope(
         ("Qwen2ForCausalLM", false),
         ("Qwen3ForCausalLM", false),
         ("Qwen3ForConditionalGeneration", false),
+        ("Qwen3VLForConditionalGeneration", false),
         ("MistralForCausalLM", false),
         ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
@@ -824,6 +835,10 @@ pub fn get_arch_rope(
         ),
         "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
             ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "Qwen3VLForConditionalGeneration" => (
+            ModelType::Qwen3VL,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "LlamaForCausalLM"
