@@ -205,6 +205,7 @@ impl Downloader {
     }
 
     pub fn check_cache(&self) -> Option<PathBuf> {
+        use crate::utils::{contains_gguf, has_complete_safetensors};
         let sanitized_id = std::path::Path::new(self.model_id.as_ref().unwrap())
             .display()
             .to_string()
@@ -234,9 +235,19 @@ impl Downloader {
         if !cache_path.exists() {
             return None;
         }
-
-        crate::log_warn!("Cache found {:?}", cache_path);
-        Some(cache_path)
+        if contains_gguf(&cache_path) {
+            crate::log_warn!("Cache found {:?}", cache_path);
+            return Some(cache_path);
+        }
+        if let Ok(v) = has_complete_safetensors(&cache_path) {
+            if v {
+                crate::log_warn!("Cache found {:?}", cache_path);
+                return Some(cache_path);
+            } else {
+                crate::log_warn!("Incomplete cache {:?}", cache_path);
+            }
+        }
+        None
     }
 
     pub fn download_model(

@@ -1123,3 +1123,60 @@ pub fn get_llama4_attn_scale(
         .unsqueeze(0)?
         .unsqueeze(0)
 }
+
+pub fn contains_gguf(path: &Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "gguf" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
+    use regex::Regex;
+    use std::collections::HashSet;
+    use std::fs;
+
+    let re = Regex::new(r"^.+-(\d{5})-of-(\d{5})\.safetensors$").unwrap();
+
+    let mut found_indices = HashSet::new();
+    let mut expected_total: Option<u32> = None;
+
+    for entry in fs::read_dir(path).map_err(candle_core::Error::wrap)? {
+        let entry = entry.map_err(candle_core::Error::wrap)?;
+        let filename = entry.file_name();
+        let filename = filename.to_string_lossy();
+
+        if let Some(caps) = re.captures(&filename) {
+            let idx: u32 = caps[1].parse().map_err(candle_core::Error::wrap)?;
+            let total: u32 = caps[2].parse().map_err(candle_core::Error::wrap)?;
+
+            if let Some(expected) = expected_total {
+                if expected != total {
+                    return Ok(false); // inconsistent shard count
+                }
+            } else {
+                expected_total = Some(total);
+            }
+
+            found_indices.insert(idx);
+        }
+    }
+
+    let total = match expected_total {
+        Some(t) => t,
+        None => return Ok(false), // no safetensors found
+    };
+
+    crate::log_info!(
+        "Local cache expect {total} safetensors, found {:?}",
+        found_indices
+    );
+    // Ensure all shards 1..=total are present
+    Ok((1..=total).all(|i| found_indices.contains(&i)))
+}
