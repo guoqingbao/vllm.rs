@@ -34,7 +34,7 @@ impl PatchEmbed {
             },
             proj_vb.clone(),
         )?;
-        let bias = match vb.0 {
+        let bias = match proj_vb.0 {
             Either::Left(v) => v.get(cfg.hidden_size, "bias")?,
             _ => {
                 panic!("Unsupported format for patch embedding!")

@@ -1111,6 +1111,19 @@ pub fn get_llama4_attn_scale(
         .unsqueeze(0)
 }
 
+pub fn contains_gguf(path: &Path) -> bool {
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Some(ext) = entry.path().extension() {
+                if ext == "gguf" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
     use regex::Regex;
     use std::collections::HashSet;
@@ -1147,6 +1160,10 @@ pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
         None => return Ok(false), // no safetensors found
     };
 
+    crate::log_info!(
+        "Local cache expect {total} safetensors, found {:?}",
+        found_indices
+    );
     // Ensure all shards 1..=total are present
     Ok((1..=total).all(|i| found_indices.contains(&i)))
 }

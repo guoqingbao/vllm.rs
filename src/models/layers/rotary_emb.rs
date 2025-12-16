@@ -159,9 +159,10 @@ impl ScalingRotaryEmbedding {
             } else if let Some(factor) = rope_scaling.get("factor").and_then(|v| v.as_f64()) {
                 cfg.max_position_embeddings as f64 / factor
             } else {
-                candle_core::bail!(
+                crate::log_warn!(
                     "original_max_position_embeddings must be set in rope_scaling or cfg"
                 );
+                cfg.max_position_embeddings as f64
             };
 
             let rope_type = rope_scaling

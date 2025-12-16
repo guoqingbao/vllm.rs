@@ -84,7 +84,7 @@ impl Qwen3VLForConditionalGeneration {
         continuous_img_pad: Option<Vec<(u32, u32)>>,
     ) -> Result<Tensor> {
         let mut input_embeds = self.text_model.embed_forward(input_ids)?;
-        let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
+        let (seq_len, hidden_dim) = input_embeds.dims2()?;
         let device = input_embeds.device().clone();
 
         let mut visual_pos_masks: Option<Tensor> = None;
@@ -111,8 +111,7 @@ impl Qwen3VLForConditionalGeneration {
                 .collect::<Result<Vec<_>>>()?;
 
             let mut offset = 0usize;
-            let mut image_mask =
-                Tensor::zeros((batch_size, seq_len), DType::F32, input_ids.device())?;
+            let mut image_mask = Tensor::zeros((1, seq_len), DType::F32, input_ids.device())?;
             let total_expected: usize = image_pad
                 .iter()
                 .map(|(s, e)| *e as usize - *s as usize)
@@ -150,30 +149,34 @@ impl Qwen3VLForConditionalGeneration {
             Vec::new()
         };
 
-        let mut ropeidx_attn_mask_bs = Vec::new();
-        let max_seqlens = *seqlens.iter().max().unwrap() as usize;
-        for len in &seqlens {
-            let len = *len as usize;
-            ropeidx_attn_mask_bs.push(Tensor::new(
-                [vec![1f32; len], vec![0f32; max_seqlens - len]].concat(),
-                input_ids.device(),
-            )?);
-        }
-        let ropeidx_attn_mask = Tensor::stack(&ropeidx_attn_mask_bs, 0)?;
-        let position_ids = if input_metadata.is_prefill {
-            use crate::models::layers::deepstack::ApplyRopeIndex;
-            input_ids
-                .apply_rope_index(
-                    image_grid_thw.as_ref(),
-                    Some(&ropeidx_attn_mask),
-                    self.spatial_merge_size,
-                    self.image_token_id,
-                    self.vision_start_token_id,
-                    self.vision_end_token_id,
-                )?
-                .0
+        let position_ids = if images.is_some() && visual_pos_masks.is_some() {
+            let mut ropeidx_attn_mask_bs = Vec::new();
+            let max_seqlens = *seqlens.iter().max().unwrap() as usize;
+            for len in &seqlens {
+                let len = *len as usize;
+                ropeidx_attn_mask_bs.push(Tensor::new(
+                    [vec![1f32; len], vec![0f32; max_seqlens - len]].concat(),
+                    input_ids.device(),
+                )?);
+            }
+            let ropeidx_attn_mask = Tensor::stack(&ropeidx_attn_mask_bs, 0)?;
+            if input_metadata.is_prefill {
+                use crate::models::layers::deepstack::ApplyRopeIndex;
+                input_ids
+                    .apply_rope_index(
+                        image_grid_thw.as_ref(),
+                        Some(&ropeidx_attn_mask),
+                        self.spatial_merge_size,
+                        self.image_token_id,
+                        self.vision_start_token_id,
+                        self.vision_end_token_id,
+                    )?
+                    .0
+            } else {
+                positions.to_owned()
+            }
         } else {
-            positions.clone()
+            positions.to_owned()
         };
 
         let out = self.text_model.forward_with_deepstack(
