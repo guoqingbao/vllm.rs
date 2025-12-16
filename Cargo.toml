@@ -55,6 +55,7 @@ sysinfo = "0.37.2"
 image = { version = "0.25.6", default-features = false, features = ['bmp', 'gif', 'jpeg', 'png', 'tiff', 'webp'] }
 reqwest = { version = "0.12.24", features = ["blocking", "json", "rustls-tls"]}
 bytemuck = "1.24.0"
+regex = "1.12.2"
 
 [lib]
 name = "vllm_rs"

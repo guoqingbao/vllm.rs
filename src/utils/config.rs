@@ -1,6 +1,5 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
-use either::Either;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
@@ -101,11 +100,36 @@ pub struct MoEConfig {
     pub num_experts_per_tok: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ScalingValue(#[serde(with = "either::serde_untagged")] pub Either<f64, Vec<f64>>);
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// pub struct ScalingValue(#[serde(with = "either::serde_untagged")] pub Either<f64, Vec<f64>>);
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RopeScaling(#[serde(with = "either::serde_untagged")] pub Either<ScalingValue, String>);
+// #[derive(Serialize, Deserialize, Debug, Clone)]
+// pub struct RopeScaling(#[serde(with = "either::serde_untagged")] pub Either<ScalingValue, String>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RopeScalingValue {
+    Bool(bool),
+    Number(f64),
+    NumberArray(Vec<f64>),
+    String(String),
+}
+
+impl RopeScalingValue {
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            RopeScalingValue::Number(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            RopeScalingValue::String(v) => Some(v),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Config {
@@ -134,7 +158,7 @@ pub struct Config {
     #[serde(alias = "hidden_activation")]
     pub hidden_act: candle_nn::Activation,
     #[serde(alias = "rope_parameters")]
-    pub rope_scaling: Option<HashMap<String, RopeScaling>>,
+    pub rope_scaling: Option<HashMap<String, RopeScalingValue>>,
     pub quant: Option<String>,
     pub moe_cfg: Option<MoEConfig>,
     pub fp8_kvcache: Option<bool>,

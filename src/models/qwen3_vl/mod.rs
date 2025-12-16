@@ -44,7 +44,7 @@ impl Qwen3VLForConditionalGeneration {
 
         let vision_model = Qwen3VLVisionModel::new(
             &cfg.vision_config,
-            vb.pp("vision_tower"),
+            vb.pp("model.visual"),
             &vb.device(),
             dtype,
         )?;
@@ -52,14 +52,15 @@ impl Qwen3VLForConditionalGeneration {
         if cfg.quantization_config.is_some() {
             cfg.text_config.quantization_config = cfg.quantization_config.clone();
         }
-        let text_model = Qwen3ForCausalLM::new(
-            &vb.pp("language_model"),
+        let text_model = Qwen3ForCausalLM::new_with_prefix(
+            &vb,
             comm.clone(),
             config,
             dtype,
             is_rope_i,
             device,
             progress_reporter,
+            Some("model.language_model".to_string()),
         )?;
         Ok(Self {
             text_model,

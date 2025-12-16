@@ -154,25 +154,53 @@ impl Qwen3ForCausalLM {
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
+        Self::new_with_prefix(
+            vb,
+            comm.clone(),
+            config,
+            dtype,
+            is_rope_i,
+            device,
+            progress_reporter,
+            None,
+        )
+    }
+
+    pub fn new_with_prefix(
+        vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        dtype: DType,
+        is_rope_i: bool,
+        device: &Device,
+        progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
+        prefix: Option<String>,
+    ) -> Result<Self> {
+        let has_prefix = prefix.is_some();
+        let prefix = prefix.unwrap_or("model".to_string());
+        let gguf_prefix = if has_prefix {
+            prefix.clone() + "."
+        } else {
+            "".to_string()
+        };
         let key_map: HashMap<&str, &str> = [
-            ("model.embed_tokens", "token_embd"),
+            ("embed_tokens", "token_embd"),
             ("lm_head", "output"),
-            ("model.norm", "output_norm"),
-            ("model.layers", "blk"),
+            ("norm", "output_norm"),
+            ("layers", "blk"),
         ]
         .iter()
         .cloned()
         .collect();
         let reporter = progress_reporter.clone();
-
         let is_qvar_builder = vb.is_qvar_builder();
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
             if is_qvar_builder {
-                vb.pp(key_map["model.embed_tokens"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
             } else {
-                vb.pp("model.embed_tokens")
+                vb.pp(&format!("{}.embed_tokens", prefix))
             },
             if is_qvar_builder || config.quant.is_some() {
                 DType::F32
@@ -198,9 +226,9 @@ impl Qwen3ForCausalLM {
                 vb.pp(format!(
                     "{}.{}",
                     if is_qvar_builder {
-                        key_map["model.layers"]
+                        format!("{}{}", gguf_prefix, key_map["layers"])
                     } else {
-                        "model.layers"
+                        format!("{}.layers", prefix)
                     },
                     i
                 )
@@ -218,9 +246,9 @@ impl Qwen3ForCausalLM {
             config.hidden_size,
             config.rms_norm_eps,
             if is_qvar_builder {
-                vb.pp(key_map["model.norm"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["norm"]))
             } else {
-                vb.pp("model.norm")
+                vb.pp(&format!("{}.norm", prefix))
             },
             dtype,
             false,
@@ -231,9 +259,9 @@ impl Qwen3ForCausalLM {
             vocab_size,
             if config.tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
-                    vb.pp(key_map["model.embed_tokens"])
+                    vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
                 } else {
-                    vb.pp("model.embed_tokens")
+                    vb.pp(&format!("{}.embed_tokens", prefix))
                 }
             } else {
                 if is_qvar_builder {
