@@ -503,6 +503,14 @@ pub fn init_config_tokenizer(
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }
+                    "Qwen3VLMoeForConditionalGeneration" => {
+                        let mut config: Config = serde_json::from_value(config_value.clone())
+                            .map_err(candle_core::Error::wrap)?;
+                        let moe_cfg: MoEConfig = serde_json::from_value(config_value)
+                            .map_err(candle_core::Error::wrap)?;
+                        config.moe_cfg = Some(moe_cfg);
+                        config
+                    }
                     _ => serde_json::from_value(config_value).map_err(candle_core::Error::wrap)?,
                 };
 
@@ -776,6 +784,7 @@ pub fn get_arch_rope(
         ("Qwen3ForCausalLM", false),
         ("Qwen3ForConditionalGeneration", false),
         ("Qwen3VLForConditionalGeneration", false),
+        ("Qwen3VLMoeForConditionalGeneration", false),
         ("MistralForCausalLM", false),
         ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
@@ -809,7 +818,7 @@ pub fn get_arch_rope(
             ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3VLForConditionalGeneration" => (
+        "Qwen3VLForConditionalGeneration" | "Qwen3VLMoeForConditionalGeneration" => (
             ModelType::Qwen3VL,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),

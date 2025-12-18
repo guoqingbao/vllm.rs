@@ -100,12 +100,6 @@ pub struct MoEConfig {
     pub num_experts_per_tok: usize,
 }
 
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// pub struct ScalingValue(#[serde(with = "either::serde_untagged")] pub Either<f64, Vec<f64>>);
-
-// #[derive(Serialize, Deserialize, Debug, Clone)]
-// pub struct RopeScaling(#[serde(with = "either::serde_untagged")] pub Either<ScalingValue, String>);
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RopeScalingValue {

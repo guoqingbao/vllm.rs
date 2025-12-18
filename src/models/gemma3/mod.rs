@@ -688,7 +688,7 @@ impl Gemma3ForConditionalGeneration {
                 .broadcast_as(xs.shape().clone())?
                 .to_dtype(DType::U32)?;
 
-            let mut image_tensor = images.to_tensor_f32(&xs.device())?;
+            let mut image_tensor = images.to_tensor_f32(&xs.device())?.to_dtype(self.dtype)?;
             let mut image_sizes = images.patches.clone();
             let num_images = image_tensor.dim(0)?;
             assert!(
@@ -710,8 +710,7 @@ impl Gemma3ForConditionalGeneration {
             }
 
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-            let image_features =
-                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
+            let image_features = self.vision_tower(&image_tensor, image_sizes)?;
 
             let mut x_flat = xs.flatten_all()?;
             let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
@@ -771,21 +770,6 @@ impl Gemma3ForConditionalGeneration {
                     Some((k_cache, v_cache)),
                     input_metadata,
                 )?;
-            }
-        } else {
-            for (i, layer) in self.layers.iter().enumerate() {
-                xs = layer.forward(
-                    &xs,
-                    attention_mask.as_ref(),
-                    if i + 1 % self.config.text_config.sliding_window_pattern != 0 {
-                        sliding_attention_mask.as_ref()
-                    } else {
-                        None
-                    },
-                    positions,
-                    None,
-                    input_metadata,
-                )?
             }
         }
 

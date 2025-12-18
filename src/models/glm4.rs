@@ -340,16 +340,6 @@ impl GLM4ForCausalLM {
                     input_metadata,
                 )?;
             }
-        } else {
-            for layer in self.layers.iter() {
-                xs = layer.forward(
-                    &xs,
-                    attention_mask.as_ref(),
-                    positions,
-                    None,
-                    input_metadata,
-                )?
-            }
         }
 
         if !seqlens.is_empty() {

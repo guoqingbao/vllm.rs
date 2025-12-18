@@ -153,7 +153,6 @@ pub struct Mistral3ForConditionalGeneration {
     vision_model: VisionModel,
     mmproj: MultiModalProjector,
     cfg: Mistral3Config,
-    dtype: DType,
 }
 
 impl Mistral3ForConditionalGeneration {
@@ -197,7 +196,6 @@ impl Mistral3ForConditionalGeneration {
             text_model,
             mmproj,
             cfg: cfg.clone(),
-            dtype,
         })
     }
 
@@ -223,9 +221,13 @@ impl Mistral3ForConditionalGeneration {
         input_metadata: &InputMetadata,
         images: Option<&ImageData>,
     ) -> Result<Tensor> {
-        let mut input_embeds = self.text_model.embed_forward(input_ids)?;
+        let (mut input_embeds, dtype) = (
+            self.text_model.embed_forward(input_ids)?,
+            self.text_model.dtype(),
+        );
 
         if let Some(images) = &images {
+            let mut image_tensor = images.to_tensor_f32(&input_ids.device())?.to_dtype(dtype)?;
             let image_mask = input_ids.eq(self.cfg.image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(D::Minus1)?
@@ -233,7 +235,6 @@ impl Mistral3ForConditionalGeneration {
                 .to_dtype(DType::U32)?;
 
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-            let mut image_tensor = images.to_tensor_f32(&input_ids.device())?;
             let mut image_sizes = images.patches.clone();
             let num_images = image_tensor.dim(0)?;
             assert!(
@@ -254,8 +255,9 @@ impl Mistral3ForConditionalGeneration {
                 );
             }
 
-            let image_features =
-                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
+            let image_features = self
+                .vision_tower(&image_tensor, image_sizes)?
+                .to_dtype(input_embeds.dtype())?;
 
             let mut x_flat = input_embeds.flatten_all()?;
             let image_flat = image_features.flatten_all()?;

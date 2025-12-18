@@ -7,6 +7,7 @@ pub mod vision;
 
 use crate::models::layers::VarBuilderX;
 use crate::models::qwen3::Qwen3ForCausalLM;
+use crate::models::qwen3_moe::Qwen3MoEForCausalLM;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::{models::layers::distributed::Comm, utils::image::ImageData};
@@ -15,9 +16,14 @@ use candle_core::{DType, Device, Result, Tensor};
 use config::Qwen3VLConfig;
 use vision::Qwen3VLVisionModel;
 
+pub enum Qwen3TextModel {
+    Dense(Qwen3ForCausalLM),
+    MoE(Qwen3MoEForCausalLM),
+}
+
 #[allow(dead_code)]
 pub struct Qwen3VLForConditionalGeneration {
-    text_model: Qwen3ForCausalLM,
+    text_model: Qwen3TextModel,
     vision_model: Qwen3VLVisionModel,
     spatial_merge_size: usize,
     image_token_id: u32,
@@ -50,16 +56,35 @@ impl Qwen3VLForConditionalGeneration {
         if cfg.quantization_config.is_some() {
             cfg.text_config.quantization_config = cfg.quantization_config.clone();
         }
-        let text_model = Qwen3ForCausalLM::new_with_prefix(
-            &vb,
-            comm.clone(),
-            config,
-            dtype,
-            is_rope_i,
-            device,
-            progress_reporter,
-            Some("model.language_model".to_string()),
-        )?;
+
+        let arch = cfg
+            .architectures
+            .unwrap_or(vec!["Qwen3VLForConditionalGeneration".to_string()]);
+        let arch = arch[0].as_str();
+        let text_model = if matches!(arch, "Qwen3VLMoeForConditionalGeneration") {
+            Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
+                &vb,
+                comm.clone(),
+                config,
+                dtype,
+                is_rope_i,
+                device,
+                progress_reporter,
+                Some("model.language_model".to_string()),
+            )?)
+        } else {
+            Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
+                &vb,
+                comm.clone(),
+                config,
+                dtype,
+                is_rope_i,
+                device,
+                progress_reporter,
+                Some("model.language_model".to_string()),
+            )?)
+        };
+
         Ok(Self {
             text_model,
             vision_model,
@@ -79,13 +104,16 @@ impl Qwen3VLForConditionalGeneration {
         input_metadata: &InputMetadata,
         images: Option<&ImageData>,
     ) -> Result<Tensor> {
-        let mut input_embeds = self.text_model.embed_forward(input_ids)?;
+        let (mut input_embeds, dtype) = match &self.text_model {
+            Qwen3TextModel::Dense(m) => (m.embed_forward(input_ids)?, m.dtype()),
+            Qwen3TextModel::MoE(m) => (m.embed_forward(input_ids)?, m.dtype()),
+        };
         let device = input_embeds.device().clone();
         let mut visual_pos_masks: Option<Tensor> = None;
         let mut deepstack_visual_embeds: Option<Vec<Tensor>> = None;
 
         if let Some(images) = &images {
-            let mut pixel_values = images.to_tensor_f32(&device)?;
+            let mut pixel_values = images.to_tensor_f32(&device)?.to_dtype(dtype)?;
             let mut patches = Vec::new();
             for (h, w) in &images.patches {
                 patches.extend(vec![1, *h as u32, *w as u32]);
@@ -123,10 +151,10 @@ impl Qwen3VLForConditionalGeneration {
 
             let image_embeds = image_embeds
                 .to_device(&device)?
-                .to_dtype(self.text_model.dtype())?;
+                .to_dtype(input_embeds.dtype())?;
             let deepstack_image_embeds = deepstack_image_embeds
                 .into_iter()
-                .map(|t| t.to_device(&device)?.to_dtype(self.text_model.dtype()))
+                .map(|t| t.to_device(&device)?.to_dtype(input_embeds.dtype()))
                 .collect::<Result<Vec<_>>>()?;
 
             let image_mask = input_ids.eq(self.image_token_id as u32)?;
@@ -148,16 +176,26 @@ impl Qwen3VLForConditionalGeneration {
             deepstack_visual_embeds = Some(deepstack_image_embeds);
         }
 
-        let out = self.text_model.forward_with_deepstack(
-            &input_embeds,
-            &positions,
-            kv_caches,
-            input_metadata,
-            true,
-            &visual_pos_masks,
-            &deepstack_visual_embeds,
-        )?;
-        Ok(out)
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.forward_with_deepstack(
+                &input_embeds,
+                &positions,
+                kv_caches,
+                input_metadata,
+                true,
+                &visual_pos_masks,
+                &deepstack_visual_embeds,
+            ),
+            Qwen3TextModel::MoE(m) => m.forward_with_deepstack(
+                &input_embeds,
+                &positions,
+                kv_caches,
+                input_metadata,
+                true,
+                &visual_pos_masks,
+                &deepstack_visual_embeds,
+            ),
+        }
     }
 
     pub fn get_vocab_size(&self) -> usize {
