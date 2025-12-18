@@ -5,10 +5,9 @@ pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, ModelType};
+use crate::utils::config::EngineConfig;
 use crate::utils::image::{
-    load_image_from_base64, load_image_from_url, ImageProcessConfig, ImageProcessor,
-    IMAGE_PLACEHOLDER,
+    load_image_from_base64, load_image_from_url, ImageProcessTrait, IMAGE_PLACEHOLDER,
 };
 use axum::extract::Json;
 use axum::http::{self, StatusCode};
@@ -295,7 +294,7 @@ pub struct Args {
 
 pub fn convert_chat_message(
     msg: &ChatMessage,
-    cfg: &Option<ImageProcessConfig>,
+    processor: &mut Option<Box<dyn ImageProcessTrait + Send>>,
     images_tensors: &mut Vec<(Tensor, Vec<(usize, usize)>)>,
 ) -> Result<Message> {
     let role = msg.role.clone();
@@ -334,17 +333,11 @@ pub fn convert_chat_message(
         }
     }
 
-    if !images.is_empty() && cfg.is_some() {
-        let (images_tensor, image_sizes) =
-            if matches!(cfg.as_ref().unwrap().model_type, ModelType::Qwen3VL) {
-                use crate::models::qwen3_vl::input::Qwen3VLImageProcessor;
-                let processor = Qwen3VLImageProcessor::default(cfg.as_ref().unwrap());
-                processor.process_inputs(&mut prompt, &mut images)?
-            } else {
-                let processor = ImageProcessor::new(cfg.as_ref().unwrap());
-                processor.process_inputs(&mut prompt, &mut images)?
-            };
-        images_tensors.push((images_tensor, image_sizes));
+    if !images.is_empty() && processor.is_some() {
+        if let Some(processor) = processor.as_mut() {
+            let (images_tensor, image_sizes) = processor.process_inputs(&mut prompt, &images)?;
+            images_tensors.push((images_tensor, image_sizes));
+        }
     }
 
     Ok(Message::new(role, prompt.trim().to_owned(), images.len()))

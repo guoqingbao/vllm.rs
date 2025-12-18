@@ -153,61 +153,6 @@ pub fn rescale(images: &Vec<DynamicImage>, factor: Option<f32>) -> Vec<DynamicIm
         })
         .collect()
 }
-/// Preprocess input DynamicImages:
-/// 1. Resize w/ custom rule (padding to uniform size)
-/// 2. Optional rescale
-/// 3. Optional normalize
-pub fn preprocess_images(
-    images: &Vec<DynamicImage>,
-    max_height: usize,
-    max_width: usize,
-    patch_size: usize,
-    scale_factor: Option<f32>,
-    mean: Option<[f32; 3]>,
-    std: Option<[f32; 3]>,
-    abolute_resize: bool,
-) -> Vec<DynamicImage> {
-    // First pass: determine final height/width after custom resize for each image
-    let mut resized_imgs: Vec<DynamicImage> = Vec::new();
-    let mut padded_imgs: Vec<DynamicImage> = Vec::new();
-    let filter = FilterType::Triangle;
-
-    if abolute_resize {
-        for img in images.iter() {
-            let resized = img.resize_exact(max_width as u32, max_height as u32, filter);
-            padded_imgs.push(resized);
-        }
-    } else {
-        // resize in ratio and padding
-        let mut final_h = 0;
-        let mut final_w = 0;
-
-        for img in images.iter() {
-            let (h, w) = img.dimensions();
-            let resized = image_resize(
-                img, h as usize, w as usize, max_height, max_width, patch_size, filter,
-            );
-            final_h = final_h.max(resized.height());
-            final_w = final_w.max(resized.width());
-            resized_imgs.push(resized);
-        }
-
-        // Second pass: pad to final_h × final_w
-        for img in resized_imgs {
-            if img.height() == final_h && img.width() == final_w {
-                padded_imgs.push(img);
-            } else {
-                // Pad with black (zeros)
-                let mut canvas = DynamicImage::new_rgb8(final_w, final_h).to_rgb8();
-                let rgb = img.to_rgb8();
-                image::imageops::overlay(&mut canvas, &rgb, 0, 0);
-                padded_imgs.push(DynamicImage::ImageRgb8(canvas));
-            }
-        }
-    }
-
-    normalize(&rescale(&padded_imgs, scale_factor), mean, std)
-}
 
 #[derive(Clone)]
 pub struct ImageProcessConfig {
@@ -263,8 +208,19 @@ impl ImageProcessConfig {
         }
     }
 }
+
+pub trait ImageProcessTrait: Send {
+    fn process_inputs(
+        &mut self,
+        prompt: &mut String,
+        images: &Vec<DynamicImage>,
+    ) -> Result<(Tensor, Vec<(usize, usize)>)>;
+}
+
 pub struct ImageProcessor {
     cfg: ImageProcessConfig,
+    fixed_width: Option<usize>,
+    fixed_height: Option<usize>,
 }
 
 impl ImageProcessor {
@@ -274,10 +230,78 @@ impl ImageProcessor {
     const DEFAULT_STD: [f32; 3] = [0.26862954, 0.26130258, 0.27577711];
 
     pub fn new(cfg: &ImageProcessConfig) -> Self {
-        Self { cfg: cfg.clone() }
+        Self {
+            cfg: cfg.clone(),
+            fixed_width: None,
+            fixed_height: None,
+        }
     }
 
-    fn preprocess(&self, images: &Vec<DynamicImage>) -> Result<(Tensor, Vec<(usize, usize)>)> {
+    /// Preprocess input DynamicImages:
+    /// 1. Resize w/ custom rule (padding to uniform size)
+    /// 2. Optional rescale
+    /// 3. Optional normalize
+    pub fn preprocess_images(
+        &mut self,
+        images: &Vec<DynamicImage>,
+        max_height: usize,
+        max_width: usize,
+        patch_size: usize,
+        scale_factor: Option<f32>,
+        mean: Option<[f32; 3]>,
+        std: Option<[f32; 3]>,
+        abolute_resize: bool,
+    ) -> Vec<DynamicImage> {
+        // First pass: determine final height/width after custom resize for each image
+        let mut resized_imgs: Vec<DynamicImage> = Vec::new();
+        // let mut padded_imgs: Vec<DynamicImage> = Vec::new();
+        let filter = FilterType::Triangle;
+
+        if abolute_resize {
+            for img in images.iter() {
+                let resized = img.resize_exact(max_width as u32, max_height as u32, filter);
+                resized_imgs.push(resized);
+            }
+        } else {
+            // resize in ratio and padding
+            // let mut final_h = 0;
+            // let mut final_w = 0;
+
+            for img in images.iter() {
+                let resized = if let (Some(h), Some(w)) = (self.fixed_height, self.fixed_width) {
+                    img.resize_exact(w as u32, h as u32, filter)
+                } else {
+                    let (h, w) = img.dimensions();
+                    let resized = image_resize(
+                        img, h as usize, w as usize, max_height, max_width, patch_size, filter,
+                    );
+                    self.fixed_height = Some(resized.height() as usize);
+                    self.fixed_width = Some(resized.width() as usize);
+                    resized
+                };
+                // final_h = final_h.max(resized.height());
+                // final_w = final_w.max(resized.width());
+                resized_imgs.push(resized);
+            }
+
+            // Second pass: pad to final_h × final_w
+            // for img in resized_imgs {
+            //     if img.height() == final_h && img.width() == final_w {
+            //         padded_imgs.push(img);
+            //     } else {
+            //         // Pad with black (zeros)
+            //         let mut canvas = DynamicImage::new_rgb8(final_w, final_h).to_rgb8();
+            //         let rgb = img.to_rgb8();
+            //         image::imageops::overlay(&mut canvas, &rgb, 0, 0);
+            //         padded_imgs.push(DynamicImage::ImageRgb8(canvas));
+            //     }
+            // }
+        }
+
+        normalize(&rescale(&resized_imgs, scale_factor), mean, std)
+    }
+
+    fn preprocess(&mut self, images: &Vec<DynamicImage>) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let do_normalize = self.cfg.do_normalize.unwrap_or(false);
         let image_mean = if do_normalize {
             Some(self.cfg.image_mean.unwrap_or(Self::DEFAULT_MEAN))
@@ -291,7 +315,7 @@ impl ImageProcessor {
             None
         };
 
-        let images = preprocess_images(
+        let images = self.preprocess_images(
             images,
             self.cfg.max_height,
             self.cfg.max_width,
@@ -303,11 +327,13 @@ impl ImageProcessor {
         );
         to_tensor(&images)
     }
+}
 
-    pub fn process_inputs(
-        &self,
+impl ImageProcessTrait for ImageProcessor {
+    fn process_inputs(
+        &mut self,
         prompt: &mut String,
-        images: &mut Vec<DynamicImage>,
+        images: &Vec<DynamicImage>,
     ) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let (pixel_values, image_sizes_all) =
             self.preprocess(images).expect("Preprocessing failed");
@@ -392,7 +418,7 @@ pub fn get_image_config(
                 cfg.spatial_merge_size,
                 None,
                 cfg.vision_config.patch_size,
-                cfg.vision_config.image_size,
+                896,
                 false,
             );
             img_cfg.model_type = ModelType::Mistral3VL;
@@ -416,7 +442,7 @@ pub fn get_image_config(
                 4,
                 None,
                 cfg.vision_config.patch_size,
-                cfg.vision_config.image_size,
+                896,
                 true,
             );
             img_cfg.model_type = ModelType::Gemma3;
@@ -443,7 +469,7 @@ pub fn get_image_config(
                 cfg.vision_config.spatial_merge_size,
                 Some(cfg.vision_config.temporal_patch_size),
                 cfg.vision_config.patch_size,
-                1536,
+                896,
                 false,
             );
             img_cfg.model_type = ModelType::Qwen3VL;

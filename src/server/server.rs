@@ -9,10 +9,13 @@ use super::{
     ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage, UsageQuery,
     UsageResponse,
 };
-use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
 use crate::utils::image::{get_tensor_raw_data, ImageData};
+use crate::{
+    core::engine::{LLMEngine, StreamItem},
+    utils::image::ImageProcessTrait,
+};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -54,12 +57,28 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
+    use crate::models::qwen3_vl::input::Qwen3VLImageProcessor;
+    use crate::utils::config::ModelType;
+    use crate::utils::image::ImageProcessor;
+
+    let mut processor: Option<Box<dyn ImageProcessTrait + Send>> = if img_cfg.is_some() {
+        if matches!(img_cfg.as_ref().unwrap().model_type, ModelType::Qwen3VL) {
+            Some(Box::new(Qwen3VLImageProcessor::default(
+                img_cfg.as_ref().unwrap(),
+            )))
+        } else {
+            Some(Box::new(ImageProcessor::new(img_cfg.as_ref().unwrap())))
+        }
+    } else {
+        None
+    };
+
     let mut images: Vec<(Tensor, Vec<(usize, usize)>)> = vec![];
 
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| convert_chat_message(m, &img_cfg, &mut images).unwrap())
+        .map(|m| convert_chat_message(m, &mut processor, &mut images).unwrap())
         .collect();
 
     let image_data = if !images.is_empty() && img_cfg.is_some() {
@@ -69,7 +88,13 @@ pub async fn chat_completion(
             image_tensors.push(t);
             image_sizes.extend(s);
         }
-        let images_tensor = Tensor::cat(&image_tensors, 0).unwrap();
+        let images_tensor = match Tensor::cat(&image_tensors, 0) {
+            Ok(t) => t,
+            Err(e) => {
+                crate::log_error!("Image processing failed: {:?}", e);
+                return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+            }
+        };
         let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor).unwrap();
         crate::log_info!(
             "{} images detected in the chat message, combined image shape {:?}",

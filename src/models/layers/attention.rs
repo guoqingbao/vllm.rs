@@ -440,12 +440,14 @@ impl NaiveAttention {
             Some(mask) => attn.broadcast_add(mask)?,
         };
 
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+        let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?;
 
         self.o_proj.forward(
             &attn
+                .to_dtype(v.dtype())?
                 .matmul(&v)?
-                .transpose(1, 2)?
+                .squeeze(0)?
+                .transpose(0, 1)?
                 .reshape((b, seq_len, ()))?,
         )
     }

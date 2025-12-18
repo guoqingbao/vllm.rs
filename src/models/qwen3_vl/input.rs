@@ -1,8 +1,7 @@
-use crate::utils::image::{normalize, to_tensor, ImageProcessConfig, ToFilter};
+use crate::utils::image::{normalize, to_tensor, ImageProcessConfig, ImageProcessTrait, ToFilter};
 use crate::utils::image::{IMAGE_PLACEHOLDER, PLACEHOLDER};
 use candle_core::{Result, Tensor};
 use image::{DynamicImage, GenericImageView};
-
 /// Qwen3-VL Image + Prompt Processor
 #[derive(Clone)]
 pub struct Qwen3VLImageProcessor {
@@ -12,6 +11,8 @@ pub struct Qwen3VLImageProcessor {
     pub temporal_patch_size: usize,
     pub min_pixels: usize,
     pub max_pixels: usize,
+    pub fixed_width: Option<usize>,
+    pub fixed_height: Option<usize>,
 }
 
 impl Qwen3VLImageProcessor {
@@ -25,6 +26,8 @@ impl Qwen3VLImageProcessor {
             temporal_patch_size: cfg.temporal_patch_size.unwrap_or(2),
             min_pixels: 256 * 256,
             max_pixels: max_row * max_row,
+            fixed_width: None,
+            fixed_height: None,
         }
     }
 }
@@ -60,14 +63,20 @@ impl Qwen3VLImageProcessor {
     }
 
     fn prepreprocess(
-        &self,
+        &mut self,
         image: &DynamicImage,
         target_hw: (u32, u32),
     ) -> Result<(Tensor, (usize, usize))> {
         let (th, tw) = target_hw;
 
-        let (nh, nw) = self.smart_resize(th as usize, tw as usize)?;
-
+        let (mut nh, mut nw) = self.smart_resize(th as usize, tw as usize)?;
+        if let (Some(h), Some(w)) = (self.fixed_height, self.fixed_width) {
+            nh = h;
+            nw = w;
+        } else {
+            self.fixed_height = Some(nh);
+            self.fixed_width = Some(nw);
+        };
         let image = image
             .resize_exact(nw as u32, nh as u32, self.cfg.resampling.to_filter()?)
             .to_rgb8();
@@ -110,12 +119,14 @@ impl Qwen3VLImageProcessor {
 
         Ok((patches, (grid_h as usize, grid_w as usize)))
     }
+}
 
+impl ImageProcessTrait for Qwen3VLImageProcessor {
     /// 🔹 Main entry: processes prompt + images together
-    pub fn process_inputs(
-        &self,
+    fn process_inputs(
+        &mut self,
         prompt: &mut String,
-        images: &[DynamicImage],
+        images: &Vec<DynamicImage>,
     ) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let (max_w, max_h) = images
             .iter()
