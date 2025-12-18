@@ -10,7 +10,6 @@ use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
-use crate::utils::image::ImageData;
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;

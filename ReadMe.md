@@ -127,21 +127,11 @@ python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --isq q4k 
   </details>
 
   <details open>
-    <summary>Multimodal model (Mistral-3 VL, with images)</summary>
+    <summary>Multimodal model (Qwen3 VL, with images)</summary>
 
 ```bash
 # Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-# Request format:
-# {
-#   "type": "image_url",
-#   "image_url": "https://..."
-# }
-# or
-# {
-#   "type": "image_base64",
-#   "image_base64": "data:image/jpeg;base64,xxxxx"
-# }
-python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --ui-server
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
 ```
 
   </details>

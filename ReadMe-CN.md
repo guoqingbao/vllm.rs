@@ -128,6 +128,16 @@ python3 -m pip install vllm_rs
    ```
   </details>
 
+<details open>
+    <summary>多模态模型 (Qwen3 VL, +图片)</summary>
+
+```bash
+# 使用内置ChatUI上传或提及图片url (格式 '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+```
+
+  </details>
+
    <details open>
     <summary>将未量化模型加载为GGUF模型</summary>
 
