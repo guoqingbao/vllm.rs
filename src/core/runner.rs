@@ -2,6 +2,7 @@ use crate::models::gemma3::Gemma3ForConditionalGeneration;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
+use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -20,7 +21,7 @@ use crate::{
 };
 use attention_rs::cache;
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -609,6 +610,72 @@ impl ModelRunner {
         };
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
         Ok(output_ids)
+    }
+
+    pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {
+        let (input_ids, positions, input_metadata) = self.prepare_prefill(seqs)?;
+
+        let hidden = match &self.model {
+            Model::Qwen3(model) => model.forward_embedding(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                false,
+            )?,
+            Model::Qwen3MoE(model) => model.forward_embedding(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                false,
+            )?,
+            Model::LLaMa(model) => model.forward_embedding(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                false,
+            )?,
+            Model::GLM4(model) => model.forward_embedding(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                false,
+            )?,
+            Model::Gemma3(model) => model.forward_embedding(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                None,
+            )?,
+            _ => {
+                candle_core::bail!("Embedding is not supported for this model type");
+            }
+        };
+
+        let hidden = hidden.to_dtype(DType::F32)?;
+        let dims = hidden.dims();
+        if dims.len() != 2 {
+            candle_core::bail!("Unexpected embedding tensor dims {:?}", dims);
+        }
+
+        let mut start = 0;
+        let mut outputs = Vec::new();
+        for seq in seqs {
+            let len = seq.len().saturating_sub(seq.num_cached_tokens);
+            let slice = hidden.narrow(0, start, len)?;
+            let pooled = match strategy {
+                EmbeddingStrategy::Mean => slice.mean(D::Minus2)?,
+                EmbeddingStrategy::Last => slice.narrow(0, len.saturating_sub(1), 1)?.squeeze(0)?,
+            };
+            outputs.push(pooled.to_vec1::<f32>()?);
+            start += len;
+        }
+
+        Ok(outputs)
     }
 
     fn prepare_block_tables<'a, I, S>(&self, seqs: I) -> Result<Tensor>

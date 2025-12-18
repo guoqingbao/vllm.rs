@@ -292,26 +292,7 @@ impl Qwen3ForCausalLM {
         self.embed_tokens.forward(xs)
     }
 
-    pub fn forward(
-        &self,
-        input_ids: &Tensor,
-        positions: &Tensor,
-        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-        input_metadata: &InputMetadata,
-        embeded_inputs: bool,
-    ) -> Result<Tensor> {
-        self.forward_with_deepstack(
-            input_ids,
-            positions,
-            kv_caches,
-            input_metadata,
-            embeded_inputs,
-            &None,
-            &None,
-        )
-    }
-
-    pub fn forward_with_deepstack(
+    fn forward_inner(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
@@ -320,6 +301,7 @@ impl Qwen3ForCausalLM {
         embeded_inputs: bool,
         visual_pos_masks: &Option<Tensor>,
         deepstack_visual_embeds: &Option<Vec<Tensor>>,
+        return_hidden: bool,
     ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
@@ -373,13 +355,77 @@ impl Qwen3ForCausalLM {
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
-        if self.is_qvar_builder {
+        if return_hidden {
+            xs.to_dtype(DType::F32)
+        } else if self.is_qvar_builder {
             self.lm_head.forward(&xs)
         } else {
             self.lm_head
                 .forward(&xs.to_dtype(self.dtype)?)?
                 .to_dtype(DType::F32)
         }
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            &None,
+            &None,
+            false,
+        )
+    }
+
+    pub fn forward_embedding(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            &None,
+            &None,
+            true,
+        )
+    }
+
+    pub fn forward_with_deepstack(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+        visual_pos_masks: &Option<Tensor>,
+        deepstack_visual_embeds: &Option<Vec<Tensor>>,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+            false,
+        )
     }
 
     pub fn get_vocab_size(&self) -> usize {

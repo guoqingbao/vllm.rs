@@ -2,12 +2,12 @@
 use super::{
     convert_chat_message,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder, MessageContentType,
+    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat, MessageContentType,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, ErrorMsg, ServerData, Usage, UsageQuery,
-    UsageResponse,
+    ChatCompletionResponse, ChatMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
+    ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
@@ -20,6 +20,7 @@ use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
 };
+use base64::Engine;
 use candle_core::Tensor;
 use std::env;
 use std::sync::Arc;
@@ -388,6 +389,66 @@ pub async fn chat_completion(
 
         ChatResponder::Completion(response)
     }
+}
+
+#[utoipa::path(
+    post,
+    tag = "vllm-rs",
+    path = "/v1/embeddings",
+    request_body = EmbeddingRequest,
+    responses((status = 200, description = "Embeddings"))
+)]
+pub async fn create_embeddings(
+    State(data): State<Arc<ServerData>>,
+    request: Json<EmbeddingRequest>,
+) -> ChatResponder {
+    let EmbeddingRequest {
+        model,
+        input,
+        encoding_format,
+        embedding_type,
+    } = request.0;
+    let inputs = input.into_vec();
+    if inputs.is_empty() {
+        return ChatResponder::ValidationError("input cannot be empty".to_string());
+    }
+
+    let model_name = model.unwrap_or_else(|| "default".to_string());
+
+    let mut engine = data.engine.write();
+    let (vectors, prompt_tokens) = match engine.embed(&inputs, embedding_type.clone()) {
+        Ok(res) => res,
+        Err(e) => return ChatResponder::ModelError(format!("Embedding generation failed: {e:?}")),
+    };
+
+    let data: Vec<EmbeddingData> = vectors
+        .into_iter()
+        .enumerate()
+        .map(|(idx, vec)| {
+            let embedding = match encoding_format {
+                EncodingFormat::Float => EmbeddingOutput::Vector(vec),
+                EncodingFormat::Base64 => {
+                    let bytes = bytemuck::cast_slice::<f32, u8>(&vec);
+                    EmbeddingOutput::Base64(base64::engine::general_purpose::STANDARD.encode(bytes))
+                }
+            };
+            EmbeddingData {
+                object: "embedding",
+                embedding,
+                index: idx,
+            }
+        })
+        .collect();
+
+    ChatResponder::Embedding(EmbeddingResponse {
+        object: "list",
+        data,
+        model: model_name,
+        usage: EmbeddingUsage {
+            prompt_tokens,
+            total_tokens: prompt_tokens,
+        },
+    })
 }
 
 #[utoipa::path(
