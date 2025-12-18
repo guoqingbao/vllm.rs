@@ -76,7 +76,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
-* ✅ Gemma3 (Text model, No flash-attn support)
+* ✅ Gemma3 (Multimodal model, No flash-attn support)
 * ✅ Qwen3-VL (Dense, Multimodal model)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
@@ -478,7 +478,6 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
 * [x] Built-in ChatGPT-like Web Server
-* [ ] Fix Gemma3 Accuracy Issue for Image Inputs
 ---
 
 ## 📚 References
