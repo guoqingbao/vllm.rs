@@ -80,7 +80,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -92,7 +92,7 @@ impl Qwen3DecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -250,7 +250,7 @@ impl Qwen3ForCausalLM {
             } else {
                 vb.pp(&format!("{}.norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 

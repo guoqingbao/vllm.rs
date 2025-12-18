@@ -164,29 +164,43 @@ impl VisionAttention {
         (q, k) = apply_rotary_pos_emb_vision(&q, &k, &cos, &sin)?;
 
         let mut outputs = Vec::new();
+        let softmax_scale = (1.0 / (self.head_dim as f32).sqrt()) as f64;
         for window in cu_seqlens.windows(2) {
             let start = window[0];
             let end = window[1];
             if end <= start {
                 continue;
             }
-            let len = end - start;
-            let q_chunk = q.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
-            let k_chunk = k.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
-            let v_chunk = v.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
+            let seq_len = end - start;
+            let q_chunk = q.narrow(0, start, seq_len)?.transpose(0, 1)?.contiguous()?;
+            let k_chunk = k.narrow(0, start, seq_len)?.transpose(0, 1)?.contiguous()?;
+            let v_chunk = v.narrow(0, start, seq_len)?.transpose(0, 1)?.contiguous()?;
 
-            let softmax_scale = (1.0 / (self.head_dim as f32).sqrt()) as f64;
-            let attn = (q_chunk.matmul(&k_chunk.t()?)? * softmax_scale)?;
-            let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?;
+            // double chunk to reduce peak gpu memory
+            let chunk_size = 512;
+            let mut attn_chunks = Vec::new();
+            let num_chunks = (seq_len + chunk_size - 1) / chunk_size;
+            for c in 0..num_chunks {
+                let offset = c * chunk_size;
+                let len = chunk_size.min(seq_len - offset);
+                //chunk at query is correct for the following
+                let q_chunk_inner = q_chunk.narrow(1, offset, len)?.contiguous()?;
+                let mut att = (q_chunk_inner.matmul(&k_chunk.t()?)? * softmax_scale)?;
 
-            let out = attn
-                .to_dtype(v_chunk.dtype())?
-                .matmul(&v_chunk)?
+                att = candle_nn::ops::softmax_last_dim(&att.to_dtype(candle_core::DType::F32)?)?
+                    .to_dtype(att.dtype())?;
+
+                let att_chunk = att.matmul(&v_chunk)?;
+                attn_chunks.push(att_chunk);
+            }
+
+            let attn = Tensor::cat(&attn_chunks, 1)?
+                .contiguous()?
                 .squeeze(0)?
                 .transpose(0, 1)?
-                .reshape((len, self.num_heads * self.head_dim))?;
+                .reshape((seq_len, self.num_heads * self.head_dim))?;
 
-            outputs.push(out.to_dtype(xs.dtype())?);
+            outputs.push(attn.to_dtype(xs.dtype())?);
         }
         let attn_output = Tensor::cat(&outputs, 0)?;
         self.proj.forward(&attn_output)

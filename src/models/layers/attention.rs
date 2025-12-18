@@ -429,26 +429,37 @@ impl NaiveAttention {
         } else {
             (q, k)
         };
-        let mut attn = (q.matmul(&k.t()?)? * self.scale)?;
 
-        if let Some(sc) = self.softcapping {
-            attn = ((attn / sc)?.tanh()? * sc)?;
+        let chunk_size = 1024;
+        let mut attn_chunks = Vec::new();
+        let num_chunks = (seq_len + chunk_size - 1) / chunk_size;
+        for c in 0..num_chunks {
+            let offset = c * chunk_size;
+            let len = chunk_size.min(seq_len - offset);
+            //chunk at query is correct for the following
+            let q_chunk = q.narrow(2, offset, len)?.contiguous()?;
+            let mut att = (q_chunk.matmul(&k.t()?)? * f64::from(self.scale))?;
+
+            if let Some(sc) = self.softcapping {
+                att = ((att / sc)?.tanh()? * sc)?;
+            }
+            if let Some(mask) = &mask {
+                //mask needs to be chunked
+                let q_chunk_mask = mask.narrow(2, offset, len)?; // shape: [1, 1, chunk_len, K_len]
+                att = att.broadcast_add(&q_chunk_mask)?;
+            }
+            att = candle_nn::ops::softmax_last_dim(&att.to_dtype(candle_core::DType::F32)?)?
+                .to_dtype(att.dtype())?;
+
+            let att_chunk = att.matmul(&v)?;
+            attn_chunks.push(att_chunk);
         }
 
-        let attn = match mask {
-            None => attn,
-            Some(mask) => attn.broadcast_add(mask)?,
-        };
-
-        let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?;
-
-        self.o_proj.forward(
-            &attn
-                .to_dtype(v.dtype())?
-                .matmul(&v)?
-                .squeeze(0)?
-                .transpose(0, 1)?
-                .reshape((b, seq_len, ()))?,
-        )
+        let att = Tensor::cat(&attn_chunks, 2)?
+            .contiguous()?
+            .squeeze(0)?
+            .transpose(0, 1)?
+            .reshape((b, seq_len, ()))?;
+        self.o_proj.forward(&att)
     }
 }
