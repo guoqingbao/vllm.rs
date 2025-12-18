@@ -3,6 +3,7 @@ use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::VarBuilderX;
 use crate::models::llama::LLaMaForCausalLM;
 use crate::utils::config::Config;
+use crate::utils::image::ImageData;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -37,10 +38,10 @@ impl PatchMerger {
         })
     }
 
-    fn forward(&self, image_features: &Tensor, image_sizes: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, image_features: &Tensor, image_sizes: Vec<(usize, usize)>) -> Result<Tensor> {
         let image_sizes = image_sizes
             .iter()
-            .map(|&(h, w)| (h as usize / self.patch_size, w as usize / self.patch_size))
+            .map(|&(h, w)| (h / self.patch_size, w / self.patch_size))
             .collect::<Vec<_>>();
 
         let tokens_per_image = image_sizes.iter().map(|&(h, w)| h * w).collect::<Vec<_>>();
@@ -139,7 +140,7 @@ impl MultiModalProjector {
         })
     }
 
-    fn forward(&self, image_features: &Tensor, image_sizes: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, image_features: &Tensor, image_sizes: Vec<(usize, usize)>) -> Result<Tensor> {
         let mut hidden_states = self.norm.forward(image_features)?;
         hidden_states = self.patch_merger.forward(&hidden_states, image_sizes)?;
         hidden_states = self.linear_1.forward(&hidden_states)?.apply(&self.act)?;
@@ -203,7 +204,7 @@ impl Mistral3ForConditionalGeneration {
     fn vision_tower(
         &self,
         image_features: &Tensor,
-        image_sizes: Vec<(u32, u32)>,
+        image_sizes: Vec<(usize, usize)>,
     ) -> Result<Tensor> {
         let image_outputs = self
             .vision_model
@@ -220,12 +221,11 @@ impl Mistral3ForConditionalGeneration {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
-        images: Option<Tensor>,
-        image_sizes: Option<Vec<(u32, u32)>>,
+        images: Option<&ImageData>,
     ) -> Result<Tensor> {
         let mut input_embeds = self.text_model.embed_forward(input_ids)?;
 
-        if let Some(image_tensor) = &images {
+        if let Some(images) = &images {
             let image_mask = input_ids.eq(self.cfg.image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(D::Minus1)?
@@ -233,8 +233,29 @@ impl Mistral3ForConditionalGeneration {
                 .to_dtype(DType::U32)?;
 
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
+            let mut image_tensor = images.to_tensor_f32(&input_ids.device())?;
+            let mut image_sizes = images.patches.clone();
+            let num_images = image_tensor.dim(0)?;
+            assert!(
+                num_images == image_sizes.len(),
+                "Input image and patch dim mismatch!"
+            );
+            if images.image_idx > 0 && (images.image_idx as usize) < num_images {
+                image_tensor = image_tensor.narrow(
+                    0,
+                    images.image_idx as usize,
+                    num_images - images.image_idx as usize,
+                )?;
+                image_sizes = image_sizes[images.image_idx as usize..].to_vec();
+                crate::log_warn!(
+                    "Slicing images: start idx {} -> {:?}",
+                    images.image_idx,
+                    image_tensor.shape()
+                );
+            }
+
             let image_features =
-                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes.unwrap())?;
+                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
 
             let mut x_flat = input_embeds.flatten_all()?;
             let image_flat = image_features.flatten_all()?;

@@ -6,7 +6,6 @@ use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::image::bytes_to_tensor_f32;
 use crate::utils::logits_processor::LogitsProcessor;
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -16,6 +15,7 @@ use crate::{
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::qwen3::Qwen3ForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
+    models::qwen3_vl::Qwen3VLForConditionalGeneration,
     utils::config::{Config, EngineConfig, ModelType},
 };
 use attention_rs::cache;
@@ -40,6 +40,7 @@ pub enum Model {
     GLM4(Arc<GLM4ForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
+    Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
     // Gemma(GemmaForCausalLM),
     // Phi(PhiForCausalLM),
     // Mistral(MistralForCausalLM),
@@ -130,6 +131,15 @@ impl ModelRunner {
                 )?))
             }
             ModelType::Gemma3 => Model::Gemma3(Arc::new(Gemma3ForConditionalGeneration::new(
+                vb,
+                comm.clone(),
+                config,
+                dtype,
+                is_rope_i,
+                &device,
+                Arc::clone(&reporter),
+            )?)),
+            ModelType::Qwen3VL => Model::Qwen3VL(Arc::new(Qwen3VLForConditionalGeneration::new(
                 vb,
                 comm.clone(),
                 config,
@@ -230,7 +240,7 @@ impl ModelRunner {
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
                                     input_metadata: &InputMetadata,
                                     _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None, None)
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -243,7 +253,19 @@ impl ModelRunner {
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
                                     input_metadata: &InputMetadata,
                                     _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None, None)
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+            }
+            Model::Qwen3VL(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata,
+                                    _: bool| {
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -517,23 +539,20 @@ impl ModelRunner {
             return Ok(output_ids);
         }
 
-        let (pixel_values, image_sizes) = if let Seqs::SeqRefs(s) = &seqs {
+        let images = if let Seqs::SeqRefs(s) = &seqs {
             // We do not batch multimodel prefill
             if let Some(images) = &s[0].images {
-                let mut vec_tensors = Vec::new();
-                let mut image_sizes = Vec::new();
-                for (img, shape) in images {
-                    let t = bytes_to_tensor_f32(&img, shape, &self.device)?;
-                    crate::log_info!("image tensor {:?}", t.shape());
-                    vec_tensors.push(t);
-                    image_sizes.push((shape[2] as u32, shape[3] as u32));
+                if images.image_idx == -1 {
+                    crate::log_warn!("Image excluded in this turn!");
+                    None
+                } else {
+                    Some(images)
                 }
-                (Some(Tensor::cat(&vec_tensors, 0)?), Some(image_sizes))
             } else {
-                (None, None)
+                None
             }
         } else {
-            (None, None)
+            None
         };
 
         let logits = match &self.model {
@@ -570,16 +589,22 @@ impl ModelRunner {
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
-                pixel_values,
-                image_sizes,
+                images,
             )?,
             Model::Gemma3(model) => model.forward(
                 &input_ids,
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
-                pixel_values,
-                image_sizes,
+                images,
+            )?,
+
+            Model::Qwen3VL(model) => model.forward(
+                &input_ids,
+                &positions,
+                Some(&self.get_kv_cache()),
+                &input_metadata,
+                images,
             )?,
         };
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
@@ -869,6 +894,7 @@ impl ModelRunner {
             Model::GLM4(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
+            Model::Qwen3VL(model) => model.get_vocab_size(),
         }
     }
 

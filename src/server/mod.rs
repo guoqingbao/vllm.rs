@@ -5,16 +5,15 @@ pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::EngineConfig;
+use crate::utils::config::{EngineConfig, ModelType};
 use crate::utils::image::{
-    get_tensor_raw_data, load_image_from_base64, load_image_from_url, ImageProcessConfig,
-    ImageProcessor, IMAGE_PLACEHOLDER,
+    load_image_from_base64, load_image_from_url, ImageProcessConfig, ImageProcessor,
+    IMAGE_PLACEHOLDER,
 };
 use axum::extract::Json;
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
-use candle_core::Result;
-use image::DynamicImage;
+use candle_core::{Result, Tensor};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -297,10 +296,11 @@ pub struct Args {
 pub fn convert_chat_message(
     msg: &ChatMessage,
     cfg: &Option<ImageProcessConfig>,
+    images_tensors: &mut Vec<(Tensor, Vec<(usize, usize)>)>,
 ) -> Result<Message> {
     let role = msg.role.clone();
     let mut prompt = String::new();
-    let mut images: Vec<DynamicImage> = vec![];
+    let mut images = Vec::new();
 
     match &msg.content {
         MessageContentType::PureText(text) => {
@@ -315,7 +315,7 @@ pub fn convert_chat_message(
                     MessageContent::ImageUrl { image_url } => {
                         let img = load_image_from_url(image_url)?;
                         crate::log_info!(
-                            "chat image downloaded: {} x {}",
+                            "Chat image downloaded: {} x {}",
                             img.width(),
                             img.height()
                         );
@@ -324,7 +324,7 @@ pub fn convert_chat_message(
                     }
                     MessageContent::ImageBase64 { image_base64 } => {
                         let img = load_image_from_base64(image_base64)?;
-                        crate::log_info!("chat image decoded: {} x {}", img.width(), img.height());
+                        crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
                         prompt.push_str(&IMAGE_PLACEHOLDER);
                         images.push(img);
                     }
@@ -335,21 +335,17 @@ pub fn convert_chat_message(
     }
 
     if !images.is_empty() && cfg.is_some() {
-        let processor = ImageProcessor::new(cfg.as_ref().unwrap());
-        let (images_tensor, _) = processor.process_inputs(&mut prompt, &mut images)?;
-        let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor)?;
-        crate::log_info!(
-            "{} images detected in the chat message, combined image shape {:?}",
-            images_shape[0],
-            images_shape
-        );
-        Ok(Message::new(
-            role,
-            prompt.trim().to_owned(),
-            Some(images_raw),
-            Some(images_shape),
-        ))
-    } else {
-        Ok(Message::new(role, prompt.trim().to_owned(), None, None))
+        let (images_tensor, image_sizes) =
+            if matches!(cfg.as_ref().unwrap().model_type, ModelType::Qwen3VL) {
+                use crate::models::qwen3_vl::input::Qwen3VLImageProcessor;
+                let processor = Qwen3VLImageProcessor::default(cfg.as_ref().unwrap());
+                processor.process_inputs(&mut prompt, &mut images)?
+            } else {
+                let processor = ImageProcessor::new(cfg.as_ref().unwrap());
+                processor.process_inputs(&mut prompt, &mut images)?
+            };
+        images_tensors.push((images_tensor, image_sizes));
     }
+
+    Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
 }

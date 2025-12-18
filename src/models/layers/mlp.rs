@@ -1,5 +1,5 @@
 use crate::models::layers::distributed::{
-    shard, Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
+    shard, Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
@@ -127,5 +127,55 @@ impl MLP {
         let up = self.up_proj.forward(xs)?;
         self.down_proj
             .forward(&(self.activation.forward(&gate)? * up)?)
+    }
+}
+
+pub struct NaiveMLP {
+    fc1: ReplicatedLinear,
+    fc2: ReplicatedLinear,
+    act: Activation,
+}
+
+impl NaiveMLP {
+    pub fn new(
+        vb: VarBuilderX,
+        hidden_size: usize,
+        intermediate_size: usize,
+        bias: bool,
+        names: &[&str],
+        hidden_act: Activation,
+        dtype: DType,
+    ) -> Result<Self> {
+        let fc1 = ReplicatedLinear::load_b(
+            hidden_size,
+            intermediate_size,
+            bias,
+            vb.pp(names[0]),
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let fc2 = ReplicatedLinear::load_b(
+            intermediate_size,
+            hidden_size,
+            bias,
+            vb.pp(names[1]),
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        Ok(Self {
+            fc1,
+            fc2,
+            act: hidden_act,
+        })
+    }
+
+    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate_up = self.fc1.forward(xs)?;
+        let down = self.act.forward(&gate_up)?;
+        self.fc2.forward(&down)
     }
 }

@@ -168,9 +168,11 @@ impl Engine {
                 let (receivers, tokenizer) = {
                     let mut engine = self.engine.write();
                     (
-                        engine.generate_sync(&params, &message_list).map_err(|e| {
-                            PyValueError::new_err(format!("generate_sync failed: {:?}", e))
-                        })?,
+                        engine
+                            .generate_sync(&params, &message_list, None)
+                            .map_err(|e| {
+                                PyValueError::new_err(format!("generate_sync failed: {:?}", e))
+                            })?,
                         Arc::new(engine.tokenizer.clone()),
                     )
                 };
@@ -195,7 +197,7 @@ impl Engine {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, &messages)
+                .generate_stream(&params, &messages, None)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 
@@ -332,17 +334,11 @@ impl EngineStream {
 #[pymethods]
 impl Message {
     #[new]
-    pub fn new(
-        role: String,
-        content: String,
-        image_values: Option<Vec<u8>>,
-        image_shape: Option<Vec<usize>>,
-    ) -> Self {
+    pub fn new(role: String, content: String, num_images: usize) -> Self {
         Message {
             role,
             content,
-            image_values,
-            image_shape,
+            num_images,
         }
     }
 }

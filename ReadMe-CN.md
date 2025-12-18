@@ -75,6 +75,7 @@
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
 * ✅ Gemma3 (文本模型，不支持Flash Attention)
+* ✅ Qwen3-VL (Dense, 多模态)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
@@ -125,6 +126,16 @@ python3 -m pip install vllm_rs
    ```bash
    python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --ui-server --context-cache
    ```
+  </details>
+
+<details open>
+    <summary>多模态模型 (Qwen3 VL, +图片)</summary>
+
+```bash
+# 使用内置ChatUI上传或提及图片url (格式 '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+```
+
   </details>
 
    <details open>

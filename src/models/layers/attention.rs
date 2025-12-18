@@ -24,7 +24,7 @@ pub struct Attention {
     attn: PagedAttention,
     softcapping: Option<f64>,
     dtype: DType,
-    is_gemma: bool,
+    no_per_head_norm: bool,
 }
 
 impl Attention {
@@ -52,8 +52,16 @@ impl Attention {
         .iter()
         .cloned()
         .collect();
-        let is_qvar_builder = vb.is_qvar_builder();
 
+        let is_qvar_builder = vb.is_qvar_builder();
+        let no_per_head_norm_models: Vec<String> = vec![
+            "Gemma3ForConditionalGeneration",
+            "Gemma3ForCausalLM",
+            "Qwen3VLForConditionalGeneration",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         let arch = config.architectures.as_ref().unwrap()[0].clone();
         let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
             || arch == "Gemma3ForCausalLM".to_string();
@@ -188,7 +196,7 @@ impl Attention {
             )?,
             softcapping: config.attn_logit_softcapping,
             dtype,
-            is_gemma,
+            no_per_head_norm: no_per_head_norm_models.contains(&arch),
         })
     }
 
@@ -222,7 +230,7 @@ impl Attention {
 
         let (q, k) = if self.q_norm.is_some() && self.k_norm.is_some() {
             //Per‑head RMSNorm in qwen3
-            if self.is_gemma {
+            if self.no_per_head_norm {
                 let q = self.q_norm.as_ref().unwrap().forward(&q)?;
                 let k = self.k_norm.as_ref().unwrap().forward(&k)?;
                 (q, k)

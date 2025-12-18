@@ -1,20 +1,21 @@
 // src/models/gemma3.rs
 
-use crate::models::gemma3::config::VisionConfig;
 use crate::models::layers::attention::{Attention, NaiveAttention};
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX;
 use crate::models::layers::mask::get_attention_causal_mask;
+use crate::models::layers::mlp::NaiveMLP;
 use crate::models::layers::others::{conv2d, embedding, layer_norm, rms_norm, AvgPool2d, NormX};
 use crate::models::layers::rotary_emb::{
     ApplyRotaryEmbedding, RotaryEmbedding, ScalingRotaryEmbedding,
 };
 use crate::models::layers::{mlp::MLP as TextMLP, VarBuilderX};
 use crate::utils::config::Config;
+use crate::utils::image::ImageData;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::{Activation, Conv2d, Conv2dConfig};
+use candle_nn::{Conv2d, Conv2dConfig};
 use either::Either;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -107,51 +108,9 @@ impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
 unsafe impl Send for DummyRotaryEmbedding {}
 unsafe impl Sync for DummyRotaryEmbedding {}
 
-pub struct MLP {
-    fc1: ReplicatedLinear,
-    fc2: ReplicatedLinear,
-    act: Activation,
-}
-
-impl MLP {
-    pub fn new(vb: VarBuilderX, cfg: &VisionConfig, dtype: DType) -> Result<Self> {
-        let fc1 = ReplicatedLinear::load_b(
-            cfg.hidden_size,
-            cfg.intermediate_size,
-            true,
-            vb.pp("fc1"),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let fc2 = ReplicatedLinear::load_b(
-            cfg.intermediate_size,
-            cfg.hidden_size,
-            true,
-            vb.pp("fc2"),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        Ok(Self {
-            fc1,
-            fc2,
-            act: cfg.hidden_act,
-        })
-    }
-
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let gate_up = self.fc1.forward(xs)?;
-        let down = self.act.forward(&gate_up)?;
-        self.fc2.forward(&down)
-    }
-}
-
 struct Gemma3VisionEncoderLayer {
     self_attn: NaiveAttention,
-    mlp: MLP,
+    mlp: NaiveMLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     rotary_emb: Arc<DummyRotaryEmbedding>,
@@ -180,7 +139,15 @@ impl Gemma3VisionEncoderLayer {
             key_mappings,
         )?;
 
-        let mlp = MLP::new(vb.pp("mlp").clone(), &config.vision_config, dtype)?;
+        let mlp = NaiveMLP::new(
+            vb.pp("mlp").clone(),
+            config.vision_config.hidden_size,
+            config.vision_config.intermediate_size,
+            true,
+            &["fc1", "fc2"],
+            config.vision_config.hidden_act,
+            dtype,
+        )?;
 
         let input_layernorm = layer_norm(
             config.vision_config.hidden_size,
@@ -258,7 +225,7 @@ impl Gemma3VisionTransformer {
         })
     }
 
-    fn forward(&self, pixel_values: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, pixel_values: &Tensor, _: Vec<(usize, usize)>) -> Result<Tensor> {
         let mut xs = self.embeddings.forward(pixel_values)?;
         for layer in &self.layers {
             xs = layer.forward(&xs)?;
@@ -311,7 +278,7 @@ impl Gemma3MultiModalProjector {
         })
     }
 
-    fn forward(&self, xs: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, _: Vec<(usize, usize)>) -> Result<Tensor> {
         // xs is [Batch, SeqLen (Patches), HiddenDim]
         let (bs, _, hidden_dim) = xs.dims3()?;
 
@@ -687,7 +654,7 @@ impl Gemma3ForConditionalGeneration {
     fn vision_tower(
         &self,
         image_features: &Tensor,
-        image_sizes: Vec<(u32, u32)>,
+        image_sizes: Vec<(usize, usize)>,
     ) -> Result<Tensor> {
         let image_outputs = self
             .vision_tower
@@ -707,24 +674,44 @@ impl Gemma3ForConditionalGeneration {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
-        images: Option<Tensor>,
-        image_sizes: Option<Vec<(u32, u32)>>, // No needed since gemma3 uses fixed image input size
+        images: Option<&ImageData>,
     ) -> Result<Tensor> {
         let text_cfg = &self.config.text_config;
         // 1. Prepare Text Embeddings (Scaled)
         let mut xs = (self.embed_tokens.forward(input_ids)? * self.embed_scale)?;
 
         // vision projection and embedding
-        if let Some(image_tensor) = &images {
+        if let Some(images) = &images {
             let image_mask = input_ids.eq(self.config.image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(candle_core::D::Minus1)?
                 .broadcast_as(xs.shape().clone())?
                 .to_dtype(DType::U32)?;
 
+            let mut image_tensor = images.to_tensor_f32(&xs.device())?;
+            let mut image_sizes = images.patches.clone();
+            let num_images = image_tensor.dim(0)?;
+            assert!(
+                num_images == image_sizes.len(),
+                "Input image and patch dim mismatch!"
+            );
+            if images.image_idx > 0 && (images.image_idx as usize) < num_images {
+                image_tensor = image_tensor.narrow(
+                    0,
+                    images.image_idx as usize,
+                    num_images - images.image_idx as usize,
+                )?;
+                image_sizes = image_sizes[images.image_idx as usize..].to_vec();
+                crate::log_warn!(
+                    "Slicing images: start idx {} -> {:?}",
+                    images.image_idx,
+                    image_tensor.shape()
+                );
+            }
+
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
             let image_features =
-                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes.unwrap())?;
+                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
 
             let mut x_flat = xs.flatten_all()?;
             let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;

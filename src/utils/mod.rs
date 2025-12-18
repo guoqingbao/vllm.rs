@@ -14,17 +14,26 @@ pub mod progress;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
-use crate::utils::config::{RopeScaling, ScalingValue};
+use crate::utils::config::RopeScalingValue;
 use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
 use colored::Colorize;
 use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
-use either::Either;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! serde_default {
+    ($t:ty, $name:ident, $v:expr) => {
+        fn $name() -> $t {
+            $v
+        }
+    };
+}
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
     crate::log_info!("{:}", Path::new(path).join(json_file).display());
@@ -264,131 +273,106 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         EosTokenId::Multiple(vec![])
     };
 
-    let rope_scaling_type = md_get(format!("{arch}.rope.scaling.type").as_str());
-    let rope_scaling = if rope_scaling_type.is_ok() {
-        let scaling_type = rope_scaling_type.unwrap().to_string()?;
-        crate::log_info!("Rope scaling type: {}", scaling_type);
-        let mut scaling_map = HashMap::<String, RopeScaling>::new();
-        let scaling_factor = md_get(format!("{arch}.rope.scaling.alpha").as_str());
-        if scaling_factor.is_ok() {
-            scaling_map.insert(
-                "alpha".to_string(),
-                RopeScaling(Either::Left(ScalingValue(Either::Left(
-                    scaling_factor.unwrap().to_f32()? as f64,
-                )))),
+    // ---------------- RoPE scaling --------------------------
+    let rope_scaling = md_get(format!("{arch}.rope.scaling.type").as_str())
+        .ok()
+        .map(|v| {
+            let scaling_type = v.to_string()?;
+            crate::log_info!("Rope scaling type: {}", scaling_type);
+
+            let mut map = HashMap::<String, RopeScalingValue>::new();
+
+            if let Ok(alpha) = md_get(format!("{arch}.rope.scaling.alpha").as_str()) {
+                map.insert(
+                    "alpha".into(),
+                    RopeScalingValue::Number(alpha.to_f32()? as f64),
+                );
+            } else if let Ok(factor) = md_get(format!("{arch}.rope.scaling.factor").as_str()) {
+                map.insert(
+                    "factor".into(),
+                    RopeScalingValue::Number(factor.to_f32()? as f64),
+                );
+            }
+
+            if let Ok(v) = md_get(format!("{arch}.rope.scaling.original_context_length").as_str()) {
+                map.insert(
+                    "original_max_position_embeddings".into(),
+                    RopeScalingValue::Number(v.to_u32()? as f64),
+                );
+            }
+
+            if scaling_type == "llama3" {
+                if let Ok(v) = md_get(format!("{arch}.rope.scaling.low_freq_factor").as_str()) {
+                    map.insert(
+                        "low_freq_factor".into(),
+                        RopeScalingValue::Number(v.to_f32()? as f64),
+                    );
+                }
+                if let Ok(v) = md_get(format!("{arch}.rope.scaling.high_freq_factor").as_str()) {
+                    map.insert(
+                        "high_freq_factor".into(),
+                        RopeScalingValue::Number(v.to_f32()? as f64),
+                    );
+                }
+            }
+
+            if scaling_type == "yarn" {
+                for (key, alt) in [
+                    ("beta_fast", "yarn_beta_fast"),
+                    ("beta_slow", "yarn_beta_slow"),
+                ] {
+                    if let Ok(v) = md_get(format!("{arch}.rope.scaling.{key}").as_str())
+                        .or_else(|_| md_get(format!("{arch}.rope.scaling.{alt}").as_str()))
+                    {
+                        map.insert(key.into(), RopeScalingValue::Number(v.to_f32()? as f64));
+                    }
+                }
+
+                for key in ["extrapolation_factor", "attn_factor"] {
+                    if let Ok(v) = md_get(format!("{arch}.rope.scaling.{key}").as_str()) {
+                        map.insert(key.into(), RopeScalingValue::Number(v.to_f32()? as f64));
+                    }
+                }
+
+                if let Ok(v) = md_get(format!("{arch}.rope.attention.temperature_scale").as_str()) {
+                    map.insert(
+                        "llama_4_scaling_beta".into(),
+                        RopeScalingValue::Number(v.to_f32()? as f64),
+                    );
+                }
+            }
+
+            // -------- MRoPE support --------
+
+            if let Ok(v) = md_get(format!("{arch}.rope.scaling.mrope_interleaved").as_str()) {
+                map.insert(
+                    "mrope_interleaved".into(),
+                    RopeScalingValue::Bool(v.to_bool()?),
+                );
+            }
+
+            if let Ok(v) = md_get(format!("{arch}.rope.scaling.mrope_section").as_str()) {
+                let section = v
+                    .to_vec()?
+                    .into_iter()
+                    .map(|v| v.to_u32().unwrap() as f64)
+                    .collect::<Vec<_>>();
+                map.insert(
+                    "mrope_section".into(),
+                    RopeScalingValue::NumberArray(section),
+                );
+            }
+
+            map.insert(
+                "rope_type".into(),
+                RopeScalingValue::String(scaling_type.clone()),
             );
-        } else {
-            let factor = md_get(format!("{arch}.rope.scaling.factor").as_str());
-            if factor.is_ok() {
-                scaling_map.insert(
-                    "factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        factor.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-        };
-        let original_max_position_embeddings =
-            md_get(format!("{arch}.rope.scaling.original_context_length").as_str());
-        if original_max_position_embeddings.is_ok() {
-            scaling_map.insert(
-                "original_max_position_embeddings".to_string(),
-                RopeScaling(Either::Left(ScalingValue(Either::Left(
-                    original_max_position_embeddings.unwrap().to_u32()? as f64,
-                )))),
-            );
-        }
+            crate::log_info!("Rope scaling map: {:?}", map);
 
-        if scaling_type == "llama3" {
-            let low_freq_factor = md_get(format!("{arch}.rope.scaling.low_freq_factor").as_str());
-            if low_freq_factor.is_ok() {
-                scaling_map.insert(
-                    "low_freq_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        low_freq_factor.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-            let high_freq_factor = md_get(format!("{arch}.rope.scaling.high_freq_factor").as_str());
-            if high_freq_factor.is_ok() {
-                scaling_map.insert(
-                    "high_freq_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        high_freq_factor.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-        }
-
-        if scaling_type == "yarn" {
-            let extrapolation_factor =
-                md_get(format!("{arch}.rope.scaling.extrapolation_factor").as_str());
-            if extrapolation_factor.is_ok() {
-                scaling_map.insert(
-                    "extrapolation_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        extrapolation_factor.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-
-            let attn_factor = md_get(format!("{arch}.rope.scaling.attn_factor").as_str());
-            if attn_factor.is_ok() {
-                scaling_map.insert(
-                    "attn_factor".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        attn_factor.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-
-            let mut beta_fast = md_get(format!("{arch}.rope.scaling.beta_fast").as_str());
-            if !beta_fast.is_ok() {
-                beta_fast = md_get(format!("{arch}.rope.scaling.yarn_beta_fast").as_str());
-            }
-            if beta_fast.is_ok() {
-                scaling_map.insert(
-                    "beta_fast".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        beta_fast.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-
-            let mut beta_slow = md_get(format!("{arch}.rope.scaling.beta_slow").as_str());
-            if !beta_slow.is_ok() {
-                beta_slow = md_get(format!("{arch}.rope.scaling.yarn_beta_slow").as_str());
-            }
-            if beta_slow.is_ok() {
-                scaling_map.insert(
-                    "beta_slow".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        beta_slow.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-
-            let llama_4_scaling_beta =
-                md_get(format!("{arch}.rope.attention.temperature_scale").as_str());
-            if llama_4_scaling_beta.is_ok() {
-                scaling_map.insert(
-                    "llama_4_scaling_beta".to_string(),
-                    RopeScaling(Either::Left(ScalingValue(Either::Left(
-                        llama_4_scaling_beta.unwrap().to_f32()? as f64,
-                    )))),
-                );
-            }
-        }
-
-        scaling_map.insert(
-            "rope_type".to_string(),
-            RopeScaling(Either::Right(scaling_type.clone())),
-        );
-        crate::log_info!("Rope scaling map: {:?}", scaling_map);
-        Some(scaling_map)
-    } else {
-        None
-    };
+            Ok::<HashMap<String, RopeScalingValue>, candle_core::Error>(map)
+        })
+        .transpose()?;
+    // --------------------------------------------------------
 
     let head_dim = head_dim.unwrap_or(embedding_length / head_count);
 
@@ -528,10 +512,8 @@ pub fn init_config_tokenizer(
                     Some(std::fs::read_to_string(&config_path).map_err(candle_core::Error::wrap)?);
                 // Remap rope_theta in rope_scaling to config file
                 if let Some(scaling) = &config.rope_scaling {
-                    if let Some(RopeScaling(Either::Left(ScalingValue(Either::Left(v))))) =
-                        scaling.get("rope_theta")
-                    {
-                        config.rope_theta = Some(*v);
+                    if let Some(v) = scaling.get("rope_theta").and_then(|v| v.as_f64()) {
+                        config.rope_theta = Some(v);
                     }
                 }
                 config
@@ -793,6 +775,7 @@ pub fn get_arch_rope(
         ("Qwen2ForCausalLM", false),
         ("Qwen3ForCausalLM", false),
         ("Qwen3ForConditionalGeneration", false),
+        ("Qwen3VLForConditionalGeneration", false),
         ("MistralForCausalLM", false),
         ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
@@ -824,6 +807,10 @@ pub fn get_arch_rope(
         ),
         "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
             ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "Qwen3VLForConditionalGeneration" => (
+            ModelType::Qwen3VL,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "LlamaForCausalLM"

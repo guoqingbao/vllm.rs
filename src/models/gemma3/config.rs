@@ -1,17 +1,9 @@
+use crate::serde_default;
 use crate::utils::config::EosTokenId;
 use crate::utils::config::QuantConfig;
-use crate::utils::config::RopeScaling;
+use crate::utils::config::RopeScalingValue;
 use candle_nn::Activation;
 use std::collections::HashMap;
-#[doc(hidden)]
-#[macro_export]
-macro_rules! serde_default {
-    ($t:ty, $name:ident, $v:expr) => {
-        fn $name() -> $t {
-            $v
-        }
-    };
-}
 
 serde_default!(usize, hidden_size, 768);
 serde_default!(usize, intermediate_size, 3072);
@@ -94,7 +86,7 @@ pub struct TextConfig {
     pub rope_local_base_freq: f64,
     #[serde(default = "sliding_window_pattern")]
     pub sliding_window_pattern: usize,
-    pub rope_scaling: Option<HashMap<String, RopeScaling>>,
+    pub rope_scaling: Option<HashMap<String, RopeScalingValue>>,
     pub quant: Option<String>,
 }
 
