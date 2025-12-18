@@ -335,11 +335,11 @@ impl EngineStream {
 #[pymethods]
 impl Message {
     #[new]
-    pub fn new(role: String, content: String, images: Option<ImageData>) -> Self {
+    pub fn new(role: String, content: String, num_images: usize) -> Self {
         Message {
             role,
             content,
-            images,
+            num_images,
         }
     }
 }

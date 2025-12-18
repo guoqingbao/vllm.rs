@@ -12,7 +12,7 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::chat_template::Message;
 use crate::utils::config::SamplingParams;
-
+use crate::utils::image::{get_tensor_raw_data, ImageData};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -69,8 +69,6 @@ pub async fn chat_completion(
             image_tensors.push(t);
             image_sizes.extend(s);
         }
-        use crate::utils::image::get_tensor_raw_data;
-        use crate::utils::image::ImageData;
         let images_tensor = Tensor::cat(&image_tensors, 0).unwrap();
         let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor).unwrap();
         crate::log_info!(
@@ -82,6 +80,7 @@ pub async fn chat_completion(
             raw: images_raw,
             shape: images_shape,
             patches: image_sizes,
+            image_idx: 0,
         };
         Some(image_data)
     } else {

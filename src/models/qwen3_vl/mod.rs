@@ -90,7 +90,29 @@ impl Qwen3VLForConditionalGeneration {
             for (h, w) in &images.patches {
                 patches.extend(vec![1, *h as u32, *w as u32]);
             }
-            let image_grid_thw = Tensor::from_vec(patches, (images.patches.len(), 3), &device)?;
+            let mut image_grid_thw = Tensor::from_vec(patches, (images.patches.len(), 3), &device)?;
+            let num_images = pixel_values.dim(0)?;
+            assert!(
+                num_images == image_grid_thw.dim(0)?,
+                "Input image and patch dim mismatch!"
+            );
+            if images.image_idx > 0 && (images.image_idx as usize) < num_images {
+                pixel_values = pixel_values.narrow(
+                    0,
+                    images.image_idx as usize,
+                    num_images - images.image_idx as usize,
+                )?;
+                image_grid_thw = image_grid_thw.narrow(
+                    0,
+                    images.image_idx as usize,
+                    num_images - images.image_idx as usize,
+                )?;
+                crate::log_warn!(
+                    "Slicing images: start idx {} -> {:?}",
+                    images.image_idx,
+                    pixel_values.shape()
+                );
+            }
 
             let dims = pixel_values.dims();
             if dims.len() == 3 {

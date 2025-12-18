@@ -415,6 +415,7 @@ impl LLMEngine {
         prompt: &str,
         request_type: &RequestType,
         images: &Option<ImageData>,
+        image_idx: i32,
     ) -> Result<(usize, usize)> {
         let tokens = self
             .tokenizer
@@ -494,6 +495,7 @@ impl LLMEngine {
                     token_ids.clone(),
                     &mut self.active_sessions,
                     images,
+                    image_idx,
                 ) {
                     Ok(id) => Some(id),
                     Err(e) => {
@@ -507,7 +509,13 @@ impl LLMEngine {
 
             let seq_id = seq_id.unwrap_or_else(|| {
                 // Cache miss: create new sequence
-                let seq = Sequence::new(token_ids, self.econfig.block_size, params, images);
+                let seq = Sequence::new(
+                    token_ids,
+                    self.econfig.block_size,
+                    params,
+                    images,
+                    image_idx,
+                );
                 let id = self.scheduler.add(seq);
 
                 // Update active_sessions queue
@@ -524,7 +532,13 @@ impl LLMEngine {
 
             seq_id
         } else {
-            let seq = Sequence::new(token_ids, self.econfig.block_size, params, images);
+            let seq = Sequence::new(
+                token_ids,
+                self.econfig.block_size,
+                params,
+                images,
+                image_idx,
+            );
             let seq_id = self.scheduler.add(seq);
             seq_id
         };
@@ -550,8 +564,10 @@ impl LLMEngine {
         prompt: &str,
         request_type: RequestType,
         images: &Option<ImageData>,
+        image_idx: i32,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
-        let (seq_id, prompt_length) = self.add_request_(params, prompt, &request_type, images)?;
+        let (seq_id, prompt_length) =
+            self.add_request_(params, prompt, &request_type, images, image_idx)?;
         let (tx, rx) = channel(4096);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
@@ -972,7 +988,7 @@ impl LLMEngine {
         params: &SamplingParams,
         messages: &Vec<Message>,
         log: bool,
-    ) -> String {
+    ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
         let mut context_cache_reqeust = false;
@@ -984,20 +1000,21 @@ impl LLMEngine {
             }
         }
 
-        if context_cache_reqeust {
-            // only collect images from last message
-            // if let Some(images) = &messages[messages.len() - 1].images {
-            //     collected_images.push(images.clone());
-            // }
+        let image_idx: i32 = if context_cache_reqeust {
+            if messages[messages.len() - 1].num_images > 0 {
+                // Find the image index of the current context request
+                let mut idx = 0;
+                for i in 0..messages.len() - 1 {
+                    idx += messages[i].num_images;
+                }
+                idx as i32
+            } else {
+                -1 // No image for the continued request
+            }
         } else {
-            // collect images from all messages
-            // for m in messages {
-            //     if let Some(images) = &m.images {
-            //         collected_images.push(images.clone());
-            //     }
-            // }
             prompt_template.set_messages(messages);
-        }
+            0 // Start from beginning (no context-cache)
+        };
         let prompt_processed = prompt_template
             .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);
@@ -1027,7 +1044,7 @@ impl LLMEngine {
                 prompt.replace("\n", "")
             );
         }
-        prompt
+        (prompt, image_idx)
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1057,9 +1074,9 @@ impl LLMEngine {
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            let prompt = self.apply_chat_template(param, messages, false);
+            let (prompt, image_idx) = self.apply_chat_template(param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, &prompt, RequestType::Completion, &images)
+                self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1200,10 +1217,10 @@ impl LLMEngine {
         &mut self,
         params: &SamplingParams,
         messages: &Vec<Message>,
-        images: Option<ImageData>,
+        images: Option<ImageData>, //collection of images of the full conversation
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        let prompt = self.apply_chat_template(params, messages, false);
-        match self.add_request(params, &prompt, RequestType::Stream, &images) {
+        let (prompt, image_idx) = self.apply_chat_template(params, messages, false);
+        match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)

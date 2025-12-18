@@ -233,8 +233,27 @@ impl Mistral3ForConditionalGeneration {
                 .to_dtype(DType::U32)?;
 
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-            let image_tensor = images.to_tensor_f32(&input_ids.device())?;
-            let image_sizes = images.patches.clone();
+            let mut image_tensor = images.to_tensor_f32(&input_ids.device())?;
+            let mut image_sizes = images.patches.clone();
+            let num_images = image_tensor.dim(0)?;
+            assert!(
+                num_images == image_sizes.len(),
+                "Input image and patch dim mismatch!"
+            );
+            if images.image_idx > 0 && (images.image_idx as usize) < num_images {
+                image_tensor = image_tensor.narrow(
+                    0,
+                    images.image_idx as usize,
+                    num_images - images.image_idx as usize,
+                )?;
+                image_sizes = image_sizes[images.image_idx as usize..].to_vec();
+                crate::log_warn!(
+                    "Slicing images: start idx {} -> {:?}",
+                    images.image_idx,
+                    image_tensor.shape()
+                );
+            }
+
             let image_features =
                 self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
 

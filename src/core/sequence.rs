@@ -143,7 +143,15 @@ impl Sequence {
         block_size: usize,
         sampling_params: SamplingParams,
         images: &Option<ImageData>,
+        image_idx: i32,
     ) -> Self {
+        let images = if let Some(img) = &images {
+            let mut img = img.clone(); // update the images
+            img.image_idx = image_idx;
+            Some(img)
+        } else {
+            None
+        };
         Self {
             id: 0, // Will be set by scheduler
             created_time: SystemTime::now()
@@ -160,7 +168,7 @@ impl Sequence {
             block_size,
             last_token: *token_ids.last().unwrap_or(&0),
             pd_first_token: None,
-            images: images.clone(),
+            images,
         }
     }
 

@@ -10,6 +10,7 @@ pub struct Message {
     pub role: String,
     #[pyo3(get)]
     pub content: String,
+    pub num_images: usize,
 }
 
 #[cfg(not(feature = "python"))]
@@ -17,12 +18,17 @@ pub struct Message {
 pub struct Message {
     pub role: String,
     pub content: String,
+    pub num_images: usize,
 }
 
 #[cfg(not(feature = "python"))]
 impl Message {
-    pub fn new(role: String, content: String) -> Self {
-        Message { role, content }
+    pub fn new(role: String, content: String, num_images: usize) -> Self {
+        Message {
+            role,
+            content,
+            num_images,
+        }
     }
 }
 
@@ -70,16 +76,21 @@ impl ChatTemplate {
             template.append_message(
                 "system".to_string(),
                 template.system_message.clone().unwrap_or_default(),
+                0,
             );
         }
         if let Some(prompt) = prompt {
-            template.append_message("user".to_string(), prompt);
+            template.append_message("user".to_string(), prompt, 0);
         }
         template
     }
 
-    pub fn append_message(&mut self, role: String, content: String) {
-        self.messages.push(Message { role, content });
+    pub fn append_message(&mut self, role: String, content: String, num_images: usize) {
+        self.messages.push(Message {
+            role,
+            content,
+            num_images,
+        });
     }
 
     pub fn set_messages(&mut self, messages: &Vec<Message>) {

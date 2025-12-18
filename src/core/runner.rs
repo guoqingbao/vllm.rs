@@ -542,7 +542,12 @@ impl ModelRunner {
         let images = if let Seqs::SeqRefs(s) = &seqs {
             // We do not batch multimodel prefill
             if let Some(images) = &s[0].images {
-                Some(images)
+                if images.image_idx == -1 {
+                    crate::log_warn!("Image excluded in this turn!");
+                    None
+                } else {
+                    Some(images)
+                }
             } else {
                 None
             }

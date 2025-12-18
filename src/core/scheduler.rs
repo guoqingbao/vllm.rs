@@ -373,6 +373,7 @@ impl Scheduler {
         new_tokens_ids: Vec<u32>,
         active_sessions: &mut VecDeque<(usize, String)>,
         images: &Option<ImageData>,
+        image_idx: i32,
     ) -> Result<usize> {
         let seq_map_entry = self
             .cached_seqs
@@ -411,8 +412,14 @@ impl Scheduler {
 
                 seq.token_ids.extend(new_tokens_ids.clone());
                 seq.output_ids.clear();
-                seq.images = images.clone(); // update the images
-                                             //in context-cache, we dont' recreate sequences, so we need to update created_time
+                if let Some(img) = &images {
+                    let mut img = img.clone(); // update the images
+                    img.image_idx = image_idx;
+                    seq.images = Some(img);
+                } else {
+                    seq.images = None;
+                }
+                //in context-cache, we dont' recreate sequences, so we need to update created_time
                 seq.created_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .expect("Time went backwards")

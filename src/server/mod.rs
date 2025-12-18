@@ -315,7 +315,7 @@ pub fn convert_chat_message(
                     MessageContent::ImageUrl { image_url } => {
                         let img = load_image_from_url(image_url)?;
                         crate::log_info!(
-                            "chat image downloaded: {} x {}",
+                            "Chat image downloaded: {} x {}",
                             img.width(),
                             img.height()
                         );
@@ -324,7 +324,7 @@ pub fn convert_chat_message(
                     }
                     MessageContent::ImageBase64 { image_base64 } => {
                         let img = load_image_from_base64(image_base64)?;
-                        crate::log_info!("chat image decoded: {} x {}", img.width(), img.height());
+                        crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
                         prompt.push_str(&IMAGE_PLACEHOLDER);
                         images.push(img);
                     }
@@ -347,5 +347,5 @@ pub fn convert_chat_message(
         images_tensors.push((images_tensor, image_sizes));
     }
 
-    Ok(Message::new(role, prompt.trim().to_owned()))
+    Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
 }

@@ -12,6 +12,7 @@ pub struct ImageData {
     pub raw: Vec<u8>,
     pub shape: Vec<usize>,
     pub patches: Vec<(usize, usize)>,
+    pub image_idx: i32,
 }
 
 impl ImageData {
@@ -22,6 +23,7 @@ impl ImageData {
 }
 // load from url
 pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
+    crate::log_info!("Start downloading image from {}", url);
     let bytes = reqwest::blocking::get(url)
         .map_err(candle_core::Error::wrap)?
         .bytes()

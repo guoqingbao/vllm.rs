@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
-            let msg = Message::new("user".to_string(), prompt.clone());
+            let msg = Message::new("user".to_string(), prompt.clone(), 0);
             let param = SamplingParams::new_with_max_tokens(args.max_tokens);
             message_list.push(vec![msg]);
             params.push(param);
@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
                     if !trimmed.is_empty() {
-                        let msg = Message::new("user".to_string(), trimmed.to_string());
+                        let msg = Message::new("user".to_string(), trimmed.to_string(), 0);
                         chat_history.push(msg.clone());
                     } else {
                         print!("\n No prompt was given.");
@@ -507,7 +507,7 @@ async fn main() -> Result<()> {
             all_decode_time_taken += duration;
 
             if interactive {
-                let msg = Message::new("assistant".to_string(), decode_output.to_string());
+                let msg = Message::new("assistant".to_string(), decode_output.to_string(), 0);
                 chat_history.push(msg.clone());
             }
         }
