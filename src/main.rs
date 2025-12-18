@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
             tracing::warn!("Live output muted for more than one prompt!\n");
         }
         for prompt in prompts.iter() {
-            let msg = Message::new("user".to_string(), prompt.clone(), None, None);
+            let msg = Message::new("user".to_string(), prompt.clone());
             let param = SamplingParams::new_with_max_tokens(args.max_tokens);
             message_list.push(vec![msg]);
             params.push(param);
@@ -339,7 +339,7 @@ async fn main() -> Result<()> {
                 Ok(Signal::Success(buffer)) => {
                     let trimmed = buffer.trim();
                     if !trimmed.is_empty() {
-                        let msg = Message::new("user".to_string(), trimmed.to_string(), None, None);
+                        let msg = Message::new("user".to_string(), trimmed.to_string());
                         chat_history.push(msg.clone());
                     } else {
                         print!("\n No prompt was given.");
@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, &chat_history) {
+                    match e.generate_stream(&request_params, &chat_history, None) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -464,7 +464,7 @@ async fn main() -> Result<()> {
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
                     (
-                        e.generate_sync(&params, &message_list)?,
+                        e.generate_sync(&params, &message_list, None)?,
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
@@ -507,12 +507,7 @@ async fn main() -> Result<()> {
             all_decode_time_taken += duration;
 
             if interactive {
-                let msg = Message::new(
-                    "assistant".to_string(),
-                    decode_output.to_string(),
-                    None,
-                    None,
-                );
+                let msg = Message::new("assistant".to_string(), decode_output.to_string());
                 chat_history.push(msg.clone());
             }
         }

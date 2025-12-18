@@ -77,6 +77,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
 * ✅ Gemma3 (Text model, No flash-attn support)
+* ✅ Qwen3-VL (Dense, Multimodal model)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 

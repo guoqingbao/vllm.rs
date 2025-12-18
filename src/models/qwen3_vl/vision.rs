@@ -1,17 +1,12 @@
 use super::config::VisionConfig;
 use crate::models::layers::{
     distributed::ReplicatedLinear,
-    mlp::NaiveMLP,
-    others::{embedding, NormX},
-};
-use crate::models::layers::{
-    others::{layer_norm, Conv3dConfig, Conv3dNoBias},
+    others::{embedding, layer_norm, Conv3dConfig, Conv3dNoBias, NormX},
     VarBuilderX,
 };
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Embedding, Module};
+use candle_nn::{Activation, Embedding, Module};
 use either::Either;
-
 struct PatchEmbed {
     proj: Conv3dNoBias,
     bias: Tensor,
@@ -36,9 +31,7 @@ impl PatchEmbed {
         )?;
         let bias = match proj_vb.0 {
             Either::Left(v) => v.get(cfg.hidden_size, "bias")?,
-            _ => {
-                panic!("Unsupported format for patch embedding!")
-            }
+            _ => panic!(""),
         };
         Ok(Self {
             proj,
@@ -65,6 +58,50 @@ impl PatchEmbed {
     }
 }
 
+struct VisionMlp {
+    fc1: ReplicatedLinear,
+    fc2: ReplicatedLinear,
+    act: Activation,
+}
+
+impl VisionMlp {
+    fn new(
+        dim: usize,
+        hidden_dim: usize,
+        act: Activation,
+        vb: VarBuilderX,
+        dtype: DType,
+    ) -> Result<Self> {
+        Ok(Self {
+            fc1: ReplicatedLinear::load_b(
+                dim,
+                hidden_dim,
+                true,
+                vb.pp("linear_fc1"),
+                &None,
+                &None,
+                dtype,
+            )?,
+            fc2: ReplicatedLinear::load_b(
+                hidden_dim,
+                dim,
+                true,
+                vb.pp("linear_fc2"),
+                &None,
+                &None,
+                dtype,
+            )?,
+            act,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.fc1.forward(xs)?;
+        let xs = xs.apply(&self.act)?;
+        self.fc2.forward(&xs)
+    }
+}
+
 fn rotate_half(xs: &Tensor) -> Result<Tensor> {
     let last_dim = xs.dim(D::Minus1)?;
     let xs1 = xs.narrow(D::Minus1, 0, last_dim / 2)?;
@@ -88,21 +125,18 @@ fn apply_rotary_pos_emb_vision(
 
 struct VisionAttention {
     qkv: ReplicatedLinear,
-    o_proj: ReplicatedLinear,
+    proj: ReplicatedLinear,
     num_heads: usize,
     head_dim: usize,
-    softmax_scale: f64,
 }
 
 impl VisionAttention {
     fn new(dim: usize, num_heads: usize, vb: VarBuilderX, dtype: DType) -> Result<Self> {
-        let head_dim = dim / num_heads;
         Ok(Self {
-            qkv: ReplicatedLinear::load_no_bias(dim, dim * 3, vb.pp("qkv"), &None, &None, dtype)?,
-            o_proj: ReplicatedLinear::load_no_bias(dim, dim, vb.pp("proj"), &None, &None, dtype)?,
+            qkv: ReplicatedLinear::load_b(dim, dim * 3, true, vb.pp("qkv"), &None, &None, dtype)?,
+            proj: ReplicatedLinear::load_b(dim, dim, true, vb.pp("proj"), &None, &None, dtype)?,
             num_heads,
-            head_dim,
-            softmax_scale: 1.0 / (head_dim as f32).sqrt() as f64,
+            head_dim: dim / num_heads,
         })
     }
 
@@ -141,17 +175,21 @@ impl VisionAttention {
             let k_chunk = k.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
             let v_chunk = v.narrow(0, start, len)?.transpose(0, 1)?.contiguous()?;
 
-            let attn = (q_chunk.matmul(&k_chunk.t()?)? * self.softmax_scale)?;
-            let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+            let softmax_scale = (1.0 / (self.head_dim as f32).sqrt()) as f64;
+            let attn = (q_chunk.matmul(&k_chunk.t()?)? * softmax_scale)?;
+            let attn = candle_nn::ops::softmax_last_dim(&attn.to_dtype(DType::F32)?)?;
+
             let out = attn
+                .to_dtype(v_chunk.dtype())?
                 .matmul(&v_chunk)?
-                .transpose(1, 2)?
+                .squeeze(0)?
+                .transpose(0, 1)?
                 .reshape((len, self.num_heads * self.head_dim))?;
 
             outputs.push(out.to_dtype(xs.dtype())?);
         }
         let attn_output = Tensor::cat(&outputs, 0)?;
-        self.o_proj.forward(&attn_output)
+        self.proj.forward(&attn_output)
     }
 }
 
@@ -159,7 +197,7 @@ struct VisionBlock {
     norm1: NormX,
     norm2: NormX,
     attn: VisionAttention,
-    mlp: NaiveMLP,
+    mlp: VisionMlp,
 }
 
 impl VisionBlock {
@@ -167,17 +205,13 @@ impl VisionBlock {
         let norm1 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp("norm1"), dtype)?;
         let norm2 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp("norm2"), dtype)?;
         let attn = VisionAttention::new(cfg.hidden_size, cfg.num_heads, vb.pp("attn"), dtype)?;
-
-        let mlp = NaiveMLP::new(
-            vb.pp("mlp").clone(),
+        let mlp = VisionMlp::new(
             cfg.hidden_size,
             cfg.intermediate_size,
-            true,
-            &["linear_fc1", "linear_fc2"],
             cfg.hidden_act,
+            vb.pp("mlp"),
             dtype,
         )?;
-
         Ok(Self {
             norm1,
             norm2,
@@ -315,7 +349,12 @@ pub struct Qwen3VLVisionModel {
 }
 
 impl Qwen3VLVisionModel {
-    pub fn new(cfg: &VisionConfig, vb: VarBuilderX, device: &Device, dtype: DType) -> Result<Self> {
+    pub fn new(
+        cfg: &VisionConfig,
+        vb: &VarBuilderX,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
         let patch_embed = PatchEmbed::new(cfg, vb.pp("patch_embed"))?;
         let (pos_embed, _) = embedding(
             Some(cfg.num_position_embeddings),
@@ -323,6 +362,14 @@ impl Qwen3VLVisionModel {
             vb.pp("pos_embed"),
             dtype,
         )?;
+
+        // let embeddings = match &vb.0 {
+        //     Either::Left(v) => {
+        //         v.pp("pos_embed").get((cfg.num_position_embeddings, cfg.hidden_size), "weight")?
+        //     }
+        //     _=> panic!(""),
+        // };
+        // let pos_embed = Embedding::new(embeddings, cfg.hidden_size);
 
         let mut blocks = Vec::with_capacity(cfg.depth);
         for i in 0..cfg.depth {

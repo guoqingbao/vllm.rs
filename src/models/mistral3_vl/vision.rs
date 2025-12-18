@@ -315,14 +315,14 @@ impl VisionModel {
             .repeat((patch_embeds.dim(0)?, 1, 1, 1))
     }
 
-    pub fn forward(&self, xs: &Tensor, image_sizes: Vec<(u32, u32)>) -> Result<Tensor> {
+    pub fn forward(&self, xs: &Tensor, image_sizes: Vec<(usize, usize)>) -> Result<Tensor> {
         let patch_embeds = self.patch_conv.forward(&xs)?;
         let patch_embeds_list = image_sizes
             .iter()
             .enumerate()
             .map(|(i, &size)| {
-                let patches_h = size.0 as usize / self.patch_size;
-                let patches_w = size.1 as usize / self.patch_size;
+                let patches_h = size.0 / self.patch_size;
+                let patches_w = size.1 / self.patch_size;
                 patch_embeds
                     .i(i)?
                     .narrow(D::Minus2, 0, patches_h)?

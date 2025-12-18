@@ -3,9 +3,23 @@ use crate::utils::Config;
 use candle_core::{DType, Device, Result, Storage, Tensor};
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, Pixel};
+use serde::{Deserialize, Serialize};
 pub const IMAGE_PLACEHOLDER: &str = "<|VLLM-RS-IMAGE|>";
-const PLACEHOLDER: &str = "<|VLLM-RS-PLACEHOLDER|>";
+pub const PLACEHOLDER: &str = "<|VLLM-RS-PLACEHOLDER|>";
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ImageData {
+    pub raw: Vec<u8>,
+    pub shape: Vec<usize>,
+    pub patches: Vec<(usize, usize)>,
+}
+
+impl ImageData {
+    pub fn to_tensor_f32(&self, device: &Device) -> Result<Tensor> {
+        let floats: &[f32] = bytemuck::cast_slice(&self.raw);
+        Tensor::from_slice(floats, self.shape.clone(), device)
+    }
+}
 // load from url
 pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
     let bytes = reqwest::blocking::get(url)
@@ -29,7 +43,6 @@ pub fn load_image_from_base64(data: &str) -> Result<DynamicImage> {
 
 pub fn get_tensor_raw_data(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     let shape = t.dims().to_vec();
-    // println!("tensor_raw shape {:?}, dtype {:?}", shape, t.dtype());
     let (storage, _) = t.storage_and_layout();
     let storage = match &*storage {
         Storage::Cpu(p) => p,
@@ -48,11 +61,6 @@ pub fn get_tensor_raw_data(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     };
 
     Ok((bytes, shape))
-}
-
-pub fn bytes_to_tensor_f32(bytes: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
-    let floats: &[f32] = bytemuck::cast_slice(bytes);
-    Tensor::from_slice(floats, shape, device)
 }
 
 fn image_resize(
@@ -205,17 +213,19 @@ pub struct ImageProcessConfig {
     image_token: String,
     image_break_token: Option<String>,
     image_end_token: String,
-    spatial_merge_size: usize,
+    pub spatial_merge_size: usize,
     pub do_normalize: Option<bool>,
     pub do_resize: Option<bool>,
     pub image_mean: Option<[f32; 3]>,
     pub image_std: Option<[f32; 3]>,
-    max_height: usize,
-    max_width: usize,
-    patch_size: usize,
-    abolute_resize: bool,
+    pub max_height: usize,
+    pub max_width: usize,
+    pub patch_size: usize,
+    pub temporal_patch_size: Option<usize>,
+    pub abolute_resize: bool,
     pub scale_factor: Option<f32>,
     pub resampling: Option<usize>,
+    pub model_type: ModelType,
 }
 
 impl ImageProcessConfig {
@@ -225,6 +235,7 @@ impl ImageProcessConfig {
         image_break_token: Option<String>,
         image_end_token: String,
         spatial_merge_size: usize,
+        temporal_patch_size: Option<usize>,
         patch_size: usize,
         image_size: usize,
         abolute_resize: bool,
@@ -245,6 +256,8 @@ impl ImageProcessConfig {
             abolute_resize,
             resampling: None,
             scale_factor: None,
+            temporal_patch_size: temporal_patch_size,
+            model_type: ModelType::Mistral3VL,
         }
     }
 }
@@ -369,16 +382,18 @@ pub fn get_image_config(
                 serde_json::from_str(config.extra_config_json.as_ref().unwrap())
                     .map_err(candle_core::Error::wrap)?;
 
-            let img_cfg = ImageProcessConfig::default(
+            let mut img_cfg = ImageProcessConfig::default(
                 None,
                 "[IMG]".to_string(),
                 Some("[IMG_BREAK]".to_string()),
                 "[IMG_END]".to_string(),
                 cfg.spatial_merge_size,
+                None,
                 cfg.vision_config.patch_size,
                 cfg.vision_config.image_size,
                 false,
             );
+            img_cfg.model_type = ModelType::Mistral3VL;
             Some(img_cfg)
         }
         ModelType::Gemma3 => {
@@ -397,11 +412,39 @@ pub fn get_image_config(
                 None,
                 "<end_of_image>".to_string(),
                 4,
+                None,
                 cfg.vision_config.patch_size,
                 cfg.vision_config.image_size,
                 true,
             );
+            img_cfg.model_type = ModelType::Gemma3;
             img_cfg.scale_factor = Some(0.003921567);
+            img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
+            img_cfg.image_std = Some([0.5, 0.5, 0.5]);
+            Some(img_cfg)
+        }
+        ModelType::Qwen3VL => {
+            use crate::models::qwen3_vl::config::Qwen3VLConfig;
+            assert!(
+                config.extra_config_json.is_some(),
+                "Multimodel missing vision config!"
+            );
+            let cfg: Qwen3VLConfig =
+                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                    .map_err(candle_core::Error::wrap)?;
+
+            let mut img_cfg = ImageProcessConfig::default(
+                Some("<|vision_start|>".to_string()),
+                "<|image_pad|>".to_string(),
+                None,
+                "<|vision_end|>".to_string(),
+                cfg.vision_config.spatial_merge_size,
+                Some(cfg.vision_config.temporal_patch_size),
+                cfg.vision_config.patch_size,
+                1536,
+                false,
+            );
+            img_cfg.model_type = ModelType::Qwen3VL;
             img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
             img_cfg.image_std = Some([0.5, 0.5, 0.5]);
             Some(img_cfg)

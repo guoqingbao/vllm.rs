@@ -1,44 +1,12 @@
-use candle_core::{Device, IndexOp, Result, Tensor};
-use image::{DynamicImage, GenericImageView};
-
 use crate::utils::image::{normalize, to_tensor, ImageProcessConfig, ToFilter};
-
-/// Replace first occurrence helper (unchanged)
-fn replace_first_occurrence(text: &str, from: &str, to: &str) -> String {
-    if let Some(pos) = text.find(from) {
-        let mut s = text.to_string();
-        s.replace_range(pos..pos + from.len(), to);
-        s
-    } else {
-        text.to_string()
-    }
-}
-
-/// Find continuous sequences of a value (kept for downstream token logic)
-pub fn find_sequences(nums: &[u32], needle: u32) -> Vec<(usize, usize)> {
-    let mut out = Vec::new();
-    let mut start = None;
-
-    for (i, &v) in nums.iter().enumerate() {
-        if v == needle {
-            start.get_or_insert(i);
-        } else if let Some(s) = start.take() {
-            out.push((s, i));
-        }
-    }
-
-    if let Some(s) = start {
-        out.push((s, nums.len()));
-    }
-
-    out
-}
+use crate::utils::image::{IMAGE_PLACEHOLDER, PLACEHOLDER};
+use candle_core::{Result, Tensor};
+use image::{DynamicImage, GenericImageView};
 
 /// Qwen3-VL Image + Prompt Processor
 #[derive(Clone)]
 pub struct Qwen3VLImageProcessor {
     pub cfg: ImageProcessConfig,
-
     pub patch_size: usize,
     pub merge_size: usize,
     pub temporal_patch_size: usize,
@@ -48,14 +16,15 @@ pub struct Qwen3VLImageProcessor {
 
 impl Qwen3VLImageProcessor {
     #[allow(dead_code)]
-    fn default(cfg: ImageProcessConfig) -> Self {
+    pub fn default(cfg: &ImageProcessConfig) -> Self {
+        let max_row = std::cmp::max(cfg.max_height, cfg.max_width);
         Self {
-            cfg,
-            patch_size: 14,
-            merge_size: 2,
-            temporal_patch_size: 2,
+            cfg: cfg.clone(),
+            patch_size: cfg.patch_size,
+            merge_size: cfg.spatial_merge_size,
+            temporal_patch_size: cfg.temporal_patch_size.unwrap_or(2),
             min_pixels: 256 * 256,
-            max_pixels: 1536 * 1536,
+            max_pixels: max_row * max_row,
         }
     }
 }
@@ -67,7 +36,6 @@ impl Qwen3VLImageProcessor {
     pub const VISION_START: &str = "<|vision_start|>";
     pub const VISION_END: &str = "<|vision_end|>";
     pub const IMAGE_PAD: &str = "<|image_pad|>";
-    pub const PLACEHOLDER: &str = "<|placeholder|>";
 
     /// Resize respecting patch constraints
     fn smart_resize(&self, h: usize, w: usize) -> Result<(usize, usize)> {
@@ -91,11 +59,11 @@ impl Qwen3VLImageProcessor {
         Ok((nh, nw))
     }
 
-    fn preprocess_inner(
+    fn prepreprocess(
         &self,
         image: &DynamicImage,
         target_hw: (u32, u32),
-    ) -> Result<(Tensor, (u32, u32, u32))> {
+    ) -> Result<(Tensor, (usize, usize))> {
         let (th, tw) = target_hw;
 
         let (nh, nw) = self.smart_resize(th as usize, tw as usize)?;
@@ -140,7 +108,7 @@ impl Qwen3VLImageProcessor {
             c * self.temporal_patch_size * self.patch_size * self.patch_size,
         ))?;
 
-        Ok((patches, (grid_t as u32, grid_h as u32, grid_w as u32)))
+        Ok((patches, (grid_h as usize, grid_w as usize)))
     }
 
     /// 🔹 Main entry: processes prompt + images together
@@ -148,7 +116,7 @@ impl Qwen3VLImageProcessor {
         &self,
         prompt: &mut String,
         images: &[DynamicImage],
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let (max_w, max_h) = images
             .iter()
             .map(|i| i.dimensions())
@@ -158,35 +126,34 @@ impl Qwen3VLImageProcessor {
         let mut grid_thw = Vec::new();
 
         for image in images {
-            let (patches, (t, h, w)) = self.preprocess_inner(image, (max_h, max_w))?;
+            let (patches, (h, w)) = self.prepreprocess(image, (max_h, max_w))?;
 
             pixel_values.push(patches);
-            grid_thw.push(Tensor::new(&[t, h, w], &Device::Cpu)?);
+            grid_thw.push((h, w));
         }
 
         let pixel_values = Tensor::stack(&pixel_values, 0)?;
-        let grid_thw = Tensor::stack(&grid_thw, 0)?;
 
         // ===== Prompt expansion logic (preserved & fixed) =====
         let merge_len = self.merge_size * self.merge_size;
         let mut image_idx = 0;
+        let mut replace_strings = Vec::new();
+        while prompt.contains(IMAGE_PLACEHOLDER) {
+            let grid = grid_thw[image_idx];
+            let num_patches: usize = (grid.0 * grid.1) as usize / merge_len;
+            let mut replace_tokens = vec![Self::VISION_START];
+            replace_tokens.extend(vec![Self::IMAGE_PAD; num_patches]);
+            replace_tokens.push(Self::VISION_END);
 
-        while prompt.contains(Self::IMAGE_PAD) {
-            let grid = grid_thw.i(image_idx)?;
-            let num_patches: usize =
-                grid.to_vec1::<u32>()?.iter().product::<u32>() as usize / merge_len;
-
-            *prompt = replace_first_occurrence(
-                prompt,
-                Self::IMAGE_PAD,
-                &Self::PLACEHOLDER.repeat(num_patches),
-            );
-
+            replace_strings.push(replace_tokens.join(""));
+            *prompt = prompt.replace(IMAGE_PLACEHOLDER, PLACEHOLDER);
             image_idx += 1;
         }
 
-        *prompt = prompt.replace(Self::PLACEHOLDER, Self::IMAGE_PAD);
-        // ======================================================
+        while prompt.contains(PLACEHOLDER) {
+            let replace_str = replace_strings.pop().unwrap();
+            *prompt = prompt.replace(PLACEHOLDER, &replace_str);
+        }
 
         Ok((pixel_values, grid_thw))
     }

@@ -6,7 +6,6 @@ use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::image::bytes_to_tensor_f32;
 use crate::utils::logits_processor::LogitsProcessor;
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -241,7 +240,7 @@ impl ModelRunner {
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
                                     input_metadata: &InputMetadata,
                                     _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None, None)
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -254,7 +253,7 @@ impl ModelRunner {
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
                                     input_metadata: &InputMetadata,
                                     _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None, None)
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -266,15 +265,7 @@ impl ModelRunner {
                                     kv_caches: Option<&Vec<(Tensor, Tensor)>>,
                                     input_metadata: &InputMetadata,
                                     _: bool| {
-                    model_arc.forward(
-                        input_ids,
-                        positions,
-                        kv_caches,
-                        input_metadata,
-                        None,
-                        None,
-                        None,
-                    )
+                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
                 CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
@@ -548,23 +539,15 @@ impl ModelRunner {
             return Ok(output_ids);
         }
 
-        let (pixel_values, image_sizes) = if let Seqs::SeqRefs(s) = &seqs {
+        let images = if let Seqs::SeqRefs(s) = &seqs {
             // We do not batch multimodel prefill
             if let Some(images) = &s[0].images {
-                let mut vec_tensors = Vec::new();
-                let mut image_sizes = Vec::new();
-                for (img, shape) in images {
-                    let t = bytes_to_tensor_f32(&img, shape, &self.device)?;
-                    crate::log_info!("image tensor {:?}", t.shape());
-                    vec_tensors.push(t);
-                    image_sizes.push((shape[2] as u32, shape[3] as u32));
-                }
-                (Some(Tensor::cat(&vec_tensors, 0)?), Some(image_sizes))
+                Some(images)
             } else {
-                (None, None)
+                None
             }
         } else {
-            (None, None)
+            None
         };
 
         let logits = match &self.model {
@@ -601,16 +584,14 @@ impl ModelRunner {
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
-                pixel_values,
-                image_sizes,
+                images,
             )?,
             Model::Gemma3(model) => model.forward(
                 &input_ids,
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
-                pixel_values,
-                image_sizes,
+                images,
             )?,
 
             Model::Qwen3VL(model) => model.forward(
@@ -618,9 +599,7 @@ impl ModelRunner {
                 &positions,
                 Some(&self.get_kv_cache()),
                 &input_metadata,
-                pixel_values,
-                None, //TODO
-                image_sizes,
+                images,
             )?,
         };
         let output_ids = self.sample(&logits, seqs, is_prefill)?;

@@ -11,6 +11,7 @@ use crate::models::layers::rotary_emb::{
 };
 use crate::models::layers::{mlp::MLP as TextMLP, VarBuilderX};
 use crate::utils::config::Config;
+use crate::utils::image::ImageData;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -224,7 +225,7 @@ impl Gemma3VisionTransformer {
         })
     }
 
-    fn forward(&self, pixel_values: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, pixel_values: &Tensor, _: Vec<(usize, usize)>) -> Result<Tensor> {
         let mut xs = self.embeddings.forward(pixel_values)?;
         for layer in &self.layers {
             xs = layer.forward(&xs)?;
@@ -277,7 +278,7 @@ impl Gemma3MultiModalProjector {
         })
     }
 
-    fn forward(&self, xs: &Tensor, _: Vec<(u32, u32)>) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, _: Vec<(usize, usize)>) -> Result<Tensor> {
         // xs is [Batch, SeqLen (Patches), HiddenDim]
         let (bs, _, hidden_dim) = xs.dims3()?;
 
@@ -653,7 +654,7 @@ impl Gemma3ForConditionalGeneration {
     fn vision_tower(
         &self,
         image_features: &Tensor,
-        image_sizes: Vec<(u32, u32)>,
+        image_sizes: Vec<(usize, usize)>,
     ) -> Result<Tensor> {
         let image_outputs = self
             .vision_tower
@@ -673,24 +674,25 @@ impl Gemma3ForConditionalGeneration {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
-        images: Option<Tensor>,
-        image_sizes: Option<Vec<(u32, u32)>>, // No needed since gemma3 uses fixed image input size
+        images: Option<&ImageData>,
     ) -> Result<Tensor> {
         let text_cfg = &self.config.text_config;
         // 1. Prepare Text Embeddings (Scaled)
         let mut xs = (self.embed_tokens.forward(input_ids)? * self.embed_scale)?;
 
         // vision projection and embedding
-        if let Some(image_tensor) = &images {
+        if let Some(images) = &images {
             let image_mask = input_ids.eq(self.config.image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(candle_core::D::Minus1)?
                 .broadcast_as(xs.shape().clone())?
                 .to_dtype(DType::U32)?;
 
+            let image_tensor = images.to_tensor_f32(&xs.device())?;
+            let image_sizes = images.patches.clone();
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
             let image_features =
-                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes.unwrap())?;
+                self.vision_tower(&image_tensor.to_dtype(self.dtype)?, image_sizes)?;
 
             let mut x_flat = xs.flatten_all()?;
             let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;

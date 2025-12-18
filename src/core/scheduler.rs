@@ -6,6 +6,7 @@ use super::{
 };
 use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
+use crate::utils::image::ImageData;
 use candle_core::Result;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
@@ -371,7 +372,7 @@ impl Scheduler {
         session_id: &String,
         new_tokens_ids: Vec<u32>,
         active_sessions: &mut VecDeque<(usize, String)>,
-        images: &Option<Vec<(Vec<u8>, Vec<usize>)>>,
+        images: &Option<ImageData>,
     ) -> Result<usize> {
         let seq_map_entry = self
             .cached_seqs

@@ -4,16 +4,18 @@ use std::sync::Arc;
 pub mod config;
 pub mod input;
 pub mod vision;
-use crate::models::layers::distributed::Comm;
+
 use crate::models::layers::VarBuilderX;
 use crate::models::qwen3::Qwen3ForCausalLM;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
+use crate::{models::layers::distributed::Comm, utils::image::ImageData};
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use config::Qwen3VLConfig;
 use vision::Qwen3VLVisionModel;
 
+#[allow(dead_code)]
 pub struct Qwen3VLForConditionalGeneration {
     text_model: Qwen3ForCausalLM,
     vision_model: Qwen3VLVisionModel,
@@ -42,12 +44,8 @@ impl Qwen3VLForConditionalGeneration {
                 .map_err(candle_core::Error::wrap)?;
         cfg.text_config = config.clone();
 
-        let vision_model = Qwen3VLVisionModel::new(
-            &cfg.vision_config,
-            vb.pp("model.visual"),
-            &vb.device(),
-            dtype,
-        )?;
+        let vision_model =
+            Qwen3VLVisionModel::new(&cfg.vision_config, &vb.pp("model.visual"), dtype, device)?;
 
         if cfg.quantization_config.is_some() {
             cfg.text_config.quantization_config = cfg.quantization_config.clone();
@@ -79,29 +77,28 @@ impl Qwen3VLForConditionalGeneration {
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
-        images: Option<Tensor>,
-        image_grid_thw: Option<Tensor>,
-        continuous_img_pad: Option<Vec<(u32, u32)>>,
+        images: Option<&ImageData>,
     ) -> Result<Tensor> {
         let mut input_embeds = self.text_model.embed_forward(input_ids)?;
-        let (seq_len, hidden_dim) = input_embeds.dims2()?;
         let device = input_embeds.device().clone();
-
         let mut visual_pos_masks: Option<Tensor> = None;
         let mut deepstack_visual_embeds: Option<Vec<Tensor>> = None;
 
-        if let (Some(pixel_values), Some(image_pad)) = (&images, &continuous_img_pad) {
-            let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
-                candle_core::bail!("pixel_values require image_grid_thw");
-            };
-            let mut pixel_values = pixel_values.clone();
+        if let Some(images) = &images {
+            let mut pixel_values = images.to_tensor_f32(&device)?;
+            let mut patches = Vec::new();
+            for (h, w) in &images.patches {
+                patches.extend(vec![1, *h as u32, *w as u32]);
+            }
+            let image_grid_thw = Tensor::from_vec(patches, (images.patches.len(), 3), &device)?;
+
             let dims = pixel_values.dims();
             if dims.len() == 3 {
                 pixel_values = pixel_values.reshape((dims[0] * dims[1], dims[2]))?;
             }
-            let (image_embeds, deepstack_image_embeds) = self
-                .vision_model
-                .forward(&pixel_values, image_grid_thw_ref)?;
+            let (image_embeds, deepstack_image_embeds) =
+                self.vision_model.forward(&pixel_values, &image_grid_thw)?;
+
             let image_embeds = image_embeds
                 .to_device(&device)?
                 .to_dtype(self.text_model.dtype())?;
@@ -110,78 +107,28 @@ impl Qwen3VLForConditionalGeneration {
                 .map(|t| t.to_device(&device)?.to_dtype(self.text_model.dtype()))
                 .collect::<Result<Vec<_>>>()?;
 
-            let mut offset = 0usize;
-            let mut image_mask = Tensor::zeros((1, seq_len), DType::F32, input_ids.device())?;
-            let total_expected: usize = image_pad
-                .iter()
-                .map(|(s, e)| *e as usize - *s as usize)
-                .sum();
-            if image_embeds.dim(0)? != total_expected {
-                candle_core::bail!(
-                    "Image embedding length {} does not match placeholder tokens {}",
-                    image_embeds.dim(0)?,
-                    total_expected
-                );
-            }
-
-            for &(start, end) in image_pad {
-                let (start, end) = (start as usize, end as usize);
-                let len = end - start;
-                let chunk = image_embeds.narrow(0, offset, len)?;
-                offset += len;
-                input_embeds = input_embeds
-                    .slice_assign(&[0..1, start..end, 0..hidden_dim], &chunk.unsqueeze(0)?)?;
-                let ones = Tensor::ones((1, len), DType::F32, input_ids.device())?;
-                image_mask = image_mask.slice_assign(&[0..1, start..end], &ones)?;
-            }
+            let image_mask = input_ids.eq(self.image_token_id as u32)?;
             visual_pos_masks = Some(image_mask.to_dtype(DType::U8)?);
+
+            let image_mask = image_mask
+                .unsqueeze(candle_core::D::Minus1)?
+                .broadcast_as(input_embeds.shape().clone())?
+                .to_dtype(DType::U32)?;
+            use attention_rs::ops::NonZeroOp;
+            let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
+
+            let mut x_flat = input_embeds.flatten_all()?;
+            let image_flat = image_embeds.flatten_all()?;
+
+            x_flat =
+                x_flat.scatter_add(&indices, &(image_flat - x_flat.gather(&indices, 0)?)?, 0)?;
+            input_embeds = x_flat.reshape(input_embeds.shape())?;
             deepstack_visual_embeds = Some(deepstack_image_embeds);
         }
 
-        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
-            input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..]
-                .into()
-        } else {
-            Vec::new()
-        };
-
-        let position_ids = if images.is_some() && visual_pos_masks.is_some() {
-            let mut ropeidx_attn_mask_bs = Vec::new();
-            let max_seqlens = *seqlens.iter().max().unwrap() as usize;
-            for len in &seqlens {
-                let len = *len as usize;
-                ropeidx_attn_mask_bs.push(Tensor::new(
-                    [vec![1f32; len], vec![0f32; max_seqlens - len]].concat(),
-                    input_ids.device(),
-                )?);
-            }
-            let ropeidx_attn_mask = Tensor::stack(&ropeidx_attn_mask_bs, 0)?;
-            if input_metadata.is_prefill {
-                use crate::models::layers::deepstack::ApplyRopeIndex;
-                input_ids
-                    .apply_rope_index(
-                        image_grid_thw.as_ref(),
-                        Some(&ropeidx_attn_mask),
-                        self.spatial_merge_size,
-                        self.image_token_id,
-                        self.vision_start_token_id,
-                        self.vision_end_token_id,
-                    )?
-                    .0
-            } else {
-                positions.to_owned()
-            }
-        } else {
-            positions.to_owned()
-        };
-
         let out = self.text_model.forward_with_deepstack(
             &input_embeds,
-            &position_ids,
+            &positions,
             kv_caches,
             input_metadata,
             true,

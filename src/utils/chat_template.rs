@@ -1,60 +1,28 @@
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+
 #[cfg(feature = "python")]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[pyclass]
-#[derive(Clone, Debug)]
 pub struct Message {
     #[pyo3(get)]
     pub role: String,
     #[pyo3(get)]
     pub content: String,
-    pub image_values: Option<Vec<u8>>,   // pixel values
-    pub image_shape: Option<Vec<usize>>, // pixel values
 }
 
 #[cfg(not(feature = "python"))]
-#[derive(Clone, Debug)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct Message {
     pub role: String,
     pub content: String,
-    pub image_values: Option<Vec<u8>>,   // pixel values
-    pub image_shape: Option<Vec<usize>>, // pixel values
 }
 
 #[cfg(not(feature = "python"))]
 impl Message {
-    pub fn new(
-        role: String,
-        content: String,
-        image_values: Option<Vec<u8>>,
-        image_shape: Option<Vec<usize>>,
-    ) -> Self {
-        Message {
-            role,
-            content,
-            image_values,
-            image_shape,
-        }
-    }
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
-pub struct PlainMessage {
-    pub role: String,
-    pub content: String,
-}
-
-impl PlainMessage {
     pub fn new(role: String, content: String) -> Self {
-        PlainMessage { role, content }
-    }
-
-    pub fn from(msg: &Message) -> Self {
-        PlainMessage {
-            role: msg.role.clone(),
-            content: msg.content.clone(),
-        }
+        Message { role, content }
     }
 }
 
@@ -102,29 +70,16 @@ impl ChatTemplate {
             template.append_message(
                 "system".to_string(),
                 template.system_message.clone().unwrap_or_default(),
-                None,
-                None,
             );
         }
         if let Some(prompt) = prompt {
-            template.append_message("user".to_string(), prompt, None, None);
+            template.append_message("user".to_string(), prompt);
         }
         template
     }
 
-    pub fn append_message(
-        &mut self,
-        role: String,
-        content: String,
-        image_values: Option<Vec<u8>>,
-        image_shape: Option<Vec<usize>>,
-    ) {
-        self.messages.push(Message {
-            role,
-            content,
-            image_values,
-            image_shape,
-        });
+    pub fn append_message(&mut self, role: String, content: String) {
+        self.messages.push(Message { role, content });
     }
 
     pub fn set_messages(&mut self, messages: &Vec<Message>) {
@@ -162,13 +117,9 @@ impl ChatTemplate {
         if log {
             tracing::info!("messages {:?}", self.messages);
         }
-        let mut plain_message = Vec::new();
-        for msg in &self.messages {
-            plain_message.push(PlainMessage::from(msg))
-        }
         template
             .render(context! {
-              messages => plain_message,
+              messages => self.messages,
               add_generation_prompt => self.add_generation_prompt,
               bos_token => self.bos_token,
               eos_token => self.eos_token,

@@ -17,6 +17,7 @@ use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
 };
+use candle_core::Tensor;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,11 +54,39 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
+    let mut images: Vec<(Tensor, Vec<(usize, usize)>)> = vec![];
+
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| convert_chat_message(m, &img_cfg).unwrap())
+        .map(|m| convert_chat_message(m, &img_cfg, &mut images).unwrap())
         .collect();
+
+    let image_data = if !images.is_empty() && img_cfg.is_some() {
+        let mut image_sizes = Vec::new();
+        let mut image_tensors = Vec::new();
+        for (t, s) in &images {
+            image_tensors.push(t);
+            image_sizes.extend(s);
+        }
+        use crate::utils::image::get_tensor_raw_data;
+        use crate::utils::image::ImageData;
+        let images_tensor = Tensor::cat(&image_tensors, 0).unwrap();
+        let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor).unwrap();
+        crate::log_info!(
+            "{} images detected in the chat message, combined image shape {:?}",
+            images_shape[0],
+            images_shape
+        );
+        let image_data = ImageData {
+            raw: images_raw,
+            shape: images_shape,
+            patches: image_sizes,
+        };
+        Some(image_data)
+    } else {
+        None
+    };
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -71,7 +100,7 @@ pub async fn chat_completion(
         }
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, &messages) {
+            match e.generate_stream(&params, &messages, image_data) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
@@ -256,7 +285,7 @@ pub async fn chat_completion(
         let (receivers, tokenizer) = {
             let mut e = data.engine.write();
             (
-                match e.generate_sync(&vec![params.clone()], &vec![messages]) {
+                match e.generate_sync(&vec![params.clone()], &vec![messages], image_data) {
                     Ok(receivers) => receivers,
                     Err(e) => {
                         crate::log_error!("Completion generation failed: {:?}", e);
