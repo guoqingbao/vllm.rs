@@ -276,11 +276,40 @@ impl Qwen3MoEForCausalLM {
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
+        Self::new_with_prefix(
+            vb,
+            comm.clone(),
+            config,
+            dtype,
+            is_rope_i,
+            device,
+            progress_reporter,
+            None,
+        )
+    }
+
+    pub fn new_with_prefix(
+        vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        dtype: DType,
+        is_rope_i: bool,
+        device: &Device,
+        progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
+        prefix: Option<String>,
+    ) -> Result<Self> {
+        let has_prefix = prefix.is_some();
+        let prefix = prefix.unwrap_or("model".to_string());
+        let gguf_prefix = if has_prefix {
+            prefix.clone() + "."
+        } else {
+            "".to_string()
+        };
         let key_map: HashMap<&str, &str> = [
-            ("model.embed_tokens", "token_embd"),
+            ("embed_tokens", "token_embd"),
             ("lm_head", "output"),
-            ("model.norm", "output_norm"),
-            ("model.layers", "blk"),
+            ("norm", "output_norm"),
+            ("layers", "blk"),
         ]
         .iter()
         .cloned()
@@ -292,9 +321,9 @@ impl Qwen3MoEForCausalLM {
             config.vocab_size,
             config.hidden_size,
             if is_qvar_builder {
-                vb.pp(key_map["model.embed_tokens"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
             } else {
-                vb.pp("model.embed_tokens")
+                vb.pp(&format!("{}.embed_tokens", prefix))
             },
             if is_qvar_builder || config.quant.is_some() {
                 DType::F32
@@ -320,9 +349,9 @@ impl Qwen3MoEForCausalLM {
                 vb.pp(format!(
                     "{}.{}",
                     if is_qvar_builder {
-                        key_map["model.layers"]
+                        format!("{}{}", gguf_prefix, key_map["layers"])
                     } else {
-                        "model.layers"
+                        format!("{}.layers", prefix)
                     },
                     i
                 )
@@ -341,9 +370,9 @@ impl Qwen3MoEForCausalLM {
             config.hidden_size,
             config.rms_norm_eps,
             if is_qvar_builder {
-                vb.pp(key_map["model.norm"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["norm"]))
             } else {
-                vb.pp("model.norm")
+                vb.pp(&format!("{}.norm", prefix))
             },
             dtype,
             false,
@@ -354,9 +383,9 @@ impl Qwen3MoEForCausalLM {
             vocab_size,
             if config.tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
-                    vb.pp(key_map["model.embed_tokens"])
+                    vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
                 } else {
-                    vb.pp("model.embed_tokens")
+                    vb.pp(&format!("{}.embed_tokens", prefix))
                 }
             } else {
                 if is_qvar_builder {
@@ -395,6 +424,27 @@ impl Qwen3MoEForCausalLM {
         input_metadata: &InputMetadata,
         embeded_inputs: bool,
     ) -> Result<Tensor> {
+        self.forward_with_deepstack(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            &None,
+            &None,
+        )
+    }
+
+    pub fn forward_with_deepstack(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+        visual_pos_masks: &Option<Tensor>,
+        deepstack_visual_embeds: &Option<Vec<Tensor>>,
+    ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
                 .cu_seqlens_q
@@ -421,7 +471,9 @@ impl Qwen3MoEForCausalLM {
         };
 
         if let Some(kv_caches) = kv_caches {
-            for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
+            for ((k_cache, v_cache), (i, layer)) in
+                zip(kv_caches.iter(), self.layers.iter().enumerate())
+            {
                 xs = layer.forward(
                     &xs,
                     attention_mask.as_ref(),
@@ -429,16 +481,14 @@ impl Qwen3MoEForCausalLM {
                     Some((k_cache, v_cache)),
                     input_metadata,
                 )?;
-            }
-        } else {
-            for layer in self.layers.iter() {
-                xs = layer.forward(
-                    &xs,
-                    attention_mask.as_ref(),
-                    positions,
-                    None,
-                    input_metadata,
-                )?
+                if let (Some(pos_mask), Some(deepstacks)) =
+                    (visual_pos_masks, deepstack_visual_embeds)
+                {
+                    use crate::models::layers::deepstack::ApplyDeepStack;
+                    if i < deepstacks.len() {
+                        xs = xs.apply_deep_stack(pos_mask, &deepstacks[i])?;
+                    }
+                }
             }
         }
 
@@ -459,5 +509,9 @@ impl Qwen3MoEForCausalLM {
 
     pub fn get_vocab_size(&self) -> usize {
         self.vocab_size
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
     }
 }

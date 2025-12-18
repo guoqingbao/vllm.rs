@@ -58,6 +58,7 @@ impl Attention {
             "Gemma3ForConditionalGeneration",
             "Gemma3ForCausalLM",
             "Qwen3VLForConditionalGeneration",
+            "Qwen3VLMoeForConditionalGeneration",
         ]
         .iter()
         .map(|s| s.to_string())

@@ -47,6 +47,7 @@ pub struct VisionConfig {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Qwen3VLConfig {
+    pub architectures: Option<Vec<String>>,
     pub text_config: Config,
     pub vision_config: VisionConfig,
     pub image_token_id: u32,

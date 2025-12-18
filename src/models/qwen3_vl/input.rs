@@ -1,4 +1,4 @@
-use crate::utils::image::{normalize, to_tensor, ImageProcessConfig, ImageProcessTrait, ToFilter};
+use crate::utils::image::{to_tensor, ImageProcessConfig, ImageProcessTrait, ToFilter};
 use crate::utils::image::{IMAGE_PLACEHOLDER, PLACEHOLDER};
 use candle_core::{Result, Tensor};
 use image::{DynamicImage, GenericImageView};
@@ -81,13 +81,11 @@ impl Qwen3VLImageProcessor {
             .resize_exact(nw as u32, nh as u32, self.cfg.resampling.to_filter()?)
             .to_rgb8();
 
-        let images = normalize(
-            &vec![DynamicImage::ImageRgb8(image)],
-            Some(self.cfg.image_mean.unwrap_or(Self::DEFAULT_MEAN)),
-            Some(self.cfg.image_std.unwrap_or(Self::DEFAULT_STD)),
-        );
+        let image_mean = Some(self.cfg.image_mean.unwrap_or(Self::DEFAULT_MEAN));
+        let image_std = Some(self.cfg.image_std.unwrap_or(Self::DEFAULT_STD));
 
-        let (mut patches, _) = to_tensor(&images)?;
+        let (mut patches, _) =
+            to_tensor(&vec![DynamicImage::ImageRgb8(image)], image_mean, image_std)?;
 
         if patches.dim(0)? == 1 {
             patches = patches.repeat((self.temporal_patch_size, 1, 1, 1))?;
