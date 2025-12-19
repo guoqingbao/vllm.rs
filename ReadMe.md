@@ -88,6 +88,116 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 - [Context cache](docs/context-cache.md)
 - [Get started (run modes, formats, PD, multi-rank)](docs/get_started.md)
 
+## 🦀 Usage in Rust (crate API)
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+vllm-rs = { path = "/path/to/vllm.rs", features = ["cuda"] }
+```
+
+### ✅ Direct generation (text)
+
+```rust
+use vllm_rs::{ChatMessage, Engine, EngineConfig, SamplingParams, get_dtype};
+
+fn main() -> candle_core::Result<()> {
+    let econfig = EngineConfig::new(
+        Some("Qwen/Qwen2.5-7B-Instruct".to_string()),
+        None,
+        None,
+        None,
+        None,
+        Some(4),
+        None,
+        Some(8192),
+        Some(512),
+        None,
+        None,
+        Some(vec![0]),
+        None,
+        None,
+        Some(false),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+    );
+
+    let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+    let params = SamplingParams::new_with_max_tokens(128);
+
+    let messages = vec![ChatMessage::text("user", "Explain KV cache in one sentence.")];
+    let output = engine.generate(params, messages)?;
+    println!("{}", output.decode_output);
+    Ok(())
+}
+```
+
+### 🖼️ Multimodal prompt (image URL / base64)
+
+```rust
+use vllm_rs::{ChatMessage, Engine, MessageContent, SamplingParams, get_dtype};
+
+let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+let params = SamplingParams::new_with_max_tokens(256);
+let messages = vec![ChatMessage::multimodal(
+    "user",
+    vec![
+        MessageContent::Text {
+            text: "Describe this image:".to_string(),
+        },
+        MessageContent::ImageUrl {
+            image_url: "https://example.com/demo.png".to_string(),
+        },
+    ],
+)];
+let output = engine.generate(params, messages)?;
+```
+
+### 🌐 Start API server from Rust
+
+```rust
+let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+engine.start_server(8000, true)?;
+```
+
+### 🧩 Multi-GPU / multi-rank
+Set `device_ids` in `EngineConfig` and compile with `nccl`:
+
+```toml
+vllm-rs = { path = "/path/to/vllm.rs", features = ["cuda", "nccl"] }
+```
+
+```rust
+let econfig = EngineConfig::new(
+    Some("Qwen/Qwen3-30B-A3B-Instruct-2507".to_string()),
+    None,
+    None,
+    None,
+    None,
+    Some(2),
+    None,
+    Some(65536),
+    Some(1024),
+    None,
+    Some(2),
+    Some(vec![0, 1]),
+    None,
+    None,
+    Some(false),
+    None,
+    Some(true),
+    None,
+    None,
+    None,
+);
+```
+
+See `examples/rust_basic.rs` and `examples/rust_multimodal.rs` for runnable snippets.
+
 
 ## 📘 Usage in Python
 

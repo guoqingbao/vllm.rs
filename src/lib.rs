@@ -1,6 +1,7 @@
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 pub mod core;
+pub mod api;
 pub mod models;
 #[cfg(feature = "python")]
 pub mod py;
@@ -18,6 +19,13 @@ use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 #[cfg(feature = "python")]
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
+
+pub use crate::api::{Engine, EngineStream};
+pub use crate::server::{ChatMessage, MessageContent, MessageContentType};
+pub use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
+pub use crate::utils::get_dtype;
+pub use core::engine::StreamItem;
+pub use core::GenerationOutput;
 /// A Python module implemented in Rust.
 #[cfg(feature = "python")]
 #[pymodule]

@@ -79,3 +79,44 @@ Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA
 - Use `--log` to view loading/progress; watch for “swap” messages (KV pressure).
 - If OOM on Metal, lower `--max-model-len` and batch; on CUDA, reduce `--kv-fraction` or `--max-num-seqs`.
 - For GGUF/ISQ, keep `--max-num-seqs` moderate to avoid bandwidth bottlenecks; consider `--fp8-kvcache` only on Ampere+.
+
+## 9) Rust crate API (direct embed)
+You can embed vLLM.rs directly inside a Rust application using the new API wrapper in `vllm_rs::Engine`.
+
+```toml
+[dependencies]
+vllm-rs = { path = "/path/to/vllm.rs", features = ["cuda"] }
+```
+
+```rust
+use vllm_rs::{ChatMessage, Engine, EngineConfig, SamplingParams, get_dtype};
+
+let econfig = EngineConfig::new(
+    Some("Qwen/Qwen2.5-7B-Instruct".to_string()),
+    None,
+    None,
+    None,
+    None,
+    Some(4),
+    None,
+    Some(8192),
+    Some(512),
+    None,
+    None,
+    Some(vec![0]),
+    None,
+    None,
+    Some(false),
+    None,
+    Some(true),
+    None,
+    None,
+    None,
+);
+
+let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+let params = SamplingParams::new_with_max_tokens(128);
+let messages = vec![ChatMessage::text("user", "Summarize KV cache in one sentence.")];
+let output = engine.generate(params, messages)?;
+println!("{}", output.decode_output);
+```

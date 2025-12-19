@@ -79,6 +79,115 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
+## 🦀 Rust Crate API 使用
+
+在 `Cargo.toml` 中添加依赖：
+
+```toml
+[dependencies]
+vllm-rs = { path = "/path/to/vllm.rs", features = ["cuda"] }
+```
+
+### ✅ 直接生成（文本）
+
+```rust
+use vllm_rs::{ChatMessage, Engine, EngineConfig, SamplingParams, get_dtype};
+
+fn main() -> candle_core::Result<()> {
+    let econfig = EngineConfig::new(
+        Some("Qwen/Qwen2.5-7B-Instruct".to_string()),
+        None,
+        None,
+        None,
+        None,
+        Some(4),
+        None,
+        Some(8192),
+        Some(512),
+        None,
+        None,
+        Some(vec![0]),
+        None,
+        None,
+        Some(false),
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+    );
+
+    let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+    let params = SamplingParams::new_with_max_tokens(128);
+    let messages = vec![ChatMessage::text("user", "请用一句话解释 KV Cache")];
+    let output = engine.generate(params, messages)?;
+    println!("{}", output.decode_output);
+    Ok(())
+}
+```
+
+### 🖼️ 多模态输入（图片 URL / base64）
+
+```rust
+use vllm_rs::{ChatMessage, Engine, MessageContent, SamplingParams, get_dtype};
+
+let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+let params = SamplingParams::new_with_max_tokens(256);
+let messages = vec![ChatMessage::multimodal(
+    "user",
+    vec![
+        MessageContent::Text {
+            text: "描述这张图片：".to_string(),
+        },
+        MessageContent::ImageUrl {
+            image_url: "https://example.com/demo.png".to_string(),
+        },
+    ],
+)];
+let output = engine.generate(params, messages)?;
+```
+
+### 🌐 用 Rust 启动 API 服务
+
+```rust
+let engine = Engine::new(econfig, get_dtype(Some("bf16".to_string())))?;
+engine.start_server(8000, true)?;
+```
+
+### 🧩 多卡 / 多 rank
+设置 `device_ids` 并启用 `nccl`：
+
+```toml
+vllm-rs = { path = "/path/to/vllm.rs", features = ["cuda", "nccl"] }
+```
+
+```rust
+let econfig = EngineConfig::new(
+    Some("Qwen/Qwen3-30B-A3B-Instruct-2507".to_string()),
+    None,
+    None,
+    None,
+    None,
+    Some(2),
+    None,
+    Some(65536),
+    Some(1024),
+    None,
+    Some(2),
+    Some(vec![0, 1]),
+    None,
+    None,
+    Some(false),
+    None,
+    Some(true),
+    None,
+    None,
+    None,
+);
+```
+
+更多示例见 `examples/rust_basic.rs` 和 `examples/rust_multimodal.rs`。
+
 ## 📘 使用方法（Python）
 ### 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
