@@ -55,7 +55,7 @@ macro_rules! build_model {
         { $( $variant:ident => $ctor:ident ),+ $(,)? }
     ) => {{
         match $model_type {
-            $( ModelType::$variant => Ok(Model::$variant(Arc::new($ctor::new(
+            $( ModelType::$variant => Ok::<Model, candle_core::Error>(Model::$variant(Arc::new($ctor::new(
                 $vb,
                 $comm.clone(),
                 $config,
