@@ -11,6 +11,7 @@ pub mod heartbeat;
 pub mod image;
 pub mod logits_processor;
 pub mod progress;
+use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
@@ -1180,4 +1181,68 @@ pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
     );
     // Ensure all shards 1..=total are present
     Ok((1..=total).all(|i| found_indices.contains(&i)))
+}
+
+pub fn log_throughput(outputs: &[GenerationOutput]) {
+    use colored::Colorize;
+    const EPS: f32 = 1e-6;
+    if outputs.is_empty() {
+        tracing::warn!("No outputs provided; cannot compute throughput.");
+        return;
+    }
+
+    let mut total_prompt_tokens: usize = 0;
+    let mut total_decoded_tokens: usize = 0;
+
+    let mut prompt_time_taken: f32 = 0.0;
+    let mut all_decode_time_taken: f32 = 0.0;
+
+    for GenerationOutput {
+        prompt_length,
+        prompt_start_time,
+        decode_start_time,
+        decode_finish_time,
+        decoded_length,
+        ..
+    } in outputs.iter()
+    {
+        total_prompt_tokens += *prompt_length as usize;
+        total_decoded_tokens += *decoded_length as usize;
+
+        let duration_prompt = (*decode_start_time - *prompt_start_time) as f32 / 1000.0;
+        if duration_prompt > prompt_time_taken {
+            prompt_time_taken = duration_prompt;
+        }
+
+        let duration_decode = (*decode_finish_time - *decode_start_time) as f32 / 1000.0;
+        all_decode_time_taken += duration_decode;
+    }
+
+    // Add a very small epsilon to avoid zero / near-zero times
+    let prompt_time_taken = prompt_time_taken + EPS;
+    let decode_time_taken = (all_decode_time_taken / outputs.len() as f32) + EPS;
+
+    eprintln!("{}", String::from("--- Performance Metrics ---").red());
+
+    eprintln!(
+        "{}",
+        String::from(format!(
+            "⏱️ Prompt tokens: {} in {:.2}s ({:.2} tokens/s)",
+            total_prompt_tokens,
+            prompt_time_taken,
+            total_prompt_tokens as f32 / prompt_time_taken,
+        ))
+        .yellow()
+    );
+
+    eprintln!(
+        "{}",
+        String::from(format!(
+            "⏱️ Decoded tokens: {} in {:.2}s ({:.2} tokens/s)",
+            total_decoded_tokens,
+            decode_time_taken,
+            total_decoded_tokens as f32 / decode_time_taken,
+        ))
+        .yellow()
+    );
 }

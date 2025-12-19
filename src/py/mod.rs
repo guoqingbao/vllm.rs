@@ -53,7 +53,6 @@ impl Engine {
                 self.econfig.clone(),
                 port,
                 with_ui_server,
-                false,
             )
             .await
             .map_err(|e| PyValueError::new_err(format!("Server error: {e:?}")))?;

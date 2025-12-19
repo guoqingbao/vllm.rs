@@ -311,6 +311,9 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub log: bool,
 
+    #[arg(long, default_value_t = false)]
+    pub no_flash_attn: bool,
+
     #[arg(long, value_delimiter = '|')]
     pub prompts: Option<Vec<String>>,
 
@@ -489,7 +492,6 @@ pub async fn run_server(
     econfig: EngineConfig,
     port: usize,
     with_ui_server: bool,
-    include_embeddings: bool,
 ) -> Result<()> {
     let (has_vision, model_name) = {
         let e = engine.read();
@@ -510,18 +512,15 @@ pub async fn run_server(
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let mut app = Router::new()
+    let app = Router::new()
         .route(
             "/v1/models",
             get(|| async move {
-                let mut m = if *has_vision {
+                let m = if *has_vision {
                     vec!["text", "image"]
                 } else {
-                    vec!["text"]
+                    vec!["text", "embedding"]
                 };
-                if include_embeddings {
-                    m.push("embedding");
-                }
                 Json(json!({
                     "object": "list",
                     "data": [
@@ -541,13 +540,10 @@ pub async fn run_server(
             }),
         )
         .route("/v1/chat/completions", post(server::chat_completion))
+        .route("/v1/embeddings", post(server::create_embeddings))
         .route("/v1/usage", get(server::get_usage))
         .layer(cors)
         .with_state(Arc::new(server_data));
-
-    if include_embeddings {
-        app = app.route("/v1/embeddings", post(server::create_embeddings));
-    }
 
     let addr = if is_pd_server {
         crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);

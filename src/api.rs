@@ -6,7 +6,6 @@ use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::get_dtype;
 use candle_core::{DType, Result};
 use parking_lot::RwLock;
-use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -15,11 +14,11 @@ use tokio::sync::mpsc;
 pub enum ModelRepo {
     /// (model_id, filename) -- when filename is None, treat as safetensor model id.
     /// When filename is Some, treat as GGUF model id + GGUF filename.
-    ModelID((Cow<'static, str>, Option<Cow<'static, str>>)),
+    ModelID((&'static str, Option<&'static str>)),
     /// Safetensor local path.
-    ModelPath(Cow<'static, str>),
+    ModelPath(&'static str),
     /// GGUF file(s). Only the first file is used today.
-    ModelFile(Vec<Cow<'static, str>>),
+    ModelFile(Vec<&'static str>),
 }
 
 #[derive(Clone, Debug)]
@@ -56,11 +55,6 @@ impl EngineBuilder {
         self
     }
 
-    pub fn with_flash_attn(mut self) -> Self {
-        self.flash_attn = Some(true);
-        self
-    }
-
     pub fn without_flash_attn(mut self) -> Self {
         self.flash_attn = Some(false);
         self
@@ -82,94 +76,73 @@ impl EngineBuilder {
     }
 
     pub fn build(self) -> Result<Engine> {
-        let mut econfig = EngineConfig::new(
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            self.context_cache,
-            self.fp8_kvcache,
-            Some(true),
-            None,
-            None,
-            None,
-        );
+        let disable_flash_attn = if let Some(enable_flash_attn) = self.flash_attn {
+            Some(!enable_flash_attn)
+        } else {
+            None
+        };
 
-        match self.repo {
-            ModelRepo::ModelID((model_id, filename)) => {
-                econfig.model_id = Some(model_id.into_owned());
-                econfig.weight_file = filename.map(|f| f.into_owned());
-            }
-            ModelRepo::ModelPath(path) => {
-                econfig.weight_path = Some(path.into_owned());
-            }
+        let (model_id, weight_path, weight_file) = match self.repo {
+            ModelRepo::ModelID((model_id, filename)) => (
+                Some(model_id.to_owned()),
+                None,
+                filename.map(|f| f.to_owned()),
+            ),
+            ModelRepo::ModelPath(path) => (None, Some(path.to_owned()), None),
             ModelRepo::ModelFile(files) => {
                 if files.len() > 1 {
                     crate::log_warn!("Multiple GGUF files provided, using the first one.");
                 }
-                econfig.weight_file = files.into_iter().next().map(|f| f.into_owned());
+                let weight_file = files.into_iter().next().map(|f| f.to_owned());
+                (None, None, weight_file)
             }
-        }
+        };
 
-        econfig.isq = self.isq;
-        econfig.device_ids = self.device_ids;
-
-        if let Some(enable_flash_attn) = self.flash_attn {
-            econfig.disable_flash_attn = Some(!enable_flash_attn);
-        }
+        let econfig = EngineConfig::new(
+            model_id,
+            weight_path,
+            weight_file,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            self.isq,
+            Some(self.device_ids.clone().unwrap_or(vec![0]).len()),
+            self.device_ids.clone(),
+            None,
+            None,
+            self.context_cache,
+            self.fp8_kvcache,
+            None,
+            None,
+            None,
+            None,
+            disable_flash_attn,
+        );
 
         let dtype = self.dtype.clone().map(dtype_to_str);
         let dtype = get_dtype(dtype);
 
         let engine = LLMEngine::new(&econfig, dtype)?;
-        Ok(Engine {
-            engine,
-            econfig,
-            dtype,
-        })
+        Ok(Engine { engine, econfig })
     }
 }
 
 pub struct Engine {
     engine: Arc<RwLock<LLMEngine>>,
     econfig: EngineConfig,
-    dtype: DType,
 }
 
 impl Engine {
-    pub fn multirank(mut self, device_ids: &str) -> Result<Self> {
-        self.econfig.device_ids = Some(parse_device_ids(device_ids)?);
-        self.rebuild()?;
-        Ok(self)
-    }
-
-    pub fn start_server(
-        &mut self,
-        port: usize,
-        with_ui_server: bool,
-        context_cache: bool,
-    ) -> Result<()> {
-        if self.econfig.flash_context != Some(context_cache) {
-            self.econfig.flash_context = Some(context_cache);
-            self.rebuild()?;
-        }
-
+    pub fn start_server(&mut self, port: usize, with_ui_server: bool) -> Result<()> {
         GLOBAL_RT.block_on(async {
             run_server(
                 self.engine.clone(),
                 self.econfig.clone(),
                 port,
                 with_ui_server,
-                false,
             )
             .await
         })
@@ -238,11 +211,6 @@ impl Engine {
     pub fn get_available_kv_tokens(&self) -> usize {
         let engine = self.engine.read();
         engine.get_available_kv_tokens()
-    }
-
-    fn rebuild(&mut self) -> Result<()> {
-        self.engine = LLMEngine::new(&self.econfig, self.dtype)?;
-        Ok(())
     }
 }
 

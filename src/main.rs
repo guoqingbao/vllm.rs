@@ -2,6 +2,7 @@ use candle_core::Result;
 use clap::Parser;
 use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use std::sync::Arc;
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
@@ -174,18 +175,12 @@ async fn main() -> Result<()> {
         args.cpu_mem_fold,
         args.kv_fraction,
         pd_config,
+        Some(args.no_flash_attn),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
     if args.server || args.ui_server || args.pd_server {
-        run_server(
-            engine.clone(),
-            econfig.clone(),
-            args.port,
-            args.ui_server,
-            true,
-        )
-        .await?;
+        run_server(engine.clone(), econfig.clone(), args.port, args.ui_server).await?;
         return Ok(());
     }
 

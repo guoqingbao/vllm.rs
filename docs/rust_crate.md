@@ -8,6 +8,9 @@ an OpenAI-compatible service without changing the existing project structure.
 ```toml
 [dependencies]
 vllm-rs = { path = "/path/to/vllm.rs" }
+
+[features]
+cuda = ["vllm_rs/cuda"]
 ```
 
 Use the same Cargo features you would use for the CLI (`cuda`, `metal`, `nccl`, etc.).
@@ -16,28 +19,23 @@ Use the same Cargo features you would use for the CLI (`cuda`, `metal`, `nccl`, 
 
 ```rust
 use vllm_rs::api::{EngineBuilder, ModelRepo};
-use vllm_rs::server::{ChatMessage, MessageContent, MessageContentType};
-use vllm_rs::utils::config::SamplingParams;
+use vllm_rs::server::{ChatMessage, MessageContentType};
+use vllm_rs::utils::{config::SamplingParams, log_throughput};
 
-fn main() -> candle_core::Result<()> {
-    let mut engine = EngineBuilder::new(ModelRepo::ModelID((
-        "Qwen/Qwen3-0.6B".to_string(),
-        None,
-    )))
-    .build()?;
+fn main() -> anyhow::Result<()> {
+    let mut engine =
+        EngineBuilder::new(ModelRepo::ModelID(("google/gemma-3-4b-it", None))).build()?;
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
-        content: MessageContentType::Multi(vec![MessageContent::Text {
-            text: "Hello from Rust!".to_string(),
-        }]),
+        content: MessageContentType::PureText("Say hello from the Rust API.".to_string()),
     }];
 
     let params = SamplingParams::default();
     let output = engine.generate(params, messages)?;
-    println!("{}", output.decode_output);
+    println!("\n\n{}", output.decode_output);
 
-    Ok(())
+    log_throughput(&vec![output]);
 }
 ```
 
@@ -110,4 +108,12 @@ fn main() -> candle_core::Result<()> {
     engine.start_server(8000, true, true)?;
     Ok(())
 }
+```
+## Command to run
+
+[Reference Rust demo](/example/rust-demo/)
+
+```shell
+# add `nccl` feature for multirank inference (and copy `runner` (which is built with build.sh) to your target path)
+cargo run --release --features cuda,graph
 ```
