@@ -418,6 +418,7 @@ pub enum ModelType {
     Gemma,
     Gemma3,
     Phi,
+    Phi4,
     Mistral,
     GLM4,
     Yi,
