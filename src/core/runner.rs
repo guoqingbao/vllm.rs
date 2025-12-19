@@ -656,6 +656,7 @@ impl ModelRunner {
             }
         };
 
+        crate::log_info!("embedding finished with hidden shape {:?}", hidden.shape());
         let hidden = hidden.to_dtype(DType::F32)?;
         let dims = hidden.dims();
         if dims.len() != 2 {
@@ -666,6 +667,10 @@ impl ModelRunner {
         let mut outputs = Vec::new();
         for seq in seqs {
             let len = seq.len().saturating_sub(seq.num_cached_tokens);
+            crate::log_info!(
+                "Extracting embedding state for Seq {} (start {start}, len {len})",
+                seq.id
+            );
             let slice = hidden.narrow(0, start, len)?;
             let pooled = match strategy {
                 EmbeddingStrategy::Mean => slice.mean(D::Minus2)?,

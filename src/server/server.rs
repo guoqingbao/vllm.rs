@@ -421,6 +421,11 @@ pub async fn create_embeddings(
         Err(e) => return ChatResponder::ModelError(format!("Embedding generation failed: {e:?}")),
     };
 
+    crate::log_warn!(
+        "Finished with {} embedding vectors and {} prompt tokens",
+        vectors.len(),
+        prompt_tokens
+    );
     let data: Vec<EmbeddingData> = vectors
         .into_iter()
         .enumerate()

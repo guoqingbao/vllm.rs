@@ -343,7 +343,7 @@ impl GLM4ForCausalLM {
             }
         }
 
-        if !seqlens.is_empty() {
+        if !seqlens.is_empty() && !return_hidden {
             let indices: Vec<_> = seqlens.iter().map(|x| x - 1 as u32).collect();
             let batch = indices.len();
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
