@@ -50,6 +50,68 @@ pub enum Model {
     // DeepSeek(DeepSeekForCausalLM),
 }
 
+macro_rules! build_model {
+    ($model_type:expr, $vb:expr, $comm:expr, $config:expr, $dtype:expr, $is_rope_i:expr, $device:expr, $reporter:expr,
+        { $( $variant:ident => $ctor:ident ),+ $(,)? }
+    ) => {{
+        match $model_type {
+            $( ModelType::$variant => Ok(Model::$variant(Arc::new($ctor::new(
+                $vb,
+                $comm.clone(),
+                $config,
+                $dtype,
+                $is_rope_i,
+                $device,
+                Arc::clone(&$reporter),
+            )?))), )+
+            _ => {
+                candle_core::bail!("Unsupported model type: {:?}", $model_type);
+            }
+        }
+    }};
+}
+
+macro_rules! model_call {
+    ($model:expr, $method:ident,
+        ($input_ids:expr, $positions:expr, $kv:expr, $input_metadata:expr),
+        { $( $variant:ident => $extra:expr ),+ $(,)? }
+        $(, $fallback:expr )?
+    ) => {{
+        match $model {
+            $( Model::$variant(model) => model.$method($input_ids, $positions, $kv, $input_metadata, $extra), )+
+            $( _ => $fallback, )?
+        }
+    }};
+}
+
+#[cfg(all(feature = "cuda", feature = "graph"))]
+macro_rules! graph_wrapper_match {
+    ($model:expr, $device:expr,
+        { $( $variant:ident => $arg:expr ),+ $(,)? }
+    ) => {{
+        match $model {
+            $( Model::$variant(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        $arg,
+                    )
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, $device.as_cuda_device()?.clone().into())
+            }, )+
+        }
+    }};
+}
+
 pub enum RunnerType {
     Thread(ModelRunner),
     Process(Vec<LocalStream>),
@@ -83,195 +145,40 @@ impl ModelRunner {
         transfer: Option<Arc<Transfer>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
-        let model = match model_type {
-            ModelType::Qwen3 => Model::Qwen3(Arc::new(Qwen3ForCausalLM::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            ModelType::Qwen3MoE => Model::Qwen3MoE(Arc::new(Qwen3MoEForCausalLM::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            ModelType::LLaMa => Model::LLaMa(Arc::new(LLaMaForCausalLM::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            ModelType::GLM4 => Model::GLM4(Arc::new(GLM4ForCausalLM::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            ModelType::Mistral3VL => {
-                Model::Mistral3VL(Arc::new(Mistral3ForConditionalGeneration::new(
-                    vb,
-                    comm.clone(),
-                    config,
-                    dtype,
-                    is_rope_i,
-                    &device,
-                    Arc::clone(&reporter),
-                )?))
+        let model = build_model!(
+            model_type,
+            vb,
+            comm,
+            config,
+            dtype,
+            is_rope_i,
+            &device,
+            reporter,
+            {
+                Qwen3 => Qwen3ForCausalLM,
+                Qwen3MoE => Qwen3MoEForCausalLM,
+                LLaMa => LLaMaForCausalLM,
+                GLM4 => GLM4ForCausalLM,
+                Mistral3VL => Mistral3ForConditionalGeneration,
+                Gemma3 => Gemma3ForConditionalGeneration,
+                Qwen3VL => Qwen3VLForConditionalGeneration,
             }
-            ModelType::Gemma3 => Model::Gemma3(Arc::new(Gemma3ForConditionalGeneration::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            ModelType::Qwen3VL => Model::Qwen3VL(Arc::new(Qwen3VLForConditionalGeneration::new(
-                vb,
-                comm.clone(),
-                config,
-                dtype,
-                is_rope_i,
-                &device,
-                Arc::clone(&reporter),
-            )?)),
-            // ModelType::Gemma => GemmaForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::Phi => PhiForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::Mistral => MistralForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::Yi => YiForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::StableLM => StableLMForCausalLM::new(vb, config, dtype, &device)?,
-            // ModelType::DeepSeek => DeepSeekForCausalLM::new(vb, config, dtype, &device)?,
-            _ => {
-                candle_core::bail!("Unsupported model type: {:?}", model_type);
-            }
-        };
+        )?;
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
-        let wrapper = match &model {
-            Model::Qwen3(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    embeded_inputs: bool| {
-                    model_arc.forward(
-                        input_ids,
-                        positions,
-                        kv_caches,
-                        input_metadata,
-                        embeded_inputs,
-                    )
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
+        let wrapper = graph_wrapper_match!(
+            &model,
+            device,
+            {
+                Qwen3 => embeded_inputs,
+                Qwen3MoE => embeded_inputs,
+                LLaMa => embeded_inputs,
+                GLM4 => embeded_inputs,
+                Mistral3VL => None,
+                Gemma3 => None,
+                Qwen3VL => None,
             }
-            Model::Qwen3MoE(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    embeded_inputs: bool| {
-                    model_arc.forward(
-                        input_ids,
-                        positions,
-                        kv_caches,
-                        input_metadata,
-                        embeded_inputs,
-                    )
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-            Model::LLaMa(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    embeded_inputs: bool| {
-                    model_arc.forward(
-                        input_ids,
-                        positions,
-                        kv_caches,
-                        input_metadata,
-                        embeded_inputs,
-                    )
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-            Model::GLM4(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    embeded_inputs: bool| {
-                    model_arc.forward(
-                        input_ids,
-                        positions,
-                        kv_caches,
-                        input_metadata,
-                        embeded_inputs,
-                    )
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-            Model::Mistral3VL(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-
-            Model::Gemma3(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-            Model::Qwen3VL(m) => {
-                let model_arc = Arc::clone(m);
-                let closure = move |input_ids: &Tensor,
-                                    positions: &Tensor,
-                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
-                                    input_metadata: &InputMetadata,
-                                    _: bool| {
-                    model_arc.forward(input_ids, positions, kv_caches, input_metadata, None)
-                };
-                let boxed_closure: Box<ModelFn> = Box::new(closure);
-                CudaGraphWrapper::new(boxed_closure, device.as_cuda_device()?.clone().into())
-            }
-        };
+        );
 
         let (gpu_kv_cache, cpu_kv_cache) = if let Some(s) = stream {
             use crate::runner::{receive_local, send_local, MessageType};
@@ -556,58 +463,20 @@ impl ModelRunner {
             None
         };
 
-        let logits = match &self.model {
-            Model::Qwen3(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::Qwen3MoE(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::LLaMa(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::GLM4(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::Mistral3VL(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                images,
-            )?,
-            Model::Gemma3(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                images,
-            )?,
-
-            Model::Qwen3VL(model) => model.forward(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                images,
-            )?,
-        };
+        let logits = model_call!(
+            &self.model,
+            forward,
+            (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
+            {
+                Qwen3 => false,
+                Qwen3MoE => false,
+                LLaMa => false,
+                GLM4 => false,
+                Mistral3VL => images,
+                Gemma3 => images,
+                Qwen3VL => images,
+            }
+        )?;
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
         Ok(output_ids)
     }
@@ -615,46 +484,19 @@ impl ModelRunner {
     pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {
         let (input_ids, positions, input_metadata) = self.prepare_prefill(seqs)?;
 
-        let hidden = match &self.model {
-            Model::Qwen3(model) => model.forward_embedding(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::Qwen3MoE(model) => model.forward_embedding(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::LLaMa(model) => model.forward_embedding(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::GLM4(model) => model.forward_embedding(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                false,
-            )?,
-            Model::Gemma3(model) => model.forward_embedding(
-                &input_ids,
-                &positions,
-                Some(&self.get_kv_cache()),
-                &input_metadata,
-                None,
-            )?,
-            _ => {
-                candle_core::bail!("Embedding is not supported for this model type");
-            }
-        };
+        let hidden = model_call!(
+            &self.model,
+            forward_embedding,
+            (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
+            {
+                Qwen3 => false,
+                Qwen3MoE => false,
+                LLaMa => false,
+                GLM4 => false,
+                Gemma3 => None,
+            },
+            candle_core::bail!("Embedding is not supported for this model type")
+        )?;
 
         crate::log_info!(
             "Embedding forward finished with hidden shape {:?}",
