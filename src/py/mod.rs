@@ -2,26 +2,17 @@ use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
-use crate::server::{
-    server::{chat_completion, get_usage},
-    ServerData,
-};
+use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
-use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rustchatui::start_ui_server;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
 
 /// Python wrapper
 #[pyclass]
@@ -56,100 +47,17 @@ impl Engine {
         text_signature = "($self, port, with_ui_server)"
     )]
     pub fn start_server(&self, port: usize, with_ui_server: bool) -> PyResult<()> {
-        let is_pd_server = if let Some(cfg) = &self.econfig.pd_config {
-            matches!(cfg.role, PdRole::Server)
-        } else {
-            false
-        };
-
-        let server_data = ServerData {
-            engine: self.engine.clone(),
-            econfig: self.econfig.clone(),
-        };
-
-        let (has_vision, model_name) = {
-            let e = self.engine.read();
-            e.get_model_info()
-        };
-        let has_vision = Arc::new(has_vision); // wrap in Arc first
-
-        // CORS config
-        let cors = CorsLayer::new()
-            .allow_origin(Any) // same as "*"
-            .allow_methods(Any)
-            .allow_headers(Any);
-        // Build axum app
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async move {
-                    let m = if *has_vision {
-                        vec!["text", "image"]
-                    } else {
-                        vec!["text"]
-                    };
-                    Json(json!({
-                        "object": "list",
-                        "data": [
-                            {
-                                "id": model_name,
-                                "object": "model",
-                                "created": std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as i64,
-                                "owned_by": "vllm.rs",
-                                "permission": [],
-                                "modalities": m,
-                            }
-                        ]
-                    }))
-                }),
-            )
-            .route("/v1/chat/completions", post(chat_completion))
-            .route("/v1/usage", get(get_usage))
-            .layer(cors)
-            .with_state(Arc::new(server_data));
-
-        let addr = if is_pd_server {
-            // Start PD server
-            crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
-            format!("0.0.0.0:{}", 0)
-        } else {
-            // Start server
-            crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}/v1/", port);
-            format!("0.0.0.0:{}", port)
-        };
-
         GLOBAL_RT.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-            let mut tasks = Vec::new();
-
-            // HTTP API
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, app).await {
-                    eprintln!("Chat API server error: {e:?}");
-                }
-            }));
-
-            // Optional UI server
-            if with_ui_server {
-                tasks.push(tokio::spawn(async move {
-                    start_ui_server((port + 1) as u16, Some(port as u16), None, None)
-                        .await
-                        .unwrap();
-                }));
-            }
-
-            // Block here until all tasks complete (they usually run forever until Ctrl+C)
-            tokio::select! {
-                _ = futures::future::try_join_all(tasks) => {},
-                _ = tokio::signal::ctrl_c() => {
-                    println!("Received CTRL+C, shutting down server...");
-                },
-            }
-        });
+            run_server(
+                self.engine.clone(),
+                self.econfig.clone(),
+                port,
+                with_ui_server,
+            )
+            .await
+            .map_err(|e| PyValueError::new_err(format!("Server error: {e:?}")))?;
+            Ok::<(), PyErr>(())
+        })?;
 
         Ok(())
     }

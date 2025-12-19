@@ -87,6 +87,7 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 - [Multimodal usage (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Context cache](docs/context-cache.md)
 - [Get started (run modes, formats, PD, multi-rank)](docs/get_started.md)
+- [Rust crate usage](docs/rust_crate.md)
 
 
 ## 📘 Usage in Python
