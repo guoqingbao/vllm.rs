@@ -177,7 +177,7 @@ pub struct GLM4ForCausalLM {
 }
 
 impl GLM4ForCausalLM {
-    pub fn new(
+    pub fn new_with_prefix(
         vb: &VarBuilderX,
         comm: Rc<Comm>,
         config: &Config,
@@ -185,6 +185,7 @@ impl GLM4ForCausalLM {
         is_rope_i: bool,
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
+        prefix: Option<String>,
     ) -> Result<Self> {
         let key_map: HashMap<&str, &str> = [
             ("model.embed_tokens", "token_embd"),
@@ -196,15 +197,21 @@ impl GLM4ForCausalLM {
         .cloned()
         .collect();
         let reporter = progress_reporter.clone();
-
+        let has_prefix = prefix.is_some();
+        let prefix = prefix.unwrap_or_else(|| "model".to_string());
+        let gguf_prefix = if has_prefix {
+            format!("{prefix}.")
+        } else {
+            "".to_string()
+        };
         let is_qvar_builder = vb.is_qvar_builder();
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
             if is_qvar_builder {
-                vb.pp(key_map["model.embed_tokens"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["model.embed_tokens"]))
             } else {
-                vb.pp("model.embed_tokens")
+                vb.pp(&format!("{prefix}.embed_tokens"))
             },
             if is_qvar_builder || config.quant.is_some() {
                 DType::F32
@@ -230,9 +237,9 @@ impl GLM4ForCausalLM {
                 vb.pp(format!(
                     "{}.{}",
                     if is_qvar_builder {
-                        key_map["model.layers"]
+                        format!("{}{}", gguf_prefix, key_map["model.layers"])
                     } else {
-                        "model.layers"
+                        format!("{prefix}.layers")
                     },
                     i
                 )
@@ -250,9 +257,9 @@ impl GLM4ForCausalLM {
             config.hidden_size,
             config.rms_norm_eps,
             if is_qvar_builder {
-                vb.pp(key_map["model.norm"])
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["model.norm"]))
             } else {
-                vb.pp("model.norm")
+                vb.pp(&format!("{prefix}.norm"))
             },
             dtype,
             false,
@@ -263,15 +270,15 @@ impl GLM4ForCausalLM {
             vocab_size,
             if config.tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
-                    vb.pp(key_map["model.embed_tokens"])
+                    vb.pp(&format!("{}{}", gguf_prefix, key_map["model.embed_tokens"]))
                 } else {
-                    vb.pp("model.embed_tokens")
+                    vb.pp(&format!("{prefix}.embed_tokens"))
                 }
             } else {
                 if is_qvar_builder {
-                    vb.pp(key_map["lm_head"])
+                    vb.pp(&format!("{}{}", gguf_prefix, key_map["lm_head"]))
                 } else {
-                    vb.pp("lm_head")
+                    vb.pp(&format!("{prefix}.lm_head"))
                 }
             },
             &None,
@@ -290,6 +297,27 @@ impl GLM4ForCausalLM {
             vocab_size,
             is_qvar_builder,
         })
+    }
+
+    pub fn new(
+        vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        dtype: DType,
+        is_rope_i: bool,
+        device: &Device,
+        progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
+    ) -> Result<Self> {
+        Self::new_with_prefix(
+            vb,
+            comm,
+            config,
+            dtype,
+            is_rope_i,
+            device,
+            progress_reporter,
+            None,
+        )
     }
 
     pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
@@ -398,5 +426,9 @@ impl GLM4ForCausalLM {
 
     pub fn get_vocab_size(&self) -> usize {
         self.vocab_size
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
     }
 }

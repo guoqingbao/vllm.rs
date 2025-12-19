@@ -420,6 +420,7 @@ pub enum ModelType {
     Phi,
     Mistral,
     GLM4,
+    GLM4VL,
     Yi,
     StableLM,
     DeepSeek,

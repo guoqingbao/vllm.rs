@@ -791,6 +791,7 @@ pub fn get_arch_rope(
         ("LlamaForCausalLM", false),
         ("LlamaForConditionalGeneration", false),
         ("Glm4ForCausalLM", true),
+        ("Glm4vForConditionalGeneration", true),
         ("glm4", true),
         ("qwen2", false),
         ("qwen3", false),
@@ -854,6 +855,10 @@ pub fn get_arch_rope(
         }
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
             ModelType::GLM4,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "Glm4vForConditionalGeneration" | "glm4v" => (
+            ModelType::GLM4VL,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (

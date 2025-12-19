@@ -420,6 +420,31 @@ pub fn get_image_config(
             img_cfg.image_std = Some([0.5, 0.5, 0.5]);
             Some(img_cfg)
         }
+        ModelType::GLM4VL => {
+            use crate::models::glm4_vl::config::Glm4VConfig;
+            assert!(
+                config.extra_config_json.is_some(),
+                "Multimodel missing vision config!"
+            );
+            let cfg: Glm4VConfig = serde_json::from_str(config.extra_config_json.as_ref().unwrap())
+                .map_err(candle_core::Error::wrap)?;
+
+            let mut img_cfg = ImageProcessConfig::default(
+                Some("<|vision_start|>".to_string()),
+                "<|image_pad|>".to_string(),
+                None,
+                "<|vision_end|>".to_string(),
+                cfg.vision_config.spatial_merge_size,
+                Some(cfg.vision_config.temporal_patch_size),
+                cfg.vision_config.patch_size,
+                896,
+                false,
+            );
+            img_cfg.model_type = ModelType::GLM4VL;
+            img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
+            img_cfg.image_std = Some([0.5, 0.5, 0.5]);
+            Some(img_cfg)
+        }
         _ => None,
     };
     Ok(img_cfg)
