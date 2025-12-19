@@ -81,7 +81,6 @@ impl BlockManager {
         let block = &mut self.blocks[block_id];
         assert_eq!(block.ref_count, 0);
         block.reset();
-        self.free_block_ids.retain(|&id| id != block_id);
         self.used_block_ids.insert(block_id);
         block
     }
@@ -125,17 +124,16 @@ impl BlockManager {
     }
 
     pub fn can_append(&self, seq: &Sequence) -> bool {
-        let mut need_block: usize = 1;
-        if seq.len() % self.block_size != 0 {
-            need_block += 1;
+        if self.needs_new_block(seq) {
+            self.free_block_ids.len() >= 1
+        } else {
+            true
         }
-        self.free_block_ids.len() >= need_block
     }
 
     pub fn may_append(&mut self, seq: &mut Sequence) -> Result<()> {
-        let len_mod = seq.len() % self.block_size;
-        if len_mod == 1 {
-            //approaching next block
+        if self.needs_new_block(seq) {
+            // Starting a new block for the next decoded token.
             let block_id = self
                 .free_block_ids
                 .pop_front()
@@ -144,6 +142,11 @@ impl BlockManager {
             seq.block_table.push(block_id as u32);
         }
         Ok(())
+    }
+
+    /// Returns true if the next decoded token requires a fresh KV cache block.
+    fn needs_new_block(&self, seq: &Sequence) -> bool {
+        seq.len() % self.block_size == 0
     }
 
     pub fn ensure_allocate(&mut self, seq: &mut Sequence) -> Result<()> {

@@ -152,6 +152,7 @@ impl Sequence {
         } else {
             None
         };
+        let last_token = *token_ids.last().unwrap_or(&0);
         Self {
             id: 0, // Will be set by scheduler
             created_time: SystemTime::now()
@@ -160,13 +161,13 @@ impl Sequence {
                 .as_millis() as usize,
             swapped_time: None,
             status: SequenceStatus::Waiting,
-            token_ids: token_ids.clone(),
+            token_ids,
             output_ids: Vec::new(),
             block_table: Vec::new(),
             num_cached_tokens: 0,
             sampling_params,
             block_size,
-            last_token: *token_ids.last().unwrap_or(&0),
+            last_token,
             pd_first_token: None,
             images,
         }
