@@ -1,11 +1,10 @@
-use vllm_rs::api::Engine;
+use vllm_rs::api::{EngineBuilder, ModelRepo};
 use vllm_rs::server::{ChatMessage, MessageContent, MessageContentType};
-use vllm_rs::utils::config::{EngineConfig, SamplingParams};
+use vllm_rs::utils::config::SamplingParams;
 
 fn main() -> candle_core::Result<()> {
-    let mut config = EngineConfig::for_model("Qwen/Qwen3-0.6B");
-    config.max_model_len = Some(4096);
-    let mut engine = Engine::new(config, Some("bf16".to_string()))?;
+    let mut engine =
+        EngineBuilder::new(ModelRepo::ModelID(("Qwen/Qwen3-0.6B".to_string(), None))).build()?;
 
     let messages = vec![ChatMessage {
         role: "user".to_string(),
@@ -15,7 +14,7 @@ fn main() -> candle_core::Result<()> {
     }];
 
     let params = SamplingParams::default();
-    let output = engine.generate_chat(params, messages)?;
+    let output = engine.generate(params, messages)?;
     println!("{}", output.decode_output);
     Ok(())
 }

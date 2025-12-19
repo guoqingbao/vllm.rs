@@ -1,135 +1,188 @@
 use crate::core::engine::{LLMEngine, StreamItem, GLOBAL_RT};
 use crate::core::GenerationOutput;
-use crate::server::{build_messages_and_images, ChatMessage, ServerData};
-use crate::transfer::PdRole;
+use crate::server::{build_messages_and_images, run_server, ChatMessage};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::get_dtype;
-use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
-use candle_core::Result;
+use candle_core::{DType, Result};
 use parking_lot::RwLock;
-use rustchatui::start_ui_server;
-use serde_json::json;
+use std::borrow::Cow;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
+
+#[derive(Clone, Debug)]
+pub enum ModelRepo {
+    /// (model_id, filename) -- when filename is None, treat as safetensor model id.
+    /// When filename is Some, treat as GGUF model id + GGUF filename.
+    ModelID((Cow<'static, str>, Option<Cow<'static, str>>)),
+    /// Safetensor local path.
+    ModelPath(Cow<'static, str>),
+    /// GGUF file(s). Only the first file is used today.
+    ModelFile(Vec<Cow<'static, str>>),
+}
+
+#[derive(Clone, Debug)]
+pub struct EngineBuilder {
+    repo: ModelRepo,
+    isq: Option<String>,
+    dtype: Option<DType>,
+    flash_attn: Option<bool>,
+    fp8_kvcache: Option<bool>,
+    context_cache: Option<bool>,
+    device_ids: Option<Vec<usize>>,
+}
+
+impl EngineBuilder {
+    pub fn new(repo: ModelRepo) -> Self {
+        Self {
+            repo,
+            isq: None,
+            dtype: None,
+            flash_attn: None,
+            fp8_kvcache: None,
+            context_cache: None,
+            device_ids: None,
+        }
+    }
+
+    pub fn with_isq(mut self, isq: impl Into<String>) -> Self {
+        self.isq = Some(isq.into());
+        self
+    }
+
+    pub fn with_dtype(mut self, dtype: DType) -> Self {
+        self.dtype = Some(dtype);
+        self
+    }
+
+    pub fn with_flash_attn(mut self) -> Self {
+        self.flash_attn = Some(true);
+        self
+    }
+
+    pub fn without_flash_attn(mut self) -> Self {
+        self.flash_attn = Some(false);
+        self
+    }
+
+    pub fn with_fp8_kvcache(mut self) -> Self {
+        self.fp8_kvcache = Some(true);
+        self
+    }
+
+    pub fn with_context_cache(mut self, enabled: bool) -> Self {
+        self.context_cache = Some(enabled);
+        self
+    }
+
+    pub fn with_multirank(mut self, device_ids: &str) -> Result<Self> {
+        self.device_ids = Some(parse_device_ids(device_ids)?);
+        Ok(self)
+    }
+
+    pub fn build(self) -> Result<Engine> {
+        let mut econfig = EngineConfig::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            self.context_cache,
+            self.fp8_kvcache,
+            Some(true),
+            None,
+            None,
+            None,
+        );
+
+        match self.repo {
+            ModelRepo::ModelID((model_id, filename)) => {
+                econfig.model_id = Some(model_id.into_owned());
+                econfig.weight_file = filename.map(|f| f.into_owned());
+            }
+            ModelRepo::ModelPath(path) => {
+                econfig.weight_path = Some(path.into_owned());
+            }
+            ModelRepo::ModelFile(files) => {
+                if files.len() > 1 {
+                    crate::log_warn!("Multiple GGUF files provided, using the first one.");
+                }
+                econfig.weight_file = files.into_iter().next().map(|f| f.into_owned());
+            }
+        }
+
+        econfig.isq = self.isq;
+        econfig.device_ids = self.device_ids;
+
+        if let Some(enable_flash_attn) = self.flash_attn {
+            econfig.disable_flash_attn = Some(!enable_flash_attn);
+        }
+
+        let dtype = self.dtype.clone().map(dtype_to_str);
+        let dtype = get_dtype(dtype);
+
+        let engine = LLMEngine::new(&econfig, dtype)?;
+        Ok(Engine {
+            engine,
+            econfig,
+            dtype,
+        })
+    }
+}
 
 pub struct Engine {
     engine: Arc<RwLock<LLMEngine>>,
     econfig: EngineConfig,
+    dtype: DType,
 }
 
 impl Engine {
-    pub fn new(econfig: EngineConfig, dtype: Option<String>) -> Result<Self> {
-        let dtype = get_dtype(dtype);
-        let engine = LLMEngine::new(&econfig, dtype)?;
-        Ok(Self { engine, econfig })
+    pub fn multirank(mut self, device_ids: &str) -> Result<Self> {
+        self.econfig.device_ids = Some(parse_device_ids(device_ids)?);
+        self.rebuild()?;
+        Ok(self)
     }
 
-    pub fn start_server(&self, port: usize, with_ui_server: bool) -> Result<()> {
-        let is_pd_server = if let Some(cfg) = &self.econfig.pd_config {
-            matches!(cfg.role, PdRole::Server)
-        } else {
-            false
-        };
+    pub fn start_server(
+        &mut self,
+        port: usize,
+        with_ui_server: bool,
+        context_cache: bool,
+    ) -> Result<()> {
+        if self.econfig.flash_context != Some(context_cache) {
+            self.econfig.flash_context = Some(context_cache);
+            self.rebuild()?;
+        }
 
-        let server_data = ServerData {
-            engine: self.engine.clone(),
-            econfig: self.econfig.clone(),
-        };
-
-        let (has_vision, model_name) = {
-            let e = self.engine.read();
-            e.get_model_info()
-        };
-        let has_vision = Arc::new(has_vision);
-
-        let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async move {
-                    let m = if *has_vision {
-                        vec!["text", "image"]
-                    } else {
-                        vec!["text"]
-                    };
-                    Json(json!({
-                        "object": "list",
-                        "data": [
-                            {
-                                "id": model_name,
-                                "object": "model",
-                                "created": std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as i64,
-                                "owned_by": "vllm.rs",
-                                "permission": [],
-                                "modalities": m,
-                            }
-                        ]
-                    }))
-                }),
+        GLOBAL_RT.block_on(async {
+            run_server(
+                self.engine.clone(),
+                self.econfig.clone(),
+                port,
+                with_ui_server,
+                false,
             )
-            .route(
-                "/v1/chat/completions",
-                post(crate::server::server::chat_completion),
-            )
-            .route("/v1/usage", get(crate::server::server::get_usage))
-            .layer(cors)
-            .with_state(Arc::new(server_data));
-
-        let addr = if is_pd_server {
-            crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...");
-            format!("0.0.0.0:{}", 0)
-        } else {
-            crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}/v1/", port);
-            format!("0.0.0.0:{}", port)
-        };
-
-        GLOBAL_RT.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-            let mut tasks = Vec::new();
-
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, app).await {
-                    eprintln!("Chat API server error: {e:?}");
-                }
-            }));
-
-            if with_ui_server {
-                tasks.push(tokio::spawn(async move {
-                    start_ui_server((port + 1) as u16, Some(port as u16), None, None)
-                        .await
-                        .unwrap();
-                }));
-            }
-
-            tokio::select! {
-                _ = futures::future::try_join_all(tasks) => {},
-                _ = tokio::signal::ctrl_c() => {
-                    println!("Received CTRL+C, shutting down server...");
-                },
-            }
-        });
-
-        Ok(())
+            .await
+        })
     }
 
-    pub fn generate_prompt(
+    pub fn generate(
         &mut self,
         params: SamplingParams,
-        prompt: impl Into<String>,
+        messages: Vec<ChatMessage>,
     ) -> Result<GenerationOutput> {
-        let messages = vec![Message::new("user".to_string(), prompt.into(), 0)];
-        self.generate_messages(params, messages, None)
+        let img_cfg = { self.engine.read().img_cfg.clone() };
+        let (messages, image_data) = build_messages_and_images(&messages, img_cfg.as_ref())?;
+        self.generate_messages(params, messages, image_data)
     }
 
     pub fn generate_messages(
@@ -154,17 +207,7 @@ impl Engine {
             .ok_or_else(|| candle_core::Error::msg("No generation output returned"))
     }
 
-    pub fn generate_chat(
-        &mut self,
-        params: SamplingParams,
-        messages: Vec<ChatMessage>,
-    ) -> Result<GenerationOutput> {
-        let img_cfg = { self.engine.read().img_cfg.clone() };
-        let (messages, image_data) = build_messages_and_images(&messages, img_cfg.as_ref())?;
-        self.generate_messages(params, messages, image_data)
-    }
-
-    pub fn generate_chat_stream(
+    pub fn generate_stream(
         &mut self,
         params: SamplingParams,
         messages: Vec<ChatMessage>,
@@ -195,6 +238,11 @@ impl Engine {
     pub fn get_available_kv_tokens(&self) -> usize {
         let engine = self.engine.read();
         engine.get_available_kv_tokens()
+    }
+
+    fn rebuild(&mut self) -> Result<()> {
+        self.engine = LLMEngine::new(&self.econfig, self.dtype)?;
+        Ok(())
     }
 }
 
@@ -242,5 +290,25 @@ impl EngineStream {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled
+    }
+}
+
+fn parse_device_ids(device_ids: &str) -> Result<Vec<usize>> {
+    device_ids
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            usize::from_str(s.trim())
+                .map_err(|e| candle_core::Error::msg(format!("Invalid device id '{s}': {e}")))
+        })
+        .collect()
+}
+
+fn dtype_to_str(dtype: DType) -> String {
+    match dtype {
+        DType::F16 => "f16".to_string(),
+        DType::BF16 => "bf16".to_string(),
+        DType::F32 => "f32".to_string(),
+        _ => "bf16".to_string(),
     }
 }

@@ -4,18 +4,24 @@ pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
+use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
 use crate::utils::image::{
     get_tensor_raw_data, load_image_from_base64, load_image_from_url, ImageData,
     ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
 };
-use axum::extract::Json;
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
+use axum::routing::{get, post};
+use axum::Json;
+use axum::Router;
 use candle_core::{Result, Tensor};
 use parking_lot::RwLock;
+use rustchatui::start_ui_server;
+use serde_json::json;
 use std::sync::Arc;
+use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
@@ -476,6 +482,102 @@ pub fn build_messages_and_images(
     };
 
     Ok((messages, image_data))
+}
+
+pub async fn run_server(
+    engine: Arc<RwLock<LLMEngine>>,
+    econfig: EngineConfig,
+    port: usize,
+    with_ui_server: bool,
+    include_embeddings: bool,
+) -> Result<()> {
+    let (has_vision, model_name) = {
+        let e = engine.read();
+        e.get_model_info()
+    };
+    let has_vision = Arc::new(has_vision);
+
+    let is_pd_server = if let Some(cfg) = &econfig.pd_config {
+        matches!(cfg.role, PdRole::Server)
+    } else {
+        false
+    };
+
+    let server_data = ServerData { engine, econfig };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let mut app = Router::new()
+        .route(
+            "/v1/models",
+            get(|| async move {
+                let mut m = if *has_vision {
+                    vec!["text", "image"]
+                } else {
+                    vec!["text"]
+                };
+                if include_embeddings {
+                    m.push("embedding");
+                }
+                Json(json!({
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": model_name,
+                            "object": "model",
+                            "created": std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis() as i64,
+                            "owned_by": "vllm.rs",
+                            "permission": [],
+                            "modalities": m,
+                        }
+                    ]
+                }))
+            }),
+        )
+        .route("/v1/chat/completions", post(server::chat_completion))
+        .route("/v1/usage", get(server::get_usage))
+        .layer(cors)
+        .with_state(Arc::new(server_data));
+
+    if include_embeddings {
+        app = app.route("/v1/embeddings", post(server::create_embeddings));
+    }
+
+    let addr = if is_pd_server {
+        crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
+        format!("0.0.0.0:{}", 0)
+    } else {
+        crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}/v1/", port);
+        format!("0.0.0.0:{}", port)
+    };
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let mut tasks = Vec::new();
+    tasks.push(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            eprintln!("Chat API server error: {e:?}");
+        }
+    }));
+
+    if with_ui_server {
+        tasks.push(tokio::spawn(async move {
+            start_ui_server((port + 1) as u16, Some(port as u16), None, None)
+                .await
+                .unwrap();
+        }));
+    }
+
+    futures::future::try_join_all(tasks)
+        .await
+        .map_err(candle_core::Error::wrap)?;
+
+    Ok(())
 }
 
 #[cfg(test)]

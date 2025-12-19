@@ -1,24 +1,14 @@
-use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use candle_core::Result;
 use clap::Parser;
 use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
-use rustchatui::start_ui_server;
-use serde_json::json;
-use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
+use vllm_rs::server::run_server;
 use vllm_rs::server::Args;
-use vllm_rs::server::{
-    server::{chat_completion, create_embeddings, get_usage},
-    ServerData,
-};
 use vllm_rs::transfer::{PdConfig, PdMethod, PdRole};
 use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
@@ -187,88 +177,15 @@ async fn main() -> Result<()> {
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
-    let (has_vision, model_name) = {
-        let e = engine.read();
-        e.get_model_info()
-    };
-    let has_vision = Arc::new(has_vision); // wrap in Arc first
     if args.server || args.ui_server || args.pd_server {
-        let server_data = ServerData {
-            engine: engine.clone(),
-            econfig: econfig.clone(),
-        };
-        // CORS config
-        let cors = CorsLayer::new()
-            .allow_origin(Any) // same as "*"
-            .allow_methods(Any)
-            .allow_headers(Any);
-        // Build axum app
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async move {
-                    let mut m = if *has_vision {
-                        vec!["text", "image"]
-                    } else {
-                        vec!["text"]
-                    };
-                    m.push("embedding");
-                    Json(json!({
-                        "object": "list",
-                        "data": [
-                            {
-                                "id": model_name,
-                                "object": "model",
-                                "created": std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as i64,
-                                "owned_by": "vllm.rs",
-                                "permission": [],
-                                "modalities": m,
-                            }
-                        ]
-                    }))
-                }),
-            )
-            .route("/v1/chat/completions", post(chat_completion))
-            .route("/v1/embeddings", post(create_embeddings))
-            .route("/v1/usage", get(get_usage))
-            .layer(cors)
-            .with_state(Arc::new(server_data));
-
-        let addr = if args.pd_server {
-            // Start PD server
-            vllm_rs::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
-            format!("0.0.0.0:{}", 0)
-        } else {
-            // Start server
-            vllm_rs::log_warn!(
-                "🚀 Chat server listening on http://0.0.0.0:{}/v1/",
-                args.port
-            );
-            format!("0.0.0.0:{}", args.port)
-        };
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-
-        let mut tasks = Vec::new();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("Chat API server error: {e:?}");
-            }
-        }));
-
-        if args.ui_server {
-            tasks.push(tokio::spawn(async move {
-                start_ui_server((args.port + 1) as u16, Some(args.port as u16), None, None)
-                    .await
-                    .unwrap();
-            }));
-        }
-
-        futures::future::try_join_all(tasks)
-            .await
-            .map_err(candle_core::Error::wrap)?;
+        run_server(
+            engine.clone(),
+            econfig.clone(),
+            args.port,
+            args.ui_server,
+            true,
+        )
+        .await?;
         return Ok(());
     }
 
