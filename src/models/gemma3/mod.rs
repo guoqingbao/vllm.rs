@@ -668,13 +668,14 @@ impl Gemma3ForConditionalGeneration {
             .forward(&selected_image_feature, image_sizes)
     }
 
-    pub fn forward(
+    fn forward_inner(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
         images: Option<&ImageData>,
+        return_hidden: bool,
     ) -> Result<Tensor> {
         let text_cfg = &self.config.text_config;
         // 1. Prepare Text Embeddings (Scaled)
@@ -774,7 +775,7 @@ impl Gemma3ForConditionalGeneration {
         }
 
         // 5. Final Norm & Projection
-        if !seqlens.is_empty() {
+        if !seqlens.is_empty() && !return_hidden {
             let indices: Vec<_> = seqlens.iter().map(|x| x - 1 as u32).collect();
             let batch = indices.len();
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
@@ -782,23 +783,63 @@ impl Gemma3ForConditionalGeneration {
 
         let xs = self.norm.forward(&xs)?;
 
-        let logits = if self.is_qvar_builder {
-            self.lm_head.forward(&xs)?
+        if return_hidden {
+            xs.to_dtype(DType::F32)
         } else {
-            self.lm_head
-                .forward(&xs.to_dtype(self.dtype)?)?
-                .to_dtype(DType::F32)?
-        };
+            let logits = if self.is_qvar_builder {
+                self.lm_head.forward(&xs)?
+            } else {
+                self.lm_head
+                    .forward(&xs.to_dtype(self.dtype)?)?
+                    .to_dtype(DType::F32)?
+            };
 
-        // Final Logit Softcapping (Gemma Specific)
-        if let Some(cap) = text_cfg.final_logit_softcapping {
-            // tanh(logits / cap) * cap
-            let scaled = (logits / cap)?;
-            let tanh = scaled.tanh()?;
-            tanh * cap
-        } else {
-            Ok(logits)
+            // Final Logit Softcapping (Gemma Specific)
+            if let Some(cap) = text_cfg.final_logit_softcapping {
+                // tanh(logits / cap) * cap
+                let scaled = (logits / cap)?;
+                let tanh = scaled.tanh()?;
+                tanh * cap
+            } else {
+                Ok(logits)
+            }
         }
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        images: Option<&ImageData>,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            images,
+            false,
+        )
+    }
+
+    pub fn forward_embedding(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        images: Option<&ImageData>,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            images,
+            true,
+        )
     }
 
     pub fn get_vocab_size(&self) -> usize {

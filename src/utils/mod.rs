@@ -965,10 +965,15 @@ pub fn max_usable_memory(
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
-    let device = metal::Device::system_default().expect("No Metal device found");
-    let max_mem = device.recommended_max_working_set_size();
-    let alloc_mem = device.current_allocated_size();
-    let avail_mem = std::cmp::max(max_mem.saturating_sub(alloc_mem), sys.available_memory());
+    #[cfg(feature = "metal")]
+    let avail_mem = {
+        let device = metal::Device::system_default().expect("No Metal device found");
+        let max_mem = device.recommended_max_working_set_size();
+        let alloc_mem = device.current_allocated_size();
+        std::cmp::max(max_mem.saturating_sub(alloc_mem), sys.available_memory())
+    };
+    #[cfg(not(feature = "metal"))]
+    let avail_mem = sys.available_memory();
     let usable_in_mb = avail_mem / 1024 / 1024;
     assert!(
         usable_in_mb > 0,

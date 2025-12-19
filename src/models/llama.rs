@@ -265,13 +265,14 @@ impl LLaMaForCausalLM {
         self.embed_tokens.forward(xs)
     }
 
-    pub fn forward(
+    fn forward_inner(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
         input_metadata: &InputMetadata,
         embeded_inputs: bool,
+        return_hidden: bool,
     ) -> Result<Tensor> {
         let seqlens = if input_metadata.cu_seqlens_q.is_some() {
             input_metadata
@@ -310,19 +311,57 @@ impl LLaMaForCausalLM {
             }
         }
 
-        if !seqlens.is_empty() {
+        if !seqlens.is_empty() && !return_hidden {
             let indices: Vec<_> = seqlens.iter().map(|x| x - 1 as u32).collect();
             let batch = indices.len();
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
-        if self.is_qvar_builder {
+        if return_hidden {
+            xs.to_dtype(DType::F32)
+        } else if self.is_qvar_builder {
             self.lm_head.forward(&xs)
         } else {
             self.lm_head
                 .forward(&xs.to_dtype(self.dtype)?)?
                 .to_dtype(DType::F32)
         }
+    }
+
+    pub fn forward(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            false,
+        )
+    }
+
+    pub fn forward_embedding(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            true,
+        )
     }
 
     pub fn get_vocab_size(&self) -> usize {

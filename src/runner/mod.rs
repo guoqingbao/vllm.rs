@@ -1,5 +1,6 @@
 use crate::core::sequence::{DecodeSequence, Sequence};
 use crate::models::layers::distributed::Id;
+use crate::server::EmbeddingStrategy;
 use crate::utils::config::{Config, EngineConfig, ModelType};
 use crate::utils::downloader::ModelPaths;
 #[cfg(feature = "nccl")]
@@ -170,6 +171,12 @@ pub enum MessageType {
 
     /// Sent by runner in response to `Run` with generated token IDs.
     RunResponse(Vec<u32>),
+
+    /// Sent by main process to request embedding on sequences.
+    RunEmbed((Vec<Sequence>, EmbeddingStrategy)),
+
+    /// Sent by runner in response to `Run` with generated embedding states
+    RunResponseEmbed(Vec<Vec<f32>>),
 
     /// Sent by main process to notify the finished decoding sequences.
     FinishDecode(usize),

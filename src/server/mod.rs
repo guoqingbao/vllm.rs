@@ -30,6 +30,32 @@ pub struct ChatCompletionRequest {
     pub session_id: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EncodingFormat {
+    Float,
+    Base64,
+}
+
+impl Default for EncodingFormat {
+    fn default() -> Self {
+        Self::Float
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingStrategy {
+    Mean,
+    Last,
+}
+
+impl Default for EmbeddingStrategy {
+    fn default() -> Self {
+        Self::Mean
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum MessageContent {
@@ -111,6 +137,60 @@ pub struct Delta {
     pub content: Option<String>,
 }
 
+#[derive(Serialize)]
+pub struct EmbeddingUsage {
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingResponse {
+    pub object: &'static str,
+    pub data: Vec<EmbeddingData>,
+    pub model: String,
+    pub usage: EmbeddingUsage,
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingData {
+    pub object: &'static str,
+    pub embedding: EmbeddingOutput,
+    pub index: usize,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum EmbeddingOutput {
+    Vector(Vec<f32>),
+    Base64(String),
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(untagged)]
+pub enum EmbeddingInput {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl EmbeddingInput {
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            EmbeddingInput::Single(s) => vec![s],
+            EmbeddingInput::Multiple(v) => v,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct EmbeddingRequest {
+    pub model: Option<String>,
+    pub input: EmbeddingInput,
+    #[serde(default)]
+    pub encoding_format: EncodingFormat,
+    #[serde(default)]
+    pub embedding_type: EmbeddingStrategy,
+}
+
 #[derive(Deserialize)]
 pub struct UsageQuery {
     pub session_id: Option<String>,
@@ -158,6 +238,7 @@ pub enum ChatResponder {
     Streamer(Sse<Streamer>),
     Completion(ChatCompletionResponse),
     Usage(UsageResponse),
+    Embedding(EmbeddingResponse),
     ModelError(String),
     InternalError(String),
     ValidationError(String),
@@ -169,6 +250,7 @@ impl IntoResponse for ChatResponder {
             ChatResponder::Streamer(s) => s.into_response(),
             ChatResponder::Completion(s) => Json(s).into_response(),
             ChatResponder::Usage(s) => Json(s).into_response(),
+            ChatResponder::Embedding(s) => Json(s).into_response(),
             ChatResponder::InternalError(e) => {
                 JsonError::new(e).to_response(http::StatusCode::INTERNAL_SERVER_ERROR)
             }

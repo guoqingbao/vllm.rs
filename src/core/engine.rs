@@ -12,7 +12,7 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
-use crate::server::UsageResponse;
+use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
@@ -1279,6 +1279,173 @@ impl LLMEngine {
                 candle_core::bail!("No session_id provided")
             }
         }
+    }
+
+    pub fn embed(
+        &mut self,
+        inputs: &[String],
+        strategy: EmbeddingStrategy,
+    ) -> Result<(Vec<Vec<f32>>, usize)> {
+        let mut outputs = Vec::new();
+        let mut prompt_tokens = 0;
+
+        for input in inputs {
+            let tokens = self
+                .tokenizer
+                .encode_fast(input.as_str(), true)
+                .map_err(candle_core::Error::wrap)?;
+            let token_ids: Vec<u32> = tokens.get_ids().iter().copied().collect();
+            if token_ids.is_empty() {
+                candle_core::bail!("Embedding input cannot be empty");
+            }
+
+            if let Some(max_model_len) = self.econfig.max_model_len {
+                if token_ids.len() > max_model_len - 1 {
+                    candle_core::bail!(
+                        "Embedding input length {} exceeds max_model_len {}",
+                        token_ids.len(),
+                        max_model_len
+                    );
+                }
+            }
+
+            let tokens_required =
+                token_ids.len().div_ceil(self.econfig.block_size) * self.econfig.block_size;
+            if tokens_required > self.scheduler.get_available_kv_tokens() {
+                candle_core::bail!(
+                    "Remaining {} kvcache tokens, but embedding requires {}, please retry later",
+                    self.scheduler.get_available_kv_tokens(),
+                    tokens_required
+                );
+            }
+
+            let mut seq = Sequence::new(
+                token_ids.clone(),
+                self.econfig.block_size,
+                SamplingParams::default(),
+                &None,
+                -1,
+            );
+            self.scheduler.block_manager.allocate(&mut seq)?;
+
+            let mut chunked_mean: Option<Vec<f32>> = None;
+            let mut last_vec: Option<Vec<f32>> = None;
+            let mut processed_tokens = 0usize;
+            let chunk_size =
+                if self.econfig.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
+                    4096
+                } else {
+                    8192
+                };
+
+            while seq.num_cached_tokens < seq.len() {
+                let remaining = seq.len() - seq.num_cached_tokens;
+                let chunk_tokens = std::cmp::min(chunk_size, remaining);
+                let embedding_result = match &mut *self.runners.write() {
+                    RunnerType::Thread(model_runner) => model_runner.embed(&[&seq], &strategy),
+                    RunnerType::Process(ref mut runner_streams) => {
+                        let request = MessageType::RunEmbed((vec![seq.clone()], strategy.clone()));
+                        let cloned_streams: Vec<LocalStream> = runner_streams
+                            .iter_mut()
+                            .map(|s| s.try_clone().expect("clone failed"))
+                            .collect();
+
+                        let all_outputs: Result<Vec<Vec<Vec<f32>>>> = cloned_streams
+                            .into_par_iter()
+                            .map(|mut stream| {
+                                let msg = request.clone();
+                                send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                                let response = receive_local(&mut stream, false)?;
+
+                                match response {
+                                    MessageType::RunResponseEmbed(output_embed) => {
+                                        if output_embed.len() == 0 {
+                                            candle_core::bail!("Runner step error, no response!")
+                                        } else {
+                                            Ok(output_embed)
+                                        }
+                                    }
+                                    other => {
+                                        candle_core::bail!("Unexpected response type: {:?}", other)
+                                    }
+                                }
+                            })
+                            .collect();
+                        let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                        if let Some(output_embed) = all_outputs.first() {
+                            Ok(output_embed.clone())
+                        } else {
+                            candle_core::bail!(
+                                "No output embedding states received from model runners"
+                            );
+                        }
+                    }
+                };
+                let embedding_vecs = match embedding_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.scheduler.block_manager.deallocate(&seq);
+                        return Err(e);
+                    }
+                };
+                if let Some(vec) = embedding_vecs.into_iter().next() {
+                    match strategy {
+                        EmbeddingStrategy::Mean => {
+                            if chunked_mean.is_none() {
+                                chunked_mean = Some(vec![0.0; vec.len()]);
+                            }
+                            if let Some(sum) = chunked_mean.as_mut() {
+                                for (dst, val) in sum.iter_mut().zip(vec.iter()) {
+                                    *dst += val * chunk_tokens as f32;
+                                }
+                            }
+                        }
+                        EmbeddingStrategy::Last => {
+                            last_vec = Some(vec);
+                        }
+                    }
+                }
+
+                seq.num_cached_tokens += chunk_tokens;
+                processed_tokens += chunk_tokens;
+                if seq.len() > chunk_size {
+                    if chunk_tokens < chunk_size {
+                        crate::log_info!(
+                            "Embedding chunk prefilled finished {}/{} (Seq {})",
+                            seq.num_cached_tokens,
+                            seq.len(),
+                            seq.id
+                        );
+                    } else {
+                        crate::log_info!(
+                            "Embedding chunk prefilled {}/{} (Seq {})",
+                            seq.num_cached_tokens,
+                            seq.len(),
+                            seq.id
+                        );
+                    }
+                }
+            }
+
+            self.scheduler.block_manager.deallocate(&seq);
+            prompt_tokens += seq.len();
+
+            let final_vec = match strategy {
+                EmbeddingStrategy::Mean => {
+                    let mut sum = chunked_mean.unwrap_or_default();
+                    if processed_tokens > 0 {
+                        for v in sum.iter_mut() {
+                            *v /= processed_tokens as f32;
+                        }
+                    }
+                    sum
+                }
+                EmbeddingStrategy::Last => last_vec.unwrap_or_default(),
+            };
+            outputs.push(final_vec);
+        }
+
+        Ok((outputs, prompt_tokens))
     }
 
     pub fn start_engine(engine: Arc<RwLock<Self>>) {

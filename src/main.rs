@@ -16,7 +16,7 @@ use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
 use vllm_rs::log_error;
 use vllm_rs::server::Args;
 use vllm_rs::server::{
-    server::{chat_completion, get_usage},
+    server::{chat_completion, create_embeddings, get_usage},
     ServerData,
 };
 use vllm_rs::transfer::{PdConfig, PdMethod, PdRole};
@@ -207,11 +207,12 @@ async fn main() -> Result<()> {
             .route(
                 "/v1/models",
                 get(|| async move {
-                    let m = if *has_vision {
+                    let mut m = if *has_vision {
                         vec!["text", "image"]
                     } else {
                         vec!["text"]
                     };
+                    m.push("embedding");
                     Json(json!({
                         "object": "list",
                         "data": [
@@ -231,6 +232,7 @@ async fn main() -> Result<()> {
                 }),
             )
             .route("/v1/chat/completions", post(chat_completion))
+            .route("/v1/embeddings", post(create_embeddings))
             .route("/v1/usage", get(get_usage))
             .layer(cors)
             .with_state(Arc::new(server_data));
