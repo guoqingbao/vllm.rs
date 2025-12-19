@@ -85,9 +85,19 @@ macro_rules! model_call {
 }
 
 #[cfg(all(feature = "cuda", feature = "graph"))]
+macro_rules! graph_extra_arg {
+    (EmbedInputs, $embeded_inputs:ident) => {
+        $embeded_inputs
+    };
+    (NoneArg, $embeded_inputs:ident) => {
+        None
+    };
+}
+
+#[cfg(all(feature = "cuda", feature = "graph"))]
 macro_rules! graph_wrapper_match {
     ($model:expr, $device:expr,
-        { $( $variant:ident => $arg:expr ),+ $(,)? }
+        { $( $variant:ident => $arg:tt ),+ $(,)? }
     ) => {{
         match $model {
             $( Model::$variant(m) => {
@@ -102,7 +112,7 @@ macro_rules! graph_wrapper_match {
                         positions,
                         kv_caches,
                         input_metadata,
-                        $arg,
+                        graph_extra_arg!($arg, embeded_inputs),
                     )
                 };
                 let boxed_closure: Box<ModelFn> = Box::new(closure);
@@ -170,13 +180,13 @@ impl ModelRunner {
             &model,
             device,
             {
-                Qwen3 => embeded_inputs,
-                Qwen3MoE => embeded_inputs,
-                LLaMa => embeded_inputs,
-                GLM4 => embeded_inputs,
-                Mistral3VL => None,
-                Gemma3 => None,
-                Qwen3VL => None,
+                Qwen3 => EmbedInputs,
+                Qwen3MoE => EmbedInputs,
+                LLaMa => EmbedInputs,
+                GLM4 => EmbedInputs,
+                Mistral3VL => NoneArg,
+                Gemma3 => NoneArg,
+                Qwen3VL => NoneArg,
             }
         );
 
