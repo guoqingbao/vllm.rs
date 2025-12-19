@@ -122,4 +122,79 @@ where
 }
 
 type DecodeStreamType = Box<dyn DecodeStreamTrait + Send + Sync>;
-// type StreamDecoderMap = HashMap<usize, DecodeStreamType>;
+
+#[macro_export]
+macro_rules! build_model {
+    ($model_type:expr, $vb:expr, $comm:expr, $config:expr, $dtype:expr, $is_rope_i:expr, $device:expr, $reporter:expr,
+        { $( $variant:ident => $ctor:ident ),+ $(,)? }
+    ) => {{
+        match $model_type {
+            $( ModelType::$variant => Ok::<Model, candle_core::Error>(Model::$variant(Arc::new($ctor::new(
+                $vb,
+                $comm.clone(),
+                $config,
+                $dtype,
+                $is_rope_i,
+                $device,
+                Arc::clone(&$reporter),
+            )?))), )+
+            _ => {
+                candle_core::bail!("Unsupported model type: {:?}", $model_type);
+            }
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! model_call {
+    ($model:expr, $method:ident,
+        ($input_ids:expr, $positions:expr, $kv:expr, $input_metadata:expr),
+        { $( $variant:ident => $extra:expr ),+ $(,)? }
+        $(, $fallback:expr )?
+    ) => {{
+        match $model {
+            $( Model::$variant(model) => model.$method($input_ids, $positions, $kv, $input_metadata, $extra), )+
+            $( _ => $fallback, )?
+        }
+    }};
+}
+
+#[cfg(all(feature = "cuda", feature = "graph"))]
+#[macro_export]
+macro_rules! graph_extra_arg {
+    (EmbedInputs, $embeded_inputs:ident) => {
+        $embeded_inputs
+    };
+    (NoneArg, $embeded_inputs:ident) => {
+        None
+    };
+}
+
+#[cfg(all(feature = "cuda", feature = "graph"))]
+#[macro_export]
+macro_rules! graph_wrapper {
+    ($model:expr, $device:expr,
+        { $( $variant:ident => $arg:tt ),+ $(,)? }
+    ) => {{
+        match $model {
+            $( Model::$variant(m) => {
+                let model_arc = Arc::clone(m);
+                let closure = move |input_ids: &Tensor,
+                                    positions: &Tensor,
+                                    kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+                                    input_metadata: &InputMetadata,
+                                    embeded_inputs: bool| {
+                    model_arc.forward(
+                        input_ids,
+                        positions,
+                        kv_caches,
+                        input_metadata,
+                        crate::graph_extra_arg!($arg, embeded_inputs),
+                    )
+                };
+                let boxed_closure: Box<ModelFn> = Box::new(closure);
+                CudaGraphWrapper::new(boxed_closure, $device.as_cuda_device()?.clone().into())
+            }, )+
+        }
+    }};
+}
