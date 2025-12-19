@@ -1341,11 +1341,44 @@ impl LLMEngine {
             while seq.num_cached_tokens < seq.len() {
                 let remaining = seq.len() - seq.num_cached_tokens;
                 let chunk_tokens = std::cmp::min(chunk_size, remaining);
-
-                let embedding_result = match &*self.runners.read() {
+                let embedding_result = match &mut *self.runners.write() {
                     RunnerType::Thread(model_runner) => model_runner.embed(&[&seq], &strategy),
-                    RunnerType::Process(_) => {
-                        candle_core::bail!("Embedding is not supported in subprocess runner mode")
+                    RunnerType::Process(ref mut runner_streams) => {
+                        let request = MessageType::RunEmbed((vec![seq.clone()], strategy.clone()));
+                        let cloned_streams: Vec<LocalStream> = runner_streams
+                            .iter_mut()
+                            .map(|s| s.try_clone().expect("clone failed"))
+                            .collect();
+
+                        let all_outputs: Result<Vec<Vec<Vec<f32>>>> = cloned_streams
+                            .into_par_iter()
+                            .map(|mut stream| {
+                                let msg = request.clone();
+                                send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                                let response = receive_local(&mut stream, false)?;
+
+                                match response {
+                                    MessageType::RunResponseEmbed(output_embed) => {
+                                        if output_embed.len() == 0 {
+                                            candle_core::bail!("Runner step error, no response!")
+                                        } else {
+                                            Ok(output_embed)
+                                        }
+                                    }
+                                    other => {
+                                        candle_core::bail!("Unexpected response type: {:?}", other)
+                                    }
+                                }
+                            })
+                            .collect();
+                        let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                        if let Some(output_embed) = all_outputs.first() {
+                            Ok(output_embed.clone())
+                        } else {
+                            candle_core::bail!(
+                                "No output embedding states received from model runners"
+                            );
+                        }
                     }
                 };
                 let embedding_vecs = match embedding_result {
@@ -1375,6 +1408,23 @@ impl LLMEngine {
 
                 seq.num_cached_tokens += chunk_tokens;
                 processed_tokens += chunk_tokens;
+                if seq.len() > chunk_size {
+                    if chunk_tokens < chunk_size {
+                        crate::log_info!(
+                            "Embedding chunk prefilled finished {}/{} (Seq {})",
+                            seq.num_cached_tokens,
+                            seq.len(),
+                            seq.id
+                        );
+                    } else {
+                        crate::log_info!(
+                            "Embedding chunk prefilled {}/{} (Seq {})",
+                            seq.num_cached_tokens,
+                            seq.len(),
+                            seq.id
+                        );
+                    }
+                }
             }
 
             self.scheduler.block_manager.deallocate(&seq);

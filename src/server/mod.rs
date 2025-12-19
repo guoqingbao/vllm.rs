@@ -43,7 +43,7 @@ impl Default for EncodingFormat {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingStrategy {
     Mean,

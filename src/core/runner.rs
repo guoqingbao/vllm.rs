@@ -656,7 +656,10 @@ impl ModelRunner {
             }
         };
 
-        crate::log_info!("embedding finished with hidden shape {:?}", hidden.shape());
+        crate::log_info!(
+            "Embedding forward finished with hidden shape {:?}",
+            hidden.shape()
+        );
         let hidden = hidden.to_dtype(DType::F32)?;
         let dims = hidden.dims();
         if dims.len() != 2 {

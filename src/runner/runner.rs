@@ -221,6 +221,20 @@ fn main() -> anyhow::Result<()> {
                     false,
                 )?;
             }
+            Ok(MessageType::RunEmbed((sequences, strategy))) => {
+                use vllm_rs::core::sequence::Sequence;
+                let refs: Vec<&Sequence> = sequences.iter().collect();
+                let slice: &[&Sequence] = &refs;
+                let outputs = runner.embed(&slice, &strategy);
+                if outputs.is_err() {
+                    vllm_rs::log_error!("Runner embedding error: {:?}", outputs);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::RunResponseEmbed(outputs.unwrap_or(vec![vec![]])),
+                    false,
+                )?;
+            }
             Ok(MessageType::LoadingProgress(_)) => {
                 vllm_rs::log_info!("Received loading progress message");
             }
