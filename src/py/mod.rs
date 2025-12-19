@@ -256,10 +256,10 @@ impl EngineConfig {
     #[new]
     #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None,
         hf_token=None, hf_token_path=None,
-        max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
+        max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,))]
+        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None, disable_flash_attn=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -267,6 +267,7 @@ impl EngineConfig {
         hf_token: Option<String>,
         hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
+        config_model_len: Option<usize>,
         max_model_len: Option<usize>,
         max_tokens: Option<usize>,
         isq: Option<String>,
@@ -280,6 +281,7 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -308,7 +310,7 @@ impl EngineConfig {
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
-            config_model_len: None,
+            config_model_len,
             max_model_len, //placeholder
             max_tokens,
             isq,
@@ -320,7 +322,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
-            disable_flash_attn: None,
+            disable_flash_attn,
         }
     }
 }
