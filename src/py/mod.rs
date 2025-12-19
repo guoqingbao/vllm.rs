@@ -2,26 +2,17 @@ use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
 use crate::core::GenerationOutput;
-use crate::server::{
-    server::{chat_completion, get_usage},
-    ServerData,
-};
+use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
-use axum::routing::{get, post};
-use axum::Json;
-use axum::Router;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rustchatui::start_ui_server;
-use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tower_http::cors::{Any, CorsLayer};
 
 /// Python wrapper
 #[pyclass]
@@ -56,100 +47,17 @@ impl Engine {
         text_signature = "($self, port, with_ui_server)"
     )]
     pub fn start_server(&self, port: usize, with_ui_server: bool) -> PyResult<()> {
-        let is_pd_server = if let Some(cfg) = &self.econfig.pd_config {
-            matches!(cfg.role, PdRole::Server)
-        } else {
-            false
-        };
-
-        let server_data = ServerData {
-            engine: self.engine.clone(),
-            econfig: self.econfig.clone(),
-        };
-
-        let (has_vision, model_name) = {
-            let e = self.engine.read();
-            e.get_model_info()
-        };
-        let has_vision = Arc::new(has_vision); // wrap in Arc first
-
-        // CORS config
-        let cors = CorsLayer::new()
-            .allow_origin(Any) // same as "*"
-            .allow_methods(Any)
-            .allow_headers(Any);
-        // Build axum app
-        let app = Router::new()
-            .route(
-                "/v1/models",
-                get(|| async move {
-                    let m = if *has_vision {
-                        vec!["text", "image"]
-                    } else {
-                        vec!["text"]
-                    };
-                    Json(json!({
-                        "object": "list",
-                        "data": [
-                            {
-                                "id": model_name,
-                                "object": "model",
-                                "created": std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis() as i64,
-                                "owned_by": "vllm.rs",
-                                "permission": [],
-                                "modalities": m,
-                            }
-                        ]
-                    }))
-                }),
-            )
-            .route("/v1/chat/completions", post(chat_completion))
-            .route("/v1/usage", get(get_usage))
-            .layer(cors)
-            .with_state(Arc::new(server_data));
-
-        let addr = if is_pd_server {
-            // Start PD server
-            crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
-            format!("0.0.0.0:{}", 0)
-        } else {
-            // Start server
-            crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}/v1/", port);
-            format!("0.0.0.0:{}", port)
-        };
-
         GLOBAL_RT.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-
-            let mut tasks = Vec::new();
-
-            // HTTP API
-            tasks.push(tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, app).await {
-                    eprintln!("Chat API server error: {e:?}");
-                }
-            }));
-
-            // Optional UI server
-            if with_ui_server {
-                tasks.push(tokio::spawn(async move {
-                    start_ui_server((port + 1) as u16, Some(port as u16), None, None)
-                        .await
-                        .unwrap();
-                }));
-            }
-
-            // Block here until all tasks complete (they usually run forever until Ctrl+C)
-            tokio::select! {
-                _ = futures::future::try_join_all(tasks) => {},
-                _ = tokio::signal::ctrl_c() => {
-                    println!("Received CTRL+C, shutting down server...");
-                },
-            }
-        });
+            run_server(
+                self.engine.clone(),
+                self.econfig.clone(),
+                port,
+                with_ui_server,
+            )
+            .await
+            .map_err(|e| PyValueError::new_err(format!("Server error: {e:?}")))?;
+            Ok::<(), PyErr>(())
+        })?;
 
         Ok(())
     }
@@ -348,10 +256,10 @@ impl EngineConfig {
     #[new]
     #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None,
         hf_token=None, hf_token_path=None,
-        max_num_seqs=Some(32), max_model_len=Some(1024), max_tokens=None,
+        max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,))]
+        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None, disable_flash_attn=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -359,6 +267,7 @@ impl EngineConfig {
         hf_token: Option<String>,
         hf_token_path: Option<String>,
         max_num_seqs: Option<usize>,
+        config_model_len: Option<usize>,
         max_model_len: Option<usize>,
         max_tokens: Option<usize>,
         isq: Option<String>,
@@ -372,6 +281,7 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -400,7 +310,7 @@ impl EngineConfig {
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
-            config_model_len: None,
+            config_model_len,
             max_model_len, //placeholder
             max_tokens,
             isq,
@@ -412,7 +322,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
-            disable_flash_attn: None,
+            disable_flash_attn,
         }
     }
 }

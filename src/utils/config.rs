@@ -268,6 +268,7 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -306,7 +307,7 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
-            disable_flash_attn: None,
+            disable_flash_attn,
         }
     }
 }
