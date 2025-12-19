@@ -7,7 +7,8 @@ use crate::server::streaming::Streamer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
 use crate::utils::image::{
-    load_image_from_base64, load_image_from_url, ImageProcessTrait, IMAGE_PLACEHOLDER,
+    get_tensor_raw_data, load_image_from_base64, load_image_from_url, ImageData,
+    ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
 };
 use axum::extract::Json;
 use axum::http::{self, StatusCode};
@@ -423,4 +424,77 @@ pub fn convert_chat_message(
     }
 
     Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
+}
+
+pub fn build_messages_and_images(
+    messages: &[ChatMessage],
+    img_cfg: Option<&ImageProcessConfig>,
+) -> Result<(Vec<Message>, Option<ImageData>)> {
+    use crate::models::qwen3_vl::input::Qwen3VLImageProcessor;
+    use crate::utils::config::ModelType;
+    use crate::utils::image::ImageProcessor;
+
+    let mut processor: Option<Box<dyn ImageProcessTrait + Send>> = if let Some(cfg) = img_cfg {
+        if matches!(cfg.model_type, ModelType::Qwen3VL) {
+            Some(Box::new(Qwen3VLImageProcessor::default(cfg)))
+        } else {
+            Some(Box::new(ImageProcessor::new(cfg)))
+        }
+    } else {
+        None
+    };
+
+    let mut images: Vec<(Tensor, Vec<(usize, usize)>)> = vec![];
+
+    let messages: Vec<Message> = messages
+        .iter()
+        .map(|m| convert_chat_message(m, &mut processor, &mut images))
+        .collect::<Result<Vec<_>>>()?;
+
+    let image_data = if !images.is_empty() && img_cfg.is_some() {
+        let mut image_sizes = Vec::new();
+        let mut image_tensors = Vec::new();
+        for (t, s) in &images {
+            image_tensors.push(t);
+            image_sizes.extend(s);
+        }
+        let images_tensor = Tensor::cat(&image_tensors, 0)?;
+        let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor)?;
+        crate::log_info!(
+            "{} images detected in the chat message, combined image shape {:?}",
+            images_shape[0],
+            images_shape
+        );
+        Some(ImageData {
+            raw: images_raw,
+            shape: images_shape,
+            patches: image_sizes,
+            image_idx: 0,
+        })
+    } else {
+        None
+    };
+
+    Ok((messages, image_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_messages_without_images() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: MessageContentType::PureText("hello world".to_string()),
+        }];
+
+        let (converted, images) = build_messages_and_images(&messages, None).unwrap();
+
+        assert!(images.is_none());
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted[0].content, "hello world");
+        assert_eq!(converted[0].num_images, 0);
+    }
 }

@@ -1,6 +1,6 @@
 // src/server/server.rs
 use super::{
-    convert_chat_message,
+    build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
     ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat, MessageContentType,
 };
@@ -9,19 +9,13 @@ use super::{
     ChatCompletionResponse, ChatMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
     ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
-use crate::utils::chat_template::Message;
+use crate::core::engine::{LLMEngine, StreamItem};
 use crate::utils::config::SamplingParams;
-use crate::utils::image::{get_tensor_raw_data, ImageData};
-use crate::{
-    core::engine::{LLMEngine, StreamItem},
-    utils::image::ImageProcessTrait,
-};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
 };
 use base64::Engine;
-use candle_core::Tensor;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,60 +52,14 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
-    use crate::models::qwen3_vl::input::Qwen3VLImageProcessor;
-    use crate::utils::config::ModelType;
-    use crate::utils::image::ImageProcessor;
-
-    let mut processor: Option<Box<dyn ImageProcessTrait + Send>> = if img_cfg.is_some() {
-        if matches!(img_cfg.as_ref().unwrap().model_type, ModelType::Qwen3VL) {
-            Some(Box::new(Qwen3VLImageProcessor::default(
-                img_cfg.as_ref().unwrap(),
-            )))
-        } else {
-            Some(Box::new(ImageProcessor::new(img_cfg.as_ref().unwrap())))
-        }
-    } else {
-        None
-    };
-
-    let mut images: Vec<(Tensor, Vec<(usize, usize)>)> = vec![];
-
-    let messages: Vec<Message> = request
-        .messages
-        .iter()
-        .map(|m| convert_chat_message(m, &mut processor, &mut images).unwrap())
-        .collect();
-
-    let image_data = if !images.is_empty() && img_cfg.is_some() {
-        let mut image_sizes = Vec::new();
-        let mut image_tensors = Vec::new();
-        for (t, s) in &images {
-            image_tensors.push(t);
-            image_sizes.extend(s);
-        }
-        let images_tensor = match Tensor::cat(&image_tensors, 0) {
-            Ok(t) => t,
+    let (messages, image_data) =
+        match build_messages_and_images(&request.messages, img_cfg.as_ref()) {
+            Ok(output) => output,
             Err(e) => {
                 crate::log_error!("Image processing failed: {:?}", e);
                 return ChatResponder::InternalError(format!("Internal server error {:?}", e));
             }
         };
-        let (images_raw, images_shape) = get_tensor_raw_data(&images_tensor).unwrap();
-        crate::log_info!(
-            "{} images detected in the chat message, combined image shape {:?}",
-            images_shape[0],
-            images_shape
-        );
-        let image_data = ImageData {
-            raw: images_raw,
-            shape: images_shape,
-            patches: image_sizes,
-            image_idx: 0,
-        };
-        Some(image_data)
-    } else {
-        None
-    };
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

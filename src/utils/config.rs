@@ -247,6 +247,31 @@ pub struct EngineConfig {
 
 #[cfg(not(feature = "python"))]
 impl EngineConfig {
+    pub fn for_model(model_id: impl Into<String>) -> Self {
+        Self::new(
+            Some(model_id.into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
