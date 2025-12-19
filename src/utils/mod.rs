@@ -12,6 +12,7 @@ pub mod image;
 pub mod logits_processor;
 pub mod progress;
 use crate::core::GenerationOutput;
+use crate::models::deepseek::{deepseek_config_to_common, DeepSeekConfig};
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
@@ -526,6 +527,25 @@ pub fn init_config_tokenizer(
                     }
                 }
                 config
+            } else if cfg
+                .architectures
+                .as_ref()
+                .and_then(|archs| archs.first())
+                .is_some_and(|arch| {
+                    matches!(
+                        arch.as_str(),
+                        "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "deepseek"
+                    )
+                })
+            {
+                let deepseek_cfg: DeepSeekConfig = serde_json::from_slice(
+                    &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
+                )
+                .map_err(candle_core::Error::wrap)?;
+                let mut config = deepseek_config_to_common(&deepseek_cfg);
+                config.extra_config_json =
+                    Some(std::fs::read_to_string(&config_path).map_err(candle_core::Error::wrap)?);
+                config
             } else {
                 serde_json::from_slice(
                     &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
@@ -792,6 +812,9 @@ pub fn get_arch_rope(
         ("LlamaForConditionalGeneration", false),
         ("Glm4ForCausalLM", true),
         ("glm4", true),
+        ("DeepseekV2ForCausalLM", false),
+        ("DeepseekV3ForCausalLM", false),
+        ("deepseek", false),
         ("qwen2", false),
         ("qwen3", false),
         ("llama", true),
@@ -855,6 +878,10 @@ pub fn get_arch_rope(
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
             ModelType::GLM4,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "DeepseekV2ForCausalLM" | "DeepseekV3ForCausalLM" | "deepseek" => (
+            ModelType::DeepSeek,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (
             ModelType::Gemma3,
