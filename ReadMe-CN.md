@@ -116,7 +116,7 @@ python3 -m pip install vllm_rs
   # CUDA
   python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
   # Metal/MacOS
-  python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --isq q4k --max-model-len 32768 --ui-server
+  python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
    ```
   </details>
 

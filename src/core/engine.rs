@@ -470,9 +470,7 @@ impl LLMEngine {
             params.top_p = top_p;
         }
         let session_id = params.session_id.clone();
-
         let session_id = if session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
-            crate::log_error!("`session_id` detected but `context-cache` is not enabled!");
             None
         } else {
             session_id.clone()
@@ -992,7 +990,16 @@ impl LLMEngine {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
         let mut context_cache_reqeust = false;
-        if let Some(session_id) = &params.session_id {
+
+        let session_id =
+            if params.session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
+                crate::log_warn!("`session_id` detected but `context-cache` is not enabled!");
+                None
+            } else {
+                params.session_id.clone()
+            };
+
+        if let Some(session_id) = &session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
                 context_cache_reqeust = true;
