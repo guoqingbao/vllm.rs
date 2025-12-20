@@ -2,14 +2,16 @@
 use super::{
     build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat, MessageContentType,
+    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
-    ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
+    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::tools::parser::ToolParser;
+use crate::tools::ToolFormat;
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -21,6 +23,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::task;
 use uuid::Uuid;
+
+fn tool_format_for_model(model_id: &str) -> ToolFormat {
+    let model_id = model_id.to_lowercase();
+    if model_id.contains("qwen") {
+        ToolFormat::Qwen
+    } else if model_id.contains("llama") || model_id.contains("mistral") {
+        ToolFormat::Llama
+    } else {
+        ToolFormat::Generic
+    }
+}
 
 #[utoipa::path(
     post,
@@ -52,14 +65,23 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
-    let (messages, image_data) =
-        match build_messages_and_images(&request.messages, img_cfg.as_ref()) {
-            Ok(output) => output,
-            Err(e) => {
-                crate::log_error!("Image processing failed: {:?}", e);
-                return ChatResponder::InternalError(format!("Internal server error {:?}", e));
-            }
-        };
+    let mut chat_messages = request.messages.clone();
+    if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
+        let model_hint = request.model.clone().unwrap_or_else(|| {
+            let e = data.engine.read();
+            e.get_model_info().1
+        });
+        let tool_prompt = tool_format_for_model(&model_hint).format_tools(tools);
+        chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+    }
+
+    let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
+        Ok(output) => output,
+        Err(e) => {
+            crate::log_error!("Image processing failed: {:?}", e);
+            return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+        }
+    };
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -296,13 +318,34 @@ pub async fn chat_completion(
             total_prompt_time_taken += prompt_time_taken;
             total_decoded_time_taken += decode_time_taken;
 
+            // Parse tool calls from the model output if tools were provided
+            let has_tools = request.tools.is_some() && !request.tools.as_ref().unwrap().is_empty();
+            let tool_parser = ToolParser::new();
+
+            let (content, tool_calls) = if has_tools {
+                let parsed_calls = tool_parser.parse(&output.decode_output);
+                if parsed_calls.is_empty() {
+                    (Some(output.decode_output), None)
+                } else {
+                    (None, Some(parsed_calls))
+                }
+            } else {
+                (Some(output.decode_output), None)
+            };
+
+            let has_tool_calls = tool_calls.is_some();
             choices.push(ChatChoice {
                 index: 0,
-                message: ChatMessage {
+                message: ChatResponseMessage {
                     role: "assistant".to_string(),
-                    content: MessageContentType::PureText(output.decode_output),
+                    content,
+                    tool_calls,
                 },
-                finish_reason: Some("stop".to_string()),
+                finish_reason: if has_tool_calls {
+                    Some("tool_calls".to_string())
+                } else {
+                    Some("stop".to_string())
+                },
             });
         }
 

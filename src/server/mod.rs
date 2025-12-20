@@ -35,6 +35,12 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
+    /// Tools available for the model to call
+    #[serde(default)]
+    pub tools: Option<Vec<crate::tools::Tool>>,
+    /// How the model should choose which tool to call
+    #[serde(default)]
+    pub tool_choice: Option<crate::tools::ToolChoice>,
 }
 
 #[derive(Deserialize)]
@@ -86,10 +92,49 @@ pub enum MessageContentType {
     Multi(Vec<MessageContent>),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: MessageContentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<MessageContentType>,
+    /// Tool calls made by the assistant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
+    /// Tool call ID when role is "tool"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    /// Create a simple text message
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(MessageContentType::PureText(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Create an assistant message with tool calls
+    pub fn with_tool_calls(tool_calls: Vec<crate::tools::ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    /// Create a tool result message
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(MessageContentType::PureText(content.into())),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -105,8 +150,18 @@ pub struct ChatCompletionResponse {
 #[derive(Serialize)]
 pub struct ChatChoice {
     pub index: usize,
-    pub message: ChatMessage,
+    pub message: ChatResponseMessage,
     pub finish_reason: Option<String>,
+}
+
+/// Message in the response (may contain tool calls)
+#[derive(Serialize)]
+pub struct ChatResponseMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
 }
 
 #[derive(Serialize)]
@@ -393,34 +448,69 @@ pub fn convert_chat_message(
     let mut prompt = String::new();
     let mut images = Vec::new();
 
-    match &msg.content {
-        MessageContentType::PureText(text) => {
-            prompt.push_str(text);
-        }
-        MessageContentType::Multi(items) => {
-            for item in items {
-                match item {
-                    MessageContent::Text { text } => {
-                        prompt.push_str(text);
+    // Handle tool call messages specially
+    if role == "tool" {
+        if let Some(tool_call_id) = &msg.tool_call_id {
+            if let Some(content) = &msg.content {
+                match content {
+                    MessageContentType::PureText(text) => {
+                        prompt = format!("[Tool Result for {}]: {}", tool_call_id, text);
                     }
-                    MessageContent::ImageUrl { image_url } => {
-                        let img = load_image_from_url(image_url)?;
-                        crate::log_info!(
-                            "Chat image downloaded: {} x {}",
-                            img.width(),
-                            img.height()
-                        );
-                        prompt.push_str(&IMAGE_PLACEHOLDER);
-                        images.push(img);
-                    }
-                    MessageContent::ImageBase64 { image_base64 } => {
-                        let img = load_image_from_base64(image_base64)?;
-                        crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
-                        prompt.push_str(&IMAGE_PLACEHOLDER);
-                        images.push(img);
-                    }
+                    _ => {}
                 }
-                prompt.push(' '); // keep spacing readable
+            }
+        }
+        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
+    }
+
+    // Handle assistant messages with tool calls
+    if msg.tool_calls.is_some() {
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                prompt.push_str(&format!(
+                    "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>\n",
+                    tc.function.name, tc.function.arguments
+                ));
+            }
+        }
+        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
+    }
+
+    // Normal message handling
+    if let Some(content) = &msg.content {
+        match content {
+            MessageContentType::PureText(text) => {
+                prompt.push_str(text);
+            }
+            MessageContentType::Multi(items) => {
+                for item in items {
+                    match item {
+                        MessageContent::Text { text } => {
+                            prompt.push_str(text);
+                        }
+                        MessageContent::ImageUrl { image_url } => {
+                            let img = load_image_from_url(image_url)?;
+                            crate::log_info!(
+                                "Chat image downloaded: {} x {}",
+                                img.width(),
+                                img.height()
+                            );
+                            prompt.push_str(&IMAGE_PLACEHOLDER);
+                            images.push(img);
+                        }
+                        MessageContent::ImageBase64 { image_base64 } => {
+                            let img = load_image_from_base64(image_base64)?;
+                            crate::log_info!(
+                                "Chat image decoded: {} x {}",
+                                img.width(),
+                                img.height()
+                            );
+                            prompt.push_str(&IMAGE_PLACEHOLDER);
+                            images.push(img);
+                        }
+                    }
+                    prompt.push(' '); // keep spacing readable
+                }
             }
         }
     }
@@ -584,7 +674,9 @@ mod tests {
     fn build_messages_without_images() {
         let messages = vec![ChatMessage {
             role: "user".to_string(),
-            content: MessageContentType::PureText("hello world".to_string()),
+            content: Some(MessageContentType::PureText("hello world".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
         }];
 
         let (converted, images) = build_messages_and_images(&messages, None).unwrap();
@@ -594,5 +686,16 @@ mod tests {
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, "hello world");
         assert_eq!(converted[0].num_images, 0);
+    }
+
+    #[test]
+    fn test_chat_message_helpers() {
+        let text_msg = ChatMessage::text("user", "Hello!");
+        assert_eq!(text_msg.role, "user");
+        assert!(text_msg.content.is_some());
+
+        let tool_result = ChatMessage::tool_result("call_123", r#"{"result": 42}"#);
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(tool_result.tool_call_id, Some("call_123".to_string()));
     }
 }
