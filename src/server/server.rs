@@ -6,8 +6,8 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatResponseMessage, Delta, EmbeddingData, EmbeddingOutput,
-    EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
+    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::tools::parser::ToolParser;
@@ -75,14 +75,13 @@ pub async fn chat_completion(
         chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
     }
 
-    let (messages, image_data) =
-        match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
-            Ok(output) => output,
-            Err(e) => {
-                crate::log_error!("Image processing failed: {:?}", e);
-                return ChatResponder::InternalError(format!("Internal server error {:?}", e));
-            }
-        };
+    let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
+        Ok(output) => output,
+        Err(e) => {
+            crate::log_error!("Image processing failed: {:?}", e);
+            return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+        }
+    };
 
     let created = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
