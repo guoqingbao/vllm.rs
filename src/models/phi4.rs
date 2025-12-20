@@ -42,6 +42,7 @@ impl Phi4RotaryBase {
 struct Phi4RotaryEmbedding {
     normal_emb: Phi4RotaryBase,
     long_emb: Option<Phi4RotaryBase>,
+    original_max_position_embeddings: Option<usize>,
 }
 
 impl Phi4RotaryEmbedding {
@@ -157,6 +158,9 @@ impl Phi4RotaryEmbedding {
             return Ok(Self {
                 normal_emb,
                 long_emb,
+                original_max_position_embeddings: Some(
+                    original_max_position_embeddings.round() as usize,
+                ),
             });
         }
 
@@ -167,6 +171,7 @@ impl Phi4RotaryEmbedding {
         Ok(Self {
             normal_emb,
             long_emb: None,
+            original_max_position_embeddings: None,
         })
     }
 
@@ -176,8 +181,21 @@ impl Phi4RotaryEmbedding {
         k: &Tensor,
         input_positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        if let Some(long_emb) = &self.long_emb {
-            long_emb.apply_rotary_emb_qkv(q, k, input_positions)
+        if let (Some(long_emb), Some(original_max_position_embeddings)) = (
+            &self.long_emb,
+            self.original_max_position_embeddings,
+        ) {
+            let max_position = input_positions
+                .flatten_all()?
+                .to_vec1::<u32>()?
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            if max_position >= original_max_position_embeddings as u32 {
+                long_emb.apply_rotary_emb_qkv(q, k, input_positions)
+            } else {
+                self.normal_emb.apply_rotary_emb_qkv(q, k, input_positions)
+            }
         } else {
             self.normal_emb.apply_rotary_emb_qkv(q, k, input_positions)
         }
