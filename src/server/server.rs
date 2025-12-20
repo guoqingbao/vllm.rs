@@ -2,14 +2,15 @@
 use super::{
     build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat, MessageContentType,
+    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
-    ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    ChatCompletionResponse, ChatResponseMessage, Delta, EmbeddingData, EmbeddingOutput,
+    EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::tools::parser::ToolParser;
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -296,13 +297,34 @@ pub async fn chat_completion(
             total_prompt_time_taken += prompt_time_taken;
             total_decoded_time_taken += decode_time_taken;
 
+            // Parse tool calls from the model output if tools were provided
+            let has_tools = request.tools.is_some() && !request.tools.as_ref().unwrap().is_empty();
+            let tool_parser = ToolParser::new();
+
+            let (content, tool_calls) = if has_tools {
+                let parsed_calls = tool_parser.parse(&output.decode_output);
+                if parsed_calls.is_empty() {
+                    (Some(output.decode_output), None)
+                } else {
+                    (None, Some(parsed_calls))
+                }
+            } else {
+                (Some(output.decode_output), None)
+            };
+
+            let has_tool_calls = tool_calls.is_some();
             choices.push(ChatChoice {
                 index: 0,
-                message: ChatMessage {
+                message: ChatResponseMessage {
                     role: "assistant".to_string(),
-                    content: MessageContentType::PureText(output.decode_output),
+                    content,
+                    tool_calls,
                 },
-                finish_reason: Some("stop".to_string()),
+                finish_reason: if has_tool_calls {
+                    Some("tool_calls".to_string())
+                } else {
+                    Some("stop".to_string())
+                },
             });
         }
 

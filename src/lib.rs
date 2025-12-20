@@ -2,11 +2,13 @@
 use pyo3::prelude::*;
 pub mod api;
 pub mod core;
+pub mod mcp;
 pub mod models;
 #[cfg(feature = "python")]
 pub mod py;
 pub mod runner;
 pub mod server;
+pub mod tools;
 pub mod transfer;
 pub mod utils;
 #[cfg(feature = "python")]
