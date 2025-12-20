@@ -1505,4 +1505,9 @@ impl LLMEngine {
     pub fn get_model_info(&self) -> (bool, String) {
         (self.has_vision, self.model_name.clone())
     }
+
+    /// Get a clone of the chat template for external use (e.g., tokenization without generation)
+    pub fn get_chat_template(&self) -> ChatTemplate {
+        self.template.clone()
+    }
 }

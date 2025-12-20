@@ -253,6 +253,61 @@ pub struct EmbeddingRequest {
     pub embedding_type: EmbeddingStrategy,
 }
 
+// === Tokenize API ===
+
+/// Input for tokenize request - either plain text or chat messages
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum TokenizeInput {
+    /// Chat messages input (will apply chat template)
+    Messages { messages: Vec<ChatMessage> },
+    /// Plain text input
+    Text { prompt: String },
+}
+
+/// Request body for /tokenize endpoint
+#[derive(Deserialize)]
+pub struct TokenizeRequest {
+    pub model: Option<String>,
+    #[serde(flatten)]
+    pub input: TokenizeInput,
+    /// Whether to add special tokens (default: true)
+    #[serde(default)]
+    pub add_special_tokens: Option<bool>,
+}
+
+/// Response from /tokenize endpoint
+#[derive(Serialize)]
+pub struct TokenizeResponse {
+    /// List of token IDs
+    pub tokens: Vec<u32>,
+    /// Number of tokens
+    pub count: usize,
+    /// Maximum model context length (if known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<usize>,
+}
+
+// === Detokenize API ===
+
+/// Request body for /detokenize endpoint
+#[derive(Deserialize)]
+pub struct DetokenizeRequest {
+    pub model: Option<String>,
+    /// Token IDs to decode
+    pub tokens: Vec<u32>,
+    /// Whether to skip special tokens in output (default: true)
+    #[serde(default)]
+    pub skip_special_tokens: Option<bool>,
+}
+
+/// Response from /detokenize endpoint
+#[derive(Serialize)]
+pub struct DetokenizeResponse {
+    /// Decoded text
+    pub prompt: String,
+}
+
 #[derive(Deserialize)]
 pub struct UsageQuery {
     pub session_id: Option<String>,
@@ -301,6 +356,8 @@ pub enum ChatResponder {
     Completion(ChatCompletionResponse),
     Usage(UsageResponse),
     Embedding(EmbeddingResponse),
+    Tokenize(TokenizeResponse),
+    Detokenize(DetokenizeResponse),
     ModelError(String),
     InternalError(String),
     ValidationError(String),
@@ -313,6 +370,8 @@ impl IntoResponse for ChatResponder {
             ChatResponder::Completion(s) => Json(s).into_response(),
             ChatResponder::Usage(s) => Json(s).into_response(),
             ChatResponder::Embedding(s) => Json(s).into_response(),
+            ChatResponder::Tokenize(s) => Json(s).into_response(),
+            ChatResponder::Detokenize(s) => Json(s).into_response(),
             ChatResponder::InternalError(e) => {
                 JsonError::new(e).to_response(http::StatusCode::INTERNAL_SERVER_ERROR)
             }
@@ -632,6 +691,8 @@ pub async fn run_server(
         .route("/v1/chat/completions", post(server::chat_completion))
         .route("/v1/embeddings", post(server::create_embeddings))
         .route("/v1/usage", get(server::get_usage))
+        .route("/tokenize", post(server::tokenize))
+        .route("/detokenize", post(server::detokenize))
         .layer(cors)
         .with_state(Arc::new(server_data));
 
@@ -697,5 +758,70 @@ mod tests {
         let tool_result = ChatMessage::tool_result("call_123", r#"{"result": 42}"#);
         assert_eq!(tool_result.role, "tool");
         assert_eq!(tool_result.tool_call_id, Some("call_123".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_request_text_parsing() {
+        let json = r#"{"prompt": "Hello, world!"}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        match request.input {
+            TokenizeInput::Text { prompt } => assert_eq!(prompt, "Hello, world!"),
+            _ => panic!("Expected TokenizeInput::Text"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_request_messages_parsing() {
+        let json = r#"{"messages": [{"role": "user", "content": "Hello"}]}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        match request.input {
+            TokenizeInput::Messages { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].role, "user");
+            }
+            _ => panic!("Expected TokenizeInput::Messages"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_request_with_options() {
+        let json = r#"{"prompt": "test", "add_special_tokens": false}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.add_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_detokenize_request_parsing() {
+        let json = r#"{"tokens": [1, 2, 3, 4]}"#;
+        let request: DetokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.tokens, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_detokenize_request_with_options() {
+        let json = r#"{"tokens": [1, 2], "skip_special_tokens": false}"#;
+        let request: DetokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_tokenize_response_serialization() {
+        let response = TokenizeResponse {
+            tokens: vec![1, 2, 3],
+            count: 3,
+            max_model_len: Some(4096),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"count\":3"));
+        assert!(json.contains("\"tokens\":[1,2,3]"));
+    }
+
+    #[test]
+    fn test_detokenize_response_serialization() {
+        let response = DetokenizeResponse {
+            prompt: "Hello, world!".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"prompt\":\"Hello, world!\""));
     }
 }

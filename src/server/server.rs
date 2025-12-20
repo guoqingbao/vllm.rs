@@ -2,7 +2,8 @@
 use super::{
     build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
-    ChatResponder, EmbeddingRequest, EmbeddingResponse, EncodingFormat,
+    ChatResponder, DetokenizeRequest, DetokenizeResponse, EmbeddingRequest, EmbeddingResponse,
+    EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
@@ -475,4 +476,123 @@ pub async fn get_usage(
         total_swap_memory: stats.total_swap_memory,
         session_status: stats.session_status,
     })
+}
+
+#[utoipa::path(
+    post,
+    tag = "vllm-rs",
+    path = "/tokenize",
+    request_body = TokenizeRequest,
+    responses((status = 200, description = "Tokenize text or messages"))
+)]
+pub async fn tokenize(
+    State(data): State<Arc<ServerData>>,
+    request: Json<TokenizeRequest>,
+) -> ChatResponder {
+    let add_special_tokens = request.add_special_tokens.unwrap_or(true);
+
+    // Get text to tokenize based on input type
+    let (text, input_type) = match &request.0.input {
+        TokenizeInput::Text { prompt } => (prompt.clone(), "text"),
+        TokenizeInput::Messages { messages } => {
+            // For messages, we need to apply chat template
+            // First convert to internal Message format
+            let img_cfg = {
+                let e = data.engine.read();
+                e.img_cfg.clone()
+            };
+            let (converted_messages, _) =
+                match build_messages_and_images(messages, img_cfg.as_ref()) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return ChatResponder::ValidationError(format!(
+                            "Message processing failed: {:?}",
+                            e
+                        ));
+                    }
+                };
+
+            // Apply chat template using engine's template
+            let engine = data.engine.read();
+            let mut template = engine.get_chat_template();
+            template.set_messages(&converted_messages);
+            let prompt = match template.apply_chat_template(false) {
+                Ok(prompt) => prompt,
+                Err(e) => {
+                    return ChatResponder::InternalError(format!(
+                        "Failed to apply chat template: {:?}",
+                        e
+                    ));
+                }
+            };
+            (prompt, "messages")
+        }
+    };
+
+    let input_chars = text.len();
+
+    // Get tokenizer and tokenize
+    let tokenizer = {
+        let e = data.engine.read();
+        e.tokenizer.clone()
+    };
+
+    let encoding = match tokenizer.encode(text.as_str(), add_special_tokens) {
+        Ok(enc) => enc,
+        Err(e) => {
+            return ChatResponder::InternalError(format!("Tokenization failed: {:?}", e));
+        }
+    };
+
+    let tokens: Vec<u32> = encoding.get_ids().to_vec();
+    let count = tokens.len();
+
+    crate::log_info!(
+        "[Tokenize] input_type={}, input_chars={}, output_tokens={}",
+        input_type,
+        input_chars,
+        count
+    );
+
+    ChatResponder::Tokenize(TokenizeResponse {
+        tokens,
+        count,
+        max_model_len: data.econfig.max_model_len,
+    })
+}
+
+#[utoipa::path(
+    post,
+    tag = "vllm-rs",
+    path = "/detokenize",
+    request_body = DetokenizeRequest,
+    responses((status = 200, description = "Detokenize tokens to text"))
+)]
+pub async fn detokenize(
+    State(data): State<Arc<ServerData>>,
+    request: Json<DetokenizeRequest>,
+) -> ChatResponder {
+    let skip_special_tokens = request.skip_special_tokens.unwrap_or(true);
+
+    let tokenizer = {
+        let e = data.engine.read();
+        e.tokenizer.clone()
+    };
+
+    let input_tokens = request.tokens.len();
+
+    let prompt = match tokenizer.decode(&request.tokens, skip_special_tokens) {
+        Ok(text) => text,
+        Err(e) => {
+            return ChatResponder::InternalError(format!("Detokenization failed: {:?}", e));
+        }
+    };
+
+    crate::log_info!(
+        "[Detokenize] input_tokens={}, output_chars={}",
+        input_tokens,
+        prompt.len()
+    );
+
+    ChatResponder::Detokenize(DetokenizeResponse { prompt })
 }
