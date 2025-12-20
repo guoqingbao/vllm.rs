@@ -21,6 +21,7 @@ use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Deserialize)]
@@ -41,6 +42,9 @@ pub struct ChatCompletionRequest {
     /// How the model should choose which tool to call
     #[serde(default)]
     pub tool_choice: Option<crate::tools::ToolChoice>,
+    /// Optional JSON schema to guide decoding
+    #[serde(default)]
+    pub guided_json_schema: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -329,6 +333,8 @@ pub struct UsageResponse {
 pub struct ServerData {
     pub engine: Arc<RwLock<LLMEngine>>,
     pub econfig: EngineConfig,
+    pub mcp_manager: Option<crate::mcp::McpClientManager>,
+    pub mcp_tool_config: Option<crate::mcp::manager::McpToolConfig>,
 }
 
 trait ErrorToResponse: Serialize {
@@ -496,6 +502,18 @@ pub struct Args {
 
     #[arg(long, default_value_t = false)]
     pub ui_server: bool, //Start the web chat
+
+    /// MCP server command to spawn for tool discovery and calls
+    #[arg(long, default_value = None)]
+    pub mcp_command: Option<String>,
+
+    /// MCP server arguments (comma-separated)
+    #[arg(long, value_delimiter = ',', default_value = None)]
+    pub mcp_args: Option<Vec<String>>,
+
+    /// MCP tool refresh interval in seconds
+    #[arg(long, default_value = None)]
+    pub mcp_tool_refresh_seconds: Option<u64>,
 }
 
 pub fn convert_chat_message(
@@ -654,7 +672,35 @@ pub async fn run_server(
         false
     };
 
-    let server_data = ServerData { engine, econfig };
+    let mcp_tool_config = econfig.mcp_command.clone().map(|command| {
+        let mut cfg = crate::mcp::manager::McpToolConfig::new(
+            command,
+            econfig.mcp_args.clone().unwrap_or_default(),
+        );
+        if let Some(seconds) = econfig.mcp_tool_refresh_seconds {
+            cfg.tool_refresh_interval = Duration::from_secs(seconds);
+        }
+        cfg
+    });
+
+    let mcp_manager = if let Some(cfg) = &mcp_tool_config {
+        match crate::mcp::McpClientManager::new(cfg.clone()) {
+            Ok(manager) => Some(manager),
+            Err(err) => {
+                crate::log_error!("Failed to start MCP client manager: {:?}", err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let server_data = ServerData {
+        engine,
+        econfig,
+        mcp_manager,
+        mcp_tool_config,
+    };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)

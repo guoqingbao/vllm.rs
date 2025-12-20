@@ -99,6 +99,45 @@ for call in calls {
 }
 ```
 
+## MCP Tool Execution (Server)
+
+If you start the server with an MCP client manager, tool calls are executed automatically:
+
+```bash
+vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0
+```
+
+When MCP is enabled:
+- The cached MCP tool list is injected into the system prompt when no `tools` are provided.
+- Tool calls are routed to `tools/call`, and the tool results are fed back into the model for a follow-up completion.
+
+## Guided Decoding
+
+vLLM.rs can use `llguidance` to enforce JSON outputs. There are two ways to enable it:
+
+### 1) Force a Tool Call via `tool_choice`
+
+If you pass `tool_choice` with a specific function, vLLM.rs applies a JSON schema constraint so the model must emit a tool call.
+
+### 2) Provide an Explicit JSON Schema
+
+You can pass a schema directly:
+
+```json
+{
+  "guided_json_schema": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" },
+      "arguments": { "type": "object" }
+    },
+    "required": ["name", "arguments"]
+  }
+}
+```
+
+Guided decoding is applied during the sampling loop, masking out invalid tokens at each step.
+
 ## Supported Tool Call Formats
 
 The parser recognizes:

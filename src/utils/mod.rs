@@ -9,6 +9,7 @@ pub mod gptq;
 pub mod graph;
 pub mod heartbeat;
 pub mod image;
+pub mod guidance;
 pub mod logits_processor;
 pub mod progress;
 use crate::core::GenerationOutput;

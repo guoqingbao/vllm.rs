@@ -11,8 +11,9 @@ use super::{
     EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::mcp::manager::call_mcp_tool;
 use crate::tools::parser::ToolParser;
-use crate::tools::ToolFormat;
+use crate::tools::{Tool, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -20,6 +21,7 @@ use axum::{
 };
 use base64::Engine;
 use std::env;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task;
@@ -33,6 +35,30 @@ fn tool_format_for_model(model_id: &str) -> ToolFormat {
         ToolFormat::Llama
     } else {
         ToolFormat::Generic
+    }
+}
+
+fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool> {
+    if let Some(tools) = request_tools {
+        if !tools.is_empty() {
+            return tools.to_vec();
+        }
+    }
+    mcp_tools.to_vec()
+}
+
+fn tool_choice_schema(tool_choice: &Option<ToolChoice>) -> Option<serde_json::Value> {
+    match tool_choice {
+        Some(ToolChoice::Function { function, .. }) => Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "const": function.name },
+                "arguments": { "type": "object" }
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": false
+        })),
+        _ => None,
     }
 }
 
@@ -61,18 +87,30 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
+    params.guided_json_schema = request
+        .guided_json_schema
+        .clone()
+        .or_else(|| tool_choice_schema(&request.tool_choice));
     let img_cfg = {
         let e = data.engine.read();
         e.img_cfg.clone()
     };
 
+    let mcp_tools = data
+        .mcp_manager
+        .as_ref()
+        .map(|manager| manager.cached_tools())
+        .unwrap_or_default();
+    let resolved_tools = resolve_tools(request.tools.as_deref(), &mcp_tools);
+
+    let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
-    if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
+    if has_tools {
         let model_hint = request.model.clone().unwrap_or_else(|| {
             let e = data.engine.read();
             e.get_model_info().1
         });
-        let tool_prompt = tool_format_for_model(&model_hint).format_tools(tools);
+        let tool_prompt = tool_format_for_model(&model_hint).format_tools(&resolved_tools);
         chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
     }
 
@@ -320,7 +358,6 @@ pub async fn chat_completion(
             total_decoded_time_taken += decode_time_taken;
 
             // Parse tool calls from the model output if tools were provided
-            let has_tools = request.tools.is_some() && !request.tools.as_ref().unwrap().is_empty();
             let tool_parser = ToolParser::new();
 
             let (content, tool_calls) = if has_tools {
@@ -334,20 +371,127 @@ pub async fn chat_completion(
                 (Some(output.decode_output), None)
             };
 
-            let has_tool_calls = tool_calls.is_some();
-            choices.push(ChatChoice {
-                index: 0,
-                message: ChatResponseMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls,
-                },
-                finish_reason: if has_tool_calls {
-                    Some("tool_calls".to_string())
-                } else {
-                    Some("stop".to_string())
-                },
-            });
+            if let (Some(tool_calls), Some(mcp_cfg)) =
+                (&tool_calls, data.mcp_tool_config.as_ref())
+            {
+                let mut followup_messages = chat_messages.clone();
+                followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
+
+                for call in tool_calls {
+                    let args_value: serde_json::Value =
+                        serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
+                            serde_json::json!({"raw": call.function.arguments})
+                        });
+                    let args_map = args_value
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect::<HashMap<String, serde_json::Value>>();
+
+                    let tool_result = match call_mcp_tool(mcp_cfg, &call.function.name, args_map) {
+                        Ok(result) => {
+                            let content = result
+                                .content
+                                .iter()
+                                .filter_map(|c| match c {
+                                    crate::mcp::ToolContent::Text { text } => {
+                                        Some(text.clone())
+                                    }
+                                    crate::mcp::ToolContent::Resource { text, .. } => {
+                                        text.clone()
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ChatMessage::tool_result(call.id.clone(), content)
+                        }
+                        Err(err) => ChatMessage::tool_result(
+                            call.id.clone(),
+                            format!("Tool execution failed: {err}"),
+                        ),
+                    };
+                    followup_messages.push(tool_result);
+                }
+
+                let (followup_inputs, followup_images) =
+                    match build_messages_and_images(&followup_messages, img_cfg.as_ref()) {
+                        Ok(output) => output,
+                        Err(e) => {
+                            crate::log_error!("Tool follow-up processing failed: {:?}", e);
+                            return ChatResponder::InternalError(format!(
+                                "Internal server error {:?}",
+                                e
+                            ));
+                        }
+                    };
+
+                let (receivers, tokenizer) = {
+                    let mut e = data.engine.write();
+                    match e.generate_sync(&vec![params.clone()], &vec![followup_inputs], followup_images)
+                    {
+                        Ok(receivers) => (receivers, Arc::new(e.tokenizer.clone())),
+                        Err(e) => {
+                            crate::log_error!("Tool follow-up generation failed: {:?}", e);
+                            return ChatResponder::InternalError(format!(
+                                "Internal server error {:?}",
+                                e
+                            ));
+                        }
+                    }
+                };
+
+                let outputs = match LLMEngine::collect_sync_results(receivers, tokenizer).await {
+                    Ok(outputs) => outputs,
+                    Err(e) => {
+                        crate::log_error!("Failed to collect tool follow-up results: {:?}", e);
+                        return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+                    }
+                };
+
+                let followup_output = outputs
+                    .first()
+                    .map(|o| o.decode_output.clone())
+                    .unwrap_or_default();
+                if let Some(followup_metrics) = outputs.first() {
+                    total_prompt_tokens += followup_metrics.prompt_length;
+                    total_decoded_tokens += followup_metrics.decoded_length;
+                    let prompt_time_taken = (followup_metrics.decode_start_time
+                        - followup_metrics.prompt_start_time) as f32
+                        / 1000.0;
+                    let decode_time_taken = (followup_metrics.decode_finish_time
+                        - followup_metrics.decode_start_time) as f32
+                        / 1000.0;
+                    total_prompt_time_taken += prompt_time_taken;
+                    total_decoded_time_taken += decode_time_taken;
+                }
+
+                choices.push(ChatChoice {
+                    index: 0,
+                    message: ChatResponseMessage {
+                        role: "assistant".to_string(),
+                        content: Some(followup_output),
+                        tool_calls: None,
+                    },
+                    finish_reason: Some("stop".to_string()),
+                });
+            } else {
+                let has_tool_calls = tool_calls.is_some();
+                choices.push(ChatChoice {
+                    index: 0,
+                    message: ChatResponseMessage {
+                        role: "assistant".to_string(),
+                        content,
+                        tool_calls,
+                    },
+                    finish_reason: if has_tool_calls {
+                        Some("tool_calls".to_string())
+                    } else {
+                        Some("stop".to_string())
+                    },
+                });
+            }
         }
 
         crate::log_warn!("--- Performance Metrics ---");
@@ -446,6 +590,40 @@ pub async fn create_embeddings(
             total_tokens: prompt_tokens,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+
+    #[test]
+    fn resolve_tools_prefers_request_tools() {
+        let request_tools = vec![Tool::function("local", "Local tool").build()];
+        let mcp_tools = vec![Tool::function("mcp", "MCP tool").build()];
+
+        let resolved = resolve_tools(Some(&request_tools), &mcp_tools);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].function.name, "local");
+    }
+
+    #[test]
+    fn resolve_tools_falls_back_to_mcp() {
+        let request_tools: Vec<Tool> = vec![];
+        let mcp_tools = vec![Tool::function("mcp", "MCP tool").build()];
+
+        let resolved = resolve_tools(Some(&request_tools), &mcp_tools);
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].function.name, "mcp");
+    }
+
+    #[test]
+    fn tool_choice_schema_for_function() {
+        let tool_choice = ToolChoice::function("get_weather");
+        let schema = tool_choice_schema(&Some(tool_choice)).unwrap();
+        assert_eq!(schema["properties"]["name"]["const"], "get_weather");
+        assert!(schema["required"].as_array().unwrap().contains(&"name".into()));
+    }
 }
 
 #[utoipa::path(

@@ -119,6 +119,9 @@ impl EngineBuilder {
             None,
             None,
             None,
+            None,
+            None,
+            None,
             disable_flash_attn,
         );
 

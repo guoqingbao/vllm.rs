@@ -175,6 +175,9 @@ async fn main() -> Result<()> {
         args.cpu_mem_fold,
         args.kv_fraction,
         pd_config,
+        args.mcp_command.clone(),
+        args.mcp_args.clone(),
+        args.mcp_tool_refresh_seconds,
         Some(args.no_flash_attn),
     );
 

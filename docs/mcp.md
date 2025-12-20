@@ -73,6 +73,23 @@ let result = client.call_tool("search", [
 ].into_iter().collect())?;
 ```
 
+## MCP Client Manager (Server Integration)
+
+vLLM.rs can run an MCP client manager alongside the chat server. The manager:
+- Spawns the MCP server process on startup
+- Runs `initialize` + `tools/list`
+- Caches the tool list for automatic prompt injection
+
+Enable it via CLI:
+
+```bash
+vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0 --mcp-tool-refresh-seconds 30
+```
+
+When configured, MCP tools are injected into the system prompt if the request does not provide its own `tools` list.
+
+Tool calls detected in model output are executed automatically via `tools/call`, and the results are fed back into the model for a follow-up response.
+
 ## Protocol Support
 
 vLLM.rs implements MCP version `2024-11-05` with support for:
