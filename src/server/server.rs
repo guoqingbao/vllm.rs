@@ -96,12 +96,15 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
+    let requested_tools = request.tools.as_deref().unwrap_or_default();
+    let has_request_tools = !requested_tools.is_empty();
     let mcp_tools = data
         .mcp_manager
         .as_ref()
         .map(|manager| manager.cached_tools())
         .unwrap_or_default();
     let resolved_tools = resolve_tools(request.tools.as_deref(), &mcp_tools);
+    let mcp_injected_tools = !has_request_tools && !mcp_tools.is_empty();
 
     let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
@@ -371,8 +374,10 @@ pub async fn chat_completion(
                 (Some(output.decode_output), None)
             };
 
-            if let (Some(tool_calls), Some(mcp_cfg)) =
-                (&tool_calls, data.mcp_tool_config.as_ref())
+            if let (Some(tool_calls), Some(mcp_cfg)) = (
+                &tool_calls,
+                data.mcp_tool_config.as_ref().filter(|_| mcp_injected_tools),
+            )
             {
                 let mut followup_messages = chat_messages.clone();
                 followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
