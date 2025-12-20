@@ -11,6 +11,7 @@ use super::{
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::tools::parser::ToolParser;
+use crate::tools::ToolFormat;
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -22,6 +23,17 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::task;
 use uuid::Uuid;
+
+fn tool_format_for_model(model_id: &str) -> ToolFormat {
+    let model_id = model_id.to_lowercase();
+    if model_id.contains("qwen") {
+        ToolFormat::Qwen
+    } else if model_id.contains("llama") || model_id.contains("mistral") {
+        ToolFormat::Llama
+    } else {
+        ToolFormat::Generic
+    }
+}
 
 #[utoipa::path(
     post,
@@ -53,8 +65,18 @@ pub async fn chat_completion(
         e.img_cfg.clone()
     };
 
+    let mut chat_messages = request.messages.clone();
+    if let Some(tools) = request.tools.as_ref().filter(|tools| !tools.is_empty()) {
+        let model_hint = request.model.clone().unwrap_or_else(|| {
+            let e = data.engine.read();
+            e.get_model_info().1
+        });
+        let tool_prompt = tool_format_for_model(&model_hint).format_tools(tools);
+        chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+    }
+
     let (messages, image_data) =
-        match build_messages_and_images(&request.messages, img_cfg.as_ref()) {
+        match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
             Ok(output) => output,
             Err(e) => {
                 crate::log_error!("Image processing failed: {:?}", e);
