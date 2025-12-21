@@ -176,6 +176,11 @@ pub async fn chat_completion(
             let mut decoded_length = 0usize;
             let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
+            
+            // Track if we're inside a tool call (for MCP mode token buffering)
+            let mut in_tool_call = false;
+            // Check if MCP mode is enabled (internal tool execution)
+            let is_mcp_mode = params_clone.mcp_mode == Some(true);
 
             // Context that accumulates across tool call cycles
             let mut current_messages = chat_messages_clone.clone();
@@ -197,8 +202,23 @@ pub async fn chat_completion(
 
                             // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
+                            
+                            // In MCP mode, detect tool call start and buffer tokens
+                            if is_mcp_mode {
+                                // Check if we're entering a tool call
+                                if !in_tool_call && accumulated_output.contains("<tool_call>") {
+                                    in_tool_call = true;
+                                    // Don't send tool call content to client
+                                    continue;
+                                }
+                                
+                                // If we're inside a tool call, don't send to client
+                                if in_tool_call {
+                                    continue;
+                                }
+                            }
 
-                            // Send token to client
+                            // Send token to client (only if not buffering tool call)
                             let chunk = ChatCompletionChunk {
                                 id: format!("seq-{}", current_seq_id),
                                 object: "chat.completion.chunk",
@@ -240,6 +260,9 @@ pub async fn chat_completion(
                             );
 
                             total_decoded_tokens += pause_decoded_length;
+                            
+                            // Reset in_tool_call state
+                            in_tool_call = false;
 
                             // Parse tool calls from accumulated output
                             let tool_parser = ToolParser::new();
@@ -280,6 +303,8 @@ pub async fn chat_completion(
                                         };
 
                                     // Resume generation with session_id to use cached context
+                                    // Note: mcp_mode is preserved to support multi-tool scenarios
+                                    // The scheduler clears tool_call_session_id on cache resume
                                     let mut resume_params = params_clone.clone();
                                     resume_params.session_id = Some(session_id.clone());
 

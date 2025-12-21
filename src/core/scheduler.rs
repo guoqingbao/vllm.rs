@@ -451,6 +451,12 @@ impl Scheduler {
 
                 seq.token_ids.extend(new_tokens_ids.clone());
                 seq.output_ids.clear();
+                
+                // CRITICAL: Clear tool_call_session_id from previous tool call cycle
+                // This prevents spurious ToolCallPause when this sequence finishes normally
+                // New tool calls will set a new session_id if they occur
+                seq.tool_call_session_id = None;
+                
                 if let Some(img) = &images {
                     let mut img = img.clone(); // update the images
                     img.image_idx = image_idx;
