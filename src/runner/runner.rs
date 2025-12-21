@@ -13,8 +13,8 @@ use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
 use vllm_rs::transfer::PdRole;
 use vllm_rs::transfer::Transfer;
-use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::guidance::load_toktrie_from_path;
+use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
 
@@ -138,8 +138,8 @@ fn main() -> anyhow::Result<()> {
                 None
             };
             let mut econfig = init_req.econfig.clone();
-            let toktrie =
-                load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename()).map(Arc::new);
+            let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
+                .map(Arc::new);
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,

@@ -5,9 +5,9 @@ use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
-use crate::utils::guidance::GuidanceState;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::guidance::GuidanceState;
 use crate::utils::logits_processor::LogitsProcessor;
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -20,11 +20,11 @@ use crate::{
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
     utils::config::{Config, EngineConfig, ModelType},
 };
-use llguidance::toktrie::TokTrie;
 use attention_rs::cache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
+use llguidance::toktrie::TokTrie;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -841,7 +841,7 @@ impl ModelRunner {
                                     .map_err(|e| candle_core::Error::msg(e.to_string()))?;
                             } else {
                                 let state = GuidanceState::new(toktrie.clone(), schema.clone())
-                                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                                    .map_err(|e| candle_core::Error::msg(e.to_string()))?;
                                 states.insert(seq.id(), state);
                             }
                         }

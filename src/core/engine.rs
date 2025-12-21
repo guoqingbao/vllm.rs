@@ -17,13 +17,13 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, SamplingParams};
+use crate::utils::guidance::load_toktrie_from_path;
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner, update_kvcache_config};
-use crate::utils::guidance::load_toktrie_from_path;
 use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
 use colored::Colorize;
@@ -101,8 +101,7 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename())
-            .map(Arc::new);
+        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename()).map(Arc::new);
         if toktrie.is_none() {
             crate::log_warn!("Guided decoding disabled: tokenizer trie unavailable.");
         }

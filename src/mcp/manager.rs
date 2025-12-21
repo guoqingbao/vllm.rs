@@ -63,9 +63,8 @@ pub struct McpManagerConfig {
 
 impl McpManagerConfig {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, McpClientError> {
-        let contents = std::fs::read_to_string(path.as_ref()).map_err(|err| {
-            McpClientError::Config(format!("Failed to read MCP config: {err}"))
-        })?;
+        let contents = std::fs::read_to_string(path.as_ref())
+            .map_err(|err| McpClientError::Config(format!("Failed to read MCP config: {err}")))?;
         let config: McpConfigFile =
             serde_json::from_str(&contents).map_err(McpClientError::Serialization)?;
         let servers = config
@@ -168,11 +167,7 @@ impl McpClientManager {
                     any_client = true;
                 }
                 Err(err) => {
-                    crate::log_error!(
-                        "Failed to spawn MCP server {}: {:?}",
-                        server.id,
-                        err
-                    );
+                    crate::log_error!("Failed to spawn MCP server {}: {:?}", server.id, err);
                 }
             }
         }
@@ -200,14 +195,15 @@ impl McpClientManager {
                     clients_clone,
                     available_clone,
                     stop_clone,
-                )
-                {
+                ) {
                     crate::log_error!("MCP manager loop failed: {:?}", err);
                 }
             })
-            .map_err(|e| McpClientError::Transport(super::transport::TransportError::Process(
-                format!("Failed to spawn MCP manager thread: {e}"),
-            )))?;
+            .map_err(|e| {
+                McpClientError::Transport(super::transport::TransportError::Process(format!(
+                    "Failed to spawn MCP manager thread: {e}"
+                )))
+            })?;
 
         Ok(Self {
             tool_cache,
@@ -284,11 +280,7 @@ fn run_manager_loop(
                 match client.list_tools() {
                     Ok(tools) => {
                         any_success = true;
-                        mapped_tools.extend(map_mcp_tools(
-                            server_id,
-                            tools,
-                            &mut routing,
-                        ));
+                        mapped_tools.extend(map_mcp_tools(server_id, tools, &mut routing));
                     }
                     Err(err) => {
                         crate::log_error!(
@@ -399,9 +391,7 @@ mod tests {
                     Ok(CallToolResult {
                         content: vec![ToolContent::text(format!(
                             "echo: {}",
-                            args.get("message")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
+                            args.get("message").and_then(|v| v.as_str()).unwrap_or("")
                         ))],
                         is_error: false,
                     })
@@ -477,11 +467,7 @@ mod tests {
         assert_eq!(filesystem.command, "npx");
         assert_eq!(
             filesystem.args,
-            vec![
-                "-y",
-                "@modelcontextprotocol/server-filesystem",
-                "/tmp"
-            ]
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         );
         let github = config
             .servers

@@ -7,9 +7,9 @@ pub mod gguf_varbuilder;
 pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
+pub mod guidance;
 pub mod heartbeat;
 pub mod image;
-pub mod guidance;
 pub mod logits_processor;
 pub mod progress;
 use crate::core::GenerationOutput;

@@ -4,8 +4,8 @@
 use llguidance::api::{Constraint, TopLevelGrammar};
 use llguidance::toktrie::TokTrie;
 use serde_json::Value;
-use std::sync::Arc;
 use std::path::Path;
+use std::sync::Arc;
 
 pub struct GuidanceState {
     constraint: Constraint,

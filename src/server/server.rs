@@ -19,8 +19,8 @@ use axum::{
     response::{sse::KeepAlive, Sse},
 };
 use base64::Engine;
-use std::env;
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task;
@@ -58,6 +58,60 @@ fn tool_choice_schema(tool_choice: &Option<ToolChoice>) -> Option<serde_json::Va
             "additionalProperties": false
         })),
         _ => None,
+    }
+}
+
+/// Result of executing tool calls via MCP
+struct ToolExecutionResult {
+    /// Messages to add for follow-up (assistant tool_calls + tool results)
+    followup_messages: Vec<ChatMessage>,
+    /// The tool calls that were executed
+    tool_calls: Vec<crate::tools::ToolCall>,
+}
+
+/// Execute tool calls via MCP manager and return messages for follow-up generation
+fn execute_mcp_tool_calls(
+    tool_calls: &[crate::tools::ToolCall],
+    mcp_manager: &crate::mcp::McpClientManager,
+    base_messages: &[ChatMessage],
+) -> ToolExecutionResult {
+    let mut followup_messages = base_messages.to_vec();
+    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.to_vec()));
+
+    for call in tool_calls {
+        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
+        let args_map = args_value
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashMap<String, serde_json::Value>>();
+
+        let tool_result = match mcp_manager.call_tool(&call.function.name, args_map) {
+            Ok(result) => {
+                let content = result
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::mcp::ToolContent::Text { text } => Some(text.clone()),
+                        crate::mcp::ToolContent::Resource { text, .. } => text.clone(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ChatMessage::tool_result(call.id.clone(), content)
+            }
+            Err(err) => {
+                ChatMessage::tool_result(call.id.clone(), format!("Tool execution failed: {err}"))
+            }
+        };
+        followup_messages.push(tool_result);
+    }
+
+    ToolExecutionResult {
+        followup_messages,
+        tool_calls: tool_calls.to_vec(),
     }
 }
 
@@ -150,154 +204,283 @@ pub async fn chat_completion(
 
         let mut stream = stream;
         let (response_tx, client_rx) = flume::unbounded();
+
+        // Clone data needed for the async task
+        let engine_clone = data.engine.clone();
+        let chat_messages_clone = chat_messages.clone();
+        let params_clone = params.clone();
+        let img_cfg_clone = img_cfg.clone();
+
         task::spawn(async move {
-            let mut decode_start_time = 0;
-            let mut decoded_length = 0;
-            let engine_clone = data.engine.clone();
-            while let Some(item) = stream.recv().await {
-                match item {
-                    StreamItem::Token(token) => {
-                        if decode_start_time == 0 {
-                            decode_start_time = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                        }
-                        decoded_length += 1;
-                        let chunk = ChatCompletionChunk {
-                            id: format!("seq-{}", seq_id),
-                            object: "chat.completion.chunk",
-                            created,
-                            model: model_id.to_string(),
-                            choices: vec![ChatChoiceChunk {
-                                index: 0,
-                                delta: Delta {
-                                    content: Some(token.clone()),
-                                },
-                                finish_reason: None,
-                                error: None,
-                            }],
-                            usage: None,
-                        };
+            /// State machine for streaming with tool calls
+            #[derive(Debug, Clone, PartialEq)]
+            enum StreamState {
+                /// Normal text streaming
+                StreamingText,
+                /// Detected tool_call start, collecting arguments
+                CollectingToolCall,
+            }
 
-                        let result = response_tx.try_send(ChatResponse::Chunk(chunk));
-                        if let Err(e) = result {
-                            crate::log_error!(
-                                "[seq_id {}] Stream send to client error: {:?}",
-                                seq_id,
-                                e
-                            );
+            let mut state = StreamState::StreamingText;
+            let mut decode_start_time = 0u64;
+            let mut decoded_length = 0usize;
+            let mut accumulated_output = String::new();
+            let mut tool_call_buffer = String::new();
+            let mut total_decoded_tokens = 0usize;
 
-                            if decoded_length > 0 {
-                                // Performance metrics
-                                let prompt_time_taken =
-                                    (decode_start_time - created) as f32 / 1000.0;
-                                let decode_time_taken = (std::time::SystemTime::now()
+            // Context that accumulates across tool call cycles
+            let mut current_messages = chat_messages_clone.clone();
+            let mut current_stream = stream;
+            let mut current_seq_id = seq_id;
+
+            // Tool call detection patterns
+            const TOOL_CALL_START: &str = "<tool_call>";
+            const TOOL_CALL_END: &str = "</tool_call>";
+
+            'outer: loop {
+                while let Some(item) = current_stream.recv().await {
+                    match item {
+                        StreamItem::Token(token) => {
+                            if decode_start_time == 0 {
+                                decode_start_time = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_millis()
-                                    as u64
-                                    - decode_start_time)
-                                    as f32
-                                    / 1000.0;
-                                crate::log_warn!("--- Performance Metrics ---");
-                                crate::log_info!(
-                                    "[Unfinished seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
-                                    seq_id,
-                                    prompt_length,
-                                    prompt_time_taken,
-                                    prompt_length as f32 / prompt_time_taken.max(0.001)
-                                );
-                                crate::log_info!(
-                                    "[Unfinished seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
-                                    seq_id,
-                                    decoded_length,
-                                    decode_time_taken,
-                                    decoded_length as f32 / decode_time_taken.max(0.001)
-                                );
+                                    as u64;
+                            }
+                            decoded_length += 1;
+
+                            // Always accumulate for context
+                            accumulated_output.push_str(&token);
+
+                            // State machine: detect tool call patterns
+                            match state {
+                                StreamState::StreamingText => {
+                                    // Check if we're entering a tool call
+                                    if mcp_injected_tools
+                                        && has_tools
+                                        && accumulated_output.contains(TOOL_CALL_START)
+                                    {
+                                        state = StreamState::CollectingToolCall;
+                                        // Extract everything after <tool_call> into buffer
+                                        if let Some(start_idx) =
+                                            accumulated_output.find(TOOL_CALL_START)
+                                        {
+                                            tool_call_buffer = accumulated_output
+                                                [start_idx + TOOL_CALL_START.len()..]
+                                                .to_string();
+                                        }
+                                        crate::log_info!("[seq_id {}] Detected tool call start, collecting arguments", current_seq_id);
+                                    }
+                                }
+                                StreamState::CollectingToolCall => {
+                                    // Accumulate into tool call buffer
+                                    tool_call_buffer.push_str(&token);
+
+                                    // Check if tool call is complete
+                                    if tool_call_buffer.contains(TOOL_CALL_END) {
+                                        crate::log_info!(
+                                            "[seq_id {}] Tool call complete, pausing for execution",
+                                            current_seq_id
+                                        );
+
+                                        // Cancel current generation immediately
+                                        {
+                                            let mut e = engine_clone.write();
+                                            e.cancel(current_seq_id);
+                                        }
+
+                                        // Parse the completed tool call
+                                        let tool_parser = ToolParser::new();
+                                        let parsed_calls = tool_parser.parse(&accumulated_output);
+
+                                        if !parsed_calls.is_empty() {
+                                            if let Some(mcp_manager) = data.mcp_manager.as_ref() {
+                                                crate::log_info!(
+                                                    "[seq_id {}] Executing {} tool call(s) via MCP",
+                                                    current_seq_id,
+                                                    parsed_calls.len()
+                                                );
+
+                                                // Execute tool calls
+                                                let exec_result = execute_mcp_tool_calls(
+                                                    &parsed_calls,
+                                                    mcp_manager,
+                                                    &current_messages,
+                                                );
+
+                                                // Update context with tool calls and results
+                                                current_messages =
+                                                    exec_result.followup_messages.clone();
+
+                                                // Build follow-up prompt
+                                                let (followup_inputs, followup_images) =
+                                                    match build_messages_and_images(
+                                                        &exec_result.followup_messages,
+                                                        img_cfg_clone.as_ref(),
+                                                    ) {
+                                                        Ok(output) => output,
+                                                        Err(e) => {
+                                                            crate::log_error!("Tool follow-up processing failed: {:?}", e);
+                                                            break 'outer;
+                                                        }
+                                                    };
+
+                                                // Resume generation with new context
+                                                let new_stream = {
+                                                    let mut e = engine_clone.write();
+                                                    match e.generate_stream(
+                                                        &params_clone,
+                                                        &followup_inputs,
+                                                        followup_images,
+                                                    ) {
+                                                        Ok((new_seq_id, _, stream)) => {
+                                                            current_seq_id = new_seq_id;
+                                                            stream
+                                                        }
+                                                        Err(e) => {
+                                                            crate::log_error!("Tool follow-up generation failed: {:?}", e);
+                                                            break 'outer;
+                                                        }
+                                                    }
+                                                };
+
+                                                // Track tokens
+                                                total_decoded_tokens += decoded_length;
+
+                                                // Reset state for new generation
+                                                state = StreamState::StreamingText;
+                                                decoded_length = 0;
+                                                decode_start_time = 0;
+                                                accumulated_output.clear();
+                                                tool_call_buffer.clear();
+                                                current_stream = new_stream;
+
+                                                crate::log_info!("[seq_id {}] Resumed streaming after tool execution", current_seq_id);
+
+                                                // Continue outer loop to process new stream
+                                                continue 'outer;
+                                            }
+                                        }
+
+                                        // If parsing failed or no MCP manager, reset state
+                                        state = StreamState::StreamingText;
+                                        tool_call_buffer.clear();
+                                    }
+                                }
                             }
 
-                            let mut e = engine_clone.write();
-                            e.cancel(seq_id);
-                            break;
+                            // Send token to client (always stream tokens, even during tool call collection)
+                            let chunk = ChatCompletionChunk {
+                                id: format!("seq-{}", current_seq_id),
+                                object: "chat.completion.chunk",
+                                created,
+                                model: model_id.to_string(),
+                                choices: vec![ChatChoiceChunk {
+                                    index: 0,
+                                    delta: Delta {
+                                        content: Some(token.clone()),
+                                    },
+                                    finish_reason: None,
+                                    error: None,
+                                }],
+                                usage: None,
+                            };
+
+                            if let Err(e) = response_tx.try_send(ChatResponse::Chunk(chunk)) {
+                                crate::log_error!(
+                                    "[seq_id {}] Stream send to client error: {:?}",
+                                    current_seq_id,
+                                    e
+                                );
+                                let mut e = engine_clone.write();
+                                e.cancel(current_seq_id);
+                                break 'outer;
+                            }
                         }
+                        StreamItem::Done((
+                            prompt_start_time,
+                            decode_start_time_done,
+                            decode_finish_time,
+                            final_decoded_length,
+                        )) => {
+                            total_decoded_tokens += final_decoded_length;
+
+                            // Send final chunk
+                            let final_chunk = ChatCompletionChunk {
+                                id: format!("seq-{}", current_seq_id),
+                                object: "chat.completion.chunk",
+                                created,
+                                model: model_id.to_string(),
+                                choices: vec![ChatChoiceChunk {
+                                    index: 0,
+                                    delta: Delta { content: None },
+                                    finish_reason: if total_decoded_tokens >= max_tokens {
+                                        Some("length".to_string())
+                                    } else {
+                                        Some("stop".to_string())
+                                    },
+                                    error: None,
+                                }],
+                                usage: Some(Usage {
+                                    prompt_tokens: prompt_length,
+                                    completion_tokens: total_decoded_tokens,
+                                    total_tokens: prompt_length + total_decoded_tokens,
+                                }),
+                            };
+
+                            let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
+
+                            // Performance metrics
+                            let prompt_time_taken =
+                                (decode_start_time_done - prompt_start_time) as f32 / 1000.0;
+                            let decode_time_taken =
+                                (decode_finish_time - decode_start_time_done) as f32 / 1000.0;
+
+                            crate::log_warn!("--- Performance Metrics ---");
+                            crate::log_info!(
+                                "[seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                                current_seq_id,
+                                prompt_length,
+                                prompt_time_taken,
+                                prompt_length as f32 / prompt_time_taken.max(0.001)
+                            );
+                            crate::log_info!(
+                                "[seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                                current_seq_id,
+                                total_decoded_tokens,
+                                decode_time_taken,
+                                total_decoded_tokens as f32 / decode_time_taken.max(0.001)
+                            );
+
+                            break 'outer;
+                        }
+                        StreamItem::Error(e) => {
+                            crate::log_error!("[seq_id {}] Stream error: {}", current_seq_id, e);
+                            let error_chunk = ChatCompletionChunk {
+                                id: format!("seq-{}", current_seq_id),
+                                object: "chat.completion.chunk",
+                                created,
+                                model: model_id.to_string(),
+                                choices: vec![ChatChoiceChunk {
+                                    index: 0,
+                                    delta: Delta { content: None },
+                                    finish_reason: None,
+                                    error: Some(vec![ErrorMsg { message: Some(e) }]),
+                                }],
+                                usage: None,
+                            };
+
+                            let _ = response_tx.try_send(ChatResponse::Chunk(error_chunk));
+                            break 'outer;
+                        }
+                        _ => {}
                     }
-                    StreamItem::Done((
-                        prompt_start_time,
-                        decode_start_time,
-                        decode_finish_time,
-                        decoded_length,
-                    )) => {
-                        let final_chunk = ChatCompletionChunk {
-                            id: format!("seq{}", seq_id),
-                            object: "chat.completion.chunk",
-                            created,
-                            model: model_id.to_string(),
-                            choices: vec![ChatChoiceChunk {
-                                index: 0,
-                                delta: Delta { content: None },
-                                finish_reason: if decoded_length >= max_tokens {
-                                    Some("length".to_string())
-                                } else {
-                                    Some("stop".to_string())
-                                },
-                                error: None,
-                            }],
-                            usage: Some(Usage {
-                                prompt_tokens: prompt_length,
-                                completion_tokens: decoded_length,
-                                total_tokens: prompt_length + decoded_length,
-                            }),
-                        };
-
-                        let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
-
-                        // Performance metrics
-                        let prompt_time_taken =
-                            (decode_start_time - prompt_start_time) as f32 / 1000.0;
-                        let decode_time_taken =
-                            (decode_finish_time - decode_start_time) as f32 / 1000.0;
-
-                        crate::log_warn!("--- Performance Metrics ---");
-                        crate::log_info!(
-                            "[seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
-                            seq_id,
-                            prompt_length,
-                            prompt_time_taken,
-                            prompt_length as f32 / prompt_time_taken.max(0.001)
-                        );
-                        crate::log_info!(
-                            "[seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
-                            seq_id,
-                            decoded_length,
-                            decode_time_taken,
-                            decoded_length as f32 / decode_time_taken.max(0.001)
-                        );
-
-                        break;
-                    }
-                    StreamItem::Error(e) => {
-                        crate::log_error!("[seq_id {}] Stream error: {}", seq_id, e);
-                        let error_chunk = ChatCompletionChunk {
-                            id: format!("seq{}", seq_id),
-                            object: "chat.completion.chunk",
-                            created,
-                            model: model_id.to_string(),
-                            choices: vec![ChatChoiceChunk {
-                                index: 0,
-                                delta: Delta { content: None },
-                                finish_reason: None,
-                                error: Some(vec![ErrorMsg { message: Some(e) }]),
-                            }],
-                            usage: None,
-                        };
-
-                        let _ = response_tx.try_send(ChatResponse::Chunk(error_chunk));
-                        break;
-                    }
-                    _ => {}
                 }
+                // Stream ended without Done signal
+                break 'outer;
             }
+
             let _ = response_tx.try_send(ChatResponse::Done);
         });
 
@@ -376,66 +559,36 @@ pub async fn chat_completion(
             if let (Some(tool_calls), Some(mcp_manager)) = (
                 &tool_calls,
                 data.mcp_manager.as_ref().filter(|_| mcp_injected_tools),
-            )
-            {
-                let mut followup_messages = chat_messages.clone();
-                followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
+            ) {
+                crate::log_info!(
+                    "Detected {} tool call(s) in completion, executing via MCP",
+                    tool_calls.len()
+                );
 
-                for call in tool_calls {
-                    let args_value: serde_json::Value =
-                        serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
-                            serde_json::json!({"raw": call.function.arguments})
-                        });
-                    let args_map = args_value
-                        .as_object()
-                        .cloned()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .collect::<HashMap<String, serde_json::Value>>();
+                // Use shared helper for tool execution
+                let exec_result = execute_mcp_tool_calls(tool_calls, mcp_manager, &chat_messages);
 
-                    let tool_result =
-                        match mcp_manager.call_tool(&call.function.name, args_map) {
-                            Ok(result) => {
-                            let content = result
-                                .content
-                                .iter()
-                                .filter_map(|c| match c {
-                                    crate::mcp::ToolContent::Text { text } => {
-                                        Some(text.clone())
-                                    }
-                                    crate::mcp::ToolContent::Resource { text, .. } => {
-                                        text.clone()
-                                    }
-                                    _ => None,
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                                ChatMessage::tool_result(call.id.clone(), content)
-                            }
-                            Err(err) => ChatMessage::tool_result(
-                                call.id.clone(),
-                                format!("Tool execution failed: {err}"),
-                            ),
-                        };
-                    followup_messages.push(tool_result);
-                }
-
-                let (followup_inputs, followup_images) =
-                    match build_messages_and_images(&followup_messages, img_cfg.as_ref()) {
-                        Ok(output) => output,
-                        Err(e) => {
-                            crate::log_error!("Tool follow-up processing failed: {:?}", e);
-                            return ChatResponder::InternalError(format!(
-                                "Internal server error {:?}",
-                                e
-                            ));
-                        }
-                    };
+                let (followup_inputs, followup_images) = match build_messages_and_images(
+                    &exec_result.followup_messages,
+                    img_cfg.as_ref(),
+                ) {
+                    Ok(output) => output,
+                    Err(e) => {
+                        crate::log_error!("Tool follow-up processing failed: {:?}", e);
+                        return ChatResponder::InternalError(format!(
+                            "Internal server error {:?}",
+                            e
+                        ));
+                    }
+                };
 
                 let (receivers, tokenizer) = {
                     let mut e = data.engine.write();
-                    match e.generate_sync(&vec![params.clone()], &vec![followup_inputs], followup_images)
-                    {
+                    match e.generate_sync(
+                        &vec![params.clone()],
+                        &vec![followup_inputs],
+                        followup_images,
+                    ) {
                         Ok(receivers) => (receivers, Arc::new(e.tokenizer.clone())),
                         Err(e) => {
                             crate::log_error!("Tool follow-up generation failed: {:?}", e);
@@ -451,7 +604,10 @@ pub async fn chat_completion(
                     Ok(outputs) => outputs,
                     Err(e) => {
                         crate::log_error!("Failed to collect tool follow-up results: {:?}", e);
-                        return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+                        return ChatResponder::InternalError(format!(
+                            "Internal server error {:?}",
+                            e
+                        ));
                     }
                 };
 
@@ -463,10 +619,12 @@ pub async fn chat_completion(
                     total_prompt_tokens += followup_metrics.prompt_length;
                     total_decoded_tokens += followup_metrics.decoded_length;
                     let prompt_time_taken = (followup_metrics.decode_start_time
-                        - followup_metrics.prompt_start_time) as f32
+                        - followup_metrics.prompt_start_time)
+                        as f32
                         / 1000.0;
                     let decode_time_taken = (followup_metrics.decode_finish_time
-                        - followup_metrics.decode_start_time) as f32
+                        - followup_metrics.decode_start_time)
+                        as f32
                         / 1000.0;
                     total_prompt_time_taken += prompt_time_taken;
                     total_decoded_time_taken += decode_time_taken;
@@ -627,7 +785,10 @@ mod tests {
         let tool_choice = ToolChoice::function("get_weather");
         let schema = tool_choice_schema(&Some(tool_choice)).unwrap();
         assert_eq!(schema["properties"]["name"]["const"], "get_weather");
-        assert!(schema["required"].as_array().unwrap().contains(&"name".into()));
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&"name".into()));
     }
 }
 
