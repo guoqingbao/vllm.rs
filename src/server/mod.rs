@@ -333,7 +333,7 @@ pub struct UsageResponse {
 pub struct ServerData {
     pub engine: Arc<RwLock<LLMEngine>>,
     pub econfig: EngineConfig,
-    pub mcp_manager: Option<crate::mcp::McpClientManager>,
+    pub mcp_manager: Option<Arc<crate::mcp::McpClientManager>>,
 }
 
 trait ErrorToResponse: Serialize {
@@ -517,23 +517,27 @@ pub struct Args {
 
 /// Result of executing tool calls via MCP
 #[allow(dead_code)]
-struct ToolExecutionResult {
+pub struct ToolExecutionResult {
     /// Messages to add for follow-up (assistant tool_calls + tool results)
     followup_messages: Vec<ChatMessage>,
     /// The tool calls that were executed
     tool_calls: Vec<crate::tools::ToolCall>,
 }
 
-/// Execute tool calls via MCP manager and return messages for follow-up generation
-fn execute_mcp_tool_calls(
-    tool_calls: &[crate::tools::ToolCall],
-    mcp_manager: &crate::mcp::McpClientManager,
-    base_messages: &[ChatMessage],
-) -> ToolExecutionResult {
-    let mut followup_messages = base_messages.to_vec();
-    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.to_vec()));
+/// Default timeout for individual tool calls (60 seconds)
+const TOOL_CALL_TIMEOUT_SECS: u64 = 60;
 
-    for call in tool_calls {
+/// Execute tool calls via MCP manager and return messages for follow-up generation
+/// Each tool call has a timeout of TOOL_CALL_TIMEOUT_SECS seconds
+pub async fn execute_mcp_tool_calls_async(
+    tool_calls: Vec<crate::tools::ToolCall>,
+    mcp_manager: std::sync::Arc<crate::mcp::McpClientManager>,
+    base_messages: Vec<ChatMessage>,
+) -> ToolExecutionResult {
+    let mut followup_messages = base_messages.clone();
+    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
+
+    for call in &tool_calls {
         let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
             .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
         let args_map = args_value
@@ -543,8 +547,33 @@ fn execute_mcp_tool_calls(
             .into_iter()
             .collect::<HashMap<String, serde_json::Value>>();
 
-        let tool_result = match mcp_manager.call_tool(&call.function.name, args_map) {
-            Ok(result) => {
+        let call_name = call.function.name.clone();
+        let call_id = call.id.clone();
+        let mcp_manager_clone = mcp_manager.clone();
+        crate::log_info!(
+            "Executing tool call: {} with args {:?}",
+            call_name,
+            args_map
+        );
+
+        let start = std::time::Instant::now();
+
+        // Execute tool call with timeout using spawn_blocking
+        let timeout_duration = std::time::Duration::from_secs(TOOL_CALL_TIMEOUT_SECS);
+        let tool_result = match tokio::time::timeout(
+            timeout_duration,
+            tokio::task::spawn_blocking(move || mcp_manager_clone.call_tool(&call_name, args_map)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(result))) => {
+                // Success: spawn_blocking succeeded, call_tool succeeded
+                let elapsed = start.elapsed();
+                crate::log_info!(
+                    "Tool '{}' completed in {:.2}s",
+                    call.function.name,
+                    elapsed.as_secs_f32()
+                );
                 let content = result
                     .content
                     .iter()
@@ -555,10 +584,39 @@ fn execute_mcp_tool_calls(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                ChatMessage::tool_result(call.id.clone(), content)
+                ChatMessage::tool_result(call_id, content)
             }
-            Err(err) => {
-                ChatMessage::tool_result(call.id.clone(), format!("Tool execution failed: {err}"))
+            Ok(Ok(Err(err))) => {
+                // Tool execution failed
+                let elapsed = start.elapsed();
+                crate::log_error!(
+                    "Tool '{}' failed after {:.2}s: {:?}",
+                    call.function.name,
+                    elapsed.as_secs_f32(),
+                    err
+                );
+                ChatMessage::tool_result(call_id, format!("Tool execution failed: {err}"))
+            }
+            Ok(Err(join_err)) => {
+                // spawn_blocking panicked
+                crate::log_error!(
+                    "Tool '{}' task panicked: {:?}",
+                    call.function.name,
+                    join_err
+                );
+                ChatMessage::tool_result(call_id, format!("Tool execution panicked: {join_err}"))
+            }
+            Err(_timeout_err) => {
+                // Timeout occurred
+                crate::log_error!(
+                    "Tool '{}' timed out after {}s",
+                    call.function.name,
+                    TOOL_CALL_TIMEOUT_SECS
+                );
+                ChatMessage::tool_result(
+                    call_id,
+                    format!("Tool execution timed out after {}s", TOOL_CALL_TIMEOUT_SECS),
+                )
             }
         };
         followup_messages.push(tool_result);
@@ -566,7 +624,7 @@ fn execute_mcp_tool_calls(
 
     ToolExecutionResult {
         followup_messages,
-        tool_calls: tool_calls.to_vec(),
+        tool_calls,
     }
 }
 
@@ -747,7 +805,7 @@ pub async fn run_server(
 
     let mcp_manager = if let Some(cfg) = mcp_manager_config {
         match crate::mcp::McpClientManager::new(cfg) {
-            Ok(manager) => Some(manager),
+            Ok(manager) => Some(Arc::new(manager)),
             Err(err) => {
                 crate::log_error!("Failed to start MCP client manager: {:?}", err);
                 None

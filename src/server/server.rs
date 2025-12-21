@@ -6,7 +6,7 @@ use super::{
     EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
 };
 use super::{
-    execute_mcp_tool_calls, ChatChoice, ChatChoiceChunk, ChatCompletionChunk,
+    execute_mcp_tool_calls_async, ChatChoice, ChatChoiceChunk, ChatCompletionChunk,
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta,
     EmbeddingData, EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery,
     UsageResponse,
@@ -176,7 +176,7 @@ pub async fn chat_completion(
             let mut decoded_length = 0usize;
             let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
-            
+
             // Track if we're inside a tool call (for MCP mode token buffering)
             let mut in_tool_call = false;
             // Check if MCP mode is enabled (internal tool execution)
@@ -202,7 +202,7 @@ pub async fn chat_completion(
 
                             // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
-                            
+
                             // In MCP mode, detect tool call start and buffer tokens
                             if is_mcp_mode {
                                 // Check if we're entering a tool call
@@ -211,7 +211,7 @@ pub async fn chat_completion(
                                     // Don't send tool call content to client
                                     continue;
                                 }
-                                
+
                                 // If we're inside a tool call, don't send to client
                                 if in_tool_call {
                                     continue;
@@ -260,7 +260,7 @@ pub async fn chat_completion(
                             );
 
                             total_decoded_tokens += pause_decoded_length;
-                            
+
                             // Reset in_tool_call state
                             in_tool_call = false;
 
@@ -270,18 +270,30 @@ pub async fn chat_completion(
 
                             if !parsed_calls.is_empty() {
                                 if let Some(mcp_manager) = data.mcp_manager.as_ref() {
+                                    // Check if client is still connected before executing tools
+                                    if response_tx.is_disconnected() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Client disconnected, aborting tool execution",
+                                            current_seq_id
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        break 'outer;
+                                    }
+
                                     crate::log_info!(
-                                        "[Seq {}] Executing {} tool call(s) via MCP",
+                                        "[Seq {}] Executing {} tool call(s) via MCP (with 60s timeout)",
                                         current_seq_id,
                                         parsed_calls.len()
                                     );
 
-                                    // Execute tool calls
-                                    let exec_result = execute_mcp_tool_calls(
-                                        &parsed_calls,
-                                        mcp_manager,
-                                        &current_messages,
-                                    );
+                                    // Execute tool calls with timeout using async version
+                                    let exec_result = execute_mcp_tool_calls_async(
+                                        parsed_calls.clone(),
+                                        mcp_manager.clone(),
+                                        current_messages.clone(),
+                                    )
+                                    .await;
 
                                     // Update context with tool calls and results
                                     current_messages = exec_result.followup_messages.clone();
@@ -386,19 +398,35 @@ pub async fn chat_completion(
                             let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
 
                             // Performance metrics
-                            let prompt_time_taken =
-                                (decode_start_time_done - prompt_start_time) as f32 / 1000.0;
-                            let decode_time_taken =
-                                (decode_finish_time - decode_start_time_done) as f32 / 1000.0;
+                            // Note: For resumed generation with cached context, timing may be unusual
+                            // Use saturating_sub to prevent underflow
+                            let prompt_time_taken = if decode_start_time_done > prompt_start_time {
+                                (decode_start_time_done - prompt_start_time) as f32 / 1000.0
+                            } else {
+                                0.0 // Cached context, no real prompt time
+                            };
+                            let decode_time_taken = if decode_finish_time > decode_start_time_done {
+                                (decode_finish_time - decode_start_time_done) as f32 / 1000.0
+                            } else {
+                                0.0
+                            };
 
                             crate::log_warn!("--- Performance Metrics ---");
-                            crate::log_info!(
-                                "[Seq {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
-                                current_seq_id,
-                                prompt_length,
-                                prompt_time_taken,
-                                prompt_length as f32 / prompt_time_taken.max(0.001)
-                            );
+                            if prompt_time_taken > 0.0 {
+                                crate::log_info!(
+                                    "[Seq {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                                    current_seq_id,
+                                    prompt_length,
+                                    prompt_time_taken,
+                                    prompt_length as f32 / prompt_time_taken.max(0.001)
+                                );
+                            } else {
+                                crate::log_info!(
+                                    "[Seq {}] ⏱️ Prompt tokens: {} (cached context)",
+                                    current_seq_id,
+                                    prompt_length
+                                );
+                            }
                             crate::log_info!(
                                 "[Seq {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
                                 current_seq_id,
@@ -515,12 +543,17 @@ pub async fn chat_completion(
                 data.mcp_manager.as_ref().filter(|_| mcp_injected_tools),
             ) {
                 crate::log_info!(
-                    "Detected {} tool call(s) in completion, executing via MCP",
+                    "Detected {} tool call(s) in completion, executing via MCP (with 60s timeout)",
                     tool_calls.len()
                 );
 
-                // Use shared helper for tool execution
-                let exec_result = execute_mcp_tool_calls(tool_calls, mcp_manager, &chat_messages);
+                // Use async helper for tool execution with timeout
+                let exec_result = execute_mcp_tool_calls_async(
+                    tool_calls.clone(),
+                    mcp_manager.clone(),
+                    chat_messages.clone(),
+                )
+                .await;
 
                 let (followup_inputs, followup_images) = match build_messages_and_images(
                     &exec_result.followup_messages,

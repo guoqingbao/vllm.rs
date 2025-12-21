@@ -50,7 +50,7 @@ When MCP servers are configured and you **don't** provide `tools` in your reques
 ```python
 # No tools provided + MCP configured → Internal execution
 response = client.chat.completions.create(
-    model="Qwen/Qwen3-0.6B",
+    model="default",
     messages=[{"role": "user", "content": "Read the README.md file"}],
     stream=True
     # No 'tools' parameter → MCP tools are auto-injected
@@ -180,13 +180,15 @@ if choice["message"].get("tool_calls"):
 
 ## MCP Configuration
 
-### Single Server (CLI)
+### Single MCP Server (CLI)
 
 ```bash
-vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0
+cargo run --release --features metal -- --w /path/Qwen3-8B-Q2_K.gguf --ui-server --context-cache \
+  --mcp-command /path/to/mcp-server \
+  --mcp-args=--arg1,arg2
 ```
 
-### Multiple Servers (Config File)
+### Multiple MCP Servers (Config File)
 
 Create `mcp.json`:
 
@@ -208,10 +210,11 @@ Create `mcp.json`:
 }
 ```
 
-Start the server:
+Start the server with MCP config (it starts api server, ui server and mcp servers):
 
 ```bash
-vllm-rs --server --mcp-config ./mcp.json
+./run.sh --release --features cuda --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
+  --mcp-config ./mcp.json
 ```
 
 ### Configuration Options
