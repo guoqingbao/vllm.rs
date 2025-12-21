@@ -6,7 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
-use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
+use vllm_rs::core::{engine::LLMEngine, GenerationOutput, SyncCollectionResult};
 use vllm_rs::log_error;
 use vllm_rs::server::run_server;
 use vllm_rs::server::Args;
@@ -175,6 +175,9 @@ async fn main() -> Result<()> {
         args.cpu_mem_fold,
         args.kv_fraction,
         pd_config,
+        args.mcp_command.clone(),
+        args.mcp_config.clone(),
+        args.mcp_args.clone(),
         Some(args.no_flash_attn),
     );
 
@@ -343,6 +346,15 @@ async fn main() -> Result<()> {
                                     break;
                                 }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
+                                StreamItem::ToolCallPause { .. } => {
+                                    // Tool call pause in CLI mode - treat as completion
+                                    // (tool execution requires server mode with MCP)
+                                    eprintln!(
+                                        "{}",
+                                        String::from("\r\nTool call detected (execution not supported in CLI mode)").yellow()
+                                    );
+                                    break;
+                                }
                             }
                         }
                         (tickets.0, tickets.1, tickets.2, tickets.3, decode_output)
@@ -382,7 +394,20 @@ async fn main() -> Result<()> {
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
-                LLMEngine::collect_sync_results(receivers, tokenizer).await?
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer).await?;
+                // Extract GenerationOutput from SyncCollectionResult
+                results
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        SyncCollectionResult::Completed(output) => Some(output),
+                        SyncCollectionResult::ToolCallPause { .. } => {
+                            tracing::warn!(
+                                "Tool call detected but CLI mode does not support MCP tool calling"
+                            );
+                            None
+                        }
+                    })
+                    .collect()
             }
         };
 

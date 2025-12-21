@@ -188,6 +188,9 @@ pub struct EngineConfig {
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
+    pub mcp_command: Option<String>,
+    pub mcp_config: Option<String>,
+    pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -242,6 +245,12 @@ pub struct EngineConfig {
     pub server_mode: Option<bool>,
     #[pyo3(get, set)]
     pub pd_config: Option<PdConfig>,
+    #[pyo3(get, set)]
+    pub mcp_command: Option<String>,
+    #[pyo3(get, set)]
+    pub mcp_config: Option<String>,
+    #[pyo3(get, set)]
+    pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -268,6 +277,9 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        mcp_command: Option<String>,
+        mcp_config: Option<String>,
+        mcp_args: Option<Vec<String>>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -307,6 +319,9 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            mcp_command,
+            mcp_config,
+            mcp_args,
             disable_flash_attn,
         }
     }
@@ -333,6 +348,13 @@ pub struct SamplingParams {
     pub session_id: Option<String>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    pub guided_json_schema: Option<serde_json::Value>,
+    /// Tool mode for streaming tool call handling:
+    /// - None: No tools, ignore </tool_call> detection
+    /// - Some(false): External tools, finish stream at </tool_call>
+    /// - Some(true): MCP internal, pause stream, execute, resume
+    #[serde(default)]
+    pub mcp_mode: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -355,6 +377,15 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub presence_penalty: Option<f32>,
+    #[pyo3(get, set)]
+    pub guided_json_schema: Option<serde_json::Value>,
+    /// Tool mode for streaming tool call handling:
+    /// - None: No tools, ignore </tool_call> detection
+    /// - Some(false): External tools, finish stream at </tool_call>
+    /// - Some(true): MCP internal, pause stream, execute, resume
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub mcp_mode: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -378,6 +409,8 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
+            guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 
@@ -391,6 +424,8 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 }
@@ -406,6 +441,8 @@ impl Default for SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 }

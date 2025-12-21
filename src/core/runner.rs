@@ -7,6 +7,7 @@ use crate::transfer::Transfer;
 use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::guidance::GuidanceState;
 use crate::utils::logits_processor::LogitsProcessor;
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -27,6 +28,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use toktrie::TokTrie;
 const MAX_PARALLEL_SAMPLING: usize = 32;
 
 pub enum Seqs<'a> {
@@ -66,6 +68,9 @@ pub struct ModelRunner {
     logit_processor: LogitsProcessor,
     sampling_params: RwLock<SamplingParams>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
+    guidance_states: RwLock<HashMap<usize, GuidanceState>>,
+    toktrie: Option<Arc<TokTrie>>,
+    eos_token_id: Option<u32>,
     transfer: Option<Arc<Transfer>>,
 }
 
@@ -82,6 +87,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
+        toktrie: Option<Arc<TokTrie>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -154,6 +160,12 @@ impl ModelRunner {
             (None, None, None)
         };
 
+        let eos_token_id = match &config.eos_token_id {
+            Some(crate::utils::config::EosTokenId::Single(eos)) => Some(*eos),
+            Some(crate::utils::config::EosTokenId::Multiple(eos)) => eos.first().copied(),
+            None => None,
+        };
+
         let seed = if econfig.seed.is_none() {
             rand::random::<u64>()
         } else {
@@ -176,6 +188,9 @@ impl ModelRunner {
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             sampling_params: RwLock::new(SamplingParams::default()),
             seq_tokens: RwLock::new(HashMap::new()),
+            guidance_states: RwLock::new(HashMap::new()),
+            toktrie,
+            eos_token_id,
             transfer,
         })
     }
@@ -658,9 +673,9 @@ impl ModelRunner {
     }
 
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        let seq_ids: Vec<usize> = match seqs {
-            Seqs::SeqRefs(seqs) => seqs.into_iter().map(|s| s.id()).collect(),
-            Seqs::DecodeVec(v) => v.into_iter().map(|s| s.id()).collect(),
+        let seq_ids: Vec<usize> = match &seqs {
+            Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.id()).collect(),
+            Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
 
         let logits = if let Some(cfg) = &self.config.generation_cfg {
@@ -696,7 +711,89 @@ impl ModelRunner {
             logits.to_owned()
         };
 
-        let tokens = match seqs {
+        let logits = if let Some(toktrie) = &self.toktrie {
+            let mut guidance_masks = Vec::new();
+            match &seqs {
+                Seqs::SeqRefs(seqs) => {
+                    for seq in (*seqs).iter().copied() {
+                        let schema = seq.sampling_params.guided_json_schema.clone();
+                        if let Some(schema) = schema {
+                            let mut states = self.guidance_states.write();
+                            let entry = states.entry(seq.id()).or_insert_with(|| {
+                                GuidanceState::new(toktrie.clone(), schema)
+                                    .expect("Failed to init guidance state")
+                            });
+                            let allowed = entry
+                                .compute_allowed_tokens()
+                                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                            guidance_masks.push(Some(allowed));
+                        } else {
+                            guidance_masks.push(None);
+                        }
+                    }
+                }
+                Seqs::DecodeVec(v) => {
+                    let sampling_params = self.sampling_params.read();
+                    for seq in v.iter() {
+                        let schema = sampling_params.guided_json_schema.clone();
+                        if let Some(schema) = schema {
+                            let mut states = self.guidance_states.write();
+                            let entry = states.entry(seq.id()).or_insert_with(|| {
+                                GuidanceState::new(toktrie.clone(), schema)
+                                    .expect("Failed to init guidance state")
+                            });
+                            let allowed = entry
+                                .compute_allowed_tokens()
+                                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                            guidance_masks.push(Some(allowed));
+                        } else {
+                            guidance_masks.push(None);
+                        }
+                    }
+                }
+            }
+
+            if guidance_masks.iter().any(|m| m.is_some()) {
+                let device = logits.device();
+                let logits_len = logits.layout().dims()[1];
+                let mut logits_vec = logits.to_vec2::<f32>()?;
+
+                for (row, mask) in logits_vec.iter_mut().zip(guidance_masks.iter()) {
+                    if let Some(mask) = mask {
+                        let mut allowed = vec![false; logits_len];
+                        for token in &mask.tokens {
+                            let idx = *token as usize;
+                            if idx < logits_len {
+                                allowed[idx] = true;
+                            }
+                        }
+                        if mask.is_stopped && allowed.iter().all(|v| !*v) {
+                            if let Some(eos) = self.eos_token_id {
+                                let idx = eos as usize;
+                                if idx < logits_len {
+                                    allowed[idx] = true;
+                                }
+                            }
+                        }
+
+                        for (idx, logit) in row.iter_mut().enumerate() {
+                            if !allowed[idx] {
+                                *logit = f32::NEG_INFINITY;
+                            }
+                        }
+                    }
+                }
+
+                let flat = logits_vec.into_iter().flatten().collect::<Vec<_>>();
+                Tensor::from_vec(flat, (seq_ids.len(), logits_len), device)?
+            } else {
+                logits
+            }
+        } else {
+            logits
+        };
+
+        let tokens = match &seqs {
             Seqs::SeqRefs(seqs) => {
                 if is_prefill {
                     *self.sampling_params.write() = seqs[0].sampling_params.clone();
@@ -719,6 +816,40 @@ impl ModelRunner {
             }
         };
 
+        if let Some(toktrie) = &self.toktrie {
+            match &seqs {
+                Seqs::SeqRefs(seqs) => {
+                    let mut states = self.guidance_states.write();
+                    for (seq, token) in (*seqs).iter().copied().zip(tokens.iter()) {
+                        if seq.sampling_params.guided_json_schema.is_some() {
+                            if let Some(state) = states.get_mut(&seq.id()) {
+                                state
+                                    .commit_token(*token)
+                                    .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                            }
+                        }
+                    }
+                }
+                Seqs::DecodeVec(v) => {
+                    let sampling_params = self.sampling_params.read();
+                    if let Some(schema) = sampling_params.guided_json_schema.clone() {
+                        let mut states = self.guidance_states.write();
+                        for (seq, token) in v.iter().zip(tokens.iter()) {
+                            if let Some(state) = states.get_mut(&seq.id()) {
+                                state
+                                    .commit_token(*token)
+                                    .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                            } else {
+                                let state = GuidanceState::new(toktrie.clone(), schema.clone())
+                                    .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                                states.insert(seq.id(), state);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(cfg) = &self.config.generation_cfg {
             if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
                 let mut seq_tokens = self.seq_tokens.write();
@@ -740,6 +871,8 @@ impl ModelRunner {
     pub fn finished(&self, id: usize) {
         let mut seq_tokens = self.seq_tokens.write();
         let _ = seq_tokens.remove(&id);
+        let mut guidance_states = self.guidance_states.write();
+        let _ = guidance_states.remove(&id);
     }
 
     pub fn get_model_vocab_size(&self) -> usize {
