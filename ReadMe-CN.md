@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="./ReadMe.md">English</a> |
-  <a href="./ReadMe-CN.md">简体中文</a> |
+  <a href="./ReadMe-CN.md">简体中文</a>
 </p>
 
 ## ✨ 主要特性
@@ -16,10 +16,15 @@
 * 🧠 **极简核心** – 核心逻辑仅 **<3000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置API 服务与ChatGPT风格网页** – Rust 原生实现的聊天与 API/Web 服务
+* 🔌 **MCP集成** – Model Context Protocol 工具调用支持
+* 📊 **Embedding与分词器API** – 完整的文本处理支持
 * 🐍 **轻量 Python 接口** – 使用 PyO3 构建的 Python 聊天接口
 * 🤝 **欢迎贡献** – 欢迎提交 PR、问题或给项目点亮 ⭐！
 
 ---
+
+## 📈 性能
+
 ### 💬 对话性能
 
 > **A100** (单卡, 40G)
@@ -35,11 +40,6 @@
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
-   > 模型: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
-   > 并发请求数: 1 - 128；
-   > Max Model Length: 512 - 2048；
-   > 每个请求最大输出: 512 - 2048；
-
    | 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
    |------------------|--------|--------|---------|-------------|
    | Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
@@ -48,22 +48,7 @@
    | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
    | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
-### 性能对比
-
-> 模型: Qwen3-0.6B (BF16)；
-> 并发请求数: 256；
-> Max Model Length: 1024；
-> 每个请求最大输出: 1024
-
-| 推理引擎 | Tokens | 耗时 (s) | 吞吐率 (tokens/s) |
-|------------------|---------------|----------|------------------------|
-| vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
-| Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
-| **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**提升40%+**)               |
-| Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
-
-<a href="python/ReadMe.md">复现步骤</a>
-
+查看 [**完整性能测试 →**](docs/performance.md)
 
 ## 🧠 支持的模型架构
 
@@ -81,14 +66,14 @@
 
 ---
 ## 📚 文档
-- [Get Started](docs/get_started.md)
+- [快速开始](docs/get_started.md)
+- [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [Embedding](docs/embeddings.md)
-- [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
-- [Context cache](docs/context-cache.md)
-- [Rust crate](docs/rust_crate.md)
+- [多模态 (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
+- [上下文缓存](docs/context-cache.md)
+- [Rust库](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
-- [Tool calling](docs/tool_calling.md)
-- [MCP](docs/mcp.md)
+- [性能测试](docs/performance.md)
 
 
 ## 📘 使用方法（Python）
@@ -297,6 +282,24 @@ python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --ui-serve
    ```
   </details>
 
+---
+
+## 🔌 MCP集成 (工具调用)
+
+通过Model Context Protocol让LLM调用外部工具。查看 [**MCP文档 →**](docs/mcp_tool_calling.md)
+
+```bash
+# 启动时配置MCP文件系统服务器
+cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache \
+  --mcp-command npx \
+  --mcp-args=-y,@modelcontextprotocol/server-filesystem,~/
+
+# 或使用配置文件配置多个MCP服务器
+./run.sh --release --features cuda --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
+  --mcp-config ./mcp.json
+```
+
+---
 
 ## 🔀 Prefill-decode 分离（PD分离）
 
@@ -399,31 +402,40 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 
 ### ⚙️ 命令行参数说明
 
-| 参数          | 描述                                     |       |
-| ----------- | -------------------------------------- | ----- |
-| `--m`       | Hugginface模型ID (用于下载)               |    |
-| `--w`       | Safetensor模型路径           |       |
-| `--f`       | 当指定Model ID时为GGUF文件名，或未指定时为GGUF本地文件路径                 |    |
-| `--d`       | 设备 ID，例如 `--d 0`                       |       |
-| `--max-num-seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |       |
-| `--max-tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |       |
-| `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |    |
+| 参数          | 描述                                     |
+| ----------- | -------------------------------------- |
+| `--m`       | Hugginface模型ID (用于下载)               |
+| `--w`       | Safetensor模型路径           |
+| `--f`       | 当指定Model ID时为GGUF文件名，或未指定时为GGUF本地文件路径                 |
+| `--d`       | 设备 ID，例如 `--d 0`                       |
+| `--max-num-seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |
+| `--max-tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |
+| `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |
 | `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
-| `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |       |
-| `--isq`   | 将未量化模型加载为GGUF量化模型，可选`q2k`, `q4k`  等   |       |
-| `--temperature`   | 采样温度 (sampling temperature)，控制输出“随机性/创造性”的一个超参数，介于0-1之间  |       |
-| `--top-k`   | top-k 控制模型在每一步只从前 k 个最高概率的词里挑选，k 越小 → 越稳定；k 越大 → 越随机   |       |
-| `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |       |
-| `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 | |
-| `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 | |
-| `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |    |
-| `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.5，取值0.1 - 10.0)              |    |
-| `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |    |
-| `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|    |
-| `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |    |
-| `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |    |
-| `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |    |
+| `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |
+| `--isq`   | 将未量化模型加载为GGUF量化模型，可选`q2k`, `q4k`  等   |
+| `--temperature`   | 采样温度 (sampling temperature)，控制输出"随机性/创造性"的一个超参数，介于0-1之间  |
+| `--top-k`   | top-k 控制模型在每一步只从前 k 个最高概率的词里挑选，k 越小 → 越稳定；k 越大 → 越随机   |
+| `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |
+| `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 |
+| `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 |
+| `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |
+| `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |
+| `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.5，取值0.1 - 10.0)              |
+| `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |
+| `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|
+| `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |
+| `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |
+| `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
+| `--context-cache`   | 启用上下文缓存，用于多轮对话 |
+
+### MCP配置参数
+
+| 参数 | 描述 |
+|------|------|
+| `--mcp-command` | 单个MCP服务器可执行文件路径 |
+| `--mcp-args` | MCP服务器参数（逗号分隔） |
+| `--mcp-config` | 多个MCP服务器的JSON配置文件路径 |
 
 ## 📌 项目状态
 
@@ -452,6 +464,9 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
 * [x] 内置 ChatGPT风格 Web 网页服务
+* [x] **Embedding API**
+* [x] **Tokenize/Detokenize API**
+* [x] **MCP集成与工具调用**
 
 ## 📚 参考项目
 
