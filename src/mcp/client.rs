@@ -210,6 +210,9 @@ pub enum McpClientError {
     #[error("Server error: {0}")]
     ServerError(JsonRpcError),
 
+    #[error("Configuration error: {0}")]
+    Config(String),
+
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 

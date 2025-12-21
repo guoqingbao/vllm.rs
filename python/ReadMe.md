@@ -76,3 +76,26 @@ response = openai.chat.completions.create(
 )
 
 ```
+
+### 🧰 MCP Multi-Server Demo (Python Client)
+
+Start vLLM.rs with an MCP config file:
+
+```shell
+vllm-rs --server --mcp-config ./mcp.json
+```
+
+Then call a prefixed MCP tool from Python:
+
+```python
+import openai
+
+openai.api_key = "EMPTY"
+openai.base_url = "http://localhost:8000/v1/"
+
+response = openai.chat.completions.create(
+   model="",
+   messages=[{"role": "user", "content": "Use filesystem_read_file to read README.md"}],
+)
+print(response.choices[0].message)
+```

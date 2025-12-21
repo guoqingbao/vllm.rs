@@ -107,9 +107,17 @@ If you start the server with an MCP client manager, tool calls are executed auto
 vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0
 ```
 
+To use multiple MCP servers, provide a config file:
+
+```bash
+vllm-rs --server --mcp-config ./mcp.json
+```
+
 When MCP is enabled:
 - The cached MCP tool list is injected into the system prompt when no `tools` are provided.
 - Tool calls are routed to `tools/call`, and the tool results are fed back into the model for a follow-up completion.
+
+When multiple MCP servers are configured, tool names are prefixed with the server ID (e.g. `filesystem_read_file`).
 
 ## Guided Decoding
 

@@ -259,7 +259,9 @@ impl EngineConfig {
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None, disable_flash_attn=None))]
+        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
+        mcp_command=None, mcp_config=None, mcp_args=None, mcp_tool_refresh_seconds=None,
+        disable_flash_attn=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -281,6 +283,10 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        mcp_command: Option<String>,
+        mcp_config: Option<String>,
+        mcp_args: Option<Vec<String>>,
+        mcp_tool_refresh_seconds: Option<u64>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -322,6 +328,10 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            mcp_command,
+            mcp_config,
+            mcp_args,
+            mcp_tool_refresh_seconds,
             disable_flash_attn,
         }
     }

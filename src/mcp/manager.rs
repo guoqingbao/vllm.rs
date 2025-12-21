@@ -6,8 +6,10 @@
 use super::client::{McpClient, McpClientError};
 use super::transport::StdioTransport;
 use crate::tools::Tool;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -27,6 +29,76 @@ impl McpToolConfig {
             args,
             tool_refresh_interval: Duration::from_secs(30),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpConfigFile {
+    #[serde(rename = "mcpServers")]
+    pub mcp_servers: HashMap<String, McpServerConfigFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerConfigFile {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerDefinition {
+    pub id: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpManagerConfig {
+    pub servers: Vec<McpServerDefinition>,
+    pub tool_refresh_interval: Duration,
+}
+
+impl McpManagerConfig {
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, McpClientError> {
+        let contents = std::fs::read_to_string(path.as_ref()).map_err(|err| {
+            McpClientError::Config(format!("Failed to read MCP config: {err}"))
+        })?;
+        let config: McpConfigFile =
+            serde_json::from_str(&contents).map_err(McpClientError::Serialization)?;
+        let servers = config
+            .mcp_servers
+            .into_iter()
+            .map(|(id, server)| McpServerDefinition {
+                id,
+                command: server.command,
+                args: server.args,
+                env: server.env,
+            })
+            .collect();
+        Ok(Self {
+            servers,
+            tool_refresh_interval: Duration::from_secs(30),
+        })
+    }
+
+    pub fn from_single(config: McpToolConfig) -> Self {
+        Self {
+            servers: vec![McpServerDefinition {
+                id: "default".to_string(),
+                command: config.command,
+                args: config.args,
+                env: HashMap::new(),
+            }],
+            tool_refresh_interval: config.tool_refresh_interval,
+        }
+    }
+
+    pub fn with_refresh_interval(mut self, interval: Duration) -> Self {
+        self.tool_refresh_interval = interval;
+        self
     }
 }
 
@@ -56,24 +128,79 @@ impl ToolCache {
 #[derive(Debug)]
 pub struct McpClientManager {
     tool_cache: Arc<RwLock<ToolCache>>,
+    routing_table: Arc<RwLock<HashMap<String, ToolRouting>>>,
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<McpClient<StdioTransport>>>>>>,
     available: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
 }
 
 impl McpClientManager {
-    pub fn new(config: McpToolConfig) -> Result<Self, McpClientError> {
+    pub fn new(config: McpManagerConfig) -> Result<Self, McpClientError> {
+        if config.servers.is_empty() {
+            return Err(McpClientError::Config(
+                "MCP manager requires at least one server".to_string(),
+            ));
+        }
+
         let tool_cache = Arc::new(RwLock::new(ToolCache::new()));
+        let routing_table = Arc::new(RwLock::new(HashMap::new()));
+        let clients = Arc::new(RwLock::new(HashMap::new()));
         let available = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::new(AtomicBool::new(false));
 
+        let mut any_client = false;
+        for server in &config.servers {
+            let args: Vec<&str> = server.args.iter().map(|s| s.as_str()).collect();
+            match StdioTransport::spawn_with_env(&server.command, &args, &server.env) {
+                Ok(transport) => {
+                    let mut client = McpClient::new(transport, "vllm-rs", "0.6.0");
+                    if let Err(err) = client.initialize() {
+                        crate::log_error!(
+                            "Failed to initialize MCP server {}: {:?}",
+                            server.id,
+                            err
+                        );
+                        continue;
+                    }
+                    clients
+                        .write()
+                        .insert(server.id.clone(), Arc::new(Mutex::new(client)));
+                    any_client = true;
+                }
+                Err(err) => {
+                    crate::log_error!(
+                        "Failed to spawn MCP server {}: {:?}",
+                        server.id,
+                        err
+                    );
+                }
+            }
+        }
+
+        if !any_client {
+            return Err(McpClientError::Config(
+                "Failed to initialize any MCP servers".to_string(),
+            ));
+        }
+
         let cache_clone = Arc::clone(&tool_cache);
+        let routing_clone = Arc::clone(&routing_table);
+        let clients_clone = Arc::clone(&clients);
         let available_clone = Arc::clone(&available);
         let stop_clone = Arc::clone(&stop_flag);
+        let refresh_interval = config.tool_refresh_interval;
 
         thread::Builder::new()
             .name("mcp-client-manager".to_string())
             .spawn(move || {
-                if let Err(err) = run_manager_loop(config, cache_clone, available_clone, stop_clone)
+                if let Err(err) = run_manager_loop(
+                    refresh_interval,
+                    cache_clone,
+                    routing_clone,
+                    clients_clone,
+                    available_clone,
+                    stop_clone,
+                )
                 {
                     crate::log_error!("MCP manager loop failed: {:?}", err);
                 }
@@ -84,6 +211,8 @@ impl McpClientManager {
 
         Ok(Self {
             tool_cache,
+            routing_table,
+            clients,
             available,
             stop_flag,
         })
@@ -97,50 +226,87 @@ impl McpClientManager {
         self.tool_cache.read().tools()
     }
 
+    pub fn call_tool(
+        &self,
+        name: &str,
+        arguments: HashMap<String, serde_json::Value>,
+    ) -> Result<super::types::CallToolResult, McpClientError> {
+        let routing = self
+            .routing_table
+            .read()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| McpClientError::ToolNotFound(name.to_string()))?;
+
+        let client = self
+            .clients
+            .read()
+            .get(&routing.server_id)
+            .cloned()
+            .ok_or_else(|| McpClientError::ToolNotFound(name.to_string()))?;
+
+        let mut client = client.lock();
+        client.call_tool(&routing.original_name, arguments)
+    }
+
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
 
+#[derive(Debug, Clone)]
+struct ToolRouting {
+    server_id: String,
+    original_name: String,
+}
+
 fn run_manager_loop(
-    config: McpToolConfig,
+    refresh_interval: Duration,
     tool_cache: Arc<RwLock<ToolCache>>,
+    routing_table: Arc<RwLock<HashMap<String, ToolRouting>>>,
+    clients: Arc<RwLock<HashMap<String, Arc<Mutex<McpClient<StdioTransport>>>>>>,
     available: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
 ) -> Result<(), McpClientError> {
-    let mut last_refresh = Instant::now() - config.tool_refresh_interval;
-    let args: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
-    let transport = StdioTransport::spawn(&config.command, &args)?;
-    let mut client = McpClient::new(transport, "vllm-rs", "0.6.0");
-    client.initialize()?;
+    let mut last_refresh = Instant::now() - refresh_interval;
 
     loop {
         if stop_flag.load(Ordering::Relaxed) {
             break;
         }
-        if last_refresh.elapsed() >= config.tool_refresh_interval {
-            match client.list_tools() {
-                Ok(tools) => {
-                    let mapped = tools
-                        .into_iter()
-                        .map(|tool| Tool {
-                            tool_type: "function".to_string(),
-                            function: crate::tools::FunctionDefinition {
-                                name: tool.name,
-                                description: tool.description.unwrap_or_default(),
-                                parameters: tool.input_schema,
-                                strict: None,
-                            },
-                        })
-                        .collect::<Vec<_>>();
-                    tool_cache.write().set_tools(mapped);
-                    available.store(true, Ordering::Relaxed);
-                    last_refresh = Instant::now();
+        if last_refresh.elapsed() >= refresh_interval {
+            let mut mapped_tools = Vec::new();
+            let mut routing = HashMap::new();
+            let mut any_success = false;
+
+            for (server_id, client) in clients.read().iter() {
+                let mut client = client.lock();
+                match client.list_tools() {
+                    Ok(tools) => {
+                        any_success = true;
+                        mapped_tools.extend(map_mcp_tools(
+                            server_id,
+                            tools,
+                            &mut routing,
+                        ));
+                    }
+                    Err(err) => {
+                        crate::log_error!(
+                            "Failed to refresh MCP tools for {}: {:?}",
+                            server_id,
+                            err
+                        );
+                    }
                 }
-                Err(err) => {
-                    available.store(false, Ordering::Relaxed);
-                    crate::log_error!("Failed to refresh MCP tools: {:?}", err);
-                }
+            }
+
+            if any_success {
+                tool_cache.write().set_tools(mapped_tools);
+                *routing_table.write() = routing;
+                available.store(true, Ordering::Relaxed);
+                last_refresh = Instant::now();
+            } else {
+                available.store(false, Ordering::Relaxed);
             }
         }
         thread::sleep(Duration::from_millis(200));
@@ -149,16 +315,33 @@ fn run_manager_loop(
     Ok(())
 }
 
-pub fn call_mcp_tool(
-    config: &McpToolConfig,
-    name: &str,
-    arguments: HashMap<String, serde_json::Value>,
-) -> Result<super::types::CallToolResult, McpClientError> {
-    let args: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
-    let transport = StdioTransport::spawn(&config.command, &args)?;
-    let mut client = McpClient::new(transport, "vllm-rs", "0.6.0");
-    client.initialize()?;
-    client.call_tool(name, arguments)
+fn map_mcp_tools(
+    server_id: &str,
+    tools: Vec<super::types::McpTool>,
+    routing: &mut HashMap<String, ToolRouting>,
+) -> Vec<Tool> {
+    tools
+        .into_iter()
+        .map(|tool| {
+            let prefixed_name = format!("{server_id}_{}", tool.name);
+            routing.insert(
+                prefixed_name.clone(),
+                ToolRouting {
+                    server_id: server_id.to_string(),
+                    original_name: tool.name,
+                },
+            );
+            Tool {
+                tool_type: "function".to_string(),
+                function: crate::tools::FunctionDefinition {
+                    name: prefixed_name,
+                    description: tool.description.unwrap_or_default(),
+                    parameters: tool.input_schema,
+                    strict: None,
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -190,21 +373,14 @@ mod tests {
         };
 
         let tools = vec![mcp_tool];
-        let mapped = tools
-            .into_iter()
-            .map(|tool| Tool {
-                tool_type: "function".to_string(),
-                function: crate::tools::FunctionDefinition {
-                    name: tool.name,
-                    description: tool.description.unwrap_or_default(),
-                    parameters: tool.input_schema,
-                    strict: None,
-                },
-            })
-            .collect::<Vec<_>>();
+        let mut routing = HashMap::new();
+        let mapped = map_mcp_tools("filesystem", tools, &mut routing);
 
         assert_eq!(mapped.len(), 1);
-        assert_eq!(mapped[0].function.name, "search");
+        assert_eq!(mapped[0].function.name, "filesystem_search");
+        let routing = routing.get("filesystem_search").unwrap();
+        assert_eq!(routing.server_id, "filesystem");
+        assert_eq!(routing.original_name, "search");
     }
 
     #[test]
@@ -267,5 +443,56 @@ mod tests {
             _ => panic!("unexpected tool content"),
         }
         server.join().unwrap();
+    }
+
+    #[test]
+    fn parse_mcp_config_file() {
+        let json = r#"{
+            "mcpServers": {
+                "filesystem": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+                },
+                "github": {
+                    "command": "npx",
+                    "args": ["-y", "@modelcontextprotocol/server-github"],
+                    "env": {
+                        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_example"
+                    }
+                }
+            }
+        }"#;
+
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(format!("mcp_config_{}.json", std::process::id()));
+        std::fs::write(&path, json).unwrap();
+
+        let config = McpManagerConfig::from_file(&path).unwrap();
+        assert_eq!(config.servers.len(), 2);
+        let filesystem = config
+            .servers
+            .iter()
+            .find(|server| server.id == "filesystem")
+            .unwrap();
+        assert_eq!(filesystem.command, "npx");
+        assert_eq!(
+            filesystem.args,
+            vec![
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/tmp"
+            ]
+        );
+        let github = config
+            .servers
+            .iter()
+            .find(|server| server.id == "github")
+            .unwrap();
+        assert_eq!(
+            github.env.get("GITHUB_PERSONAL_ACCESS_TOKEN").unwrap(),
+            "ghp_example"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }

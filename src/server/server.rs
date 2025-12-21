@@ -11,7 +11,6 @@ use super::{
     EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
-use crate::mcp::manager::call_mcp_tool;
 use crate::tools::parser::ToolParser;
 use crate::tools::{Tool, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -374,9 +373,9 @@ pub async fn chat_completion(
                 (Some(output.decode_output), None)
             };
 
-            if let (Some(tool_calls), Some(mcp_cfg)) = (
+            if let (Some(tool_calls), Some(mcp_manager)) = (
                 &tool_calls,
-                data.mcp_tool_config.as_ref().filter(|_| mcp_injected_tools),
+                data.mcp_manager.as_ref().filter(|_| mcp_injected_tools),
             )
             {
                 let mut followup_messages = chat_messages.clone();
@@ -394,8 +393,9 @@ pub async fn chat_completion(
                         .into_iter()
                         .collect::<HashMap<String, serde_json::Value>>();
 
-                    let tool_result = match call_mcp_tool(mcp_cfg, &call.function.name, args_map) {
-                        Ok(result) => {
+                    let tool_result =
+                        match mcp_manager.call_tool(&call.function.name, args_map) {
+                            Ok(result) => {
                             let content = result
                                 .content
                                 .iter()
@@ -410,13 +410,13 @@ pub async fn chat_completion(
                                 })
                                 .collect::<Vec<_>>()
                                 .join("\n");
-                            ChatMessage::tool_result(call.id.clone(), content)
-                        }
-                        Err(err) => ChatMessage::tool_result(
-                            call.id.clone(),
-                            format!("Tool execution failed: {err}"),
-                        ),
-                    };
+                                ChatMessage::tool_result(call.id.clone(), content)
+                            }
+                            Err(err) => ChatMessage::tool_result(
+                                call.id.clone(),
+                                format!("Tool execution failed: {err}"),
+                            ),
+                        };
                     followup_messages.push(tool_result);
                 }
 

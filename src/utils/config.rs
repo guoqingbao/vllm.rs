@@ -189,6 +189,7 @@ pub struct EngineConfig {
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
     pub mcp_command: Option<String>,
+    pub mcp_config: Option<String>,
     pub mcp_args: Option<Vec<String>>,
     pub mcp_tool_refresh_seconds: Option<u64>,
     pub disable_flash_attn: Option<bool>,
@@ -248,6 +249,8 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub mcp_command: Option<String>,
     #[pyo3(get, set)]
+    pub mcp_config: Option<String>,
+    #[pyo3(get, set)]
     pub mcp_args: Option<Vec<String>>,
     #[pyo3(get, set)]
     pub mcp_tool_refresh_seconds: Option<u64>,
@@ -278,6 +281,7 @@ impl EngineConfig {
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
         mcp_command: Option<String>,
+        mcp_config: Option<String>,
         mcp_args: Option<Vec<String>>,
         mcp_tool_refresh_seconds: Option<u64>,
         disable_flash_attn: Option<bool>,
@@ -320,6 +324,7 @@ impl EngineConfig {
             server_mode,
             pd_config,
             mcp_command,
+            mcp_config,
             mcp_args,
             mcp_tool_refresh_seconds,
             disable_flash_attn,

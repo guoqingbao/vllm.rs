@@ -48,8 +48,18 @@ pub struct StdioTransport {
 impl StdioTransport {
     /// Create a new stdio transport by spawning a process
     pub fn spawn(command: &str, args: &[&str]) -> Result<Self, TransportError> {
+        Self::spawn_with_env(command, args, &std::collections::HashMap::new())
+    }
+
+    /// Create a new stdio transport with additional environment variables
+    pub fn spawn_with_env(
+        command: &str,
+        args: &[&str],
+        env: &std::collections::HashMap<String, String>,
+    ) -> Result<Self, TransportError> {
         let mut child = Command::new(command)
             .args(args)
+            .envs(env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

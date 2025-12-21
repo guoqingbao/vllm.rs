@@ -11,6 +11,6 @@ pub mod transport;
 pub mod types;
 
 pub use client::McpClient;
-pub use manager::McpClientManager;
+pub use manager::{McpClientManager, McpManagerConfig, McpServerDefinition, McpToolConfig};
 pub use server::McpServer;
 pub use types::*;
