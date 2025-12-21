@@ -79,6 +79,18 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 
+---
+## 📚 文档
+- [Get Started](docs/get_started.md)
+- [Embedding](docs/embeddings.md)
+- [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
+- [Context cache](docs/context-cache.md)
+- [Rust crate](docs/rust_crate.md)
+- [Tokenize/Detokenize](docs/tokenize.md)
+- [Tool calling](docs/tool_calling.md)
+- [MCP](docs/mcp.md)
+
+
 ## 📘 使用方法（Python）
 ### 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）

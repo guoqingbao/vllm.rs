@@ -191,7 +191,6 @@ pub struct EngineConfig {
     pub mcp_command: Option<String>,
     pub mcp_config: Option<String>,
     pub mcp_args: Option<Vec<String>>,
-    pub mcp_tool_refresh_seconds: Option<u64>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -252,8 +251,6 @@ pub struct EngineConfig {
     pub mcp_config: Option<String>,
     #[pyo3(get, set)]
     pub mcp_args: Option<Vec<String>>,
-    #[pyo3(get, set)]
-    pub mcp_tool_refresh_seconds: Option<u64>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -283,7 +280,6 @@ impl EngineConfig {
         mcp_command: Option<String>,
         mcp_config: Option<String>,
         mcp_args: Option<Vec<String>>,
-        mcp_tool_refresh_seconds: Option<u64>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -326,7 +322,6 @@ impl EngineConfig {
             mcp_command,
             mcp_config,
             mcp_args,
-            mcp_tool_refresh_seconds,
             disable_flash_attn,
         }
     }
@@ -354,6 +349,12 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub guided_json_schema: Option<serde_json::Value>,
+    /// Tool mode for streaming tool call handling:
+    /// - None: No tools, ignore </tool_call> detection
+    /// - Some(false): External tools, finish stream at </tool_call>
+    /// - Some(true): MCP internal, pause stream, execute, resume
+    #[serde(default)]
+    pub mcp_mode: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -378,6 +379,13 @@ pub struct SamplingParams {
     pub presence_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub guided_json_schema: Option<serde_json::Value>,
+    /// Tool mode for streaming tool call handling:
+    /// - None: No tools, ignore </tool_call> detection
+    /// - Some(false): External tools, finish stream at </tool_call>
+    /// - Some(true): MCP internal, pause stream, execute, resume
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub mcp_mode: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -402,6 +410,7 @@ impl SamplingParams {
             frequency_penalty,
             presence_penalty,
             guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 
@@ -416,6 +425,7 @@ impl SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 }
@@ -432,6 +442,7 @@ impl Default for SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             guided_json_schema: None,
+            mcp_mode: None,
         }
     }
 }

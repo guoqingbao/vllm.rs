@@ -82,12 +82,15 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
 ---
-## 📚 Additional Guides
-- [Embedding usage](docs/embeddings.md)
-- [Multimodal usage (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
+## 📚 Guides
+- [Get Started](docs/get_started.md)
+- [Embedding](docs/embeddings.md)
+- [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Context cache](docs/context-cache.md)
-- [Get started (run modes, formats, PD, multi-rank)](docs/get_started.md)
-- [Rust crate usage](docs/rust_crate.md)
+- [Rust crate](docs/rust_crate.md)
+- [Tokenize/Detokenize](docs/tokenize.md)
+- [Tool calling](docs/tool_calling.md)
+- [MCP](docs/mcp.md)
 
 
 ## 📘 Usage in Python

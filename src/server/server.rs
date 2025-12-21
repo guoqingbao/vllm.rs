@@ -6,9 +6,10 @@ use super::{
     EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
 };
 use super::{
-    ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
-    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    execute_mcp_tool_calls, ChatChoice, ChatChoiceChunk, ChatCompletionChunk,
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta,
+    EmbeddingData, EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery,
+    UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::tools::parser::ToolParser;
@@ -19,7 +20,6 @@ use axum::{
     response::{sse::KeepAlive, Sse},
 };
 use base64::Engine;
-use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,60 +58,6 @@ fn tool_choice_schema(tool_choice: &Option<ToolChoice>) -> Option<serde_json::Va
             "additionalProperties": false
         })),
         _ => None,
-    }
-}
-
-/// Result of executing tool calls via MCP
-struct ToolExecutionResult {
-    /// Messages to add for follow-up (assistant tool_calls + tool results)
-    followup_messages: Vec<ChatMessage>,
-    /// The tool calls that were executed
-    tool_calls: Vec<crate::tools::ToolCall>,
-}
-
-/// Execute tool calls via MCP manager and return messages for follow-up generation
-fn execute_mcp_tool_calls(
-    tool_calls: &[crate::tools::ToolCall],
-    mcp_manager: &crate::mcp::McpClientManager,
-    base_messages: &[ChatMessage],
-) -> ToolExecutionResult {
-    let mut followup_messages = base_messages.to_vec();
-    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.to_vec()));
-
-    for call in tool_calls {
-        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
-            .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
-        let args_map = args_value
-            .as_object()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<HashMap<String, serde_json::Value>>();
-
-        let tool_result = match mcp_manager.call_tool(&call.function.name, args_map) {
-            Ok(result) => {
-                let content = result
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        crate::mcp::ToolContent::Text { text } => Some(text.clone()),
-                        crate::mcp::ToolContent::Resource { text, .. } => text.clone(),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                ChatMessage::tool_result(call.id.clone(), content)
-            }
-            Err(err) => {
-                ChatMessage::tool_result(call.id.clone(), format!("Tool execution failed: {err}"))
-            }
-        };
-        followup_messages.push(tool_result);
-    }
-
-    ToolExecutionResult {
-        followup_messages,
-        tool_calls: tool_calls.to_vec(),
     }
 }
 
@@ -159,6 +105,18 @@ pub async fn chat_completion(
     let resolved_tools = resolve_tools(request.tools.as_deref(), &mcp_tools);
     let mcp_injected_tools = !has_request_tools && !mcp_tools.is_empty();
 
+    // Set tool mode for streaming tool call handling:
+    // - None: No tools, ignore </tool_call> detection
+    // - Some(false): External tools (user-provided), finish stream at </tool_call>
+    // - Some(true): MCP internal tools, pause stream, execute, resume
+    params.mcp_mode = if mcp_injected_tools {
+        Some(true) // MCP internal execution
+    } else if has_request_tools {
+        Some(false) // External tool handling
+    } else {
+        None // No tools at all
+    };
+
     let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
     if has_tools {
@@ -202,7 +160,7 @@ pub async fn chat_completion(
             }
         };
 
-        let mut stream = stream;
+        let stream = stream;
         let (response_tx, client_rx) = flume::unbounded();
 
         // Clone data needed for the async task
@@ -212,30 +170,17 @@ pub async fn chat_completion(
         let img_cfg_clone = img_cfg.clone();
 
         task::spawn(async move {
-            /// State machine for streaming with tool calls
-            #[derive(Debug, Clone, PartialEq)]
-            enum StreamState {
-                /// Normal text streaming
-                StreamingText,
-                /// Detected tool_call start, collecting arguments
-                CollectingToolCall,
-            }
-
-            let mut state = StreamState::StreamingText;
+            #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
+            #[allow(unused_assignments, unused_variables)]
             let mut decoded_length = 0usize;
             let mut accumulated_output = String::new();
-            let mut tool_call_buffer = String::new();
             let mut total_decoded_tokens = 0usize;
 
             // Context that accumulates across tool call cycles
             let mut current_messages = chat_messages_clone.clone();
             let mut current_stream = stream;
             let mut current_seq_id = seq_id;
-
-            // Tool call detection patterns
-            const TOOL_CALL_START: &str = "<tool_call>";
-            const TOOL_CALL_END: &str = "</tool_call>";
 
             'outer: loop {
                 while let Some(item) = current_stream.recv().await {
@@ -250,127 +195,10 @@ pub async fn chat_completion(
                             }
                             decoded_length += 1;
 
-                            // Always accumulate for context
+                            // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
 
-                            // State machine: detect tool call patterns
-                            match state {
-                                StreamState::StreamingText => {
-                                    // Check if we're entering a tool call
-                                    if mcp_injected_tools
-                                        && has_tools
-                                        && accumulated_output.contains(TOOL_CALL_START)
-                                    {
-                                        state = StreamState::CollectingToolCall;
-                                        // Extract everything after <tool_call> into buffer
-                                        if let Some(start_idx) =
-                                            accumulated_output.find(TOOL_CALL_START)
-                                        {
-                                            tool_call_buffer = accumulated_output
-                                                [start_idx + TOOL_CALL_START.len()..]
-                                                .to_string();
-                                        }
-                                        crate::log_info!("[seq_id {}] Detected tool call start, collecting arguments", current_seq_id);
-                                    }
-                                }
-                                StreamState::CollectingToolCall => {
-                                    // Accumulate into tool call buffer
-                                    tool_call_buffer.push_str(&token);
-
-                                    // Check if tool call is complete
-                                    if tool_call_buffer.contains(TOOL_CALL_END) {
-                                        crate::log_info!(
-                                            "[seq_id {}] Tool call complete, pausing for execution",
-                                            current_seq_id
-                                        );
-
-                                        // Cancel current generation immediately
-                                        {
-                                            let mut e = engine_clone.write();
-                                            e.cancel(current_seq_id);
-                                        }
-
-                                        // Parse the completed tool call
-                                        let tool_parser = ToolParser::new();
-                                        let parsed_calls = tool_parser.parse(&accumulated_output);
-
-                                        if !parsed_calls.is_empty() {
-                                            if let Some(mcp_manager) = data.mcp_manager.as_ref() {
-                                                crate::log_info!(
-                                                    "[seq_id {}] Executing {} tool call(s) via MCP",
-                                                    current_seq_id,
-                                                    parsed_calls.len()
-                                                );
-
-                                                // Execute tool calls
-                                                let exec_result = execute_mcp_tool_calls(
-                                                    &parsed_calls,
-                                                    mcp_manager,
-                                                    &current_messages,
-                                                );
-
-                                                // Update context with tool calls and results
-                                                current_messages =
-                                                    exec_result.followup_messages.clone();
-
-                                                // Build follow-up prompt
-                                                let (followup_inputs, followup_images) =
-                                                    match build_messages_and_images(
-                                                        &exec_result.followup_messages,
-                                                        img_cfg_clone.as_ref(),
-                                                    ) {
-                                                        Ok(output) => output,
-                                                        Err(e) => {
-                                                            crate::log_error!("Tool follow-up processing failed: {:?}", e);
-                                                            break 'outer;
-                                                        }
-                                                    };
-
-                                                // Resume generation with new context
-                                                let new_stream = {
-                                                    let mut e = engine_clone.write();
-                                                    match e.generate_stream(
-                                                        &params_clone,
-                                                        &followup_inputs,
-                                                        followup_images,
-                                                    ) {
-                                                        Ok((new_seq_id, _, stream)) => {
-                                                            current_seq_id = new_seq_id;
-                                                            stream
-                                                        }
-                                                        Err(e) => {
-                                                            crate::log_error!("Tool follow-up generation failed: {:?}", e);
-                                                            break 'outer;
-                                                        }
-                                                    }
-                                                };
-
-                                                // Track tokens
-                                                total_decoded_tokens += decoded_length;
-
-                                                // Reset state for new generation
-                                                state = StreamState::StreamingText;
-                                                decoded_length = 0;
-                                                decode_start_time = 0;
-                                                accumulated_output.clear();
-                                                tool_call_buffer.clear();
-                                                current_stream = new_stream;
-
-                                                crate::log_info!("[seq_id {}] Resumed streaming after tool execution", current_seq_id);
-
-                                                // Continue outer loop to process new stream
-                                                continue 'outer;
-                                            }
-                                        }
-
-                                        // If parsing failed or no MCP manager, reset state
-                                        state = StreamState::StreamingText;
-                                        tool_call_buffer.clear();
-                                    }
-                                }
-                            }
-
-                            // Send token to client (always stream tokens, even during tool call collection)
+                            // Send token to client
                             let chunk = ChatCompletionChunk {
                                 id: format!("seq-{}", current_seq_id),
                                 object: "chat.completion.chunk",
@@ -389,7 +217,7 @@ pub async fn chat_completion(
 
                             if let Err(e) = response_tx.try_send(ChatResponse::Chunk(chunk)) {
                                 crate::log_error!(
-                                    "[seq_id {}] Stream send to client error: {:?}",
+                                    "[Seq {}] Stream send to client error: {:?}",
                                     current_seq_id,
                                     e
                                 );
@@ -397,6 +225,107 @@ pub async fn chat_completion(
                                 e.cancel(current_seq_id);
                                 break 'outer;
                             }
+                        }
+                        StreamItem::ToolCallPause {
+                            session_id,
+                            prompt_start_time: _,
+                            decode_start_time: _,
+                            decoded_length: pause_decoded_length,
+                        } => {
+                            // Scheduler detected tool call end, execute MCP and resume
+                            crate::log_info!(
+                                "[Seq {}] Received ToolCallPause, session_id: {}",
+                                current_seq_id,
+                                session_id
+                            );
+
+                            total_decoded_tokens += pause_decoded_length;
+
+                            // Parse tool calls from accumulated output
+                            let tool_parser = ToolParser::new();
+                            let parsed_calls = tool_parser.parse(&accumulated_output);
+
+                            if !parsed_calls.is_empty() {
+                                if let Some(mcp_manager) = data.mcp_manager.as_ref() {
+                                    crate::log_info!(
+                                        "[Seq {}] Executing {} tool call(s) via MCP",
+                                        current_seq_id,
+                                        parsed_calls.len()
+                                    );
+
+                                    // Execute tool calls
+                                    let exec_result = execute_mcp_tool_calls(
+                                        &parsed_calls,
+                                        mcp_manager,
+                                        &current_messages,
+                                    );
+
+                                    // Update context with tool calls and results
+                                    current_messages = exec_result.followup_messages.clone();
+
+                                    // Build follow-up prompt
+                                    let (followup_inputs, followup_images) =
+                                        match build_messages_and_images(
+                                            &exec_result.followup_messages,
+                                            img_cfg_clone.as_ref(),
+                                        ) {
+                                            Ok(output) => output,
+                                            Err(e) => {
+                                                crate::log_error!(
+                                                    "Tool follow-up processing failed: {:?}",
+                                                    e
+                                                );
+                                                break 'outer;
+                                            }
+                                        };
+
+                                    // Resume generation with session_id to use cached context
+                                    let mut resume_params = params_clone.clone();
+                                    resume_params.session_id = Some(session_id.clone());
+
+                                    let new_stream = {
+                                        let mut e = engine_clone.write();
+                                        match e.generate_stream(
+                                            &resume_params,
+                                            &followup_inputs,
+                                            followup_images,
+                                        ) {
+                                            Ok((new_seq_id, _, stream)) => {
+                                                crate::log_info!(
+                                                    "[Seq {}] Resumed generation with session_id: {} (new seq: {})",
+                                                    current_seq_id,
+                                                    session_id,
+                                                    new_seq_id
+                                                );
+                                                current_seq_id = new_seq_id;
+                                                stream
+                                            }
+                                            Err(e) => {
+                                                crate::log_error!(
+                                                    "Tool follow-up generation failed: {:?}",
+                                                    e
+                                                );
+                                                break 'outer;
+                                            }
+                                        }
+                                    };
+
+                                    // Reset state for new generation
+                                    decoded_length = 0;
+                                    decode_start_time = 0;
+                                    accumulated_output.clear();
+                                    current_stream = new_stream;
+
+                                    // Continue outer loop to process new stream
+                                    continue 'outer;
+                                }
+                            }
+
+                            // If no tool calls parsed or no MCP manager, treat as normal completion
+                            crate::log_warn!(
+                                "[Seq {}] ToolCallPause received but no tool calls to execute",
+                                current_seq_id
+                            );
                         }
                         StreamItem::Done((
                             prompt_start_time,
@@ -439,14 +368,14 @@ pub async fn chat_completion(
 
                             crate::log_warn!("--- Performance Metrics ---");
                             crate::log_info!(
-                                "[seq_id {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                                "[Seq {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
                                 current_seq_id,
                                 prompt_length,
                                 prompt_time_taken,
                                 prompt_length as f32 / prompt_time_taken.max(0.001)
                             );
                             crate::log_info!(
-                                "[seq_id {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                                "[Seq {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
                                 current_seq_id,
                                 total_decoded_tokens,
                                 decode_time_taken,
@@ -456,7 +385,7 @@ pub async fn chat_completion(
                             break 'outer;
                         }
                         StreamItem::Error(e) => {
-                            crate::log_error!("[seq_id {}] Stream error: {}", current_seq_id, e);
+                            crate::log_error!("[Seq {}] Stream error: {}", current_seq_id, e);
                             let error_chunk = ChatCompletionChunk {
                                 id: format!("seq-{}", current_seq_id),
                                 object: "chat.completion.chunk",

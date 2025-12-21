@@ -9,9 +9,164 @@ MCP is an open protocol that enables seamless integration between LLM applicatio
 - Resource management for prompts and templates
 - Transport-agnostic communication (stdio, HTTP, WebSocket)
 
+## MCP Client Manager
+
+vLLM.rs can run an MCP client manager alongside the chat server. When configured:
+
+1. **Tool Auto-Injection**: MCP tools are automatically injected into the system prompt when no `tools` are provided in the request
+2. **Automatic Execution**: Tool calls are detected and executed via `tools/call`
+3. **Streaming Support**: Pause-and-resume pattern for seamless streaming tool execution
+4. **Multi-Server**: Connect to multiple MCP servers with tool name prefixing
+
+## Quick Start
+
+### Single MCP Server
+
+```bash
+vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0
+```
+
+### Multiple MCP Servers
+
+Create `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/allowed_dir"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
+      }
+    }
+  }
+}
+```
+
+Start the server:
+
+```bash
+vllm-rs --server --mcp-config ./mcp.json --mcp-tool-refresh-seconds 30
+```
+
+## How Tool Execution Works
+
+### Non-Streaming Mode
+
+```
+User Request → Generate → Parse Tool Calls → Execute MCP → Generate Follow-up → Response
+```
+
+### Streaming Mode
+
+vLLM.rs implements an efficient **pause-and-resume** pattern:
+
+```
+User Request
+    ↓
+Start Streaming Tokens → Client receives tokens
+    ↓
+Model outputs: "<tool_call>{"name": "read_file", ...}</tool_call>"
+    ↓
+[PAUSE] Scheduler detects </tool_call> token
+    ↓
+[CACHE] KV cache is preserved (auto-generated session_id)
+    ↓
+[EXECUTE] MCP tools/call
+    ↓
+[RESUME] Continue generation with tool result
+    ↓
+Continue Streaming → Client receives more tokens
+    ↓
+Complete
+```
+
+**Key benefits:**
+- Zero client-side complexity for tool execution
+- KV cache is preserved for efficiency  
+- Multiple tool calls are handled automatically
+- Works with any OpenAI-compatible client
+
+### When Tool Execution Happens
+
+| Request has `tools`? | MCP Configured? | Tool Mode | Stream on `</tool_call>` |
+|----------------------|-----------------|-----------|--------------------------|
+| ❌ No | ❌ No | None | **Continues streaming** |
+| ✅ Yes | ❌ No | External | **Stream finishes** |
+| ✅ Yes | ✅ Yes | External | **Stream finishes** |
+| ❌ No | ✅ Yes | MCP Internal | **Stream pauses**, resumes after tool |
+
+> **Important**: When the model outputs `</tool_call>`:
+> - **No tools**: Token is treated as normal output, streaming continues
+> - **User-provided tools**: Stream finishes so you can handle tools externally
+> - **MCP internal**: Stream pauses, tool executes, generation resumes
+
+## Configuration Reference
+
+### CLI Options
+
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--mcp-command` | Path to single MCP server | `--mcp-command ./mcp-server` |
+| `--mcp-args` | Comma-separated server args | `--mcp-args=--port,0` |
+| `--mcp-config` | Path to JSON config file | `--mcp-config ./mcp.json` |
+
+> **Note**: Tool lists are refreshed automatically every 30 seconds.
+
+### Config File Format
+
+```json
+{
+  "mcpServers": {
+    "<server-id>": {
+      "command": "<executable>",
+      "args": ["<arg1>", "<arg2>"],
+      "env": {
+        "KEY": "value"
+      }
+    }
+  }
+}
+```
+
+### Environment Variables
+
+MCP servers can receive environment variables:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_...",
+        "GITHUB_ORG": "my-org"
+      }
+    }
+  }
+}
+```
+
+## Tool Name Prefixing
+
+When multiple servers are configured, tool names are prefixed with the server ID:
+
+| Server ID | Original Tool | Prefixed Name |
+|-----------|---------------|---------------|
+| `filesystem` | `read_file` | `filesystem_read_file` |
+| `github` | `read_file` | `github_read_file` |
+
+This prevents name collisions. Tool call routing automatically strips the prefix and forwards to the correct server.
+
 ## Using vLLM.rs as an MCP Server
 
-### Basic Setup
+In addition to being an MCP client, vLLM.rs can also act as an MCP server:
 
 ```rust
 use vllm_rs::mcp::{McpServer, McpTool, ToolContent, CallToolResult};
@@ -47,9 +202,9 @@ server.register_tool(
 );
 ```
 
-## MCP Client
+## MCP Client API
 
-Connect to external MCP servers:
+Connect to external MCP servers programmatically:
 
 ```rust
 use vllm_rs::mcp::{McpClient, StdioTransport};
@@ -73,62 +228,7 @@ let result = client.call_tool("search", [
 ].into_iter().collect())?;
 ```
 
-## MCP Client Manager (Server Integration)
-
-vLLM.rs can run an MCP client manager alongside the chat server. The manager:
-- Spawns MCP server processes on startup
-- Runs `initialize` + `tools/list` on each server
-- Caches the combined tool list for automatic prompt injection
-- Prefixes tool names with the server ID (e.g. `filesystem_read_file`) to avoid collisions
-
-Enable it via CLI:
-
-```bash
-vllm-rs --server --mcp-command ./my-mcp-server --mcp-args=--port,0 --mcp-tool-refresh-seconds 30
-```
-
-### Multi-Server Configuration
-
-You can define multiple MCP servers via a JSON config file:
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/allowed_dir"]
-    },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
-      }
-    }
-  }
-}
-```
-
-Start the server with:
-
-```bash
-vllm-rs --server --mcp-config ./mcp.json --mcp-tool-refresh-seconds 30
-```
-
-When configured, MCP tools are injected into the system prompt if the request does not provide its own `tools` list.
-
-Tool calls detected in model output are executed automatically via `tools/call`, and the results are fed back into the model for a follow-up response.
-
-### Tool Name Prefixing
-
-When multiple servers are configured, tool names are prefixed with the server ID:
-
-- `read_file` from `filesystem` becomes `filesystem_read_file`
-- `read_file` from `github` becomes `github_read_file`
-
-Tool call routing strips the prefix and forwards the call to the matching server.
-
-### Rust Demo: Load MCP Config
+## Rust Demo: Load MCP Config
 
 ```rust
 use vllm_rs::mcp::{McpClientManager, McpManagerConfig};
@@ -143,21 +243,24 @@ println!(
 );
 ```
 
-### Python Demo: Call a Tool via vLLM.rs
+## Python Demo: Call a Tool via vLLM.rs
 
 ```python
 import openai
 
-openai.api_key = "EMPTY"
-openai.base_url = "http://localhost:8000/v1/"
+client = openai.OpenAI(
+    base_url="http://localhost:8000/v1/",
+    api_key="EMPTY"
+)
 
-response = openai.chat.completions.create(
+# Don't provide tools → MCP tools are auto-injected and executed
+response = client.chat.completions.create(
     model="",
     messages=[
         {"role": "user", "content": "Use filesystem_read_file to read README.md"}
     ],
 )
-print(response.choices[0].message)
+print(response.choices[0].message.content)
 ```
 
 ## Protocol Support
@@ -190,7 +293,34 @@ let transport = StdioTransport::spawn("./my-mcp-server", &["--port", "0"])?;
 | `resources/list` | List available resources |
 | `prompts/list` | List available prompts |
 
+## Troubleshooting
+
+### MCP Server Won't Start
+
+- Check the command path is correct and executable
+- Verify required environment variables are set
+- Check server logs in stderr
+
+### Tools Not Being Executed
+
+- Ensure you're NOT providing `tools` in your request (this disables auto-execution)
+- Verify MCP server is responding to `tools/list`
+- Check vLLM.rs logs for tool call parsing
+
+### Streaming Hangs
+
+- MCP server may be slow or unresponsive
+- Add timeouts to your MCP server implementations
+- Check for network issues with external services
+
+### Tool Name Conflicts
+
+- Use unique server IDs in your config
+- Remember tool names are prefixed with server ID
+- Check the actual tool names with `tools/list`
+
 ## See Also
 
 - [Tool Calling Guide](tool_calling.md)
+- [Context Cache for Sessions](context-cache.md)
 - [MCP Specification](https://modelcontextprotocol.io/)

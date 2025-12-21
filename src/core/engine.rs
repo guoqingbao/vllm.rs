@@ -65,6 +65,14 @@ pub enum StreamItem {
     Completion((usize, usize, usize, Vec<u32>)), //completion
     Done((usize, usize, usize, usize)),          //streaming end
     Error(String),
+    /// Tool call pause - generation paused for MCP execution
+    /// Contains: (session_id for resume, prompt_start_time, decode_start_time, decoded_length)
+    ToolCallPause {
+        session_id: String,
+        prompt_start_time: usize,
+        decode_start_time: usize,
+        decoded_length: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -362,7 +370,20 @@ impl LLMEngine {
             econfig.max_model_len = Some(32768);
         }
         let runners = Arc::new(RwLock::new(runners));
-        let scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+
+        // Initialize tool call end tokens for detection
+        // Tokenize "</tool_call>" to get the token IDs for tool call end detection
+        if let Ok(tokens) = tokenizer.encode("</tool_call>", false) {
+            let tool_call_end_ids: Vec<u32> = tokens.get_ids().to_vec();
+            // We want to detect when the LAST token of "</tool_call>" is generated
+            // So we just need the last token ID
+            if let Some(&last_token) = tool_call_end_ids.last() {
+                scheduler.set_tool_call_end_tokens(vec![last_token]);
+                log_info!("Tool call end token ID set to: {}", last_token);
+            }
+        }
+
         log_warn!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
             econfig.max_num_batched_tokens,
@@ -689,13 +710,13 @@ impl LLMEngine {
                     self.scheduler.postprocess(
                         &finished_indices,
                         &output_ids,
-                        &self.active_sessions,
+                        &mut self.active_sessions,
                     );
                     DecodedIds(Either::Left(finished_indices))
                 }
             } else {
                 self.scheduler
-                    .postprocess(&scheduled_ids, &output_ids, &self.active_sessions);
+                    .postprocess(&scheduled_ids, &output_ids, &mut self.active_sessions);
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
@@ -716,6 +737,49 @@ impl LLMEngine {
             if let Some(s) = sq {
                 let seq_id = s.id;
                 if s.is_finished() {
+                    // Check if this is a tool call pause (not a real finish)
+                    if let Some(session_id) = &s.tool_call_session_id {
+                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                            if let Some(request_type) = self.request_types.get(&seq_id) {
+                                if *request_type == RequestType::Stream {
+                                    let prompt_start_time = s.created_time();
+                                    let decode_start_time = self
+                                        .decode_start_times
+                                        .get(&seq_id)
+                                        .copied()
+                                        .unwrap_or(prompt_start_time);
+
+                                    crate::log_info!(
+                                        "[Seq {}] Sending ToolCallPause with session_id: {}",
+                                        seq_id,
+                                        session_id
+                                    );
+
+                                    // Different from normal finish, we need to send the last token (end of </tool_call>)
+                                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
+                                        if let Some(tok) = decoder.step(s.last_token) {
+                                            let _ = sender.try_send(StreamItem::Token(tok.clone()));
+                                        }
+                                    }
+
+                                    let _ = sender.try_send(StreamItem::ToolCallPause {
+                                        session_id: session_id.clone(),
+                                        prompt_start_time,
+                                        decode_start_time,
+                                        decoded_length: s.output_ids.len(),
+                                    });
+                                }
+                            }
+                        }
+                        // Don't remove senders/decoders - they will be reused for follow-up
+                        // The sequence will be resumed via get_cache with the session_id
+                        if self.econfig.server_mode.unwrap_or(true) {
+                            self.scheduler.print_free_blocks();
+                        }
+                        continue; // Skip normal finish handling
+                    }
+
+                    // Normal finish handling (no tool call)
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
                             let prompt_start_time = s.created_time();
@@ -1191,6 +1255,12 @@ impl LLMEngine {
                             }
                             StreamItem::Done(_) => {
                                 println!("Sequence [seq_id {}] finished!", seq_id);
+                                break;
+                            }
+                            StreamItem::ToolCallPause { .. } => {
+                                // In batch mode, tool call pause is treated as done
+                                // (tool call execution is only for streaming mode)
+                                println!("Sequence [seq_id {}] tool call pause (treated as done in batch)", seq_id);
                                 break;
                             }
                             StreamItem::Error(e) => {

@@ -20,8 +20,8 @@ use candle_core::{Result, Tensor};
 use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Deserialize)]
@@ -513,10 +513,61 @@ pub struct Args {
     /// MCP server arguments (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = None)]
     pub mcp_args: Option<Vec<String>>,
+}
 
-    /// MCP tool refresh interval in seconds
-    #[arg(long, default_value = None)]
-    pub mcp_tool_refresh_seconds: Option<u64>,
+/// Result of executing tool calls via MCP
+#[allow(dead_code)]
+struct ToolExecutionResult {
+    /// Messages to add for follow-up (assistant tool_calls + tool results)
+    followup_messages: Vec<ChatMessage>,
+    /// The tool calls that were executed
+    tool_calls: Vec<crate::tools::ToolCall>,
+}
+
+/// Execute tool calls via MCP manager and return messages for follow-up generation
+fn execute_mcp_tool_calls(
+    tool_calls: &[crate::tools::ToolCall],
+    mcp_manager: &crate::mcp::McpClientManager,
+    base_messages: &[ChatMessage],
+) -> ToolExecutionResult {
+    let mut followup_messages = base_messages.to_vec();
+    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.to_vec()));
+
+    for call in tool_calls {
+        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
+        let args_map = args_value
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashMap<String, serde_json::Value>>();
+
+        let tool_result = match mcp_manager.call_tool(&call.function.name, args_map) {
+            Ok(result) => {
+                let content = result
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::mcp::ToolContent::Text { text } => Some(text.clone()),
+                        crate::mcp::ToolContent::Resource { text, .. } => text.clone(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ChatMessage::tool_result(call.id.clone(), content)
+            }
+            Err(err) => {
+                ChatMessage::tool_result(call.id.clone(), format!("Tool execution failed: {err}"))
+            }
+        };
+        followup_messages.push(tool_result);
+    }
+
+    ToolExecutionResult {
+        followup_messages,
+        tool_calls: tool_calls.to_vec(),
+    }
 }
 
 pub fn convert_chat_message(
@@ -677,28 +728,19 @@ pub async fn run_server(
 
     let mcp_manager_config = if let Some(path) = &econfig.mcp_config {
         match crate::mcp::manager::McpManagerConfig::from_file(path) {
-            Ok(mut cfg) => {
-                if let Some(seconds) = econfig.mcp_tool_refresh_seconds {
-                    cfg = cfg.with_refresh_interval(Duration::from_secs(seconds));
-                }
-                Some(cfg)
-            }
+            Ok(cfg) => Some(cfg),
             Err(err) => {
                 crate::log_error!("Failed to load MCP config file: {:?}", err);
                 None
             }
         }
     } else if let Some(command) = econfig.mcp_command.clone() {
-        let mut cfg = crate::mcp::manager::McpManagerConfig::from_single(
+        Some(crate::mcp::manager::McpManagerConfig::from_single(
             crate::mcp::manager::McpToolConfig::new(
                 command,
                 econfig.mcp_args.clone().unwrap_or_default(),
             ),
-        );
-        if let Some(seconds) = econfig.mcp_tool_refresh_seconds {
-            cfg = cfg.with_refresh_interval(Duration::from_secs(seconds));
-        }
-        Some(cfg)
+        ))
     } else {
         None
     };

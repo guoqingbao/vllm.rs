@@ -124,7 +124,6 @@ impl ToolCache {
     }
 }
 
-#[derive(Debug)]
 pub struct McpClientManager {
     tool_cache: Arc<RwLock<ToolCache>>,
     routing_table: Arc<RwLock<HashMap<String, ToolRouting>>>,

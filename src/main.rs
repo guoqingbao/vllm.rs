@@ -178,7 +178,6 @@ async fn main() -> Result<()> {
         args.mcp_command.clone(),
         args.mcp_config.clone(),
         args.mcp_args.clone(),
-        args.mcp_tool_refresh_seconds,
         Some(args.no_flash_attn),
     );
 
@@ -347,6 +346,15 @@ async fn main() -> Result<()> {
                                     break;
                                 }
                                 StreamItem::Error(e) => eprintln!("Error: {}", e),
+                                StreamItem::ToolCallPause { .. } => {
+                                    // Tool call pause in CLI mode - treat as completion
+                                    // (tool execution requires server mode with MCP)
+                                    eprintln!(
+                                        "{}",
+                                        String::from("\r\nTool call detected (execution not supported in CLI mode)").yellow()
+                                    );
+                                    break;
+                                }
                             }
                         }
                         (tickets.0, tickets.1, tickets.2, tickets.3, decode_output)

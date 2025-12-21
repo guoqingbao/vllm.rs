@@ -24,11 +24,11 @@ use attention_rs::cache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
-use llguidance::toktrie::TokTrie;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use toktrie::TokTrie;
 const MAX_PARALLEL_SAMPLING: usize = 32;
 
 pub enum Seqs<'a> {
