@@ -9,9 +9,11 @@ use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use crate::utils::image::ImageData;
 use candle_core::Result;
 use parking_lot::RwLock;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokenizers::Tokenizer;
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
@@ -22,6 +24,12 @@ pub struct Scheduler {
     eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
+    /// Token ID for } character (used for JSON tool call detection)
+    json_end_token_id: Option<u32>,
+    /// Tokenizer for decoding output to check JSON tool call patterns
+    tokenizer: Option<Arc<Tokenizer>>,
+    /// Regex for detecting JSON tool calls
+    tool_call_regex: Regex,
     cfg: EngineConfig,
     cached_seqs: VecDeque<(usize, String)>,
     pd_config: Option<PdConfig>,
@@ -56,6 +64,11 @@ impl Scheduler {
             },
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
+            json_end_token_id: None,
+            tokenizer: None,
+            // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
+            // We use (?s) to allow dot matching newlines
+            tool_call_regex: Regex::new(r#"(?s)\{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$"#).unwrap(),
             cfg: econfig.clone(),
             cached_seqs: VecDeque::new(),
             pd_config: econfig.pd_config.clone(),
@@ -66,6 +79,18 @@ impl Scheduler {
     /// Set tool call end token IDs (called by engine after tokenizer is available)
     pub fn set_tool_call_end_tokens(&mut self, token_ids: Vec<u32>) {
         self.tool_call_end_token_ids = token_ids;
+    }
+
+    /// Set tokenizer for JSON tool call detection (called by engine after initialization)
+    pub fn set_tokenizer(&mut self, tokenizer: Arc<Tokenizer>) {
+        // Get the token ID for "}" character
+        if let Ok(tokens) = tokenizer.encode("}", false) {
+            if let Some(&token_id) = tokens.get_ids().last() {
+                self.json_end_token_id = Some(token_id);
+                crate::log_info!("JSON end token ID (}}) set to: {}", token_id);
+            }
+        }
+        self.tokenizer = Some(tokenizer);
     }
 
     pub fn add(&mut self, mut seq: Sequence) -> usize {
@@ -343,7 +368,9 @@ impl Scheduler {
             // - Some(false): External tools, finish stream at </tool_call>
             // - Some(true): MCP internal, pause stream, execute, resume
             if let Some(mcp_mode) = self.running[idx].sampling_params.mcp_mode {
-                if self.is_tool_call_end(token) {
+                // Check if this is a tool call end (supports both XML </tool_call> and JSON } patterns)
+                // We check BEFORE borrowing seq mutably
+                if self.is_tool_call_end(token, idx) {
                     let seq = &mut self.running[idx];
                     seq.append_token(token);
                     if mcp_mode {
@@ -1130,8 +1157,34 @@ impl Scheduler {
     }
 
     /// Check if the given token is a tool call end token
-    pub fn is_tool_call_end(&self, token: u32) -> bool {
-        self.tool_call_end_token_ids.contains(&token)
+    /// This supports both:
+    /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
+    /// 2. JSON end token "}" combined with Regex validation for {..."name":..., "arguments":...} pattern
+    pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
+        // 1. Check for explicit tool call end tokens (XML style)
+        if self.tool_call_end_token_ids.contains(&token) {
+            return true;
+        }
+
+        // 2. Check for JSON style tool call using Regex
+        // This handles models like Qwen3 that output raw JSON without XML tags
+        if self.json_end_token_id == Some(token) {
+            if let Some(tokenizer) = &self.tokenizer {
+                // Temporarily add the token to get complete output for decoding
+                let mut temp_output = self.running[idx].output_ids.to_vec();
+                temp_output.push(token);
+
+                if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
+                    // Check for JSON tool call pattern using Regex
+                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
+                    if self.tool_call_regex.is_match(&decoded) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Force context-cache for tool call continuation, generating session_id if needed

@@ -8,7 +8,7 @@ use pyo3::pyclass;
 
 #[cfg(feature = "python")]
 #[pyclass]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenerationOutput {
     #[pyo3(get)]
     pub seq_id: usize,
@@ -27,7 +27,7 @@ pub struct GenerationOutput {
 }
 
 #[cfg(not(feature = "python"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenerationOutput {
     pub seq_id: usize,
     pub prompt_length: usize,
@@ -36,6 +36,23 @@ pub struct GenerationOutput {
     pub decode_finish_time: usize,
     pub decoded_length: usize,
     pub decode_output: String,
+}
+
+/// Result from sync collection - either completed normally or paused for tool call
+#[derive(Debug, Clone)]
+pub enum SyncCollectionResult {
+    /// Generation completed normally
+    Completed(GenerationOutput),
+    /// Generation paused for tool call, needs resume with session_id
+    ToolCallPause {
+        session_id: String,
+        seq_id: usize,
+        prompt_length: usize,
+        output_ids: Vec<u32>,
+        prompt_start_time: usize,
+        decode_start_time: usize,
+        decoded_length: usize,
+    },
 }
 
 #[macro_export]

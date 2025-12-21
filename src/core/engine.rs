@@ -4,7 +4,7 @@ use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
 use crate::core::sequence::{DecodeSequence, SequenceStatus};
-use crate::core::GenerationOutput;
+use crate::core::{GenerationOutput, SyncCollectionResult};
 use crate::models::layers::distributed::Comm;
 #[cfg(feature = "nccl")]
 use crate::models::layers::distributed::Id;
@@ -384,6 +384,9 @@ impl LLMEngine {
             }
         }
 
+        // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
+        scheduler.set_tokenizer(Arc::new(tokenizer.clone()));
+
         log_warn!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
             econfig.max_num_batched_tokens,
@@ -741,34 +744,38 @@ impl LLMEngine {
                     if let Some(session_id) = &s.tool_call_session_id {
                         if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                             if let Some(request_type) = self.request_types.get(&seq_id) {
+                                let prompt_start_time = s.created_time();
+                                let decode_start_time = self
+                                    .decode_start_times
+                                    .get(&seq_id)
+                                    .copied()
+                                    .unwrap_or(prompt_start_time);
+
+                                crate::log_info!(
+                                    "[Seq {}] Sending ToolCallPause with session_id: {} (request_type: {:?})",
+                                    seq_id,
+                                    session_id,
+                                    request_type
+                                );
+
+                                // For stream requests, send the last token before pause
                                 if *request_type == RequestType::Stream {
-                                    let prompt_start_time = s.created_time();
-                                    let decode_start_time = self
-                                        .decode_start_times
-                                        .get(&seq_id)
-                                        .copied()
-                                        .unwrap_or(prompt_start_time);
-
-                                    crate::log_info!(
-                                        "[Seq {}] Sending ToolCallPause with session_id: {}",
-                                        seq_id,
-                                        session_id
-                                    );
-
-                                    // Different from normal finish, we need to send the last token (end of </tool_call>)
                                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                         if let Some(tok) = decoder.step(s.last_token) {
                                             let _ = sender.try_send(StreamItem::Token(tok.clone()));
                                         }
                                     }
-
-                                    let _ = sender.try_send(StreamItem::ToolCallPause {
-                                        session_id: session_id.clone(),
-                                        prompt_start_time,
-                                        decode_start_time,
-                                        decoded_length: s.output_ids.len(),
-                                    });
+                                } else {
+                                    let _ = sender.try_send(StreamItem::TokenID(s.last_token));
                                 }
+
+                                // Emit ToolCallPause for both stream and completion requests
+                                let _ = sender.try_send(StreamItem::ToolCallPause {
+                                    session_id: session_id.clone(),
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decoded_length: s.output_ids.len(),
+                                });
                             }
                         }
                         // Don't remove senders/decoders - they will be reused for follow-up
@@ -779,7 +786,8 @@ impl LLMEngine {
                         continue; // Skip normal finish handling
                     }
 
-                    // Normal finish handling (no tool call)
+                    // Normal finish handling - tool call detection is now done in scheduler
+
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
                             let prompt_start_time = s.created_time();
@@ -1165,7 +1173,7 @@ impl LLMEngine {
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
         tokenizer: Arc<Tokenizer>,
-    ) -> Result<Vec<GenerationOutput>> {
+    ) -> Result<Vec<SyncCollectionResult>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
         let decode_start_time_clone = Arc::clone(&decode_start_time);
@@ -1211,7 +1219,8 @@ impl LLMEngine {
                 let decode_start_time_clone = decode_start_time.clone();
                 let tokenizer = Arc::clone(&tokenizer);
                 task::spawn(async move {
-                    let mut output: Option<GenerationOutput> = None;
+                    let mut output: Option<SyncCollectionResult> = None;
+                    let mut collected_token_ids: Vec<u32> = Vec::new();
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
@@ -1226,7 +1235,7 @@ impl LLMEngine {
                                     .decode(&decoded_ids, true)
                                     .expect("unable to decode!");
 
-                                output = Some(GenerationOutput {
+                                output = Some(SyncCollectionResult::Completed(GenerationOutput {
                                     seq_id,
                                     prompt_length,
                                     prompt_start_time: prompt_start,
@@ -1234,10 +1243,10 @@ impl LLMEngine {
                                     decode_finish_time: decode_finish,
                                     decoded_length: decoded_len,
                                     decode_output,
-                                });
+                                }));
                                 break;
                             }
-                            StreamItem::Token(_) | StreamItem::TokenID(_) => {
+                            StreamItem::Token(_) => {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
 
                                 decode_start_time_clone
@@ -1251,20 +1260,54 @@ impl LLMEngine {
                                         Ordering::SeqCst,
                                         Ordering::SeqCst,
                                     )
-                                    .ok(); // set it only if it was 0
+                                    .ok();
+                            }
+                            StreamItem::TokenID(id) => {
+                                decoded_tokens.fetch_add(1, Ordering::Relaxed);
+                                collected_token_ids.push(id);
+
+                                decode_start_time_clone
+                                    .compare_exchange(
+                                        0,
+                                        SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis()
+                                            as usize,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .ok();
                             }
                             StreamItem::Done(_) => {
-                                println!("Sequence [seq_id {}] finished!", seq_id);
+                                crate::log_info!("Sequence [seq_id {}] finished!", seq_id);
                                 break;
                             }
-                            StreamItem::ToolCallPause { .. } => {
-                                // In batch mode, tool call pause is treated as done
-                                // (tool call execution is only for streaming mode)
-                                println!("Sequence [seq_id {}] tool call pause (treated as done in batch)", seq_id);
+                            StreamItem::ToolCallPause {
+                                session_id,
+                                prompt_start_time,
+                                decode_start_time,
+                                decoded_length,
+                            } => {
+                                // Return tool call pause info for caller to handle
+                                crate::log_info!(
+                                    "Sequence [seq_id {}] tool call pause with session_id: {}",
+                                    seq_id,
+                                    session_id
+                                );
+                                output = Some(SyncCollectionResult::ToolCallPause {
+                                    session_id,
+                                    seq_id,
+                                    prompt_length,
+                                    output_ids: collected_token_ids.clone(),
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decoded_length,
+                                });
                                 break;
                             }
                             StreamItem::Error(e) => {
-                                eprintln!("Error in Seq {}: {}", seq_id, e);
+                                crate::log_error!("Error in Seq {}: {}", seq_id, e);
                                 break;
                             }
                         }

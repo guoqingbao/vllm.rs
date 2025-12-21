@@ -12,6 +12,7 @@ use super::{
     UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::core::SyncCollectionResult;
 use crate::tools::parser::ToolParser;
 use crate::tools::{Tool, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -359,10 +360,11 @@ pub async fn chat_completion(
                             }
 
                             // If no tool calls parsed or no MCP manager, treat as normal completion
-                            crate::log_warn!(
+                            crate::log_error!(
                                 "[Seq {}] ToolCallPause received but no tool calls to execute",
                                 current_seq_id
                             );
+                            break 'outer;
                         }
                         StreamItem::Done((
                             prompt_start_time,
@@ -482,11 +484,44 @@ pub async fn chat_completion(
             ),
         )
     } else {
-        // Non-streaming
-        let (receivers, tokenizer) = {
-            let mut e = data.engine.write();
-            (
-                match e.generate_sync(&vec![params.clone()], &vec![messages], image_data) {
+        // Non-streaming with loop-based MCP tool calling (like stream path)
+        let mut current_messages = chat_messages.clone();
+        let mut current_params = params.clone();
+        let mut total_prompt_tokens = 0;
+        let mut total_decoded_tokens = 0;
+        let mut total_prompt_time_taken = 0f32;
+        let mut total_decoded_time_taken = 0f32;
+        let mut choices = Vec::new();
+        let tokenizer = {
+            let e = data.engine.read();
+            Arc::new(e.tokenizer.clone())
+        };
+
+        // MCP tool calling loop - continues until no more tool calls
+        'tool_loop: loop {
+            let (input_messages, input_images) =
+                match build_messages_and_images(&current_messages, img_cfg.as_ref()) {
+                    Ok(output) => output,
+                    Err(e) => {
+                        crate::log_error!("Message processing failed: {:?}", e);
+                        return ChatResponder::InternalError(format!(
+                            "Internal server error {:?}",
+                            e
+                        ));
+                    }
+                };
+
+            crate::log_info!(
+                "Received completion request with {} messages",
+                input_messages.len()
+            );
+            let receivers = {
+                let mut e = data.engine.write();
+                match e.generate_sync(
+                    &vec![current_params.clone()],
+                    &vec![input_messages],
+                    input_images,
+                ) {
                     Ok(receivers) => receivers,
                     Err(e) => {
                         crate::log_error!("Completion generation failed: {:?}", e);
@@ -495,153 +530,135 @@ pub async fn chat_completion(
                             e
                         ));
                     }
-                },
-                Arc::new(e.tokenizer.clone()),
-            )
-        };
-
-        let outputs = match LLMEngine::collect_sync_results(receivers, tokenizer).await {
-            Ok(outputs) => outputs,
-            Err(e) => {
-                crate::log_error!("Failed to collect completion results: {:?}", e);
-                return ChatResponder::InternalError(format!("Internal server error {:?}", e));
-            }
-        };
-
-        let mut total_prompt_tokens = 0;
-        let mut total_decoded_tokens = 0;
-        let mut total_prompt_time_taken = 0.;
-        let mut total_decoded_time_taken = 0.;
-
-        let mut choices = Vec::new();
-        for output in outputs {
-            total_prompt_tokens += output.prompt_length;
-            total_decoded_tokens += output.decoded_length;
-            let prompt_time_taken =
-                (output.decode_start_time - output.prompt_start_time) as f32 / 1000.0;
-            let decode_time_taken =
-                (output.decode_finish_time - output.decode_start_time) as f32 / 1000.0;
-            total_prompt_time_taken += prompt_time_taken;
-            total_decoded_time_taken += decode_time_taken;
-
-            // Parse tool calls from the model output if tools were provided
-            let tool_parser = ToolParser::new();
-
-            let (content, tool_calls) = if has_tools {
-                let parsed_calls = tool_parser.parse(&output.decode_output);
-                if parsed_calls.is_empty() {
-                    (Some(output.decode_output), None)
-                } else {
-                    (None, Some(parsed_calls))
                 }
-            } else {
-                (Some(output.decode_output), None)
             };
 
-            if let (Some(tool_calls), Some(mcp_manager)) = (
-                &tool_calls,
-                data.mcp_manager.as_ref().filter(|_| mcp_injected_tools),
-            ) {
-                crate::log_info!(
-                    "Detected {} tool call(s) in completion, executing via MCP (with 60s timeout)",
-                    tool_calls.len()
-                );
-
-                // Use async helper for tool execution with timeout
-                let exec_result = execute_mcp_tool_calls_async(
-                    tool_calls.clone(),
-                    mcp_manager.clone(),
-                    chat_messages.clone(),
-                )
-                .await;
-
-                let (followup_inputs, followup_images) = match build_messages_and_images(
-                    &exec_result.followup_messages,
-                    img_cfg.as_ref(),
-                ) {
-                    Ok(output) => output,
-                    Err(e) => {
-                        crate::log_error!("Tool follow-up processing failed: {:?}", e);
-                        return ChatResponder::InternalError(format!(
-                            "Internal server error {:?}",
-                            e
-                        ));
-                    }
-                };
-
-                let (receivers, tokenizer) = {
-                    let mut e = data.engine.write();
-                    match e.generate_sync(
-                        &vec![params.clone()],
-                        &vec![followup_inputs],
-                        followup_images,
-                    ) {
-                        Ok(receivers) => (receivers, Arc::new(e.tokenizer.clone())),
-                        Err(e) => {
-                            crate::log_error!("Tool follow-up generation failed: {:?}", e);
-                            return ChatResponder::InternalError(format!(
-                                "Internal server error {:?}",
-                                e
-                            ));
-                        }
-                    }
-                };
-
-                let outputs = match LLMEngine::collect_sync_results(receivers, tokenizer).await {
-                    Ok(outputs) => outputs,
-                    Err(e) => {
-                        crate::log_error!("Failed to collect tool follow-up results: {:?}", e);
-                        return ChatResponder::InternalError(format!(
-                            "Internal server error {:?}",
-                            e
-                        ));
-                    }
-                };
-
-                let followup_output = outputs
-                    .first()
-                    .map(|o| o.decode_output.clone())
-                    .unwrap_or_default();
-                if let Some(followup_metrics) = outputs.first() {
-                    total_prompt_tokens += followup_metrics.prompt_length;
-                    total_decoded_tokens += followup_metrics.decoded_length;
-                    let prompt_time_taken = (followup_metrics.decode_start_time
-                        - followup_metrics.prompt_start_time)
-                        as f32
-                        / 1000.0;
-                    let decode_time_taken = (followup_metrics.decode_finish_time
-                        - followup_metrics.decode_start_time)
-                        as f32
-                        / 1000.0;
-                    total_prompt_time_taken += prompt_time_taken;
-                    total_decoded_time_taken += decode_time_taken;
+            let results = match LLMEngine::collect_sync_results(receivers, tokenizer.clone()).await
+            {
+                Ok(results) => results,
+                Err(e) => {
+                    crate::log_error!("Failed to collect completion results: {:?}", e);
+                    return ChatResponder::InternalError(format!("Internal server error {:?}", e));
                 }
+            };
 
-                choices.push(ChatChoice {
-                    index: 0,
-                    message: ChatResponseMessage {
-                        role: "assistant".to_string(),
-                        content: Some(followup_output),
-                        tool_calls: None,
-                    },
-                    finish_reason: Some("stop".to_string()),
-                });
-            } else {
-                let has_tool_calls = tool_calls.is_some();
-                choices.push(ChatChoice {
-                    index: 0,
-                    message: ChatResponseMessage {
-                        role: "assistant".to_string(),
-                        content,
-                        tool_calls,
-                    },
-                    finish_reason: if has_tool_calls {
-                        Some("tool_calls".to_string())
-                    } else {
-                        Some("stop".to_string())
-                    },
-                });
+            for result in results {
+                match result {
+                    SyncCollectionResult::Completed(output) => {
+                        total_prompt_tokens += output.prompt_length;
+                        total_decoded_tokens += output.decoded_length;
+                        let prompt_time_taken =
+                            (output.decode_start_time - output.prompt_start_time) as f32 / 1000.0;
+                        let decode_time_taken =
+                            (output.decode_finish_time - output.decode_start_time) as f32 / 1000.0;
+                        total_prompt_time_taken += prompt_time_taken;
+                        total_decoded_time_taken += decode_time_taken;
+
+                        // Parse tool calls from the model output if tools were provided
+                        let tool_parser = ToolParser::new();
+
+                        let (content, tool_calls) = if has_tools {
+                            let parsed_calls = tool_parser.parse(&output.decode_output);
+                            if parsed_calls.is_empty() {
+                                (Some(output.decode_output), None)
+                            } else {
+                                (None, Some(parsed_calls))
+                            }
+                        } else {
+                            (Some(output.decode_output), None)
+                        };
+
+                        // For external tool calls (not MCP), return to client
+                        let has_tool_calls = tool_calls.is_some();
+                        choices.push(ChatChoice {
+                            index: 0,
+                            message: ChatResponseMessage {
+                                role: "assistant".to_string(),
+                                content,
+                                tool_calls,
+                            },
+                            finish_reason: if has_tool_calls {
+                                Some("tool_calls".to_string())
+                            } else {
+                                Some("stop".to_string())
+                            },
+                        });
+                    }
+                    SyncCollectionResult::ToolCallPause {
+                        session_id,
+                        seq_id,
+                        prompt_length,
+                        output_ids,
+                        prompt_start_time,
+                        decode_start_time,
+                        decoded_length,
+                    } => {
+                        crate::log_info!(
+                            "[Seq {}] Received ToolCallPause, session_id: {}",
+                            seq_id,
+                            session_id
+                        );
+                        total_prompt_tokens += prompt_length;
+                        total_decoded_tokens += decoded_length;
+                        let prompt_time_taken =
+                            (decode_start_time - prompt_start_time) as f32 / 1000.0;
+                        total_prompt_time_taken += prompt_time_taken;
+
+                        // Decode the output to get tool call text
+                        let decoded_output = tokenizer
+                            .decode(&output_ids, true)
+                            .unwrap_or_else(|_| String::new());
+
+                        // Parse tool calls from accumulated output
+                        let tool_parser = ToolParser::new();
+                        let parsed_calls = tool_parser.parse(&decoded_output);
+
+                        if !parsed_calls.is_empty() {
+                            if let Some(mcp_manager) = data.mcp_manager.as_ref() {
+                                crate::log_info!(
+                                    "Executing {} MCP tool call(s) in non-stream mode",
+                                    parsed_calls.len()
+                                );
+
+                                // Execute tool calls via MCP
+                                let exec_result = execute_mcp_tool_calls_async(
+                                    parsed_calls.clone(),
+                                    mcp_manager.clone(),
+                                    current_messages.clone(),
+                                )
+                                .await;
+
+                                // Update messages for next iteration
+                                current_messages = exec_result.followup_messages;
+
+                                // Set session_id for KV cache resumption
+                                current_params.session_id = Some(session_id);
+
+                                // Continue the tool loop for next generation
+                                continue 'tool_loop;
+                            }
+                        }
+
+                        // If no MCP manager or no tool calls, treat as completed
+                        crate::log_error!(
+                            "ToolCallPause received but no tool calls to execute, treating as done"
+                        );
+                        choices.push(ChatChoice {
+                            index: 0,
+                            message: ChatResponseMessage {
+                                role: "assistant".to_string(),
+                                content: Some(decoded_output),
+                                tool_calls: None,
+                            },
+                            finish_reason: Some("stop".to_string()),
+                        });
+                        break 'tool_loop;
+                    }
+                }
             }
+
+            // If we get here without continuing the loop, we're done
+            break 'tool_loop;
         }
 
         crate::log_warn!("--- Performance Metrics ---");

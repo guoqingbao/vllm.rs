@@ -6,7 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
-use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
+use vllm_rs::core::{engine::LLMEngine, GenerationOutput, SyncCollectionResult};
 use vllm_rs::log_error;
 use vllm_rs::server::run_server;
 use vllm_rs::server::Args;
@@ -394,7 +394,20 @@ async fn main() -> Result<()> {
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
-                LLMEngine::collect_sync_results(receivers, tokenizer).await?
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer).await?;
+                // Extract GenerationOutput from SyncCollectionResult
+                results
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        SyncCollectionResult::Completed(output) => Some(output),
+                        SyncCollectionResult::ToolCallPause { .. } => {
+                            tracing::warn!(
+                                "Tool call detected but CLI mode does not support MCP tool calling"
+                            );
+                            None
+                        }
+                    })
+                    .collect()
             }
         };
 
