@@ -160,8 +160,11 @@ impl ImageProcessTrait for Qwen3VLImageProcessor {
         }
 
         while prompt.contains(PLACEHOLDER) {
-            let replace_str = replace_strings.pop().unwrap();
-            *prompt = prompt.replace(PLACEHOLDER, &replace_str);
+            if let Some(replace_str) = replace_strings.pop() {
+                *prompt = prompt.replace(PLACEHOLDER, &replace_str);
+            } else {
+                break;
+            }
         }
 
         Ok((pixel_values, grid_thw))

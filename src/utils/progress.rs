@@ -61,7 +61,11 @@ impl RemoteProgressReporter {
                 stream = LocalStream::connect(name.clone());
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            streams.push(stream.unwrap());
+            if let Ok(s) = stream {
+                streams.push(s);
+            } else {
+                crate::log_error!("Failed to connect stream");
+            }
         } else {
             let listener = ListenerOptions::new()
                 .name(
@@ -170,7 +174,7 @@ impl Progress {
                 self.bars[idx].set_message(format!("On Rank {} Device Finished", idx));
             }
         }
-        self.m.clear().unwrap();
+        let _ = self.m.clear();
     }
 }
 
@@ -189,11 +193,15 @@ pub fn progress_worker(
             let progress = reporter.write().get_progress();
             for (rank, progress) in progress {
                 finished_map.insert(rank, progress);
-                progress_bar.as_ref().unwrap().update(rank, progress);
+                if let Some(pb) = progress_bar.as_ref() {
+                    pb.update(rank, progress);
+                }
             }
 
             if finished_map.values().all(|v| v >= &length) {
-                progress_bar.as_ref().unwrap().finish();
+                if let Some(pb) = progress_bar.as_ref() {
+                    pb.finish();
+                }
                 break;
             }
         }

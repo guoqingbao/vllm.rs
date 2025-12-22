@@ -337,32 +337,13 @@ impl TensorParallelRowLinear {
     }
 }
 
-// pub fn rms_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<RmsNorm> {
-//     let weight = vb.get_with_hints(size, "weight", shard(0, 0, 1))?;
-//     Ok(RmsNorm::new(weight, eps))
-// }
-
-// pub fn layer_norm(size: usize, eps: f64, affine: bool, vb: VarBuilder) -> Result<LayerNorm> {
-//     let weight = vb.get_with_hints(size, "weight", Shard::default())?;
-//     if affine {
-//         Ok(LayerNorm::new(weight, vb.get(size, "bias")?, eps))
-//     } else {
-//         Ok(LayerNorm::new_no_bias(weight, eps))
-//     }
-// }
-
-// pub fn embedding(vocab_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Embedding> {
-//     let embeddings = vb.get((vocab_size, hidden_size), "weight")?;
-//     Ok(Embedding::new(embeddings, hidden_size))
-// }
-
 impl ReplicatedLinear {
     pub fn from(linear: Linear) -> Result<Self> {
         Ok(Self { linear })
     }
 
     pub fn from_weight_bias(weight: Tensor, bias: Option<Tensor>) -> Result<Self> {
-        let linear = Linear::new(weight, bias, &None);
+        let linear = Linear::new(weight, bias, &None)?;
         Ok(Self { linear })
     }
 

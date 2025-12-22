@@ -199,6 +199,9 @@ impl Qwen3VLForConditionalGeneration {
     }
 
     pub fn get_vocab_size(&self) -> usize {
-        todo!()
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.get_vocab_size(),
+            Qwen3TextModel::MoE(m) => m.get_vocab_size(),
+        }
     }
 }

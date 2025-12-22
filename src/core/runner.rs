@@ -594,6 +594,7 @@ impl ModelRunner {
         } else {
             (None, None)
         };
+        let cu_seqlens_q_vec = cu_seqlens_q.clone();
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
@@ -608,6 +609,7 @@ impl ModelRunner {
             max_seqlen_k,
             max_context_len,
             disable_flash_attn: self.config.disable_flash_attn,
+            seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -657,6 +659,7 @@ impl ModelRunner {
             max_seqlen_k: 0,
             max_context_len,
             disable_flash_attn: None,
+            seqlens: None,
         };
 
         Ok((input_ids, positions, input_metadata))

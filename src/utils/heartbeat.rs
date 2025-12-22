@@ -41,24 +41,31 @@ pub fn heartbeat_worker(
         };
 
         let mut heartbeat_error_count = 0;
-        crate::log_info!("enter heartbeat processing loop ({:?})", command_manager);
-        while !flag_clone.load(Ordering::Relaxed) {
-            let alive_result = command_manager.as_mut().unwrap().heartbeat(is_daemon);
-            if alive_result.is_err() {
-                if !flag_clone.load(Ordering::Relaxed) {
-                    crate::log_warn!("{:?}", alive_result);
+        if let Ok(manager) = command_manager.as_mut() {
+            crate::log_info!("enter heartbeat processing loop ({:?})", manager);
+            while !flag_clone.load(Ordering::Relaxed) {
+                let alive_result = manager.heartbeat(is_daemon);
+                if alive_result.is_err() {
+                    if !flag_clone.load(Ordering::Relaxed) {
+                        crate::log_warn!("{:?}", alive_result);
+                    }
+                    if heartbeat_error_count > 5 {
+                        crate::log_error!(
+                            "heartbeat detection failed, exit the current process because of {:?}",
+                            alive_result
+                        );
+                        process::abort();
+                    }
+                    heartbeat_error_count += 1;
                 }
-                if heartbeat_error_count > 5 {
-                    crate::log_error!(
-                        "heartbeat detection failed, exit the current process because of {:?}",
-                        alive_result
-                    );
-                    process::abort();
-                }
-                heartbeat_error_count += 1;
-            }
 
-            let _ = thread::sleep(time::Duration::from_millis(1000 as u64));
+                let _ = thread::sleep(time::Duration::from_millis(1000 as u64));
+            }
+        } else {
+            crate::log_error!(
+                "Failed to initialize command manager: {:?}",
+                command_manager.err()
+            );
         }
     });
     handle
