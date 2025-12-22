@@ -1,3 +1,4 @@
+use crate::models::deepseek::DeepSeekForCausalLM;
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
@@ -41,6 +42,7 @@ pub enum Model {
     Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
+    DeepSeek(Arc<DeepSeekForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
@@ -102,6 +104,7 @@ impl ModelRunner {
                 Qwen3MoE => Qwen3MoEForCausalLM,
                 LLaMa => LLaMaForCausalLM,
                 GLM4 => GLM4ForCausalLM,
+                DeepSeek => DeepSeekForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
@@ -117,6 +120,7 @@ impl ModelRunner {
                 Qwen3MoE => EmbedInputs,
                 LLaMa => EmbedInputs,
                 GLM4 => EmbedInputs,
+                DeepSeek => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
                 Qwen3VL => NoneArg,
@@ -416,6 +420,7 @@ impl ModelRunner {
                 Qwen3MoE => false,
                 LLaMa => false,
                 GLM4 => false,
+                DeepSeek => false,
                 Mistral3VL => images,
                 Gemma3 => images,
                 Qwen3VL => images,
@@ -437,6 +442,7 @@ impl ModelRunner {
                 Qwen3MoE => false,
                 LLaMa => false,
                 GLM4 => false,
+                DeepSeek => false,
                 Gemma3 => None,
             },
             candle_core::bail!("Embedding is not supported for this model type")
@@ -758,6 +764,7 @@ impl ModelRunner {
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),
+            Model::DeepSeek(model) => model.get_vocab_size(),
         }
     }
 
