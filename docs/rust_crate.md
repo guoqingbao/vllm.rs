@@ -7,7 +7,7 @@ an OpenAI-compatible service without changing the existing project structure.
 
 ```toml
 [dependencies]
-vllm-rs = { path = "/path/to/vllm.rs" }
+vllm-rs = { git = "https://github.com/guoqingbao/vllm.rs.git", rev = "1377fa9" }
 
 [features]
 cuda = ["vllm_rs/cuda"]

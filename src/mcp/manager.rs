@@ -287,6 +287,7 @@ fn run_manager_loop(
                             server_id,
                             err
                         );
+                        break;
                     }
                 }
             }

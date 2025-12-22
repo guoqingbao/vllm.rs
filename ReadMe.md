@@ -12,14 +12,13 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**) – Superior than Python counterparts
+* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**)
 * 🧠 **Minimalist Core** – Core logic written in **<3000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in API Server and ChatGPT-like Web UI** – Native Rust server for both CUDA and Metal
 * 🔌 **MCP Integration** – Model Context Protocol for tool calling support
 * 📊 **Embedding & Tokenizer APIs** – Full text processing support
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
-* 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
 
@@ -106,27 +105,10 @@ python3 -m pip install vllm_rs
     <summary>Single GPU + GGUF model</summary>
 
 ```bash
-# The following command will start both the API Server and the Web Server (ChatGPT-style UI)
-# Use the arrow keys to select the access mode (Local Access / Remote Access);
-# Use Remote Access if the server and the web client usage are not on the same machine.
-# API Server example: http://<IP>:8000/v1/ (API Key: empty)
-# Web Server (click to open the ChatGPT-style page): http://<IP>:8001
-```
-```bash
 # CUDA
 python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
-# Metal/MacOS (response can be seriously degradated if GPU memory over 95% on MacOS, use a smaller `--max-model-len` or `--kv-fraction` parameter)
+# Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
 python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
-```
-
-  </details>
-
-  <details open>
-    <summary>Multimodal model (Qwen3 VL, with images)</summary>
-
-```bash
-# Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
 ```
 
   </details>
@@ -150,157 +132,82 @@ python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,
 
   </details>
 
-  <details>
+
+  <details open>
+    <summary>Multimodal model (Qwen3 VL, with images)</summary>
+
+```bash
+# Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+```
+
+  </details>
+
+  <details open>
     <summary>GPTQ/AWQ Marlin-compatible model</summary>
 
 ```bash
 python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ```
-
   </details>
 
-
-### 🤖✨ Interactive Chat and Batch Processing
-
-  <details open>
-    <summary>Chat with Qwen3-32B-A3B model</summary>
-
-```bash
-# Context-cache automatically enabled under chat mode
-python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-```
-
-  </details>
-
-  <details open>
-    <summary>Chat with local unquantized model</summary>
-
-```bash
-python3 -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
-```
-
-  </details>
-
-  <details open>
-    <summary>Chat with model quantized instantly (ISQ)</summary>
-
-```bash
-# Enable maximum context (262144 tokens), two ranks (`--d 0,1`)
-python3 -m vllm_rs.chat --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
-```
-
-  </details>
-
-  <details>
-    <summary>Batch Completion</summary>
-
-```bash
-python3 -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
-```bash
-python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
-
-  </details>
-
-🤖 <a href="python/ReadMe.md">Here are notes on using API interface and Context-cache in Python</a>
-
+See [**More Python Examples →**](python/ReadMe.md)
 
 ## 📘 Usage (Rust)
 
-Use `--i` to enable interactive mode 🤖, `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
 
-> Chat mode
+### Build (CUDA)
+```shell
+# Remove `nccl` for single-gpu usage
+# Remove `flash-attn,flash-context` for V100 or older hardware
+./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+```
+
+### Build (Metal)
+```shell
+cargo build --release --features metal
+```
+
+> API server + Web UI
 
   <details open>
-    <summary>Single GPU + built-in Context Cache</summary>
+    <summary>Single GPU</summary>
 
   ```bash
   # CUDA
-  cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache
   # Metal/MacOS
-  cargo run --release --features metal -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
+  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --context-cache
   ```
-
-  </details>
-
+  
   <details open>
-    <summary>Multi-GPU + CUDA Graph + Flash attention + FP8 kvcache</summary>
+    <summary>Multi-GPU + Unquantized Model</summary>
 
   ```bash
-  # run.sh script help generate the standalone runner, use kv-fraction to control kvcache usage (percent of remaining gpu memory after model loading)
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --kv-fraction 0.7 --port 8000 --fp8-kvcache
-  ```
-
-  </details>
-
----
-
-> API server + **ChatGPT-like Web UI** (other option: **PD server**)
-
-  <details open>
-    <summary>Serve unquantized model with multiple GPUs</summary>
-
-  ```bash
-  # Remove `flash-attn` feature will enable built-in context cache, making it supports V100 and Metal (metal need additionally remove `graph` feature) platforms
   # Replace "--ui-server" with "--server" will only start API server
-  ```
-  ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
+  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
   ```
 
   </details>
 
   <details open>
-    <summary>Serve GGUF models</summary>
+    <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
+  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
   ```
 
   </details>
 
-  <details>
-    <summary>Serve ISQ model</summary>
+  <details open>
+    <summary>ISQ model + FP8 KvCache</summary>
 
   ```bash
-# Disabled flash-context feature to use fp8-kvcache
+  # CUDA: Disabled flash-context feature to use fp8-kvcache
   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
-  ```
-
-  </details>
-
-  <details>
-    <summary>High-performance prefill solution</summary>
-
-  Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
-
-  ```bash
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --context-cache
-  ```
-
-  </details>
-
----
-
-> **MacOS/Metal platform**
-
-  <details open>
-    <summary>Run GGUF quantized model</summary>
-
-  ```bash
-   # Use `--fp8-kvcache` to enable fp8 kvcache (slight acuracy and performance slow down)
-   cargo run --release --features metal -- --ui-server --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --context-cache --fp8-kvcache
-  ```
-
-  </details>
-
-  <details open>
-    <summary>Run unquantized as Q6K model with context-cache</summary>
-
-  ```bash
-  cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k
+  # MacOS/Metal
+  cargo run --release --features metal -- --ui-server --w /path/Qwen3-4B --isq q6k
   ```
 
   </details>
@@ -309,18 +216,14 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
 
 ## 🔌 MCP Integration (Tool Calling)
 
-Enable LLMs to call external tools via Model Context Protocol. See [**MCP Documentation →**](docs/mcp_tool_calling.md)
+Enable LLMs to call external tools via Model Context Protocol.
 
 ```bash
-# Start with single MCP server
-cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache \
-  --mcp-command npx \
-  --mcp-args=-y,@modelcontextprotocol/server-filesystem,~/
-
-# Or with config file for multiple servers
-./run.sh --release --features cuda --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
-  --mcp-config ./mcp.json
+# Start with multiple mcp servers
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache --mcp-config ./mcp.json
 ```
+
+See [**MCP Documentation →**](docs/mcp_tool_calling.md)
 
 ---
 
@@ -336,7 +239,7 @@ cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
+  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
@@ -351,7 +254,7 @@ cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
+  target/release/vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   Or, start with prebuild Python package:

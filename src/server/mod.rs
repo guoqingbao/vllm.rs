@@ -42,9 +42,6 @@ pub struct ChatCompletionRequest {
     /// How the model should choose which tool to call
     #[serde(default)]
     pub tool_choice: Option<crate::tools::ToolChoice>,
-    /// Optional JSON schema to guide decoding
-    #[serde(default)]
-    pub guided_json_schema: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]

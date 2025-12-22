@@ -68,8 +68,17 @@ Create `mcp.json`:
 Start the server:
 
 ```bash
+# pip install vllm_rs
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache --mcp-config ./mcp.json
+```
+
+or Rust:
+
+```bash
 # CUDA
-./run.sh --release --features cuda --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
+./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+
+target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
   --mcp-config ./mcp.json
 
 # Metal/macOS

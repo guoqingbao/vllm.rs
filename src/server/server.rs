@@ -14,7 +14,7 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::core::SyncCollectionResult;
 use crate::tools::parser::ToolParser;
-use crate::tools::{Tool, ToolChoice, ToolFormat};
+use crate::tools::{Tool, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -47,21 +47,6 @@ fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool
     mcp_tools.to_vec()
 }
 
-fn tool_choice_schema(tool_choice: &Option<ToolChoice>) -> Option<serde_json::Value> {
-    match tool_choice {
-        Some(ToolChoice::Function { function, .. }) => Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": { "const": function.name },
-                "arguments": { "type": "object" }
-            },
-            "required": ["name", "arguments"],
-            "additionalProperties": false
-        })),
-        _ => None,
-    }
-}
-
 #[utoipa::path(
     post,
     tag = "vllm-rs",
@@ -87,10 +72,6 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
-    params.guided_json_schema = request
-        .guided_json_schema
-        .clone()
-        .or_else(|| tool_choice_schema(&request.tool_choice));
     let img_cfg = {
         let e = data.engine.read();
         e.img_cfg.clone()

@@ -310,7 +310,7 @@ impl EngineConfig {
         pd_config: Option<PdConfig>,
         mcp_command: Option<String>,
         mcp_config: Option<String>,
-        mcp_args: Option<Vec<String>>,
+        mcp_args: Option<String>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -326,6 +326,12 @@ impl EngineConfig {
                 !\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`) when building the package.");
             }
         }
+
+        let mcp_args = if let Some(mcp_args) = mcp_args {
+            Some(mcp_args.split(',').map(|s| s.to_string()).collect())
+        } else {
+            None
+        };
 
         Self {
             model_id,
@@ -385,6 +391,7 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
+            mcp_mode: None,
         }
     }
 
@@ -399,6 +406,7 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            mcp_mode: None,
         }
     }
 }

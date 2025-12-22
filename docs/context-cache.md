@@ -5,11 +5,11 @@ Context-cache lets the server reuse KV cache across turns via `session_id` when 
 ## Enabling
 - Start server with cache on:  
   ```bash
-  ./run.sh --release --features cuda -- --server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --context-cache
+  target/release/vllm-rs --server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --context-cache
   ```
 - Metal example:  
   ```bash
-  ./run.sh --release --features metal -- --server --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --context-cache --max-model-len 32768
+  target/release/vllm-rs --server --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --context-cache --max-model-len 32768
   ```
 
 ## Using `session_id`

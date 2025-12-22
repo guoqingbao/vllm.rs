@@ -348,7 +348,6 @@ pub struct SamplingParams {
     pub session_id: Option<String>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
-    pub guided_json_schema: Option<serde_json::Value>,
     /// Tool mode for streaming tool call handling:
     /// - None: No tools, ignore </tool_call> detection
     /// - Some(false): External tools, finish stream at </tool_call>
@@ -377,14 +376,11 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub presence_penalty: Option<f32>,
-    #[pyo3(get, set)]
-    pub guided_json_schema: Option<serde_json::Value>,
     /// Tool mode for streaming tool call handling:
     /// - None: No tools, ignore </tool_call> detection
     /// - Some(false): External tools, finish stream at </tool_call>
     /// - Some(true): MCP internal, pause stream, execute, resume
     #[pyo3(get, set)]
-    #[serde(default)]
     pub mcp_mode: Option<bool>,
 }
 
@@ -409,7 +405,6 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
-            guided_json_schema: None,
             mcp_mode: None,
         }
     }
@@ -424,7 +419,6 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
-            guided_json_schema: None,
             mcp_mode: None,
         }
     }
@@ -441,7 +435,6 @@ impl Default for SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
-            guided_json_schema: None,
             mcp_mode: None,
         }
     }
