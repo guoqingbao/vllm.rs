@@ -4,17 +4,17 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
-use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 use crate::utils::guidance::GuidanceState;
-use crate::utils::logits_processor::LogitsProcessor;
+use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
+    models::phi4::Phi4ForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
@@ -40,6 +40,7 @@ pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
     Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
+    Phi4(Arc<Phi4ForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
@@ -66,7 +67,8 @@ pub struct ModelRunner {
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
     logit_processor: LogitsProcessor,
-    sampling_params: RwLock<SamplingParams>,
+    /// Cached sampling strategy computed once during prefill, reused during decode
+    cached_sampling: RwLock<Option<Sampling>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
@@ -101,6 +103,7 @@ impl ModelRunner {
                 Qwen3 => Qwen3ForCausalLM,
                 Qwen3MoE => Qwen3MoEForCausalLM,
                 LLaMa => LLaMaForCausalLM,
+                Phi4 => Phi4ForCausalLM,
                 GLM4 => GLM4ForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
@@ -116,6 +119,7 @@ impl ModelRunner {
                 Qwen3 => EmbedInputs,
                 Qwen3MoE => EmbedInputs,
                 LLaMa => EmbedInputs,
+                Phi4 => EmbedInputs,
                 GLM4 => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
@@ -178,7 +182,7 @@ impl ModelRunner {
                 config.hidden_size,
             ),
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
-            sampling_params: RwLock::new(SamplingParams::default()),
+            cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             guidance_states: RwLock::new(HashMap::new()),
             transfer,
@@ -415,6 +419,7 @@ impl ModelRunner {
                 Qwen3 => false,
                 Qwen3MoE => false,
                 LLaMa => false,
+                Phi4 => false,
                 GLM4 => false,
                 Mistral3VL => images,
                 Gemma3 => images,
@@ -436,6 +441,7 @@ impl ModelRunner {
                 Qwen3 => false,
                 Qwen3MoE => false,
                 LLaMa => false,
+                Phi4 => false,
                 GLM4 => false,
                 Gemma3 => None,
             },
@@ -704,27 +710,69 @@ impl ModelRunner {
             logits.to_owned()
         };
 
-        let tokens = match &seqs {
-            Seqs::SeqRefs(seqs) => {
-                if is_prefill {
-                    *self.sampling_params.write() = seqs[0].sampling_params.clone();
-                }
-                if seqs.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    self.logit_processor
-                        .sample(&logits, &Some(seqs[0].sampling_params.clone()))?
+        // Check if generation_cfg has valid sampling params (temperature AND top_k/top_p)
+        let has_valid_sampling_cfg = self.config.generation_cfg.as_ref().map_or(false, |cfg| {
+            cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
+        });
+
+        // Get the batch size for deciding whether to use parallel sampling
+        let batch_size = match seqs {
+            Seqs::SeqRefs(seqs) => seqs.len(),
+            Seqs::DecodeVec(v) => v.len(),
+        };
+
+        // Compute and cache sampling strategy during prefill, reuse during decode
+        let sampling = if is_prefill {
+            // Determine the sampling strategy based on priority:
+            // 1. generation_cfg (model's config) takes highest priority if valid
+            // 2. user's sampling_params if provided with valid values
+            // 3. fallback to ArgMax (naive sampling)
+            let sampling = if has_valid_sampling_cfg {
+                let cfg = self.config.generation_cfg.as_ref().unwrap();
+                crate::log_warn!(
+                    "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}",
+                    cfg.temperature,
+                    cfg.top_k,
+                    cfg.top_p
+                );
+                LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
+            } else if let Seqs::SeqRefs(seqs) = seqs {
+                let user_params = &seqs[0].sampling_params;
+                let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                    && (matches!(user_params.top_k, Some(k) if k > 0)
+                        || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
+                if has_user_config {
+                    crate::log_warn!("Using user's sampling params: {:?}", user_params);
+                    LogitsProcessor::get_strategy(
+                        user_params.temperature,
+                        user_params.top_k,
+                        user_params.top_p,
+                    )
                 } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
+                    crate::log_warn!("No generation_config, using naive sampling (argmax)");
+                    Sampling::ArgMax
                 }
-            }
-            Seqs::DecodeVec(v) => {
-                if v.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    let sampling_params = self.sampling_params.read();
-                    self.logit_processor
-                        .sample(&logits, &Some(sampling_params.clone()))?
-                } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-                }
-            }
+            } else {
+                Sampling::ArgMax
+            };
+
+            // Cache the computed sampling strategy for decode phase
+            *self.cached_sampling.write() = Some(sampling.clone());
+            sampling
+        } else {
+            // Decode phase: reuse cached sampling strategy (no recomputation)
+            self.cached_sampling
+                .read()
+                .clone()
+                .unwrap_or(Sampling::ArgMax)
+        };
+
+        let tokens = if batch_size <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs)
+        {
+            self.logit_processor
+                .sample_with_strategy(&logits, &sampling)?
+        } else {
+            logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
         };
 
         if let Some(cfg) = &self.config.generation_cfg {
@@ -757,6 +805,7 @@ impl ModelRunner {
             Model::Qwen3(model) => model.get_vocab_size(),
             Model::Qwen3MoE(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
+            Model::Phi4(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
