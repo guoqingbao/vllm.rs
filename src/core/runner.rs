@@ -702,23 +702,57 @@ impl ModelRunner {
             logits.to_owned()
         };
 
+        // Check if generation_cfg has valid sampling params (temperature AND top_k/top_p)
+        let has_valid_sampling_cfg = self.config.generation_cfg.as_ref().map_or(false, |cfg| {
+            cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
+        });
+
         let tokens = match seqs {
             Seqs::SeqRefs(seqs) => {
+                let has_user_config = matches!(seqs[0].sampling_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                    && (matches!(seqs[0].sampling_params.top_k, Some(k) if k > 0)
+                        || matches!(seqs[0].sampling_params.top_p, Some(p) if p != 0.0 && p != 1.0));
                 if is_prefill {
                     *self.sampling_params.write() = seqs[0].sampling_params.clone();
+                    if has_valid_sampling_cfg {
+                        crate::log_warn!("Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}", 
+                            self.config.generation_cfg.as_ref().unwrap().temperature,
+                            self.config.generation_cfg.as_ref().unwrap().top_k,
+                            self.config.generation_cfg.as_ref().unwrap().top_p);
+                    } else if !has_user_config {
+                        crate::log_warn!("No generation_config, using naive sampling (argmax)");
+                    } else {
+                        crate::log_warn!(
+                            "Using user's sampling params: {:?}",
+                            seqs[0].sampling_params
+                        );
+                    }
                 }
+                let effective_sampling_params = if has_valid_sampling_cfg || !has_user_config {
+                    None // Valid config: use config; No config: use naive
+                } else {
+                    Some(seqs[0].sampling_params.clone()) // Has config but no values, use user input
+                };
                 if seqs.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
                     self.logit_processor
-                        .sample(&logits, &Some(seqs[0].sampling_params.clone()))?
+                        .sample(&logits, &effective_sampling_params)?
                 } else {
                     logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
                 }
             }
             Seqs::DecodeVec(v) => {
+                let sampling_params = self.sampling_params.read().clone();
+                let has_user_config = matches!(sampling_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                    && (matches!(sampling_params.top_k, Some(k) if k > 0)
+                        || matches!(sampling_params.top_p, Some(p) if p != 0.0 && p != 1.0));
+                let effective_sampling_params = if has_valid_sampling_cfg || !has_user_config {
+                    None // Valid config: use config; No config: use naive
+                } else {
+                    Some(self.sampling_params.read().clone()) // Has config but invalid, use user input
+                };
                 if v.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    let sampling_params = self.sampling_params.read();
                     self.logit_processor
-                        .sample(&logits, &Some(sampling_params.clone()))?
+                        .sample(&logits, &effective_sampling_params)?
                 } else {
                     logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
                 }

@@ -87,6 +87,7 @@ impl Phi4RotaryEmbedding {
                 Self::rope_scaling_array(short_factor, inv_freq_len, "short_factor")?;
             let long_factor = Self::rope_scaling_array(long_factor, inv_freq_len, "long_factor")?;
 
+            // Compute scaling factor (same for both short and long embeddings)
             let scale = max_seq_len as f64 / original_max_position_embeddings;
             let scaling_factor = if scale <= 1.0 {
                 1.0
@@ -130,8 +131,8 @@ impl Phi4RotaryEmbedding {
             let short_cos = (freqs_short.cos()? * scaling_factor)?;
 
             let normal_emb = RotaryEmbedding {
-                sin: short_cos.to_dtype(dtype)?,
-                cos: short_sin.to_dtype(dtype)?,
+                sin: short_sin.to_dtype(dtype)?,
+                cos: short_cos.to_dtype(dtype)?,
                 is_rope_i,
                 rotary_dim: if cfg.partial_rotary_factor.is_some() {
                     Some(rotary_dim)
@@ -143,8 +144,8 @@ impl Phi4RotaryEmbedding {
             };
 
             let long_emb = RotaryEmbedding {
-                sin: long_cos.to_dtype(dtype)?,
-                cos: long_sin.to_dtype(dtype)?,
+                sin: long_sin.to_dtype(dtype)?,
+                cos: long_cos.to_dtype(dtype)?,
                 is_rope_i,
                 rotary_dim: if cfg.partial_rotary_factor.is_some() {
                     Some(rotary_dim)
