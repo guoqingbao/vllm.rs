@@ -190,11 +190,9 @@ impl LogitsProcessor {
         vec_ret
     }
 
-    pub fn sample(
-        &self,
-        logits: &Tensor,
-        sampling_params: &Option<SamplingParams>,
-    ) -> Result<Vec<u32>> {
+    /// Sample tokens using a pre-computed sampling strategy.
+    /// This is more efficient than `sample()` when the strategy is already computed and cached.
+    pub fn sample_with_strategy(&self, logits: &Tensor, sampling: &Sampling) -> Result<Vec<u32>> {
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         let prs = |temperature: f64| -> Result<Tensor> {
@@ -203,12 +201,7 @@ impl LogitsProcessor {
             Ok(prs)
         };
 
-        let sampling = sampling_params.as_ref().map_or_else(
-            || self.sampling.to_owned(),
-            |param| LogitsProcessor::get_strategy(param.temperature, param.top_k, param.top_p),
-        );
-
-        let next_tokens = match &sampling {
+        let next_tokens = match sampling {
             Sampling::ArgMax => self.sample_argmax(&logits)?,
             Sampling::All { temperature } => {
                 let prs = prs(*temperature as f64)?.to_vec2()?;
@@ -239,6 +232,18 @@ impl LogitsProcessor {
             }
         };
         Ok(next_tokens)
+    }
+
+    pub fn sample(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+    ) -> Result<Vec<u32>> {
+        let sampling = sampling_params.as_ref().map_or_else(
+            || self.sampling.to_owned(),
+            |param| LogitsProcessor::get_strategy(param.temperature, param.top_k, param.top_p),
+        );
+        self.sample_with_strategy(logits, &sampling)
     }
 
     fn apply_penalties(

@@ -4,10 +4,9 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
-use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::logits_processor::LogitsProcessor;
+use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
@@ -66,7 +65,8 @@ pub struct ModelRunner {
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
     logit_processor: LogitsProcessor,
-    sampling_params: RwLock<SamplingParams>,
+    /// Cached sampling strategy computed once during prefill, reused during decode
+    cached_sampling: RwLock<Option<Sampling>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     transfer: Option<Arc<Transfer>>,
 }
@@ -178,7 +178,7 @@ impl ModelRunner {
                 config.hidden_size,
             ),
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
-            sampling_params: RwLock::new(SamplingParams::default()),
+            cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             transfer,
         })
@@ -707,56 +707,64 @@ impl ModelRunner {
             cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
         });
 
-        let tokens = match seqs {
-            Seqs::SeqRefs(seqs) => {
-                let has_user_config = matches!(seqs[0].sampling_params.temperature, Some(t) if t != 0.0 && t != 1.0)
-                    && (matches!(seqs[0].sampling_params.top_k, Some(k) if k > 0)
-                        || matches!(seqs[0].sampling_params.top_p, Some(p) if p != 0.0 && p != 1.0));
-                if is_prefill {
-                    *self.sampling_params.write() = seqs[0].sampling_params.clone();
-                    if has_valid_sampling_cfg {
-                        crate::log_warn!("Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}", 
-                            self.config.generation_cfg.as_ref().unwrap().temperature,
-                            self.config.generation_cfg.as_ref().unwrap().top_k,
-                            self.config.generation_cfg.as_ref().unwrap().top_p);
-                    } else if !has_user_config {
-                        crate::log_warn!("No generation_config, using naive sampling (argmax)");
-                    } else {
-                        crate::log_warn!(
-                            "Using user's sampling params: {:?}",
-                            seqs[0].sampling_params
-                        );
-                    }
+        // Get the batch size for deciding whether to use parallel sampling
+        let batch_size = match seqs {
+            Seqs::SeqRefs(seqs) => seqs.len(),
+            Seqs::DecodeVec(v) => v.len(),
+        };
+
+        // Compute and cache sampling strategy during prefill, reuse during decode
+        let sampling = if is_prefill {
+            // Determine the sampling strategy based on priority:
+            // 1. generation_cfg (model's config) takes highest priority if valid
+            // 2. user's sampling_params if provided with valid values
+            // 3. fallback to ArgMax (naive sampling)
+            let sampling = if has_valid_sampling_cfg {
+                let cfg = self.config.generation_cfg.as_ref().unwrap();
+                crate::log_warn!(
+                    "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}",
+                    cfg.temperature,
+                    cfg.top_k,
+                    cfg.top_p
+                );
+                LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
+            } else if let Seqs::SeqRefs(seqs) = seqs {
+                let user_params = &seqs[0].sampling_params;
+                let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                    && (matches!(user_params.top_k, Some(k) if k > 0)
+                        || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
+                if has_user_config {
+                    crate::log_warn!("Using user's sampling params: {:?}", user_params);
+                    LogitsProcessor::get_strategy(
+                        user_params.temperature,
+                        user_params.top_k,
+                        user_params.top_p,
+                    )
+                } else {
+                    crate::log_warn!("No generation_config, using naive sampling (argmax)");
+                    Sampling::ArgMax
                 }
-                let effective_sampling_params = if has_valid_sampling_cfg || !has_user_config {
-                    None // Valid config: use config; No config: use naive
-                } else {
-                    Some(seqs[0].sampling_params.clone()) // Has config but no values, use user input
-                };
-                if seqs.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    self.logit_processor
-                        .sample(&logits, &effective_sampling_params)?
-                } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-                }
-            }
-            Seqs::DecodeVec(v) => {
-                let sampling_params = self.sampling_params.read().clone();
-                let has_user_config = matches!(sampling_params.temperature, Some(t) if t != 0.0 && t != 1.0)
-                    && (matches!(sampling_params.top_k, Some(k) if k > 0)
-                        || matches!(sampling_params.top_p, Some(p) if p != 0.0 && p != 1.0));
-                let effective_sampling_params = if has_valid_sampling_cfg || !has_user_config {
-                    None // Valid config: use config; No config: use naive
-                } else {
-                    Some(self.sampling_params.read().clone()) // Has config but invalid, use user input
-                };
-                if v.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    self.logit_processor
-                        .sample(&logits, &effective_sampling_params)?
-                } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-                }
-            }
+            } else {
+                Sampling::ArgMax
+            };
+
+            // Cache the computed sampling strategy for decode phase
+            *self.cached_sampling.write() = Some(sampling.clone());
+            sampling
+        } else {
+            // Decode phase: reuse cached sampling strategy (no recomputation)
+            self.cached_sampling
+                .read()
+                .clone()
+                .unwrap_or(Sampling::ArgMax)
+        };
+
+        let tokens = if batch_size <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs)
+        {
+            self.logit_processor
+                .sample_with_strategy(&logits, &sampling)?
+        } else {
+            logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
         };
 
         if let Some(cfg) = &self.config.generation_cfg {
