@@ -33,6 +33,8 @@ fn tool_format_for_model(model_id: &str) -> ToolFormat {
         ToolFormat::Qwen
     } else if model_id.contains("llama") || model_id.contains("mistral") {
         ToolFormat::Llama
+    } else if model_id.contains("phi") {
+        ToolFormat::Phi4
     } else {
         ToolFormat::Generic
     }

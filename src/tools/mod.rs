@@ -231,6 +231,8 @@ pub enum ToolFormat {
     Qwen,
     /// LLaMA/Mistral format
     Llama,
+    /// Phi4 models format (uses <|tool|> tokens)
+    Phi4,
     /// Generic JSON format
     Generic,
 }
@@ -241,6 +243,7 @@ impl ToolFormat {
         match self {
             ToolFormat::Qwen => format_tools_qwen(tools),
             ToolFormat::Llama => format_tools_llama(tools),
+            ToolFormat::Phi4 => format_tools_phi4(tools),
             ToolFormat::Generic => format_tools_generic(tools),
         }
     }
@@ -278,6 +281,17 @@ fn format_tools_llama(tools: &[Tool]) -> String {
     );
 
     output
+}
+
+fn format_tools_phi4(tools: &[Tool]) -> String {
+    // Phi4 uses <|tool|> and <|/tool|> tokens for tool definitions
+    // Format: <|tool|>[{"name": "...", "description": "...", "parameters": {...}}]<|/tool|>
+    let tools_list: Vec<_> = tools.iter().map(|t| &t.function).collect();
+    let tools_json = serde_json::to_string(&tools_list).unwrap_or_default();
+    format!(
+        "You are a helpful assistant with some tools.<|tool|>{}<|/tool|>",
+        tools_json
+    )
 }
 
 fn format_tools_generic(tools: &[Tool]) -> String {

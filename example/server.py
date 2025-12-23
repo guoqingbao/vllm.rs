@@ -34,6 +34,7 @@ def parse_args():
         used for TCP/IP communication between PD server and client", type=str, default=None)
     parser.add_argument("--ui-server", action="store_true")
     parser.add_argument("--mcp_config", type=str, default=None)
+    parser.add_argument("--mcp_command", type=str, default=None)
     parser.add_argument("--mcp_args", type=str, default=None)
 
     return parser.parse_args()
@@ -75,6 +76,7 @@ def run_server(args):
         kv_fraction=args.kv_fraction,
         pd_config=pd_config,
         mcp_config=args.mcp_config,
+        mcp_command=args.mcp_command,
         mcp_args=args.mcp_args,
     )
 

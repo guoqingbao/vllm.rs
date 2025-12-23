@@ -166,15 +166,21 @@ fn main() -> anyhow::Result<()> {
             if !is_pd_server {
                 //No need graph capture for PD server
                 #[cfg(all(feature = "cuda", feature = "graph"))]
-                match runner.warmup_capture() {
-                    Ok(_) => {
-                        use colored::Colorize;
-                        eprintln!("{}", String::from("Cuda graph captured").yellow());
-                    }
-                    Err(e) => {
-                        use colored::Colorize;
-                        let s = format!("Graph capture failed: {:?}", e);
-                        eprintln!("{}", s.red());
+                let arch = init_req.config.architectures.as_ref().unwrap()[0].clone();
+                #[cfg(all(feature = "cuda", feature = "graph"))]
+                if vllm_rs::utils::is_no_cuda_graph_supprt(arch.clone()) {
+                    vllm_rs::log_info!("{arch} does not supprt CUDA graph");
+                } else {
+                    match runner.warmup_capture() {
+                        Ok(_) => {
+                            use colored::Colorize;
+                            eprintln!("{}", String::from("Cuda graph captured").yellow());
+                        }
+                        Err(e) => {
+                            use colored::Colorize;
+                            let s = format!("Graph capture failed: {:?}", e);
+                            eprintln!("{}", s.red());
+                        }
                     }
                 }
             }

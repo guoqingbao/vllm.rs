@@ -777,6 +777,12 @@ pub fn spawn_runner(
     }
 }
 
+pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
+    let black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+
+    black_list.contains(&architectures.as_str())
+}
+
 pub fn get_arch_rope(
     tokenizer: &Tokenizer,
     architectures: String,

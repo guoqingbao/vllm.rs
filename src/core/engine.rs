@@ -138,11 +138,10 @@ impl LLMEngine {
             config.architectures.is_some() && config.architectures.as_ref().unwrap().len() == 1,
             "Only one architecture is supported at the moment!"
         );
+        let arch = config.architectures.as_ref().unwrap()[0].clone();
 
-        let (model_type, default_chat_template, is_rope_i) = crate::utils::get_arch_rope(
-            &tokenizer,
-            config.architectures.as_ref().unwrap()[0].clone(),
-        )?;
+        let (model_type, default_chat_template, is_rope_i) =
+            crate::utils::get_arch_rope(&tokenizer, arch.clone())?;
         log_info!("Use ROPE interleaved {is_rope_i}");
 
         let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
@@ -163,7 +162,6 @@ impl LLMEngine {
             vec![0]
         };
 
-        let arch = config.architectures.as_ref().unwrap()[0].clone();
         let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
             || arch == "Gemma3ForCausalLM".to_string();
         // Gemma3 must use conventional attention
@@ -217,11 +215,15 @@ impl LLMEngine {
             if !is_pd_server {
                 //No graph capture for PD server
                 #[cfg(all(feature = "cuda", feature = "graph"))]
-                match model_runner.warmup_capture() {
-                    Ok(_) => {
-                        log_info!("Cuda graph captured for performance enhancement!")
+                if crate::utils::is_no_cuda_graph_supprt(arch.clone()) {
+                    log_info!("{arch} does not supprt CUDA graph");
+                } else {
+                    match model_runner.warmup_capture() {
+                        Ok(_) => {
+                            log_info!("Cuda graph captured for performance enhancement!")
+                        }
+                        Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
                     }
-                    Err(e) => crate::log_error!("Unable to capture cuda graph {:?}!", e),
                 }
             }
 

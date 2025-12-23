@@ -71,6 +71,7 @@ class EngineConfig:
     server_mode: Optional[bool]
     pd_config: Optional[PdConfig]
     mcp_config: Optional[str]
+    mcp_command: Optional[str]
     mcp_args: Optional[str]
 
 @dataclass

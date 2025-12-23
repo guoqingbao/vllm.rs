@@ -1,16 +1,17 @@
 // src/models/phi4.rs
 // This implementation is adapted from Phi-3, using the local Candle layers.
 use crate::models::layers::distributed::{
-    Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    Comm, MergedParallelColumnLinear, ReplicatedLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::mask::get_attention_causal_mask;
+use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, RotaryEmbedding};
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::{Config, RopeScalingValue};
 use crate::utils::progress::ProgressLike;
 use attention_rs::{InputMetadata, PagedAttention};
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -214,13 +215,15 @@ impl Phi4RotaryEmbedding {
 }
 
 struct Phi4Attention {
-    qkv_proj: ReplicatedLinear,
-    o_proj: ReplicatedLinear,
+    qkv_proj: MergedParallelColumnLinear,
+    o_proj: TensorParallelRowLinear,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
     rotary_emb: Arc<Phi4RotaryEmbedding>,
     attn: PagedAttention,
+    is_quantized: bool,
+    dtype: DType,
 }
 
 impl Phi4Attention {
@@ -238,19 +241,26 @@ impl Phi4Attention {
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
         let op_size = num_heads * head_dim + 2 * num_kv_heads * head_dim;
         let is_qvar_builder = vb.is_qvar_builder();
-        let qkv_proj = ReplicatedLinear::load_no_bias(
+        let qkv_proj = MergedParallelColumnLinear::load_merged_chunks(
             cfg.hidden_size,
             op_size,
+            0,
+            vec![
+                num_heads * head_dim,
+                num_kv_heads * head_dim,
+                num_kv_heads * head_dim,
+            ],
             if is_qvar_builder {
                 vb.pp("attn_qkv")
             } else {
                 vb.pp("qkv_proj")
             },
+            comm.clone(),
             &cfg.quantization_config,
             &cfg.quant,
             dtype,
         )?;
-        let o_proj = ReplicatedLinear::load_no_bias(
+        let o_proj = TensorParallelRowLinear::load_with_hints(
             num_heads * head_dim,
             cfg.hidden_size,
             if is_qvar_builder {
@@ -258,14 +268,12 @@ impl Phi4Attention {
             } else {
                 vb.pp("o_proj")
             },
+            comm.clone(),
             &cfg.quantization_config,
             &cfg.quant,
             dtype,
         )?;
-        assert!(
-            comm.world_size() < 2,
-            "Packed qkv_proj is not supported under multi-gpu setting!"
-        );
+
         let attention_heads = num_heads / comm.world_size();
         let kv_heads = num_kv_heads / comm.world_size();
         Ok(Self {
@@ -285,6 +293,8 @@ impl Phi4Attention {
                 None,
                 cfg.fp8_kvcache.unwrap_or(false),
             )?,
+            is_quantized: is_qvar_builder || cfg.quant.is_some(),
+            dtype,
         })
     }
 
@@ -299,28 +309,15 @@ impl Phi4Attention {
         let (seq_len, _) = xs.dims2()?;
 
         let qkv = self.qkv_proj.forward(xs)?;
-        let query_pos = self.num_heads * self.head_dim;
-        let query_states = qkv.narrow(D::Minus1, 0, query_pos)?.to_dtype(DType::F32)?;
-        let key_states = qkv
-            .narrow(D::Minus1, query_pos, self.num_kv_heads * self.head_dim)?
-            .to_dtype(DType::F32)?;
-        let value_states = qkv
-            .narrow(
-                D::Minus1,
-                query_pos + self.num_kv_heads * self.head_dim,
-                self.num_kv_heads * self.head_dim,
-            )?
-            .contiguous()?;
-
-        let q = query_states
+        let q = qkv[0]
             .reshape((1, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let k = key_states
+        let k = qkv[1]
             .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let v = value_states
+        let v = qkv[2]
             .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
@@ -328,8 +325,16 @@ impl Phi4Attention {
         let (q, k) = self
             .rotary_emb
             .apply_rotary_emb_qkv(&q, &k, input_positions)?;
-        let q = q.to_dtype(v.dtype())?;
-        let k = k.to_dtype(v.dtype())?;
+
+        let (q, k, v) = if self.is_quantized {
+            (
+                q.to_dtype(self.dtype)?,
+                k.to_dtype(self.dtype)?,
+                v.to_dtype(self.dtype)?,
+            )
+        } else {
+            (q, k, v)
+        };
 
         let y = self
             .attn
@@ -345,71 +350,13 @@ impl Phi4Attention {
             )?
             .reshape((seq_len, ()))?;
 
-        self.o_proj.forward(&y)
-    }
-}
-
-struct Phi4Mlp {
-    gate_up_proj: TensorParallelColumnLinear,
-    down_proj: TensorParallelRowLinear,
-    act_fn: candle_nn::Activation,
-    i_size: usize,
-}
-
-impl Phi4Mlp {
-    fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-        let i_size = cfg.intermediate_size;
-        let is_qvar_builder = vb.is_qvar_builder();
-        let gate_up_proj = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            2 * i_size,
-            false,
-            if is_qvar_builder {
-                vb.pp("ffn_up")
-            } else {
-                vb.pp("gate_up_proj")
-            },
-            comm.clone(),
-            &cfg.quantization_config,
-            &cfg.quant,
-            dtype,
-        )?;
-        let down_proj = TensorParallelRowLinear::load_with_hints(
-            i_size,
-            hidden_size,
-            if is_qvar_builder {
-                vb.pp("ffn_down")
-            } else {
-                vb.pp("down_proj")
-            },
-            comm,
-            &cfg.quantization_config,
-            &cfg.quant,
-            dtype,
-        )?;
-        Ok(Self {
-            gate_up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act.clone(),
-            i_size,
-        })
-    }
-}
-
-impl Module for Phi4Mlp {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let up_states = self.gate_up_proj.forward(xs)?;
-        let gate = up_states.narrow(D::Minus1, 0, self.i_size)?;
-        let up_states = up_states.narrow(D::Minus1, self.i_size, self.i_size)?;
-        let up_states = (up_states * gate.apply(&self.act_fn))?;
-        self.down_proj.forward(&up_states)
+        self.o_proj.forward(&y)?.to_dtype(xs.dtype())
     }
 }
 
 struct Phi4DecoderLayer {
     self_attn: Phi4Attention,
-    mlp: Phi4Mlp,
+    mlp: MLP,
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
 }
@@ -434,15 +381,22 @@ impl Phi4DecoderLayer {
             comm.clone(),
             dtype,
         )?;
-        let mlp = Phi4Mlp::new(
-            cfg,
+
+        let mlp = MLP::new(
             if is_qvar_builder {
                 vb.clone()
             } else {
                 vb.pp("mlp")
             },
             comm.clone(),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            &cfg.hidden_act,
+            &cfg.quantization_config,
+            &cfg.quant,
+            true,
             dtype,
+            "",
         )?;
         let key_map: HashMap<&str, &str> = [
             ("input_layernorm", "attn_norm"),
@@ -496,10 +450,8 @@ impl Phi4DecoderLayer {
                 .forward(&xs, attention_mask, input_positions, cache, input_metadata)?;
         let xs = (xs + residual)?;
         let residual = &xs;
-        let xs = self
-            .post_attention_layernorm
-            .forward(&xs)?
-            .apply(&self.mlp)?;
+        let xs = self.post_attention_layernorm.forward(&xs)?;
+        let xs = self.mlp.forward(&xs)?;
         residual + xs
     }
 }
@@ -552,7 +504,11 @@ impl Phi4ForCausalLM {
             },
         )?;
         let rotary_emb = Arc::new(Phi4RotaryEmbedding::new(
-            DType::F32,
+            if is_qvar_builder || config.quant.is_some() {
+                DType::F32
+            } else {
+                dtype
+            },
             config,
             is_rope_i,
             &vb.device(),
@@ -632,13 +588,8 @@ impl Phi4ForCausalLM {
         embeded_inputs: bool,
         return_hidden: bool,
     ) -> Result<Tensor> {
-        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
-            input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..]
-                .into()
+        let seqlens = if input_metadata.seqlens.is_some() {
+            input_metadata.seqlens.as_ref().unwrap().clone()
         } else {
             Vec::new()
         };

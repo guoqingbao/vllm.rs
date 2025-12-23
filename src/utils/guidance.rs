@@ -47,8 +47,8 @@ pub fn build_toktrie_from_tokenizer_bytes(bytes: &[u8]) -> anyhow::Result<TokTri
                    Input bytes length: {}", bytes.len())
 }
 
-pub fn load_toktrie_from_path(path: &Path) -> Option<TokTrie> {
+pub fn load_toktrie_from_path(_: &Path) -> Option<TokTrie> {
     // Temporarily disabled - returns None
-    crate::log_warn!("load_toktrie_from_path is disabled: {:?}", path);
+    // crate::log_warn!("load_toktrie_from_path is disabled: {:?}", path);
     None
 }
