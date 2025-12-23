@@ -20,6 +20,7 @@ use candle_core::{Result, Tensor};
 use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -35,6 +36,12 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
+    /// Tools available for the model to call
+    #[serde(default)]
+    pub tools: Option<Vec<crate::tools::Tool>>,
+    /// How the model should choose which tool to call
+    #[serde(default)]
+    pub tool_choice: Option<crate::tools::ToolChoice>,
 }
 
 #[derive(Deserialize)]
@@ -86,10 +93,49 @@ pub enum MessageContentType {
     Multi(Vec<MessageContent>),
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ChatMessage {
     pub role: String,
-    pub content: MessageContentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<MessageContentType>,
+    /// Tool calls made by the assistant
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
+    /// Tool call ID when role is "tool"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatMessage {
+    /// Create a simple text message
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(MessageContentType::PureText(content.into())),
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    /// Create an assistant message with tool calls
+    pub fn with_tool_calls(tool_calls: Vec<crate::tools::ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    /// Create a tool result message
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: Some(MessageContentType::PureText(content.into())),
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -105,8 +151,18 @@ pub struct ChatCompletionResponse {
 #[derive(Serialize)]
 pub struct ChatChoice {
     pub index: usize,
-    pub message: ChatMessage,
+    pub message: ChatResponseMessage,
     pub finish_reason: Option<String>,
+}
+
+/// Message in the response (may contain tool calls)
+#[derive(Serialize)]
+pub struct ChatResponseMessage {
+    pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
 }
 
 #[derive(Serialize)]
@@ -198,6 +254,61 @@ pub struct EmbeddingRequest {
     pub embedding_type: EmbeddingStrategy,
 }
 
+// === Tokenize API ===
+
+/// Input for tokenize request - either plain text or chat messages
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum TokenizeInput {
+    /// Chat messages input (will apply chat template)
+    Messages { messages: Vec<ChatMessage> },
+    /// Plain text input
+    Text { prompt: String },
+}
+
+/// Request body for /tokenize endpoint
+#[derive(Deserialize)]
+pub struct TokenizeRequest {
+    pub model: Option<String>,
+    #[serde(flatten)]
+    pub input: TokenizeInput,
+    /// Whether to add special tokens (default: true)
+    #[serde(default)]
+    pub add_special_tokens: Option<bool>,
+}
+
+/// Response from /tokenize endpoint
+#[derive(Serialize)]
+pub struct TokenizeResponse {
+    /// List of token IDs
+    pub tokens: Vec<u32>,
+    /// Number of tokens
+    pub count: usize,
+    /// Maximum model context length (if known)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<usize>,
+}
+
+// === Detokenize API ===
+
+/// Request body for /detokenize endpoint
+#[derive(Deserialize)]
+pub struct DetokenizeRequest {
+    pub model: Option<String>,
+    /// Token IDs to decode
+    pub tokens: Vec<u32>,
+    /// Whether to skip special tokens in output (default: true)
+    #[serde(default)]
+    pub skip_special_tokens: Option<bool>,
+}
+
+/// Response from /detokenize endpoint
+#[derive(Serialize)]
+pub struct DetokenizeResponse {
+    /// Decoded text
+    pub prompt: String,
+}
+
 #[derive(Deserialize)]
 pub struct UsageQuery {
     pub session_id: Option<String>,
@@ -219,6 +330,7 @@ pub struct UsageResponse {
 pub struct ServerData {
     pub engine: Arc<RwLock<LLMEngine>>,
     pub econfig: EngineConfig,
+    pub mcp_manager: Option<Arc<crate::mcp::McpClientManager>>,
 }
 
 trait ErrorToResponse: Serialize {
@@ -246,6 +358,8 @@ pub enum ChatResponder {
     Completion(ChatCompletionResponse),
     Usage(UsageResponse),
     Embedding(EmbeddingResponse),
+    Tokenize(TokenizeResponse),
+    Detokenize(DetokenizeResponse),
     ModelError(String),
     InternalError(String),
     ValidationError(String),
@@ -258,6 +372,8 @@ impl IntoResponse for ChatResponder {
             ChatResponder::Completion(s) => Json(s).into_response(),
             ChatResponder::Usage(s) => Json(s).into_response(),
             ChatResponder::Embedding(s) => Json(s).into_response(),
+            ChatResponder::Tokenize(s) => Json(s).into_response(),
+            ChatResponder::Detokenize(s) => Json(s).into_response(),
             ChatResponder::InternalError(e) => {
                 JsonError::new(e).to_response(http::StatusCode::INTERNAL_SERVER_ERROR)
             }
@@ -382,6 +498,131 @@ pub struct Args {
 
     #[arg(long, default_value_t = false)]
     pub ui_server: bool, //Start the web chat
+
+    /// MCP server command to spawn for tool discovery and calls
+    #[arg(long, default_value = None)]
+    pub mcp_command: Option<String>,
+
+    /// MCP config file path for multi-server setups
+    #[arg(long, default_value = None)]
+    pub mcp_config: Option<String>,
+
+    /// MCP server arguments (comma-separated)
+    #[arg(long, value_delimiter = ',', default_value = None)]
+    pub mcp_args: Option<Vec<String>>,
+}
+
+/// Result of executing tool calls via MCP
+#[allow(dead_code)]
+pub struct ToolExecutionResult {
+    /// Messages to add for follow-up (assistant tool_calls + tool results)
+    followup_messages: Vec<ChatMessage>,
+    /// The tool calls that were executed
+    tool_calls: Vec<crate::tools::ToolCall>,
+}
+
+/// Default timeout for individual tool calls (60 seconds)
+const TOOL_CALL_TIMEOUT_SECS: u64 = 60;
+
+/// Execute tool calls via MCP manager and return messages for follow-up generation
+/// Each tool call has a timeout of TOOL_CALL_TIMEOUT_SECS seconds
+pub async fn execute_mcp_tool_calls_async(
+    tool_calls: Vec<crate::tools::ToolCall>,
+    mcp_manager: std::sync::Arc<crate::mcp::McpClientManager>,
+    base_messages: Vec<ChatMessage>,
+) -> ToolExecutionResult {
+    let mut followup_messages = base_messages.clone();
+    followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
+
+    for call in &tool_calls {
+        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
+            .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
+        let args_map = args_value
+            .as_object()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .collect::<HashMap<String, serde_json::Value>>();
+
+        let call_name = call.function.name.clone();
+        let call_id = call.id.clone();
+        let mcp_manager_clone = mcp_manager.clone();
+        crate::log_info!(
+            "Executing tool call: {} with args {:?}",
+            call_name,
+            args_map
+        );
+
+        let start = std::time::Instant::now();
+
+        // Execute tool call with timeout using spawn_blocking
+        let timeout_duration = std::time::Duration::from_secs(TOOL_CALL_TIMEOUT_SECS);
+        let tool_result = match tokio::time::timeout(
+            timeout_duration,
+            tokio::task::spawn_blocking(move || mcp_manager_clone.call_tool(&call_name, args_map)),
+        )
+        .await
+        {
+            Ok(Ok(Ok(result))) => {
+                // Success: spawn_blocking succeeded, call_tool succeeded
+                let elapsed = start.elapsed();
+                crate::log_info!(
+                    "Tool '{}' completed in {:.2}s",
+                    call.function.name,
+                    elapsed.as_secs_f32()
+                );
+                let content = result
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        crate::mcp::ToolContent::Text { text } => Some(text.clone()),
+                        crate::mcp::ToolContent::Resource { text, .. } => text.clone(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ChatMessage::tool_result(call_id, content)
+            }
+            Ok(Ok(Err(err))) => {
+                // Tool execution failed
+                let elapsed = start.elapsed();
+                crate::log_error!(
+                    "Tool '{}' failed after {:.2}s: {:?}",
+                    call.function.name,
+                    elapsed.as_secs_f32(),
+                    err
+                );
+                ChatMessage::tool_result(call_id, format!("Tool execution failed: {err}"))
+            }
+            Ok(Err(join_err)) => {
+                // spawn_blocking panicked
+                crate::log_error!(
+                    "Tool '{}' task panicked: {:?}",
+                    call.function.name,
+                    join_err
+                );
+                ChatMessage::tool_result(call_id, format!("Tool execution panicked: {join_err}"))
+            }
+            Err(_timeout_err) => {
+                // Timeout occurred
+                crate::log_error!(
+                    "Tool '{}' timed out after {}s",
+                    call.function.name,
+                    TOOL_CALL_TIMEOUT_SECS
+                );
+                ChatMessage::tool_result(
+                    call_id,
+                    format!("Tool execution timed out after {}s", TOOL_CALL_TIMEOUT_SECS),
+                )
+            }
+        };
+        followup_messages.push(tool_result);
+    }
+
+    ToolExecutionResult {
+        followup_messages,
+        tool_calls,
+    }
 }
 
 pub fn convert_chat_message(
@@ -393,34 +634,69 @@ pub fn convert_chat_message(
     let mut prompt = String::new();
     let mut images = Vec::new();
 
-    match &msg.content {
-        MessageContentType::PureText(text) => {
-            prompt.push_str(text);
-        }
-        MessageContentType::Multi(items) => {
-            for item in items {
-                match item {
-                    MessageContent::Text { text } => {
-                        prompt.push_str(text);
+    // Handle tool call messages specially
+    if role == "tool" {
+        if let Some(tool_call_id) = &msg.tool_call_id {
+            if let Some(content) = &msg.content {
+                match content {
+                    MessageContentType::PureText(text) => {
+                        prompt = format!("[Tool Result for {}]: {}", tool_call_id, text);
                     }
-                    MessageContent::ImageUrl { image_url } => {
-                        let img = load_image_from_url(image_url)?;
-                        crate::log_info!(
-                            "Chat image downloaded: {} x {}",
-                            img.width(),
-                            img.height()
-                        );
-                        prompt.push_str(&IMAGE_PLACEHOLDER);
-                        images.push(img);
-                    }
-                    MessageContent::ImageBase64 { image_base64 } => {
-                        let img = load_image_from_base64(image_base64)?;
-                        crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
-                        prompt.push_str(&IMAGE_PLACEHOLDER);
-                        images.push(img);
-                    }
+                    _ => {}
                 }
-                prompt.push(' '); // keep spacing readable
+            }
+        }
+        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
+    }
+
+    // Handle assistant messages with tool calls
+    if msg.tool_calls.is_some() {
+        if let Some(tool_calls) = &msg.tool_calls {
+            for tc in tool_calls {
+                prompt.push_str(&format!(
+                    "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>\n",
+                    tc.function.name, tc.function.arguments
+                ));
+            }
+        }
+        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
+    }
+
+    // Normal message handling
+    if let Some(content) = &msg.content {
+        match content {
+            MessageContentType::PureText(text) => {
+                prompt.push_str(text);
+            }
+            MessageContentType::Multi(items) => {
+                for item in items {
+                    match item {
+                        MessageContent::Text { text } => {
+                            prompt.push_str(text);
+                        }
+                        MessageContent::ImageUrl { image_url } => {
+                            let img = load_image_from_url(image_url)?;
+                            crate::log_info!(
+                                "Chat image downloaded: {} x {}",
+                                img.width(),
+                                img.height()
+                            );
+                            prompt.push_str(&IMAGE_PLACEHOLDER);
+                            images.push(img);
+                        }
+                        MessageContent::ImageBase64 { image_base64 } => {
+                            let img = load_image_from_base64(image_base64)?;
+                            crate::log_info!(
+                                "Chat image decoded: {} x {}",
+                                img.width(),
+                                img.height()
+                            );
+                            prompt.push_str(&IMAGE_PLACEHOLDER);
+                            images.push(img);
+                        }
+                    }
+                    prompt.push(' '); // keep spacing readable
+                }
             }
         }
     }
@@ -505,7 +781,42 @@ pub async fn run_server(
         false
     };
 
-    let server_data = ServerData { engine, econfig };
+    let mcp_manager_config = if let Some(path) = &econfig.mcp_config {
+        match crate::mcp::manager::McpManagerConfig::from_file(path) {
+            Ok(cfg) => Some(cfg),
+            Err(err) => {
+                crate::log_error!("Failed to load MCP config file: {:?}", err);
+                None
+            }
+        }
+    } else if let Some(command) = econfig.mcp_command.clone() {
+        Some(crate::mcp::manager::McpManagerConfig::from_single(
+            crate::mcp::manager::McpToolConfig::new(
+                command,
+                econfig.mcp_args.clone().unwrap_or_default(),
+            ),
+        ))
+    } else {
+        None
+    };
+
+    let mcp_manager = if let Some(cfg) = mcp_manager_config {
+        match crate::mcp::McpClientManager::new(cfg) {
+            Ok(manager) => Some(Arc::new(manager)),
+            Err(err) => {
+                crate::log_error!("Failed to start MCP client manager: {:?}", err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let server_data = ServerData {
+        engine,
+        econfig,
+        mcp_manager,
+    };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -542,6 +853,8 @@ pub async fn run_server(
         .route("/v1/chat/completions", post(server::chat_completion))
         .route("/v1/embeddings", post(server::create_embeddings))
         .route("/v1/usage", get(server::get_usage))
+        .route("/tokenize", post(server::tokenize))
+        .route("/detokenize", post(server::detokenize))
         .layer(cors)
         .with_state(Arc::new(server_data));
 
@@ -584,7 +897,9 @@ mod tests {
     fn build_messages_without_images() {
         let messages = vec![ChatMessage {
             role: "user".to_string(),
-            content: MessageContentType::PureText("hello world".to_string()),
+            content: Some(MessageContentType::PureText("hello world".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
         }];
 
         let (converted, images) = build_messages_and_images(&messages, None).unwrap();
@@ -594,5 +909,81 @@ mod tests {
         assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content, "hello world");
         assert_eq!(converted[0].num_images, 0);
+    }
+
+    #[test]
+    fn test_chat_message_helpers() {
+        let text_msg = ChatMessage::text("user", "Hello!");
+        assert_eq!(text_msg.role, "user");
+        assert!(text_msg.content.is_some());
+
+        let tool_result = ChatMessage::tool_result("call_123", r#"{"result": 42}"#);
+        assert_eq!(tool_result.role, "tool");
+        assert_eq!(tool_result.tool_call_id, Some("call_123".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_request_text_parsing() {
+        let json = r#"{"prompt": "Hello, world!"}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        match request.input {
+            TokenizeInput::Text { prompt } => assert_eq!(prompt, "Hello, world!"),
+            _ => panic!("Expected TokenizeInput::Text"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_request_messages_parsing() {
+        let json = r#"{"messages": [{"role": "user", "content": "Hello"}]}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        match request.input {
+            TokenizeInput::Messages { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].role, "user");
+            }
+            _ => panic!("Expected TokenizeInput::Messages"),
+        }
+    }
+
+    #[test]
+    fn test_tokenize_request_with_options() {
+        let json = r#"{"prompt": "test", "add_special_tokens": false}"#;
+        let request: TokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.add_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_detokenize_request_parsing() {
+        let json = r#"{"tokens": [1, 2, 3, 4]}"#;
+        let request: DetokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.tokens, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_detokenize_request_with_options() {
+        let json = r#"{"tokens": [1, 2], "skip_special_tokens": false}"#;
+        let request: DetokenizeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_tokenize_response_serialization() {
+        let response = TokenizeResponse {
+            tokens: vec![1, 2, 3],
+            count: 3,
+            max_model_len: Some(4096),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"count\":3"));
+        assert!(json.contains("\"tokens\":[1,2,3]"));
+    }
+
+    #[test]
+    fn test_detokenize_response_serialization() {
+        let response = DetokenizeResponse {
+            prompt: "Hello, world!".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"prompt\":\"Hello, world!\""));
     }
 }

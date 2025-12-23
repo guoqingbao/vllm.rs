@@ -296,18 +296,18 @@ impl QLinear {
         })
     }
 
-    pub fn from_qparts_x(w: QTensor, b: Option<Tensor>, dtype: DType) -> Self {
+    pub fn from_qparts_x(w: QTensor, b: Option<Tensor>, dtype: DType) -> Result<Self> {
         let bx = match b {
-            Some(b_) => Some(b_.to_dtype(DType::F32).unwrap()),
+            Some(b_) => Some(b_.to_dtype(DType::F32)?),
             _ => None,
         };
 
-        Self {
+        Ok(Self {
             inner: Some(QMatMul::QTensor(Arc::new(w))),
             bias: bx,
             wna16: None,
             dtype,
-        }
+        })
     }
 
     pub fn dequantize(&self) -> Result<Tensor> {
@@ -347,7 +347,7 @@ impl QLinear {
             );
         }
         let qtensor = QTensor::quantize(weight, ggml_dtype)?;
-        Ok(QLinear::from_qparts_x(qtensor, qbias, dtype))
+        QLinear::from_qparts_x(qtensor, qbias, dtype)
     }
 
     pub fn bias(&self) -> Option<&Tensor> {
@@ -421,15 +421,17 @@ impl LinearX {
 }
 
 impl LinearX {
-    pub fn new(weight: Tensor, bias: Option<Tensor>, quant: &Option<String>) -> Self {
+    pub fn new(weight: Tensor, bias: Option<Tensor>, quant: &Option<String>) -> Result<Self> {
         let dtype = weight.dtype();
         let ln = Linear::new(weight, bias);
         if let Some(quantized_type) = quant {
-            LinearX(Either::Right(
-                QLinear::from_linear_x(ln, quantized_type.clone(), dtype).unwrap(),
-            ))
+            Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                ln,
+                quantized_type.clone(),
+                dtype,
+            )?)))
         } else {
-            LinearX(Either::Left(ln))
+            Ok(LinearX(Either::Left(ln)))
         }
     }
 

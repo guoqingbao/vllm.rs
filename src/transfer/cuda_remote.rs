@@ -43,7 +43,7 @@ pub(super) fn open_ipc_handle<T: WithDType + candle_core::cuda_backend::CudaDTyp
     if handle.0.len() != 64 {
         candle_core::bail!("Invalid CUipcMemHandle handle!");
     }
-    let raw_array: [i8; 64] = handle.0.clone().try_into().unwrap();
+    let raw_array: [i8; 64] = handle.0.clone().try_into().expect("length checked");
     let handle_raw = CUipcMemHandle {
         reserved: raw_array.map(|b| b as c_char),
     };

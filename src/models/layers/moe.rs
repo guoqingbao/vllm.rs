@@ -197,7 +197,7 @@ impl FusedMoeGGUF {
             }
         };
 
-        let gate = Linear::new(gate_ws, None, &None);
+        let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (
@@ -297,7 +297,7 @@ impl FusedMoeGGUF {
             }
         };
 
-        let gate = Linear::new(gate_ws, None, &None);
+        let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (

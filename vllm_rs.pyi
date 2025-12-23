@@ -70,6 +70,8 @@ class EngineConfig:
     fp8_kvcache: Optional[bool]
     server_mode: Optional[bool]
     pd_config: Optional[PdConfig]
+    mcp_config: Optional[str]
+    mcp_args: Optional[str]
 
 @dataclass
 class SamplingParams:

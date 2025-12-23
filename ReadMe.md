@@ -6,21 +6,25 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 <p align="center">
   <a href="./ReadMe.md">English</a> |
-  <a href="./ReadMe-CN.md">简体中文</a> |
+  <a href="./ReadMe-CN.md">简体中文</a>
 </p>
 
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**) – Superior than Python counterparts
+* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**)
 * 🧠 **Minimalist Core** – Core logic written in **<3000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in API Server and ChatGPT-like Web UI** – Native Rust server for both CUDA and Metal
+* 🔌 **MCP Integration** – Model Context Protocol for tool calling support
+* 📊 **Embedding & Tokenizer APIs** – Full text processing support
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
-* 🤝 **Open for Contributions** – PRs, issues, and stars are welcome!
 
 ---
-### 💬 Chat Performace
+
+## 📈 Performance
+
+### 💬 Chat Performance
 
 > **A100** (Single Card, 40G)
 
@@ -35,11 +39,6 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 
 > **Metal (Apple Silicon, M4)**
 
-> Models: Qwen3-0.6B (BF16), Qwen3-4B (Q4_K_M), Qwen3-8B (Q2_K)；
-> Concurrent Requests: 1 - 128；
-> Max Model Length: 512 - 2048；
-> Max Output Tokens / Request: 512 - 2048；
-
 | Model | Batch Size | Output Tokens | Time (s) | Throughput (tokens/s) |
 |------------------|--------|--------|---------|-------------|
 | Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
@@ -48,23 +47,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 
-
-### Performance Comparison
-
-> Model: Qwen3-0.6B (BF16); 
-> Concurrent Requests: 256; 
-> Max Model Length: 1024; 
-> Max Output Tokens / Request: 1024
-
-| Inference Engine | Tokens | Time (s) | Throughput (tokens/s) |
-|------------------|---------------|----------|------------------------|
-| vLLM (RTX 4070) (Reference)          | 133,966       | 98.37    | 1361.84                |
-| Nano-vLLM (RTX 4070) (Reference)      | 133,966       | 93.41    | 1434.13                |
-| **vLLM.rs** (**A100**)        | 262,144       | 23.88s    | **10977.55** (**40%+ speedup**)               |
-| Nano-vLLM (A100)       | 262,144       | 34.22s    |   7660.26      | 
-
-<a href="python/ReadMe.md">Reproducible steps</a>
-
+See [**Full Performance Benchmarks →**](docs/performance.md)
 
 
 ## 🧠 Supported Architectures
@@ -83,12 +66,15 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
 ---
-## 📚 Additional Guides
-- [Embedding usage](docs/embeddings.md)
-- [Multimodal usage (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
+## 📚 Guides
+- [Get Started](docs/get_started.md)
+- [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
+- [Embedding](docs/embeddings.md)
+- [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Context cache](docs/context-cache.md)
-- [Get started (run modes, formats, PD, multi-rank)](docs/get_started.md)
-- [Rust crate usage](docs/rust_crate.md)
+- [Rust crate](docs/rust_crate.md)
+- [Tokenize/Detokenize](docs/tokenize.md)
+- [Performance Benchmarks](docs/performance.md)
 
 
 ## 📘 Usage in Python
@@ -120,27 +106,10 @@ python3 -m pip install vllm_rs
     <summary>Single GPU + GGUF model</summary>
 
 ```bash
-# The following command will start both the API Server and the Web Server (ChatGPT-style UI)
-# Use the arrow keys to select the access mode (Local Access / Remote Access);
-# Use Remote Access if the server and the web client usage are not on the same machine.
-# API Server example: http://<IP>:8000/v1/ (API Key: empty)
-# Web Server (click to open the ChatGPT-style page): http://<IP>:8001
-```
-```bash
 # CUDA
 python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
-# Metal/MacOS (response can be seriously degradated if GPU memory over 95% on MacOS, use a smaller `--max-model-len` or `--kv-fraction` parameter)
-python3 -m vllm_rs.server --m mistralai/Ministral-3-3B-Reasoning-2512 --isq q4k --max-model-len 32768 --ui-server
-```
-
-  </details>
-
-  <details open>
-    <summary>Multimodal model (Qwen3 VL, with images)</summary>
-
-```bash
-# Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+# Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
+python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
 ```
 
   </details>
@@ -164,160 +133,100 @@ python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,
 
   </details>
 
-  <details>
+
+  <details open>
+    <summary>Multimodal model (Qwen3 VL, with images)</summary>
+
+```bash
+# Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+```
+
+  </details>
+
+  <details open>
     <summary>GPTQ/AWQ Marlin-compatible model</summary>
 
 ```bash
 python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ```
-
   </details>
 
-
-### 🤖✨ Interactive Chat and Batch Processing
-
-  <details open>
-    <summary>Chat with Qwen3-32B-A3B model</summary>
-
-```bash
-# Context-cache automatically enabled under chat mode
-python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
-```
-
-  </details>
-
-  <details open>
-    <summary>Chat with local unquantized model</summary>
-
-```bash
-python3 -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
-```
-
-  </details>
-
-  <details open>
-    <summary>Chat with model quantized instantly (ISQ)</summary>
-
-```bash
-# Enable maximum context (262144 tokens), two ranks (`--d 0,1`)
-python3 -m vllm_rs.chat --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
-```
-
-  </details>
-
-  <details>
-    <summary>Batch Completion</summary>
-
-```bash
-python3 -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
-```
-
-```bash
-python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
-```
-
-  </details>
-
-🤖 <a href="python/ReadMe.md">Here are notes on using API interface and Context-cache in Python</a>
-
+See [**More Python Examples →**](python/ReadMe.md)
 
 ## 📘 Usage (Rust)
 
-Use `--i` to enable interactive mode 🤖, `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
 
-> Chat mode
+### Build (CUDA 11+, 12+)
+```shell
+# Remove `nccl` for single-gpu usage
+# Remove `flash-attn,flash-context` for V100 or older hardware
+./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+```
+
+### Build (Metal)
+```shell
+cargo build --release --features metal
+```
+
+> API server + Web UI
 
   <details open>
-    <summary>Single GPU + built-in Context Cache</summary>
+    <summary>Single GPU</summary>
 
   ```bash
   # CUDA
-  cargo run --release --features cuda -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache
   # Metal/MacOS
-  cargo run --release --features metal -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
+  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --context-cache
   ```
-
-  </details>
-
+  
   <details open>
-    <summary>Multi-GPU + CUDA Graph + Flash attention + FP8 kvcache</summary>
+    <summary>Multi-GPU + Unquantized Model</summary>
 
   ```bash
-  # run.sh script help generate the standalone runner, use kv-fraction to control kvcache usage (percent of remaining gpu memory after model loading)
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --i --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --kv-fraction 0.7 --port 8000 --fp8-kvcache
-  ```
-
-  </details>
-
----
-
-> API server + **ChatGPT-like Web UI** (other option: **PD server**)
-
-  <details open>
-    <summary>Serve unquantized model with multiple GPUs</summary>
-
-  ```bash
-  # Remove `flash-attn` feature will enable built-in context cache, making it supports V100 and Metal (metal need additionally remove `graph` feature) platforms
   # Replace "--ui-server" with "--server" will only start API server
-  ```
-  ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
+  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
   ```
 
   </details>
 
   <details open>
-    <summary>Serve GGUF models</summary>
+    <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  ./run.sh --release --features cuda,nccl,graph,flash-attn --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
+  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
   ```
 
   </details>
 
-  <details>
-    <summary>Serve ISQ model</summary>
+  <details open>
+    <summary>ISQ model + FP8 KvCache</summary>
 
   ```bash
-# Disabled flash-context feature to use fp8-kvcache
+  # CUDA: Disabled flash-context feature to use fp8-kvcache
   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
-  ```
-
-  </details>
-
-  <details>
-    <summary>High-performance prefill solution</summary>
-
-  Using Flash Attention for both context-cache and decoding (requires Ampere+ hardware; long compilation time; best performance for long-text prefill):
-
-  ```bash
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --context-cache
+  # MacOS/Metal
+  cargo run --release --features metal -- --ui-server --w /path/Qwen3-4B --isq q6k
   ```
 
   </details>
 
 ---
 
-> **MacOS/Metal platform**
+## 🔌 MCP Integration (Tool Calling)
 
-  <details open>
-    <summary>Run GGUF quantized model</summary>
+Enable LLMs to call external tools via Model Context Protocol.
 
-  ```bash
-   # Use `--fp8-kvcache` to enable fp8 kvcache (slight acuracy and performance slow down)
-   cargo run --release --features metal -- --ui-server --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --context-cache --fp8-kvcache
-  ```
+```bash
+# Start with multiple mcp servers
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache --mcp-config ./mcp.json
+```
 
-  </details>
+See [**MCP Documentation →**](docs/mcp_tool_calling.md)
 
-  <details open>
-    <summary>Run unquantized as Q6K model with context-cache</summary>
-
-  ```bash
-  cargo run --release --features metal -- --ui-server --w /path/Qwen3-0.6B --isq q6k
-  ```
-
-  </details>
+---
 
 ## 🔀 Prefill-Decode Separation (PD Disaggregation)
 
@@ -331,7 +240,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  ./run.sh --release --features cuda,nccl,flash-context --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
+  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
@@ -346,7 +255,7 @@ Use `--i` to enable interactive mode 🤖, `--server` to enable service mode �
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  ./run.sh --release --features cuda,nccl,flash-attn --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
+  target/release/vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   Or, start with prebuild Python package:
@@ -433,31 +342,40 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 
 ## ⚙️ Command Line Arguments
 
-| Flag        | Description                                                      |    |
-| ----------- | ---------------------------------------------------------------- | -- |
-| `--m`       | Hugginface Model ID                 |    |
-| `--w`       | Path to Safetensors model                 |    |
-| `--f`       | GGUF filename when model_id given or GGUF file path                 |    |
-| `--d`       | Device ID (e.g. `--d 0`)                                         |    |
-| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |    |
-| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |    |
-| `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |    |
+| Flag        | Description                                                      |
+| ----------- | ---------------------------------------------------------------- |
+| `--m`       | Hugginface Model ID                 |
+| `--w`       | Path to Safetensors model                 |
+| `--f`       | GGUF filename when model_id given or GGUF file path                 |
+| `--d`       | Device ID (e.g. `--d 0`)                                         |
+| `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |
+| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |
+| `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |
 | `--prompts` | Prompts separated by \| |
-| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |    |
-| `--isq`   | Load unquantized model as GGUF quantized format such as `q2k`, `q4k`, etc.   |       |
-| `--temperature`   | Controls randomness: lower (0.) → deterministic, higher (1.0) → creative/random.  |       |
-| `--top-k`   | Limits choices to the top k highest-probability tokens. smaller k → more stable；larger k → more random   |       |
-| `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |       |
-| `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens | |
-| `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition | |
-| `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |       |
-| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |    |
-| `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.5, range from 0.1 to 10.0)              |    |
-| `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |    |
-| `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |    |
-| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |    |
-| `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |    |
-| `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |    |
+| `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |
+| `--isq`   | Load unquantized model as GGUF quantized format such as `q2k`, `q4k`, etc.   |
+| `--temperature`   | Controls randomness: lower (0.) → deterministic, higher (1.0) → creative/random.  |
+| `--top-k`   | Limits choices to the top k highest-probability tokens. smaller k → more stable；larger k → more random   |
+| `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |
+| `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens |
+| `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition |
+| `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |
+| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |
+| `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.5, range from 0.1 to 10.0)              |
+| `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
+| `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
+| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |
+| `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
+| `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
+| `--context-cache`   | Enable context caching for multi-turn conversations |
+
+### MCP Configuration
+
+| Flag | Description |
+|------|-------------|
+| `--mcp-command` | Path to single MCP server executable |
+| `--mcp-args` | Comma-separated arguments for MCP server |
+| `--mcp-config` | Path to JSON config file for multiple MCP servers |
 
 ## 📌 Project Status
 
@@ -487,6 +405,9 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
 * [x] Built-in ChatGPT-like Web Server
+* [x] **Embedding API**
+* [x] **Tokenize/Detokenize API**
+* [x] **MCP Integration & Tool Calling**
 ---
 
 ## 📚 References

@@ -5,23 +5,16 @@ This project supports vision-language models (Qwen3-VL dense/MoE, Gemma3, Mistra
 ## Starting servers
 - Qwen3-VL (CUDA):  
   ```bash
-  ./run.sh --release --features cuda -- --server \
-    --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+  target/release/vllm-rs --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
   ```
-- Qwen3-VL (Metal/Mac):  
+- Gemma3 (vision, No Flash attention support):  
   ```bash
-  ./run.sh --release --features metal -- --server \
-    --m Qwen/Qwen3-VL-8B-Instruct --max-model-len 32768 --ui-server
-  ```
-- Gemma3 (vision):  
-  ```bash
-  ./run.sh --release --features cuda -- --server \
+  ./run.sh --release --features cuda -- \
     --m google/gemma-3-4b-it --ui-server --context-cache
   ```
 - Mistral3-VL (vision):  
   ```bash
-  ./run.sh --release --features cuda -- --server \
-    --m mistralai/Ministral-3-8B-Reasoning --ui-server --context-cache
+  target/release/vllm-rs --m mistralai/Ministral-3-8B-Reasoning --ui-server --context-cache
   ```
 
 ## Request payloads (OpenAI-compatible)

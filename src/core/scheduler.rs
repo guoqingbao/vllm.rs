@@ -9,9 +9,11 @@ use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use crate::utils::image::ImageData;
 use candle_core::Result;
 use parking_lot::RwLock;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokenizers::Tokenizer;
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
@@ -20,6 +22,14 @@ pub struct Scheduler {
     pub block_manager: BlockManager,
     next_seq_id: usize,
     eos_token_id: Vec<u32>,
+    /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
+    tool_call_end_token_ids: Vec<u32>,
+    /// Token ID for } character (used for JSON tool call detection)
+    json_end_token_id: Option<u32>,
+    /// Tokenizer for decoding output to check JSON tool call patterns
+    tokenizer: Option<Arc<Tokenizer>>,
+    /// Regex for detecting JSON tool calls
+    tool_call_regex: Regex,
     cfg: EngineConfig,
     cached_seqs: VecDeque<(usize, String)>,
     pd_config: Option<PdConfig>,
@@ -52,11 +62,35 @@ impl Scheduler {
                 Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
                 _ => vec![],
             },
+            // Tool call end tokens will be set by engine after tokenizer is initialized
+            tool_call_end_token_ids: Vec::new(),
+            json_end_token_id: None,
+            tokenizer: None,
+            // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
+            // We use (?s) to allow dot matching newlines
+            tool_call_regex: Regex::new(r#"(?s)\{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$"#).unwrap(),
             cfg: econfig.clone(),
             cached_seqs: VecDeque::new(),
             pd_config: econfig.pd_config.clone(),
             is_last_prefill: false,
         }
+    }
+
+    /// Set tool call end token IDs (called by engine after tokenizer is available)
+    pub fn set_tool_call_end_tokens(&mut self, token_ids: Vec<u32>) {
+        self.tool_call_end_token_ids = token_ids;
+    }
+
+    /// Set tokenizer for JSON tool call detection (called by engine after initialization)
+    pub fn set_tokenizer(&mut self, tokenizer: Arc<Tokenizer>) {
+        // Get the token ID for "}" character
+        if let Ok(tokens) = tokenizer.encode("}", false) {
+            if let Some(&token_id) = tokens.get_ids().last() {
+                self.json_end_token_id = Some(token_id);
+                crate::log_info!("JSON end token ID (}}) set to: {}", token_id);
+            }
+        }
+        self.tokenizer = Some(tokenizer);
     }
 
     pub fn add(&mut self, mut seq: Sequence) -> usize {
@@ -265,7 +299,7 @@ impl Scheduler {
         &mut self,
         ids: &[usize],
         output_ids: &[u32],
-        active_sessions: &VecDeque<(usize, String)>,
+        active_sessions: &mut VecDeque<(usize, String)>,
     ) {
         for (i, &idx) in ids.iter().enumerate() {
             // Sequence may swapped out
@@ -326,6 +360,38 @@ impl Scheduler {
                 }
 
                 continue; // Go to next sequence in postprocess
+            }
+
+            // Check for tool call end token BEFORE checking EOS
+            // Handle three mcp_mode states:
+            // - None: No tools, ignore </tool_call> detection (continue streaming)
+            // - Some(false): External tools, finish stream at </tool_call>
+            // - Some(true): MCP internal, pause stream, execute, resume
+            if let Some(mcp_mode) = self.running[idx].sampling_params.mcp_mode {
+                // Check if this is a tool call end (supports both XML </tool_call> and JSON } patterns)
+                // We check BEFORE borrowing seq mutably
+                if self.is_tool_call_end(token, idx) {
+                    let seq = &mut self.running[idx];
+                    seq.append_token(token);
+                    if mcp_mode {
+                        // MCP internal mode: pause stream, cache context for follow-up
+                        crate::log_info!(
+                            "[Seq {}] Tool call end detected, pausing for MCP execution",
+                            seq_id
+                        );
+                        let _session_id = self.force_cache_for_tool_call(idx, active_sessions);
+                        continue;
+                    } else {
+                        // External tool mode: finish stream so user can handle tool calls
+                        crate::log_info!(
+                            "[Seq {}] Tool call end detected, finishing stream for external handling",
+                            seq_id
+                        );
+                        seq.status = SequenceStatus::Finished;
+                        self.block_manager.deallocate(seq);
+                        continue;
+                    }
+                }
             }
 
             let seq = &mut self.running[idx];
@@ -412,6 +478,12 @@ impl Scheduler {
 
                 seq.token_ids.extend(new_tokens_ids.clone());
                 seq.output_ids.clear();
+
+                // CRITICAL: Clear tool_call_session_id from previous tool call cycle
+                // This prevents spurious ToolCallPause when this sequence finishes normally
+                // New tool calls will set a new session_id if they occur
+                seq.tool_call_session_id = None;
+
                 if let Some(img) = &images {
                     let mut img = img.clone(); // update the images
                     img.image_idx = image_idx;
@@ -1082,5 +1154,66 @@ impl Scheduler {
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
         1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32)
+    }
+
+    /// Check if the given token is a tool call end token
+    /// This supports both:
+    /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
+    /// 2. JSON end token "}" combined with Regex validation for {..."name":..., "arguments":...} pattern
+    pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
+        // 1. Check for explicit tool call end tokens (XML style)
+        if self.tool_call_end_token_ids.contains(&token) {
+            return true;
+        }
+
+        // 2. Check for JSON style tool call using Regex
+        // This handles models like Qwen3 that output raw JSON without XML tags
+        if self.json_end_token_id == Some(token) {
+            if let Some(tokenizer) = &self.tokenizer {
+                // Temporarily add the token to get complete output for decoding
+                let mut temp_output = self.running[idx].output_ids.to_vec();
+                temp_output.push(token);
+
+                if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
+                    // Check for JSON tool call pattern using Regex
+                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
+                    if self.tool_call_regex.is_match(&decoded) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Force context-cache for tool call continuation, generating session_id if needed
+    /// Returns the session_id to be used for resuming generation
+    pub fn force_cache_for_tool_call(
+        &mut self,
+        idx: usize,
+        active_sessions: &mut VecDeque<(usize, String)>,
+    ) -> String {
+        let seq = &mut self.running[idx];
+
+        // Generate session_id if not present in sampling params
+        let session_id = seq.sampling_params.session_id.clone().unwrap_or_else(|| {
+            let id = format!("tool_call_{}", seq.id);
+            seq.sampling_params.session_id = Some(id.clone());
+            id
+        });
+
+        // Add to active sessions if not already present
+        if !active_sessions.iter().any(|(id, _)| *id == seq.id) {
+            active_sessions.push_back((seq.id, session_id.clone()));
+        }
+
+        // Set the tool_call_session_id on the sequence for engine to detect
+        seq.tool_call_session_id = Some(session_id.clone());
+
+        // Force swap_out_or_cache to preserve the KV cache
+        self.swap_out_or_cache(idx, session_id.clone());
+
+        session_id
     }
 }

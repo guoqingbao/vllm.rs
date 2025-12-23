@@ -1,7 +1,7 @@
 use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
-use crate::core::GenerationOutput;
+use crate::core::{GenerationOutput, SyncCollectionResult};
 use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
@@ -91,7 +91,19 @@ impl Engine {
                         PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
                     })?;
 
-                Ok(results)
+                // Extract GenerationOutput from SyncCollectionResult
+                let outputs: Vec<GenerationOutput> = results
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        SyncCollectionResult::Completed(output) => Some(output),
+                        SyncCollectionResult::ToolCallPause { .. } => {
+                            // Python sync API does not support MCP tool calling
+                            None
+                        }
+                    })
+                    .collect();
+
+                Ok(outputs)
             })
         })
     }
@@ -152,6 +164,7 @@ impl PyStreamItem {
             StreamItem::Completion(_) => "COMPLETION",
             StreamItem::Done(_) => "DONE",
             StreamItem::Error(_) => "ERROR",
+            StreamItem::ToolCallPause { .. } => "TOOL_CALL_PAUSE",
         }
     }
 
@@ -169,6 +182,18 @@ impl PyStreamItem {
             StreamItem::Completion(c) => (c.0, c.1, c.2, c.3.clone()).into_py_any(py),
             StreamItem::Done(d) => (d.0, d.1, d.2, d.3).into_py_any(py),
             StreamItem::Error(e) => e.into_py_any(py),
+            StreamItem::ToolCallPause {
+                session_id,
+                prompt_start_time,
+                decode_start_time,
+                decoded_length,
+            } => (
+                session_id.clone(),
+                *prompt_start_time,
+                *decode_start_time,
+                *decoded_length,
+            )
+                .into_py_any(py),
         }
     }
 
@@ -259,7 +284,9 @@ impl EngineConfig {
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None, disable_flash_attn=None))]
+        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
+        mcp_command=None, mcp_config=None, mcp_args=None,
+        disable_flash_attn=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -281,6 +308,9 @@ impl EngineConfig {
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        mcp_command: Option<String>,
+        mcp_config: Option<String>,
+        mcp_args: Option<String>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -296,6 +326,12 @@ impl EngineConfig {
                 !\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`) when building the package.");
             }
         }
+
+        let mcp_args = if let Some(mcp_args) = mcp_args {
+            Some(mcp_args.split(',').map(|s| s.to_string()).collect())
+        } else {
+            None
+        };
 
         Self {
             model_id,
@@ -322,6 +358,9 @@ impl EngineConfig {
             fp8_kvcache,
             server_mode,
             pd_config,
+            mcp_command,
+            mcp_config,
+            mcp_args,
             disable_flash_attn,
         }
     }
@@ -352,6 +391,7 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
+            mcp_mode: None,
         }
     }
 
@@ -366,6 +406,7 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            mcp_mode: None,
         }
     }
 }

@@ -4,7 +4,7 @@ use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
 use crate::core::sequence::{DecodeSequence, SequenceStatus};
-use crate::core::GenerationOutput;
+use crate::core::{GenerationOutput, SyncCollectionResult};
 use crate::models::layers::distributed::Comm;
 #[cfg(feature = "nccl")]
 use crate::models::layers::distributed::Id;
@@ -17,6 +17,7 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, SamplingParams};
+use crate::utils::guidance::load_toktrie_from_path;
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::progress::{progress_worker, ProgressReporter};
@@ -64,6 +65,14 @@ pub enum StreamItem {
     Completion((usize, usize, usize, Vec<u32>)), //completion
     Done((usize, usize, usize, usize)),          //streaming end
     Error(String),
+    /// Tool call pause - generation paused for MCP execution
+    /// Contains: (session_id for resume, prompt_start_time, decode_start_time, decoded_length)
+    ToolCallPause {
+        session_id: String,
+        prompt_start_time: usize,
+        decode_start_time: usize,
+        decoded_length: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +109,10 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
+        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename()).map(Arc::new);
+        if toktrie.is_none() {
+            crate::log_warn!("Guided decoding disabled: tokenizer trie unavailable.");
+        }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
@@ -197,6 +210,7 @@ impl LLMEngine {
                 device.clone(),
                 reporter,
                 transfer,
+                toktrie.clone(),
                 None,
             )?;
 
@@ -349,7 +363,23 @@ impl LLMEngine {
             econfig.max_model_len = Some(32768);
         }
         let runners = Arc::new(RwLock::new(runners));
-        let scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+
+        // Initialize tool call end tokens for detection
+        // Tokenize "</tool_call>" to get the token IDs for tool call end detection
+        if let Ok(tokens) = tokenizer.encode("</tool_call>", false) {
+            let tool_call_end_ids: Vec<u32> = tokens.get_ids().to_vec();
+            // We want to detect when the LAST token of "</tool_call>" is generated
+            // So we just need the last token ID
+            if let Some(&last_token) = tool_call_end_ids.last() {
+                scheduler.set_tool_call_end_tokens(vec![last_token]);
+                log_info!("Tool call end token ID set to: {}", last_token);
+            }
+        }
+
+        // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
+        scheduler.set_tokenizer(Arc::new(tokenizer.clone()));
+
         log_warn!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
             econfig.max_num_batched_tokens,
@@ -463,9 +493,7 @@ impl LLMEngine {
             params.top_p = top_p;
         }
         let session_id = params.session_id.clone();
-
         let session_id = if session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
-            crate::log_error!("`session_id` detected but `context-cache` is not enabled!");
             None
         } else {
             session_id.clone()
@@ -678,13 +706,13 @@ impl LLMEngine {
                     self.scheduler.postprocess(
                         &finished_indices,
                         &output_ids,
-                        &self.active_sessions,
+                        &mut self.active_sessions,
                     );
                     DecodedIds(Either::Left(finished_indices))
                 }
             } else {
                 self.scheduler
-                    .postprocess(&scheduled_ids, &output_ids, &self.active_sessions);
+                    .postprocess(&scheduled_ids, &output_ids, &mut self.active_sessions);
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
@@ -705,6 +733,54 @@ impl LLMEngine {
             if let Some(s) = sq {
                 let seq_id = s.id;
                 if s.is_finished() {
+                    // Check if this is a tool call pause (not a real finish)
+                    if let Some(session_id) = &s.tool_call_session_id {
+                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
+                            if let Some(request_type) = self.request_types.get(&seq_id) {
+                                let prompt_start_time = s.created_time();
+                                let decode_start_time = self
+                                    .decode_start_times
+                                    .get(&seq_id)
+                                    .copied()
+                                    .unwrap_or(prompt_start_time);
+
+                                crate::log_info!(
+                                    "[Seq {}] Sending ToolCallPause with session_id: {} (request_type: {:?})",
+                                    seq_id,
+                                    session_id,
+                                    request_type
+                                );
+
+                                // For stream requests, send the last token before pause
+                                if *request_type == RequestType::Stream {
+                                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
+                                        if let Some(tok) = decoder.step(s.last_token) {
+                                            let _ = sender.try_send(StreamItem::Token(tok.clone()));
+                                        }
+                                    }
+                                } else {
+                                    let _ = sender.try_send(StreamItem::TokenID(s.last_token));
+                                }
+
+                                // Emit ToolCallPause for both stream and completion requests
+                                let _ = sender.try_send(StreamItem::ToolCallPause {
+                                    session_id: session_id.clone(),
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decoded_length: s.output_ids.len(),
+                                });
+                            }
+                        }
+                        // Don't remove senders/decoders - they will be reused for follow-up
+                        // The sequence will be resumed via get_cache with the session_id
+                        if self.econfig.server_mode.unwrap_or(true) {
+                            self.scheduler.print_free_blocks();
+                        }
+                        continue; // Skip normal finish handling
+                    }
+
+                    // Normal finish handling - tool call detection is now done in scheduler
+
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
                             let prompt_start_time = s.created_time();
@@ -985,7 +1061,16 @@ impl LLMEngine {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
         let mut context_cache_reqeust = false;
-        if let Some(session_id) = &params.session_id {
+
+        let session_id =
+            if params.session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
+                crate::log_warn!("`session_id` detected but `context-cache` is not enabled!");
+                None
+            } else {
+                params.session_id.clone()
+            };
+
+        if let Some(session_id) = &session_id {
             if self.scheduler.has_cache(&session_id) {
                 //context cache, only retrieve the last message
                 context_cache_reqeust = true;
@@ -1081,7 +1166,7 @@ impl LLMEngine {
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
         tokenizer: Arc<Tokenizer>,
-    ) -> Result<Vec<GenerationOutput>> {
+    ) -> Result<Vec<SyncCollectionResult>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
         let decode_start_time_clone = Arc::clone(&decode_start_time);
@@ -1127,7 +1212,8 @@ impl LLMEngine {
                 let decode_start_time_clone = decode_start_time.clone();
                 let tokenizer = Arc::clone(&tokenizer);
                 task::spawn(async move {
-                    let mut output: Option<GenerationOutput> = None;
+                    let mut output: Option<SyncCollectionResult> = None;
+                    let mut collected_token_ids: Vec<u32> = Vec::new();
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
@@ -1142,7 +1228,7 @@ impl LLMEngine {
                                     .decode(&decoded_ids, true)
                                     .expect("unable to decode!");
 
-                                output = Some(GenerationOutput {
+                                output = Some(SyncCollectionResult::Completed(GenerationOutput {
                                     seq_id,
                                     prompt_length,
                                     prompt_start_time: prompt_start,
@@ -1150,10 +1236,10 @@ impl LLMEngine {
                                     decode_finish_time: decode_finish,
                                     decoded_length: decoded_len,
                                     decode_output,
-                                });
+                                }));
                                 break;
                             }
-                            StreamItem::Token(_) | StreamItem::TokenID(_) => {
+                            StreamItem::Token(_) => {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
 
                                 decode_start_time_clone
@@ -1167,14 +1253,54 @@ impl LLMEngine {
                                         Ordering::SeqCst,
                                         Ordering::SeqCst,
                                     )
-                                    .ok(); // set it only if it was 0
+                                    .ok();
+                            }
+                            StreamItem::TokenID(id) => {
+                                decoded_tokens.fetch_add(1, Ordering::Relaxed);
+                                collected_token_ids.push(id);
+
+                                decode_start_time_clone
+                                    .compare_exchange(
+                                        0,
+                                        SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_millis()
+                                            as usize,
+                                        Ordering::SeqCst,
+                                        Ordering::SeqCst,
+                                    )
+                                    .ok();
                             }
                             StreamItem::Done(_) => {
-                                println!("Sequence [seq_id {}] finished!", seq_id);
+                                crate::log_info!("Sequence [seq_id {}] finished!", seq_id);
+                                break;
+                            }
+                            StreamItem::ToolCallPause {
+                                session_id,
+                                prompt_start_time,
+                                decode_start_time,
+                                decoded_length,
+                            } => {
+                                // Return tool call pause info for caller to handle
+                                crate::log_info!(
+                                    "Sequence [seq_id {}] tool call pause with session_id: {}",
+                                    seq_id,
+                                    session_id
+                                );
+                                output = Some(SyncCollectionResult::ToolCallPause {
+                                    session_id,
+                                    seq_id,
+                                    prompt_length,
+                                    output_ids: collected_token_ids.clone(),
+                                    prompt_start_time,
+                                    decode_start_time,
+                                    decoded_length,
+                                });
                                 break;
                             }
                             StreamItem::Error(e) => {
-                                eprintln!("Error in Seq {}: {}", seq_id, e);
+                                crate::log_error!("Error in Seq {}: {}", seq_id, e);
                                 break;
                             }
                         }
@@ -1490,5 +1616,10 @@ impl LLMEngine {
 
     pub fn get_model_info(&self) -> (bool, String) {
         (self.has_vision, self.model_name.clone())
+    }
+
+    /// Get a clone of the chat template for external use (e.g., tokenization without generation)
+    pub fn get_chat_template(&self) -> ChatTemplate {
+        self.template.clone()
     }
 }

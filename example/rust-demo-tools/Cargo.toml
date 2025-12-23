@@ -1,0 +1,9 @@
+[package]
+name = "rust-demo-tools"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vllm-rs = { path = "../.." }
+anyhow = "1.0"
+serde_json = "1.0"

@@ -6,6 +6,7 @@ use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::guidance::GuidanceState;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -27,6 +28,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use toktrie::TokTrie;
 const MAX_PARALLEL_SAMPLING: usize = 32;
 
 pub enum Seqs<'a> {
@@ -68,6 +70,7 @@ pub struct ModelRunner {
     /// Cached sampling strategy computed once during prefill, reused during decode
     cached_sampling: RwLock<Option<Sampling>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
+    guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
 }
 
@@ -84,6 +87,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
+        toktrie: Option<Arc<TokTrie>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -180,6 +184,7 @@ impl ModelRunner {
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
+            guidance_states: RwLock::new(HashMap::new()),
             transfer,
         })
     }
@@ -595,6 +600,7 @@ impl ModelRunner {
         } else {
             (None, None)
         };
+        let cu_seqlens_q_vec = cu_seqlens_q.clone();
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
@@ -609,6 +615,7 @@ impl ModelRunner {
             max_seqlen_k,
             max_context_len,
             disable_flash_attn: self.config.disable_flash_attn,
+            seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -658,15 +665,16 @@ impl ModelRunner {
             max_seqlen_k: 0,
             max_context_len,
             disable_flash_attn: None,
+            seqlens: None,
         };
 
         Ok((input_ids, positions, input_metadata))
     }
 
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        let seq_ids: Vec<usize> = match seqs {
-            Seqs::SeqRefs(seqs) => seqs.into_iter().map(|s| s.id()).collect(),
-            Seqs::DecodeVec(v) => v.into_iter().map(|s| s.id()).collect(),
+        let seq_ids: Vec<usize> = match &seqs {
+            Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.id()).collect(),
+            Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
 
         let logits = if let Some(cfg) = &self.config.generation_cfg {
@@ -788,6 +796,8 @@ impl ModelRunner {
     pub fn finished(&self, id: usize) {
         let mut seq_tokens = self.seq_tokens.write();
         let _ = seq_tokens.remove(&id);
+        let mut guidance_states = self.guidance_states.write();
+        let _ = guidance_states.remove(&id);
     }
 
     pub fn get_model_vocab_size(&self) -> usize {

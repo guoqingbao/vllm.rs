@@ -257,7 +257,7 @@ impl Gemma3MultiModalProjector {
         }
         .to_dtype(dtype)?;
 
-        let projector = LinearX::new(ws.t()?, None, &None);
+        let projector = LinearX::new(ws.t()?, None, &None)?;
         let norm = rms_norm(
             config.vision_config.hidden_size,
             config.vision_config.layer_norm_eps,
@@ -723,16 +723,7 @@ impl Gemma3ForConditionalGeneration {
 
         // Followings are language model logics
         // 3. Prepare Masks
-        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
-            input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..]
-                .into()
-        } else {
-            Vec::new()
-        };
+        let seqlens = input_metadata.seqlens.clone().unwrap_or_default();
 
         // Full Global Mask
         let attention_mask = get_attention_causal_mask(

@@ -76,3 +76,72 @@ response = openai.chat.completions.create(
 )
 
 ```
+
+### 🤖✨ Interactive Chat and Batch Processing
+
+> Interactive Chat
+  <details open>
+    <summary>Chat with Qwen3-32B-A3B model</summary>
+
+```bash
+# Context-cache automatically enabled under chat mode
+python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+```
+
+  </details>
+
+  <details open>
+    <summary>Chat with local unquantized model</summary>
+
+```bash
+python3 -m vllm_rs.chat --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1
+```
+
+  </details>
+
+  <details open>
+    <summary>Chat with model quantized instantly (ISQ)</summary>
+
+```bash
+# Enable maximum context (262144 tokens), two ranks (`--d 0,1`)
+python3 -m vllm_rs.chat --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 262144
+```
+
+  </details>
+
+> Batch Processing
+  <details>
+    <summary>Batch Completion</summary>
+
+```bash
+python3 -m vllm_rs.completion --f /path/qwq-32b-q4_k_m.gguf --prompts "How are you? | How to make money?"
+```
+
+```bash
+python3 -m vllm_rs.completion --w /home/GLM-4-9B-0414 --d 0,1 --batch 8 --max-model-len 1024 --max-tokens 1024
+```
+
+  </details>
+
+### 🧰 MCP Multi-Server Demo (Python Client)
+
+Start vLLM.rs with an MCP config file:
+
+```shell
+target/release/vllm-rs --m <model_id> --server --mcp-config ./mcp.json
+```
+
+Then call a prefixed MCP tool from Python:
+
+```python
+import openai
+
+openai.api_key = "EMPTY"
+openai.base_url = "http://localhost:8000/v1/"
+
+response = openai.chat.completions.create(
+   model="",
+   messages=[{"role": "user", "content": "Use filesystem_read_file to read README.md"}],
+)
+print(response.choices[0].message)
+```

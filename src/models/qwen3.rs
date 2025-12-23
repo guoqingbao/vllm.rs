@@ -303,16 +303,7 @@ impl Qwen3ForCausalLM {
         deepstack_visual_embeds: &Option<Vec<Tensor>>,
         return_hidden: bool,
     ) -> Result<Tensor> {
-        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
-            input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..]
-                .into()
-        } else {
-            Vec::new()
-        };
+        let seqlens = input_metadata.seqlens.clone().unwrap_or_default();
 
         let attention_mask = get_attention_causal_mask(
             &self.device,
