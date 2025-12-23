@@ -157,7 +157,7 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
 
-### Build (CUDA)
+### Build (CUDA 11+, 12+)
 ```shell
 # Remove `nccl` for single-gpu usage
 # Remove `flash-attn,flash-context` for V100 or older hardware
