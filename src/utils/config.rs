@@ -80,6 +80,41 @@ impl Serialize for EosTokenId {
     }
 }
 
+impl EosTokenId {
+    /// Merge `other` into `self`, returning the combined token set.
+    /// - Single + Single => Multiple([a, b])
+    /// - Single + Multiple => Multiple([a, ...])
+    /// - Multiple + Single => Multiple([... , b])
+    /// - Multiple + Multiple => Multiple([... , ...])
+    pub fn merge(self, other: EosTokenId) -> EosTokenId {
+        let mut out = self.into_vec();
+        out.extend(other.into_vec());
+        EosTokenId::Multiple(out)
+    }
+
+    /// Like merge, but de-duplicates while preserving first-seen order.
+    pub fn merge_dedup(self, other: EosTokenId) -> EosTokenId {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::<u32>::new();
+        let mut out = Vec::<u32>::new();
+
+        for id in self.into_vec().into_iter().chain(other.into_vec()) {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+        EosTokenId::Multiple(out)
+    }
+
+    fn into_vec(self) -> Vec<u32> {
+        match self {
+            EosTokenId::Single(x) => vec![x],
+            EosTokenId::Multiple(v) => v,
+        }
+    }
+}
+
 // To make the "tagged" logic work for bincode, we need a separate
 // definition of the enum with derived traits. We keep it private inside this module.
 #[derive(Serialize, Deserialize)]
@@ -161,6 +196,24 @@ pub struct Config {
     pub extra_config_json: Option<String>,
 }
 
+impl Config {
+    pub fn apply_generation_cfg(&mut self, generation_cfg: Option<&GenerationConfig>) {
+        let Some(gcfg) = generation_cfg else { return };
+
+        // BOS merge (fill if missing; config wins)
+        if self.bos_token_id.is_none() {
+            self.bos_token_id = gcfg.bos_token_id;
+        }
+
+        // EOS merge (combine if both present)
+        self.eos_token_id = match (self.eos_token_id.take(), gcfg.eos_token_id.as_ref()) {
+            (None, None) => None,
+            (None, Some(e)) => Some(e.clone()),
+            (Some(e), None) => Some(e),
+            (Some(e), Some(other)) => Some(e.merge(other.clone())),
+        };
+    }
+}
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {

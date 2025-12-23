@@ -5,6 +5,7 @@ use crate::models::layers::distributed::{
 };
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
+use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, RotaryEmbedding};
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::{Config, RopeScalingValue};
 use crate::utils::progress::ProgressLike;
@@ -18,30 +19,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-struct Phi4RotaryBase {
-    sin: Tensor,
-    cos: Tensor,
-}
-
-impl Phi4RotaryBase {
-    fn apply_rotary_emb_qkv(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        let cos = self.cos.index_select(positions, 0)?;
-        let sin = self.sin.index_select(positions, 0)?;
-        let q_embed = candle_nn::rotary_emb::rope(q, &cos, &sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(k, &cos, &sin)?;
-        Ok((q_embed, k_embed))
-    }
-}
-
-#[derive(Debug, Clone)]
 struct Phi4RotaryEmbedding {
-    normal_emb: Phi4RotaryBase,
-    long_emb: Option<Phi4RotaryBase>,
+    normal_emb: RotaryEmbedding,
+    long_emb: Option<RotaryEmbedding>,
     original_max_position_embeddings: Option<usize>,
 }
 
@@ -66,22 +46,25 @@ impl Phi4RotaryEmbedding {
         }
     }
 
-    fn new(dtype: DType, cfg: &Config, dev: &Device) -> Result<Self> {
+    fn new(dtype: DType, cfg: &Config, is_rope_i: bool, dev: &Device) -> Result<Self> {
         let dim = cfg
             .head_dim
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
+
+        let rotary_dim = cfg
+            .partial_rotary_factor
+            .map(|factor| (factor * dim as f32) as usize)
+            .unwrap_or(dim);
         let max_seq_len = cfg.max_position_embeddings;
         let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
-        let inv_freq: Vec<_> = (0..dim)
+        let inv_freq: Vec<_> = (0..rotary_dim)
             .step_by(2)
-            .map(|i| 1f32 / rope_theta.powf(i as f64 / dim as f64) as f32)
+            .map(|i| 1f32 / rope_theta.powf(i as f64 / rotary_dim as f64) as f32)
             .collect();
         let inv_freq_len = inv_freq.len();
-        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
         let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
             .to_dtype(DType::F32)?
             .reshape((max_seq_len, 1))?;
-        let freqs = t.matmul(&inv_freq)?;
 
         if let Some(rope_scaling) = &cfg.rope_scaling {
             let original_max_position_embeddings = rope_scaling
@@ -117,18 +100,19 @@ impl Phi4RotaryEmbedding {
                 }
             };
 
-            let inv_freq_long = (0..dim)
+            let inv_freq_long = (0..rotary_dim)
                 .step_by(2)
                 .enumerate()
                 .map(|(k, i)| {
-                    (1f64 / (long_factor[k] * rope_theta.powf(i as f64 / dim as f64))) as f32
+                    (1f64 / (long_factor[k] * rope_theta.powf(i as f64 / rotary_dim as f64))) as f32
                 })
                 .collect::<Vec<_>>();
-            let inv_freq_short = (0..dim)
+            let inv_freq_short = (0..rotary_dim)
                 .step_by(2)
                 .enumerate()
                 .map(|(k, i)| {
-                    (1f64 / (short_factor[k] * rope_theta.powf(i as f64 / dim as f64))) as f32
+                    (1f64 / (short_factor[k] * rope_theta.powf(i as f64 / rotary_dim as f64)))
+                        as f32
                 })
                 .collect::<Vec<_>>();
 
@@ -145,28 +129,55 @@ impl Phi4RotaryEmbedding {
             let short_sin = (freqs_short.sin()? * scaling_factor)?;
             let short_cos = (freqs_short.cos()? * scaling_factor)?;
 
-            let normal_emb = Phi4RotaryBase {
-                cos: short_cos.to_dtype(dtype)?,
-                sin: short_sin.to_dtype(dtype)?,
+            let normal_emb = RotaryEmbedding {
+                sin: short_cos.to_dtype(dtype)?,
+                cos: short_sin.to_dtype(dtype)?,
+                is_rope_i,
+                rotary_dim: if cfg.partial_rotary_factor.is_some() {
+                    Some(rotary_dim)
+                } else {
+                    None
+                },
+                original_max_position_embeddings: Some(original_max_position_embeddings as usize),
+                llama_4_scaling_beta: None,
             };
 
-            let long_emb = Some(Phi4RotaryBase {
-                cos: long_cos.to_dtype(dtype)?,
-                sin: long_sin.to_dtype(dtype)?,
-            });
+            let long_emb = RotaryEmbedding {
+                sin: long_cos.to_dtype(dtype)?,
+                cos: long_sin.to_dtype(dtype)?,
+                is_rope_i,
+                rotary_dim: if cfg.partial_rotary_factor.is_some() {
+                    Some(rotary_dim)
+                } else {
+                    None
+                },
+                original_max_position_embeddings: Some(original_max_position_embeddings as usize),
+                llama_4_scaling_beta: None,
+            };
 
             return Ok(Self {
                 normal_emb,
-                long_emb,
+                long_emb: Some(long_emb),
                 original_max_position_embeddings: Some(
-                    original_max_position_embeddings.round() as usize,
+                    original_max_position_embeddings.round() as usize
                 ),
             });
         }
 
-        let normal_emb = Phi4RotaryBase {
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(DType::F32)?;
+        let freqs = t.matmul(&inv_freq)?;
+
+        let normal_emb = RotaryEmbedding {
             cos: freqs.cos()?.to_dtype(dtype)?,
             sin: freqs.sin()?.to_dtype(dtype)?,
+            is_rope_i,
+            rotary_dim: if cfg.partial_rotary_factor.is_some() {
+                Some(rotary_dim)
+            } else {
+                None
+            },
+            original_max_position_embeddings: None,
+            llama_4_scaling_beta: None,
         };
         Ok(Self {
             normal_emb,
@@ -181,17 +192,16 @@ impl Phi4RotaryEmbedding {
         k: &Tensor,
         input_positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        if let (Some(long_emb), Some(original_max_position_embeddings)) = (
-            &self.long_emb,
-            self.original_max_position_embeddings,
-        ) {
+        if let (Some(long_emb), Some(original_max_position_embeddings)) =
+            (&self.long_emb, self.original_max_position_embeddings)
+        {
             let max_position = input_positions
                 .flatten_all()?
-                .to_vec1::<u32>()?
+                .to_vec1::<i64>()?
                 .into_iter()
                 .max()
                 .unwrap_or(0);
-            if max_position >= original_max_position_embeddings as u32 {
+            if max_position >= original_max_position_embeddings as i64 {
                 long_emb.apply_rotary_emb_qkv(q, k, input_positions)
             } else {
                 self.normal_emb.apply_rotary_emb_qkv(q, k, input_positions)
@@ -511,7 +521,7 @@ impl Phi4ForCausalLM {
         comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
-        _is_rope_i: bool,
+        is_rope_i: bool,
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
@@ -540,7 +550,12 @@ impl Phi4ForCausalLM {
                 dtype
             },
         )?;
-        let rotary_emb = Arc::new(Phi4RotaryEmbedding::new(DType::F32, config, &vb.device())?);
+        let rotary_emb = Arc::new(Phi4RotaryEmbedding::new(
+            DType::F32,
+            config,
+            is_rope_i,
+            &vb.device(),
+        )?);
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
             let layer = Phi4DecoderLayer::new(

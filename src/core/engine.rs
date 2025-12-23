@@ -113,14 +113,7 @@ impl LLMEngine {
         config.fp8_kvcache = econfig.fp8_kvcache;
 
         // In case config file missing bos and eos configuratioin
-        if let Some(gcfg) = &generation_cfg {
-            if config.bos_token_id.is_none() && gcfg.bos_token_id.is_some() {
-                config.bos_token_id = gcfg.bos_token_id.clone();
-            }
-            if config.eos_token_id.is_none() && gcfg.eos_token_id.is_some() {
-                config.eos_token_id = gcfg.eos_token_id.clone();
-            }
-        }
+        config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
             if let Some(eos) = &config_tokenizer.eos_token {
                 if let Some(token) = tokenizer.get_vocab(true).get(eos).copied() {

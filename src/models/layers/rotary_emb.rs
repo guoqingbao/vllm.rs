@@ -16,12 +16,12 @@ pub trait ApplyRotaryEmbedding {
 
 #[derive(Debug, Clone)]
 pub struct RotaryEmbedding {
-    sin: Tensor,
-    cos: Tensor,
-    is_rope_i: bool,
-    rotary_dim: Option<usize>,
-    original_max_position_embeddings: Option<usize>,
-    llama_4_scaling_beta: Option<f64>,
+    pub sin: Tensor,
+    pub cos: Tensor,
+    pub is_rope_i: bool,
+    pub rotary_dim: Option<usize>,
+    pub original_max_position_embeddings: Option<usize>,
+    pub llama_4_scaling_beta: Option<f64>,
 }
 
 impl RotaryEmbedding {

@@ -250,6 +250,51 @@ impl Downloader {
         None
     }
 
+    /// Retry helper for downloading a single file from a repo.
+    ///
+    /// - `retries`: total attempts (e.g., 5 means try up to 5 times)
+    /// - `base_delay`: delay between attempts; with exponential backoff below it grows each attempt
+    fn hf_get_with_retry(
+        &self,
+        api: &hf_hub::api::sync::ApiRepo,
+        rfilename: &str,
+        retries: u32,
+        base_delay: std::time::Duration,
+    ) -> Result<PathBuf> {
+        let mut last_err: Option<candle_core::Error> = None;
+
+        for attempt in 1..=retries {
+            match api.get(rfilename).map_err(candle_core::Error::wrap) {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    last_err = Some(e);
+
+                    crate::log_error!(
+                        "Download error on attempt {}/{} for {}. Will retry...",
+                        attempt,
+                        retries,
+                        rfilename
+                    );
+
+                    if attempt == retries {
+                        break;
+                    }
+
+                    // Exponential backoff: base_delay, 2*base_delay, 4*base_delay, ...
+                    let backoff = base_delay * (1u32 << (attempt - 1));
+                    std::thread::sleep(backoff);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| {
+            candle_core::Error::msg(format!(
+                "Failed downloading {} after {} attempts",
+                rfilename, retries
+            ))
+        }))
+    }
+
     pub fn download_model(
         &self,
         revision: Option<String>,
@@ -326,7 +371,8 @@ impl Downloader {
             .map(|x| x.rfilename.clone())
             .filter(|x| x.ends_with(".safetensors"))
         {
-            let filename = api.get(&rfilename).map_err(candle_core::Error::wrap)?;
+            let filename =
+                self.hf_get_with_retry(&api, &rfilename, 5, std::time::Duration::from_secs(5))?;
             filenames.push(filename);
         }
 
