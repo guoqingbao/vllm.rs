@@ -20,6 +20,8 @@ pub enum Sampling {
 pub struct LogitsProcessor {
     rng: Arc<Mutex<rand::rngs::StdRng>>,
     pub sampling: Sampling,
+    #[cfg(feature = "cuda")]
+    fast_sampler: Arc<std::sync::Mutex<attention_rs::sampler::Sampler>>, // Use Mutex because Sampler has interior mutability (Mutex) but Rust needs to know who owns it. Wait, Sampler contains Mutexes, so it's thread-safe?
 }
 
 impl LogitsProcessor {
@@ -28,6 +30,8 @@ impl LogitsProcessor {
         Self {
             rng: Arc::new(Mutex::new(rng)),
             sampling,
+            #[cfg(feature = "cuda")]
+            fast_sampler: Arc::new(std::sync::Mutex::new(attention_rs::sampler::Sampler::new())),
         }
     }
 
@@ -193,6 +197,33 @@ impl LogitsProcessor {
     /// Sample tokens using a pre-computed sampling strategy.
     /// This is more efficient than `sample()` when the strategy is already computed and cached.
     pub fn sample_with_strategy(&self, logits: &Tensor, sampling: &Sampling) -> Result<Vec<u32>> {
+        #[cfg(feature = "cuda")]
+        {
+            let (k, p, t) = match sampling {
+                Sampling::TopKThenTopP { k, p, temperature } => (Some(*k), Some(*p), *temperature),
+                Sampling::TopK { k, temperature } => (Some(*k), None, *temperature),
+                Sampling::TopP { p, temperature } => (None, Some(*p), *temperature),
+                _ => (None, None, 0.0),
+            };
+
+            if let (Some(mut k), Some(mut p)) = (k.or(Some(32)), p.or(Some(0.95))) {
+                let should_run = matches!(
+                    sampling,
+                    Sampling::TopKThenTopP { .. } | Sampling::TopK { .. } | Sampling::TopP { .. }
+                );
+
+                if should_run {
+                    let seed = {
+                        use rand::RngCore;
+                        self.rng.lock().next_u64()
+                    };
+                    let token_pos = 0;
+                    let sampler = self.fast_sampler.lock().unwrap();
+                    return sampler.sample(logits, k, p, t, seed, token_pos);
+                }
+            }
+        }
+
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         let prs = |temperature: f64| -> Result<Tensor> {
