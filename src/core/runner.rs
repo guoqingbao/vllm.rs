@@ -677,35 +677,35 @@ impl ModelRunner {
             Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
 
-        let logits = if let Some(cfg) = &self.config.generation_cfg {
-            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
-                let frequency_penalty = cfg.frequency_penalty.unwrap_or(0.);
-                let presence_penalty = cfg.presence_penalty.unwrap_or(0.);
-                let seq_tokens = self.seq_tokens.write();
-                let reference_tokens: Vec<Vec<u32>> = seq_ids
-                    .iter()
-                    .map(|id| {
-                        if let Some(tokens) = seq_tokens.get(&id) {
-                            if tokens.len() > 128 {
-                                tokens[tokens.len().saturating_sub(128)..].to_vec()
-                            } else {
-                                vec![]
-                            }
+        let (frequency_penalty, presence_penalty) = if let Some(cfg) = &self.config.generation_cfg {
+            (cfg.frequency_penalty, cfg.presence_penalty)
+        } else {
+            (None, None)
+        };
+
+        let logits = if !is_prefill && (frequency_penalty.is_some() || presence_penalty.is_some()) {
+            let seq_tokens = self.seq_tokens.write();
+            let reference_tokens: Vec<Vec<u32>> = seq_ids
+                .iter()
+                .map(|id| {
+                    if let Some(tokens) = seq_tokens.get(&id) {
+                        if tokens.len() > 128 {
+                            tokens[tokens.len().saturating_sub(128)..].to_vec()
                         } else {
                             vec![]
                         }
-                    })
-                    .collect();
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect();
 
-                self.logit_processor.apply_batch_repeat_penalty(
-                    logits,
-                    vec![frequency_penalty; reference_tokens.len()],
-                    vec![presence_penalty; reference_tokens.len()],
-                    reference_tokens,
-                )?
-            } else {
-                logits.to_owned()
-            }
+            self.logit_processor.apply_batch_repeat_penalty(
+                logits,
+                vec![frequency_penalty.unwrap_or(0.0); reference_tokens.len()],
+                vec![presence_penalty.unwrap_or(0.0); reference_tokens.len()],
+                reference_tokens,
+            )?
         } else {
             logits.to_owned()
         };
@@ -726,7 +726,7 @@ impl ModelRunner {
             // Determine the sampling strategy based on priority:
             // 1. generation_cfg (model's config) takes highest priority if valid
             // 2. user's sampling_params if provided with valid values
-            // 3. fallback to ArgMax (naive sampling)
+            // 3. fallback to default TopP
             let sampling = if has_valid_sampling_cfg {
                 let cfg = self.config.generation_cfg.as_ref().unwrap();
                 crate::log_warn!(
@@ -749,11 +749,19 @@ impl ModelRunner {
                         user_params.top_p,
                     )
                 } else {
-                    crate::log_warn!("No generation_config, using naive sampling (argmax)");
-                    Sampling::ArgMax
+                    crate::log_warn!(
+                        "No generation_config, using default sampling (temp=0.7, top_p=0.9)"
+                    );
+                    Sampling::TopP {
+                        p: 0.9,
+                        temperature: 0.7,
+                    }
                 }
             } else {
-                Sampling::ArgMax
+                Sampling::TopP {
+                    p: 0.9,
+                    temperature: 0.7,
+                }
             };
 
             // Cache the computed sampling strategy for decode phase
@@ -764,7 +772,10 @@ impl ModelRunner {
             self.cached_sampling
                 .read()
                 .clone()
-                .unwrap_or(Sampling::ArgMax)
+                .unwrap_or(Sampling::TopP {
+                    p: 0.9,
+                    temperature: 0.7,
+                })
         };
 
         let tokens = if batch_size <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs)

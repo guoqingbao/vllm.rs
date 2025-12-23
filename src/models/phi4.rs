@@ -202,7 +202,8 @@ impl Phi4RotaryEmbedding {
                 .to_vec1::<i64>()?
                 .into_iter()
                 .max()
-                .unwrap_or(0);
+                .unwrap_or(0)
+                + 1;
             if max_position >= original_max_position_embeddings as i64 {
                 long_emb.apply_rotary_emb_qkv(q, k, input_positions)
             } else {

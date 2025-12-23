@@ -466,6 +466,21 @@ fn is_multi_model(config_path: &PathBuf) -> Result<DummyMultiModelConfig> {
     Ok(config)
 }
 
+fn require_model_penalty(arch: String) -> bool {
+    matches!(
+        arch.as_str(),
+        "Glm4ForCausalLM"
+            | "Glm4ForConditionalGeneration"
+            | "glm4"
+            | "Phi3ForCausalLM"
+            | "Phi4ForCausalLM"
+            | "phi3"
+            | "phi4"
+            | "Gemma3ForConditionalGeneration"
+            | "Gemma3ForCausalLM"
+    )
+}
+
 pub fn init_config_tokenizer(
     econfig: &EngineConfig,
 ) -> Result<(
@@ -596,7 +611,19 @@ pub fn init_config_tokenizer(
             let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
             Some(cfg)
         } else {
-            None
+            if require_model_penalty(architectures[0].clone()) {
+                Some(GenerationConfig {
+                    temperature: Some(0.7),
+                    top_p: Some(0.9),
+                    top_k: None,
+                    frequency_penalty: Some(1.2),
+                    presence_penalty: Some(1.2),
+                    bos_token_id: None,
+                    eos_token_id: None,
+                })
+            } else {
+                None
+            }
         };
 
         // Handle jinja chat template
@@ -661,14 +688,10 @@ pub fn init_config_tokenizer(
         };
         let archs = config.architectures.as_ref().unwrap();
 
-        let generation_cfg = if matches!(
-            archs[0].as_str(),
-            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4"
-        ) {
-            //default repetition penalty for glm4 models
+        let generation_cfg = if require_model_penalty(archs[0].clone()) {
             Some(GenerationConfig {
-                temperature: None,
-                top_p: None,
+                temperature: Some(0.7),
+                top_p: Some(0.9),
                 top_k: None,
                 frequency_penalty: Some(1.2),
                 presence_penalty: Some(1.2),
