@@ -317,13 +317,16 @@ impl Qwen3MoEForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
-        if !is_qvar_builder
+        let tie_word_embeddings = if !is_qvar_builder
             && vb.has_key("embed_tokens.weight")
             && !vb.has_key(&format!("{}embed_tokens.weight", prefix))
         {
             crate::log_error!("This model does not support decoding!");
             prefix.clear(); // Some embedding model has no prefix
-        }
+            Some(true)
+        } else {
+            config.tie_word_embeddings
+        };
 
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
@@ -389,7 +392,7 @@ impl Qwen3MoEForCausalLM {
         let lm_head = ReplicatedLinear::load_no_bias(
             config.hidden_size,
             vocab_size,
-            if config.tie_word_embeddings.is_some_and(|x| x) {
+            if tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
                     vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
                 } else {
