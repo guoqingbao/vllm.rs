@@ -69,4 +69,11 @@ impl VarBuilderX<'_> {
             Either::Right(vb) => VarBuilderX(Either::Right(vb.pp(name))),
         }
     }
+
+    pub fn has_key(&self, name: &str) -> bool {
+        match &self.0 {
+            Either::Left(vb) => vb.contains_tensor(name),
+            Either::Right(vb) => vb.contains_key(name),
+        }
+    }
 }
