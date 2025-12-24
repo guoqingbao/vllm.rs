@@ -206,7 +206,7 @@ impl LogitsProcessor {
                 _ => (None, None, 0.0),
             };
 
-            if let (Some(mut k), Some(mut p)) = (k.or(Some(32)), p.or(Some(0.95))) {
+            if let (Some(k), Some(p)) = (k.or(Some(32)), p.or(Some(0.95))) {
                 let should_run = matches!(
                     sampling,
                     Sampling::TopKThenTopP { .. } | Sampling::TopK { .. } | Sampling::TopP { .. }
@@ -217,9 +217,8 @@ impl LogitsProcessor {
                         use rand::RngCore;
                         self.rng.lock().next_u64()
                     };
-                    let token_pos = 0;
                     let sampler = self.fast_sampler.lock().unwrap();
-                    return sampler.sample(logits, k, p, t, seed, token_pos);
+                    return sampler.sample_cuda(logits, k, p, t, seed);
                 }
             }
         }
