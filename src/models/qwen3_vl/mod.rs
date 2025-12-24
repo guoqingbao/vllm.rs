@@ -70,7 +70,7 @@ impl Qwen3VLForConditionalGeneration {
                 is_rope_i,
                 device,
                 progress_reporter,
-                Some("model.language_model".to_string()),
+                Some("model.language_model.".to_string()),
             )?)
         } else {
             Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
@@ -81,7 +81,7 @@ impl Qwen3VLForConditionalGeneration {
                 is_rope_i,
                 device,
                 progress_reporter,
-                Some("model.language_model".to_string()),
+                Some("model.language_model.".to_string()),
             )?)
         };
 

@@ -401,6 +401,8 @@ pub struct SamplingParams {
     pub session_id: Option<String>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>, // enable reasoning
     /// Tool mode for streaming tool call handling:
     /// - None: No tools, ignore </tool_call> detection
     /// - Some(false): External tools, finish stream at </tool_call>
@@ -435,6 +437,9 @@ pub struct SamplingParams {
     /// - Some(true): MCP internal, pause stream, execute, resume
     #[pyo3(get, set)]
     pub mcp_mode: Option<bool>,
+    #[pyo3(get, set)]
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -448,6 +453,7 @@ impl SamplingParams {
         session_id: Option<String>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        thinking: Option<bool>,
     ) -> Self {
         Self {
             temperature,
@@ -459,6 +465,7 @@ impl SamplingParams {
             frequency_penalty,
             presence_penalty,
             mcp_mode: None,
+            thinking,
         }
     }
 
@@ -473,6 +480,7 @@ impl SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            thinking: None,
         }
     }
 }
@@ -489,6 +497,7 @@ impl Default for SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            thinking: None,
         }
     }
 }

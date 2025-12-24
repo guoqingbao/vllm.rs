@@ -34,6 +34,8 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
     /// Tools available for the model to call
@@ -769,6 +771,7 @@ pub async fn run_server(
     port: usize,
     with_ui_server: bool,
 ) -> Result<()> {
+    use axum::extract::DefaultBodyLimit;
     let (has_vision, model_name) = {
         let e = engine.read();
         e.get_model_info()
@@ -855,6 +858,7 @@ pub async fn run_server(
         .route("/v1/usage", get(server::get_usage))
         .route("/tokenize", post(server::tokenize))
         .route("/detokenize", post(server::detokenize))
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB body size limit
         .layer(cors)
         .with_state(Arc::new(server_data));
 

@@ -74,6 +74,7 @@ pub async fn chat_completion(
     params.frequency_penalty = request.frequency_penalty;
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
+    params.thinking = request.thinking.clone();
     let img_cfg = {
         let e = data.engine.read();
         e.img_cfg.clone()

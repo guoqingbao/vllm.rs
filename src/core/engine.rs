@@ -490,9 +490,13 @@ impl LLMEngine {
             let temperature = params.temperature.or(gen_cfg.temperature);
             let top_k = params.top_k.or(gen_cfg.top_k);
             let top_p = params.top_p.or(gen_cfg.top_p);
+            let frequency_penalty = params.frequency_penalty.or(gen_cfg.frequency_penalty);
+            let presence_penalty = params.presence_penalty.or(gen_cfg.presence_penalty);
             params.temperature = temperature;
             params.top_k = top_k;
             params.top_p = top_p;
+            params.frequency_penalty = frequency_penalty;
+            params.presence_penalty = presence_penalty;
         }
         let session_id = params.session_id.clone();
         let session_id = if session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
@@ -1062,6 +1066,11 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
+
+        // Apply user's thinking preference - default to false if not specified
+        let enable_thinking = params.thinking.unwrap_or(false);
+        prompt_template.set_enable_thinking(enable_thinking);
+
         let mut context_cache_reqeust = false;
 
         let session_id =

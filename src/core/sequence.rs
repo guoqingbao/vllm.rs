@@ -55,6 +55,7 @@ pub struct DecodeSequence {
     pub last_block_tokens: usize,
     pub block_table_last: u32,
     pub block_tables: Vec<u32>,
+    pub sampling_params: SamplingParams,
 }
 
 impl DecodeSequence {
@@ -70,6 +71,7 @@ impl DecodeSequence {
             last_block_tokens,
             block_table_last,
             block_tables: sequence.block_table.clone(),
+            sampling_params: sequence.sampling_params.clone(),
         }
     }
 

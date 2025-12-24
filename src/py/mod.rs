@@ -371,7 +371,7 @@ impl SamplingParams {
     #[new]
     #[pyo3(signature = (temperature=None, max_tokens=None,
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
-        frequency_penalty=None, presence_penalty=None))]
+        frequency_penalty=None, presence_penalty=None, thinking=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
@@ -381,6 +381,7 @@ impl SamplingParams {
         session_id: Option<String>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        thinking: Option<bool>,
     ) -> Self {
         Self {
             temperature,
@@ -392,6 +393,7 @@ impl SamplingParams {
             frequency_penalty,
             presence_penalty,
             mcp_mode: None,
+            thinking,
         }
     }
 
@@ -407,6 +409,7 @@ impl SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            thinking: None,
         }
     }
 }

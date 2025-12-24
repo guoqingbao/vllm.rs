@@ -160,7 +160,7 @@ impl ScalingRotaryEmbedding {
                 cfg.max_position_embeddings as f64 / factor
             } else {
                 crate::log_warn!(
-                    "original_max_position_embeddings must be set in rope_scaling or cfg"
+                    "original_max_position_embeddings not found in rope_scaling or cfg"
                 );
                 cfg.max_position_embeddings as f64
             };
