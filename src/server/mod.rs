@@ -34,6 +34,8 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
     /// Tools available for the model to call

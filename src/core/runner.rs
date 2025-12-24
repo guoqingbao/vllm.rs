@@ -31,6 +31,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use toktrie::TokTrie;
 const MAX_PARALLEL_SAMPLING: usize = 32;
 
+/// Cached sampling parameters computed once during prefill, reused during decode
+#[derive(Clone, Debug)]
+pub struct CachedSamplingParams {
+    pub sampling: Sampling,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+}
+
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
     DecodeVec(&'a Vec<DecodeSequence>),
@@ -68,7 +76,7 @@ pub struct ModelRunner {
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
     logit_processor: LogitsProcessor,
     /// Cached sampling strategy computed once during prefill, reused during decode
-    cached_sampling: RwLock<Option<Sampling>>,
+    cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
@@ -677,13 +685,115 @@ impl ModelRunner {
             Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
 
-        let (frequency_penalty, presence_penalty) = if let Some(cfg) = &self.config.generation_cfg {
-            (cfg.frequency_penalty, cfg.presence_penalty)
-        } else {
-            (None, None)
+        // Get the batch size for deciding whether to use parallel sampling
+        let batch_size = match seqs {
+            Seqs::SeqRefs(seqs) => seqs.len(),
+            Seqs::DecodeVec(v) => v.len(),
         };
 
-        let logits = if !is_prefill && (frequency_penalty.is_some() || presence_penalty.is_some()) {
+        // Compute and cache sampling params (including penalties) during prefill, reuse during decode
+        let cached_params = match (is_prefill, &seqs) {
+            // Prefill: compute sampling strategy and penalties, cache for decode phase
+            (true, Seqs::SeqRefs(seqs)) => {
+                // Check if generation_cfg has valid sampling params (temperature AND top_k/top_p)
+                let has_valid_sampling_cfg =
+                    self.config.generation_cfg.as_ref().map_or(false, |cfg| {
+                        cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
+                    });
+                let user_params = &seqs[0].sampling_params;
+
+                // Log thinking parameter whenever user provides it (independent of other sampling config)
+                crate::log_warn!(
+                    "User's thinking preference for reasoning models: {:?}",
+                    user_params.thinking
+                );
+
+                // Determine frequency/presence penalties (user params > generation_cfg)
+                let gen_cfg_freq = self
+                    .config
+                    .generation_cfg
+                    .as_ref()
+                    .and_then(|c| c.frequency_penalty);
+                let gen_cfg_pres = self
+                    .config
+                    .generation_cfg
+                    .as_ref()
+                    .and_then(|c| c.presence_penalty);
+                let frequency_penalty = user_params.frequency_penalty.or(gen_cfg_freq);
+                let presence_penalty = user_params.presence_penalty.or(gen_cfg_pres);
+
+                let sampling = if has_valid_sampling_cfg {
+                    let cfg = self.config.generation_cfg.as_ref().unwrap();
+                    crate::log_warn!(
+                        "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                        cfg.temperature,
+                        cfg.top_k,
+                        cfg.top_p,
+                        frequency_penalty,
+                        presence_penalty
+                    );
+                    LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
+                } else {
+                    let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                        && (matches!(user_params.top_k, Some(k) if k > 0)
+                            || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
+                    if has_user_config {
+                        crate::log_warn!(
+                            "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                            user_params.temperature,
+                            user_params.top_k,
+                            user_params.top_p,
+                            frequency_penalty,
+                            presence_penalty
+                        );
+                        LogitsProcessor::get_strategy(
+                            user_params.temperature,
+                            user_params.top_k,
+                            user_params.top_p,
+                        )
+                    } else {
+                        crate::log_warn!(
+                            "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
+                        );
+                        Sampling::TopKThenTopP {
+                            k: 32,
+                            p: 0.95,
+                            temperature: 0.7,
+                        }
+                    }
+                };
+
+                let cached = CachedSamplingParams {
+                    sampling,
+                    frequency_penalty,
+                    presence_penalty,
+                };
+
+                // Cache for decode phase
+                *self.cached_sampling.write() = Some(cached.clone());
+                cached
+            }
+            // Decode or non-SeqRefs: use cached parameters
+            _ => self
+                .cached_sampling
+                .read()
+                .clone()
+                .unwrap_or(CachedSamplingParams {
+                    sampling: Sampling::TopKThenTopP {
+                        k: 32,
+                        p: 0.95,
+                        temperature: 0.7,
+                    },
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                }),
+        };
+
+        // Apply penalties using cached values (same for all sequences in batch)
+        let has_any_penalty =
+            cached_params.frequency_penalty.is_some() || cached_params.presence_penalty.is_some();
+
+        let logits = if !is_prefill && has_any_penalty {
             let seq_tokens = self.seq_tokens.write();
             let reference_tokens: Vec<Vec<u32>> = seq_ids
                 .iter()
@@ -702,102 +812,33 @@ impl ModelRunner {
 
             self.logit_processor.apply_batch_repeat_penalty(
                 logits,
-                vec![frequency_penalty.unwrap_or(0.0); reference_tokens.len()],
-                vec![presence_penalty.unwrap_or(0.0); reference_tokens.len()],
+                vec![cached_params.frequency_penalty.unwrap_or(0.0); batch_size],
+                vec![cached_params.presence_penalty.unwrap_or(0.0); batch_size],
                 reference_tokens,
             )?
         } else {
             logits.to_owned()
         };
 
-        // Check if generation_cfg has valid sampling params (temperature AND top_k/top_p)
-        let has_valid_sampling_cfg = self.config.generation_cfg.as_ref().map_or(false, |cfg| {
-            cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
-        });
-
-        // Get the batch size for deciding whether to use parallel sampling
-        let batch_size = match seqs {
-            Seqs::SeqRefs(seqs) => seqs.len(),
-            Seqs::DecodeVec(v) => v.len(),
-        };
-
-        // Compute and cache sampling strategy during prefill, reuse during decode
-        let sampling = if is_prefill {
-            // Determine the sampling strategy based on priority:
-            // 1. generation_cfg (model's config) takes highest priority if valid
-            // 2. user's sampling_params if provided with valid values
-            // 3. fallback to default TopP
-            let sampling = if has_valid_sampling_cfg {
-                let cfg = self.config.generation_cfg.as_ref().unwrap();
-                crate::log_warn!(
-                    "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}",
-                    cfg.temperature,
-                    cfg.top_k,
-                    cfg.top_p
-                );
-                LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
-            } else if let Seqs::SeqRefs(seqs) = seqs {
-                let user_params = &seqs[0].sampling_params;
-                let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
-                    && (matches!(user_params.top_k, Some(k) if k > 0)
-                        || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
-                if has_user_config {
-                    crate::log_warn!("Using user's sampling params: {:?}", user_params);
-                    LogitsProcessor::get_strategy(
-                        user_params.temperature,
-                        user_params.top_k,
-                        user_params.top_p,
-                    )
-                } else {
-                    crate::log_warn!(
-                        "No generation_config, using default sampling (temp=0.7, top_p=0.9)"
-                    );
-                    Sampling::TopP {
-                        p: 0.9,
-                        temperature: 0.7,
-                    }
-                }
-            } else {
-                Sampling::TopP {
-                    p: 0.9,
-                    temperature: 0.7,
-                }
-            };
-
-            // Cache the computed sampling strategy for decode phase
-            *self.cached_sampling.write() = Some(sampling.clone());
-            sampling
-        } else {
-            // Decode phase: reuse cached sampling strategy (no recomputation)
-            self.cached_sampling
-                .read()
-                .clone()
-                .unwrap_or(Sampling::TopP {
-                    p: 0.9,
-                    temperature: 0.7,
-                })
-        };
-
         let tokens = if batch_size <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs)
         {
             self.logit_processor
-                .sample_with_strategy(&logits, &sampling)?
+                .sample_with_strategy(&logits, &cached_params.sampling)?
         } else {
             logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
         };
 
-        if let Some(cfg) = &self.config.generation_cfg {
-            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
-                let mut seq_tokens = self.seq_tokens.write();
-                for i in 0..seq_ids.len() {
-                    if seq_tokens.contains_key(&seq_ids[i]) {
-                        seq_tokens
-                            .get_mut(&seq_ids[i])
-                            .expect("no entry")
-                            .push(tokens[i]);
-                    } else {
-                        seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
-                    }
+        // Track tokens for sequences when penalties are enabled
+        if has_any_penalty {
+            let mut seq_tokens = self.seq_tokens.write();
+            for i in 0..seq_ids.len() {
+                if seq_tokens.contains_key(&seq_ids[i]) {
+                    seq_tokens
+                        .get_mut(&seq_ids[i])
+                        .expect("no entry")
+                        .push(tokens[i]);
+                } else {
+                    seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
                 }
             }
         }
