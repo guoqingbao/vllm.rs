@@ -487,9 +487,7 @@ impl Qwen3MoEForCausalLM {
         } else if self.is_qvar_builder {
             self.lm_head.forward(&xs)
         } else {
-            self.lm_head
-                .forward(&xs.to_dtype(self.dtype)?)?
-                .to_dtype(DType::F32)
+            self.lm_head.forward(&xs.to_dtype(self.dtype)?)
         }
     }
 

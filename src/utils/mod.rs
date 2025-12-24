@@ -1181,6 +1181,12 @@ pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
     use std::collections::HashSet;
     use std::fs;
 
+    // Check for single model.safetensors file (small models without sharding)
+    if path.join("model.safetensors").exists() {
+        return Ok(true);
+    }
+
+    // Check for sharded safetensors (e.g., model-00001-of-00005.safetensors format)
     let re = Regex::new(r"^.+-(\d{5})-of-(\d{5})\.safetensors$").unwrap();
 
     let mut found_indices = HashSet::new();
