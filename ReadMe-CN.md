@@ -30,12 +30,13 @@
 
 | 模型 | 格式 | 大小 | 输出速度 |
 |------------------|---------------|----------|------------------------|
-| Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **90.19** tokens/s |
-| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **94.47** tokens/s |
-| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **95** tokens/s |
+|------------------|---------------|----------|------------------------|
+| Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **120.74** tokens/s |
+| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **126.89** tokens/s |
+| DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **124.87** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
-| QwQ-32B | Q4_K_M | 32B | **35.69** tokens/s |
-| **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)** | **75.91** tokens/s  |
+| QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
+| **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **90.05** tokens/s  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
