@@ -30,7 +30,6 @@
 
 | 模型 | 格式 | 大小 | 输出速度 |
 |------------------|---------------|----------|------------------------|
-|------------------|---------------|----------|------------------------|
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **120.74** tokens/s |
 | DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **126.89** tokens/s |
 | DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **124.87** tokens/s |
@@ -40,6 +39,8 @@
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
+  <details>
+
    | 模型 | 并发数 | 输出Tokens | 耗时 (s) | 吞吐量 (tokens/s) |
    |------------------|--------|--------|---------|-------------|
    | Qwen3-0.6B (BF16) |  128  | 63488       | 83.13s    | 763.73     |
@@ -47,6 +48,7 @@
    | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
    | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
    | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+  </details>
 
 查看 [**完整性能测试 →**](docs/performance.md)
 
@@ -92,12 +94,14 @@
 python3 -m pip install vllm_rs
 ```
 
-### 🌐✨ API Server
+### 🌐✨ API Server + ChatGPT风格内置网页
    💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互
    
    💡使用`--ui-server`会同时启动ChatGPT风格网页, 此时无需其它客户端。
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
+
+   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以通过`thinking=False` / `enable_thinking=False`关闭推理过程。
 
   <details open>
     <summary>单卡 + GGUF模型</summary>

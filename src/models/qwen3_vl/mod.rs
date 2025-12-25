@@ -50,6 +50,8 @@ impl Qwen3VLForConditionalGeneration {
                 .map_err(candle_core::Error::wrap)?;
         cfg.text_config = config.clone();
 
+        crate::log_info!("Loading vision tower...");
+
         let vision_model =
             Qwen3VLVisionModel::new(&cfg.vision_config, &vb.pp("model.visual"), dtype, device)?;
 
@@ -61,6 +63,7 @@ impl Qwen3VLForConditionalGeneration {
             .architectures
             .unwrap_or(vec!["Qwen3VLForConditionalGeneration".to_string()]);
         let arch = arch[0].as_str();
+        crate::log_info!("Loading language model...");
         let text_model = if matches!(arch, "Qwen3VLMoeForConditionalGeneration") {
             Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
                 &vb,

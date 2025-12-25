@@ -38,6 +38,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **90.05** tokens/s  |
 
 > **Metal (Apple Silicon, M4)**
+  <details>
 
 | Model | Batch Size | Output Tokens | Time (s) | Throughput (tokens/s) |
 |------------------|--------|--------|---------|-------------|
@@ -46,6 +47,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+
+  </details>
 
 See [**Full Performance Benchmarks →**](docs/performance.md)
 
@@ -101,6 +104,8 @@ python3 -m pip install vllm_rs
 💡Start with `--ui-server` will also start ChatGPT-like web server, no external chat client required in that case.
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
+
+ ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable through `thinking=False` / `enable_thinking=False`.
 
   <details open>
     <summary>Single GPU + GGUF model</summary>

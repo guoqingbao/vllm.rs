@@ -546,6 +546,7 @@ impl Gemma3ForConditionalGeneration {
         )?;
 
         let embed_scale = (config.text_config.hidden_size as f64).sqrt();
+        crate::log_info!("Loading vision tower...");
 
         // 2. Vision & Projector (Optional load based on config)
         let vision_tower = if config.has_vision {
@@ -568,6 +569,8 @@ impl Gemma3ForConditionalGeneration {
         } else {
             None
         };
+
+        crate::log_info!("Loading language model...");
 
         // 3. RoPE
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(

@@ -173,6 +173,7 @@ impl Mistral3ForConditionalGeneration {
             serde_json::from_str(config.extra_config_json.as_ref().unwrap())
                 .map_err(candle_core::Error::wrap)?;
         cfg.text_config = config.clone();
+        crate::log_info!("Loading vision tower...");
         let vision_model = VisionModel::new(
             &cfg.vision_config,
             vb.pp("vision_tower"),
@@ -180,6 +181,7 @@ impl Mistral3ForConditionalGeneration {
             dtype,
         )?;
         let mmproj = MultiModalProjector::new(&cfg, vb.pp("multi_modal_projector"), dtype)?;
+        crate::log_info!("Loading language model...");
 
         let text_model = LLaMaForCausalLM::new(
             &vb.pp("language_model"),
