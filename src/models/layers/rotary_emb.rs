@@ -78,15 +78,17 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         k: &Tensor,
         positions: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        let cos = self.cos.index_select(positions, 0)?;
-        let sin = self.sin.index_select(positions, 0)?;
-
         #[cfg(feature = "cuda")]
         {
             use attention_rs::fused_rope::FusedRope;
 
             // Handle partial rotary (rotary_dim < head_dim) - must return new tensors
+            // For partial rotary, we still need index_select + candle_nn fallback
+            // because the kernel can't handle partial dimensions
             if let Some(rotary_dim) = self.rotary_dim {
+                let cos = self.cos.index_select(positions, 0)?;
+                let sin = self.sin.index_select(positions, 0)?;
+                
                 let q_rot = q.narrow(candle_core::D::Minus1, 0, rotary_dim)?.contiguous()?;
                 let q_pass = q
                     .narrow(candle_core::D::Minus1, rotary_dim, q.dim(candle_core::D::Minus1)? - rotary_dim)?
@@ -96,22 +98,33 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
                     .narrow(candle_core::D::Minus1, rotary_dim, k.dim(candle_core::D::Minus1)? - rotary_dim)?
                     .contiguous()?;
 
-                // Use fused kernel for the rotary portion
-                let (q_rot, k_rot) = FusedRope::apply(&q_rot, &k_rot, &cos, &sin, self.is_rope_i)?;
+                // Use candle_nn for partial rotary
+                let func = if self.is_rope_i {
+                    candle_nn::rotary_emb::rope_i
+                } else {
+                    candle_nn::rotary_emb::rope
+                };
+                let q_rot = func(&q_rot, &cos, &sin)?;
+                let k_rot = func(&k_rot, &cos, &sin)?;
 
                 let q_embed = Tensor::cat(&[&q_rot, &q_pass], candle_core::D::Minus1)?.contiguous()?;
                 let k_embed = Tensor::cat(&[&k_rot, &k_pass], candle_core::D::Minus1)?.contiguous()?;
                 return Ok(Some((q_embed, k_embed)));
             }
 
-            // Full rotary embedding - apply in-place, return None
-            FusedRope::apply_inplace(q, k, &cos, &sin, self.is_rope_i)?;
+            // Full rotary embedding - use fused kernel with position selection
+            // Pass full cos/sin tables and positions - kernel selects on-the-fly
+            // This eliminates the index_select kernel launch!
+            FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
             return Ok(None);
         }
 
         // Fallback to candle_nn implementation (non-CUDA) - always returns tensors
         #[cfg(not(feature = "cuda"))]
         {
+            let cos = self.cos.index_select(positions, 0)?;
+            let sin = self.sin.index_select(positions, 0)?;
+            
             let func = if self.is_rope_i {
                 candle_nn::rotary_emb::rope_i
             } else {
