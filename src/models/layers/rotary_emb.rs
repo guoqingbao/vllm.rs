@@ -1,14 +1,18 @@
 use crate::utils::config::Config;
 use crate::utils::config::RopeScalingValue;
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{DType, Device, Result, Tensor};
 
 pub trait ApplyRotaryEmbedding {
+    /// Apply rotary embedding to Q and K tensors.
+    /// Returns:
+    /// - `Ok(None)` when in-place operation was performed (CUDA, non-partial)
+    /// - `Ok(Some((q, k)))` when new tensors are returned (partial rotary or non-CUDA)
     fn apply_rotary_emb_qkv(
         &self,
         q: &Tensor,
         k: &Tensor,
         positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)>;
+    ) -> Result<Option<(Tensor, Tensor)>>;
 
     fn get_original_max_position_embeddings(&self) -> Option<usize>;
     fn get_llama_4_scaling_beta(&self) -> Option<f64>;
@@ -73,37 +77,43 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         q: &Tensor,
         k: &Tensor,
         positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        let cos = self.cos.index_select(positions, 0)?;
-        let sin = self.sin.index_select(positions, 0)?;
-        let func = if self.is_rope_i {
-            candle_nn::rotary_emb::rope_i
-        } else {
-            candle_nn::rotary_emb::rope
-        };
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        use attention_rs::fused_rope::FusedRope;
 
-        let (q_embed, k_embed) = if let Some(rotary_dim) = self.rotary_dim {
+        // Handle partial rotary (rotary_dim < head_dim) - must return new tensors
+        if let Some(rotary_dim) = self.rotary_dim {
+            use candle_core::D;
+            let cos = self.cos.index_select(positions, 0)?;
+            let sin = self.sin.index_select(positions, 0)?;
+
             let q_rot = q.narrow(D::Minus1, 0, rotary_dim)?.contiguous()?;
             let q_pass = q
                 .narrow(D::Minus1, rotary_dim, q.dim(D::Minus1)? - rotary_dim)?
                 .contiguous()?;
-            let q_rot = func(&q_rot, &cos, &sin)?;
-            let q_embed = Tensor::cat(&[&q_rot, &q_pass], D::Minus1)?.contiguous()?;
-
             let k_rot = k.narrow(D::Minus1, 0, rotary_dim)?.contiguous()?;
             let k_pass = k
                 .narrow(D::Minus1, rotary_dim, k.dim(D::Minus1)? - rotary_dim)?
                 .contiguous()?;
-            let k_rot = func(&k_rot, &cos, &sin)?;
-            let k_embed = Tensor::cat(&[&k_rot, &k_pass], D::Minus1)?.contiguous()?;
-            (q_embed, k_embed)
-        } else {
-            let q_embed = func(&q, &cos, &sin)?;
-            let k_embed = func(&k, &cos, &sin)?;
-            (q_embed, k_embed)
-        };
 
-        Ok((q_embed, k_embed))
+            // Use candle_nn for partial rotary
+            let func = if self.is_rope_i {
+                candle_nn::rotary_emb::rope_i
+            } else {
+                candle_nn::rotary_emb::rope
+            };
+            let q_rot = func(&q_rot, &cos, &sin)?;
+            let k_rot = func(&k_rot, &cos, &sin)?;
+
+            let q_embed = Tensor::cat(&[&q_rot, &q_pass], D::Minus1)?.contiguous()?;
+            let k_embed = Tensor::cat(&[&k_rot, &k_pass], D::Minus1)?.contiguous()?;
+            return Ok(Some((q_embed, k_embed)));
+        }
+
+        // Full rotary embedding - use fused kernel with position selection
+        // Pass full cos/sin tables and positions - kernel selects on-the-fly
+        // This eliminates the index_select kernel launch!
+        FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
+        Ok(None)
     }
 
     fn get_original_max_position_embeddings(&self) -> Option<usize> {
@@ -422,7 +432,7 @@ impl ApplyRotaryEmbedding for ScalingRotaryEmbedding {
         q: &Tensor,
         k: &Tensor,
         positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<Option<(Tensor, Tensor)>> {
         self.0.apply_rotary_emb_qkv(q, k, positions)
     }
 

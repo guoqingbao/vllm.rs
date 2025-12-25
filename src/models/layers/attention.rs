@@ -250,7 +250,10 @@ impl Attention {
 
         // Apply rotary embeddings
         let (q, k) = if let Some(rotary_emb) = &rotary_emb {
-            rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)?
+            match rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)? {
+                Some((q_new, k_new)) => (q_new, k_new),
+                None => (q, k), // In-place operation, keep originals
+            }
         } else {
             (q, k)
         };
@@ -426,7 +429,10 @@ impl NaiveAttention {
         let v = v.reshape(shape)?.transpose(1, 2)?.contiguous()?;
 
         let (q, k) = if let Some(positions) = positions {
-            emb.apply_rotary_emb_qkv(&q, &k, positions)?
+            match emb.apply_rotary_emb_qkv(&q, &k, positions)? {
+                Some((q_new, k_new)) => (q_new, k_new),
+                None => (q, k), // In-place operation, keep originals
+            }
         } else {
             (q, k)
         };

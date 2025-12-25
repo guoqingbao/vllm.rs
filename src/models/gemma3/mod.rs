@@ -92,8 +92,13 @@ impl Gemma3VisionEmbeddings {
 struct DummyRotaryEmbedding {}
 
 impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
-    fn apply_rotary_emb_qkv(&self, q: &Tensor, k: &Tensor, _: &Tensor) -> Result<(Tensor, Tensor)> {
-        Ok((q.to_owned(), k.to_owned()))
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        _: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        Ok(Some((q.to_owned(), k.to_owned())))
     }
 
     fn get_original_max_position_embeddings(&self) -> Option<usize> {
@@ -541,6 +546,7 @@ impl Gemma3ForConditionalGeneration {
         )?;
 
         let embed_scale = (config.text_config.hidden_size as f64).sqrt();
+        crate::log_info!("Loading vision tower...");
 
         // 2. Vision & Projector (Optional load based on config)
         let vision_tower = if config.has_vision {
@@ -563,6 +569,8 @@ impl Gemma3ForConditionalGeneration {
         } else {
             None
         };
+
+        crate::log_info!("Loading language model...");
 
         // 3. RoPE
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
