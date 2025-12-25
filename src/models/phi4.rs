@@ -193,7 +193,7 @@ impl Phi4RotaryEmbedding {
         q: &Tensor,
         k: &Tensor,
         input_positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<Option<(Tensor, Tensor)>> {
         if let (Some(long_emb), Some(original_max_position_embeddings)) =
             (&self.long_emb, self.original_max_position_embeddings)
         {
@@ -323,9 +323,13 @@ impl Phi4Attention {
             .transpose(1, 2)?
             .contiguous()?;
 
-        let (q, k) = self
+        let (q, k) = match self
             .rotary_emb
-            .apply_rotary_emb_qkv(&q, &k, input_positions)?;
+            .apply_rotary_emb_qkv(&q, &k, input_positions)?
+        {
+            Some((q_new, k_new)) => (q_new, k_new),
+            None => (q, k), // In-place operation, keep originals
+        };
 
         let (q, k, v) = if self.is_quantized {
             (
