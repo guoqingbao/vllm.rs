@@ -105,7 +105,7 @@ python3 -m pip install vllm_rs
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
- ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable through `thinking=False` / `enable_thinking=False`.
+ ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `context-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
 
   <details open>
     <summary>Single GPU + GGUF model</summary>

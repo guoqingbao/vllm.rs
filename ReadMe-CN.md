@@ -101,7 +101,7 @@ python3 -m pip install vllm_rs
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
-   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以通过`thinking=False` / `enable_thinking=False`关闭推理过程。
+   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`context-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
 
   <details open>
     <summary>单卡 + GGUF模型</summary>
