@@ -92,7 +92,12 @@ impl Gemma3VisionEmbeddings {
 struct DummyRotaryEmbedding {}
 
 impl ApplyRotaryEmbedding for DummyRotaryEmbedding {
-    fn apply_rotary_emb_qkv(&self, q: &Tensor, k: &Tensor, _: &Tensor) -> Result<Option<(Tensor, Tensor)>> {
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        _: &Tensor,
+    ) -> Result<Option<(Tensor, Tensor)>> {
         Ok(Some((q.to_owned(), k.to_owned())))
     }
 
