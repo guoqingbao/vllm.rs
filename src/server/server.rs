@@ -8,8 +8,8 @@ use super::{
 use super::{
     execute_mcp_tool_calls_async, ChatChoice, ChatChoiceChunk, ChatCompletionChunk,
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta,
-    EmbeddingData, EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery,
-    UsageResponse,
+    EmbeddingData, EmbeddingOutput, EmbeddingUsage, ErrorMsg, MessageContent, MessageContentType,
+    ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::core::SyncCollectionResult;
@@ -110,7 +110,30 @@ pub async fn chat_completion(
             e.get_model_info().1
         });
         let tool_prompt = tool_format_for_model(&model_hint).format_tools(&resolved_tools);
-        chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+
+        if let Some(existing_system) = chat_messages
+            .iter_mut()
+            .find(|msg| msg.role.eq_ignore_ascii_case("system"))
+        {
+            match &mut existing_system.content {
+                Some(MessageContentType::PureText(text)) => {
+                    text.push('\n');
+                    text.push_str(&tool_prompt);
+                }
+                Some(MessageContentType::Multi(parts)) => {
+                    // Append tool prompt as a text part, keeping the user's system content first
+                    parts.push(MessageContent::Text {
+                        text: format!("\n{}", tool_prompt),
+                    });
+                }
+                None => {
+                    existing_system.content =
+                        Some(MessageContentType::PureText(tool_prompt.clone()));
+                }
+            }
+        } else {
+            chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+        }
     }
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
