@@ -107,31 +107,12 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
             return Ok(Some((q_embed, k_embed)));
         }
 
-        // Full rotary embedding
-        // CUDA path uses fused in-place kernel; CPU falls back to candle_nn implementation
-        #[cfg(feature = "cuda")]
-        {
-            use attention_rs::fused_rope::FusedRope;
-            // Pass full cos/sin tables and positions - kernel selects on-the-fly
-            // This eliminates the index_select kernel launch!
-            FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
-            return Ok(None);
-        }
-
-        #[cfg(not(feature = "cuda"))]
-        {
-            // CPU fallback: index_select positions then apply rope
-            let cos = self.cos.index_select(positions, 0)?;
-            let sin = self.sin.index_select(positions, 0)?;
-            let func = if self.is_rope_i {
-                candle_nn::rotary_emb::rope_i
-            } else {
-                candle_nn::rotary_emb::rope
-            };
-            let q_embed = func(q, &cos, &sin)?;
-            let k_embed = func(k, &cos, &sin)?;
-            Ok(Some((q_embed, k_embed)))
-        }
+        // Full rotary embedding - use fused kernel with position selection
+        // Pass full cos/sin tables and positions - kernel selects on-the-fly
+        // This eliminates the index_select kernel launch!
+        use attention_rs::fused_rope::FusedRope;
+        FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
+        Ok(None)
     }
 
     fn get_original_max_position_embeddings(&self) -> Option<usize> {
