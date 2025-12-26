@@ -189,7 +189,7 @@ pub async fn chat_completion(
             let mut in_tool_call = false;
             // MCP mode is enabled when tools are present (Some(true) for MCP, Some(false) for external)
             let mcp_mode = params_clone.mcp_mode;
-            let is_mcp_mode = mcp_mode == Some(true);
+            let _is_mcp_mode = mcp_mode == Some(true);
             let should_buffer_tool_calls = mcp_mode.is_some();
 
             // Context that accumulates across tool call cycles
