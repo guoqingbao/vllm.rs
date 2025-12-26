@@ -164,8 +164,10 @@ pub async fn chat_completion(
 
             // Track if we're inside a tool call (for MCP mode token buffering)
             let mut in_tool_call = false;
-            // Check if MCP mode is enabled (internal tool execution)
-            let is_mcp_mode = params_clone.mcp_mode == Some(true);
+            // MCP mode is enabled when tools are present (Some(true) for MCP, Some(false) for external)
+            let mcp_mode = params_clone.mcp_mode;
+            let is_mcp_mode = mcp_mode == Some(true);
+            let should_buffer_tool_calls = mcp_mode.is_some();
 
             // Context that accumulates across tool call cycles
             let mut current_messages = chat_messages_clone.clone();
@@ -188,8 +190,8 @@ pub async fn chat_completion(
                             // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
 
-                            // In MCP mode, detect tool call start and buffer tokens
-                            if is_mcp_mode {
+                            // When tools are enabled, detect tool call start and buffer tokens
+                            if should_buffer_tool_calls {
                                 // Check if we're entering a tool call
                                 if !in_tool_call && accumulated_output.contains("<tool_call>") {
                                     in_tool_call = true;
@@ -212,7 +214,9 @@ pub async fn chat_completion(
                                 choices: vec![ChatChoiceChunk {
                                     index: 0,
                                     delta: Delta {
+                                        role: None,
                                         content: Some(token.clone()),
+                                        tool_calls: None,
                                     },
                                     finish_reason: None,
                                     error: None,
@@ -364,16 +368,42 @@ pub async fn chat_completion(
                                 object: "chat.completion.chunk",
                                 created,
                                 model: model_id.to_string(),
-                                choices: vec![ChatChoiceChunk {
-                                    index: 0,
-                                    delta: Delta { content: None },
-                                    finish_reason: if total_decoded_tokens >= max_tokens {
+                                choices: {
+                                    // For external tool handling, parse buffered output into tool calls
+                                    let tool_parser = ToolParser::new();
+                                    let parsed_calls = if mcp_mode == Some(false) {
+                                        tool_parser.parse(&accumulated_output)
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    let finish_reason = if !parsed_calls.is_empty() {
+                                        Some("tool_calls".to_string())
+                                    } else if total_decoded_tokens >= max_tokens {
                                         Some("length".to_string())
                                     } else {
                                         Some("stop".to_string())
-                                    },
-                                    error: None,
-                                }],
+                                    };
+
+                                    vec![ChatChoiceChunk {
+                                        index: 0,
+                                        delta: Delta {
+                                            role: if parsed_calls.is_empty() {
+                                                None
+                                            } else {
+                                                Some("assistant".to_string())
+                                            },
+                                            content: None,
+                                            tool_calls: if parsed_calls.is_empty() {
+                                                None
+                                            } else {
+                                                Some(parsed_calls)
+                                            },
+                                        },
+                                        finish_reason,
+                                        error: None,
+                                    }]
+                                },
                                 usage: Some(Usage {
                                     prompt_tokens: prompt_length,
                                     completion_tokens: total_decoded_tokens,
@@ -432,7 +462,11 @@ pub async fn chat_completion(
                                 model: model_id.to_string(),
                                 choices: vec![ChatChoiceChunk {
                                     index: 0,
-                                    delta: Delta { content: None },
+                                    delta: Delta {
+                                        role: None,
+                                        content: None,
+                                        tool_calls: None,
+                                    },
                                     finish_reason: None,
                                     error: Some(vec![ErrorMsg { message: Some(e) }]),
                                 }],
