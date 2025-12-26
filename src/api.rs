@@ -123,6 +123,7 @@ impl EngineBuilder {
             None,
             None,
             disable_flash_attn,
+            None, // force_cache - not exposed in simple API
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);
