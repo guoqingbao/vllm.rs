@@ -63,7 +63,7 @@ extra_body = {"session_id": session_id if use_context_cache else None }
 
 # vllm.rs service url
 openai.api_key = "EMPTY"
-openai.base_url = "http://localhost:8000/v1/"
+openai.base_url = "http://localhost:8000/v1"
 
 response = openai.chat.completions.create(
    model="",
@@ -137,7 +137,7 @@ Then call a prefixed MCP tool from Python:
 import openai
 
 openai.api_key = "EMPTY"
-openai.base_url = "http://localhost:8000/v1/"
+openai.base_url = "http://localhost:8000/v1"
 
 response = openai.chat.completions.create(
    model="",

@@ -102,6 +102,10 @@ pub async fn chat_completion(
         None // No tools at all
     };
 
+    if params.mcp_mode.is_some() {
+        crate::log_warn!("MCP mode {:?}", params.mcp_mode);
+    }
+
     let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
     if has_tools {
@@ -110,7 +114,32 @@ pub async fn chat_completion(
             e.get_model_info().1
         });
         let tool_prompt = tool_format_for_model(&model_hint).format_tools(&resolved_tools);
-        chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+
+        // Merge with existing system prompt if present, otherwise insert new one
+        if !chat_messages.is_empty() && chat_messages[0].role == "system" {
+            // Merge: tool prompt + newline + existing system content
+            if let Some(ref content) = chat_messages[0].content {
+                let existing_content = match content {
+                    super::MessageContentType::PureText(text) => text.clone(),
+                    super::MessageContentType::Multi(items) => items
+                        .iter()
+                        .filter_map(|item| match item {
+                            super::MessageContent::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                };
+                let merged = format!("{}\n\n{}", tool_prompt, existing_content);
+                chat_messages[0] = ChatMessage::text("system", merged);
+            } else {
+                // System message exists but has no content, just use tool prompt
+                chat_messages[0] = ChatMessage::text("system", tool_prompt);
+            }
+        } else {
+            // No existing system prompt, insert tool prompt as first message
+            chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+        }
     }
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
@@ -162,10 +191,11 @@ pub async fn chat_completion(
             let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
 
-            // Track if we're inside a tool call (for MCP mode token buffering)
+            // Track if we're inside a tool call (for token buffering)
             let mut in_tool_call = false;
-            // Check if MCP mode is enabled (internal tool execution)
-            let is_mcp_mode = params_clone.mcp_mode == Some(true);
+            // Check if we should buffer tool calls (both MCP internal and external tool modes)
+            // mcp_mode: Some(true) = MCP internal, Some(false) = external tools, None = no tools
+            let should_buffer_tool_calls = params_clone.mcp_mode.is_some();
 
             // Context that accumulates across tool call cycles
             let mut current_messages = chat_messages_clone.clone();
@@ -188,13 +218,20 @@ pub async fn chat_completion(
                             // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
 
-                            // In MCP mode, detect tool call start and buffer tokens
-                            if is_mcp_mode {
-                                // Check if we're entering a tool call
-                                if !in_tool_call && accumulated_output.contains("<tool_call>") {
-                                    in_tool_call = true;
-                                    // Don't send tool call content to client
-                                    continue;
+                            // When tools are available, detect tool call start and buffer tokens
+                            if should_buffer_tool_calls {
+                                // Only detect EXPLICIT XML tool call tags to avoid false positives
+                                // Optimization: only check when token could be part of tool call marker
+                                if !in_tool_call {
+                                    // Check if current token contains the tool call marker
+                                    // or if accumulated output just completed the marker
+                                    if token.contains("<tool_call>")
+                                        || accumulated_output.ends_with("<tool_call>")
+                                    {
+                                        in_tool_call = true;
+                                        // Don't send tool call content to client
+                                        continue;
+                                    }
                                 }
 
                                 // If we're inside a tool call, don't send to client
@@ -213,6 +250,7 @@ pub async fn chat_completion(
                                     index: 0,
                                     delta: Delta {
                                         content: Some(token.clone()),
+                                        tool_calls: None,
                                     },
                                     finish_reason: None,
                                     error: None,
@@ -358,7 +396,24 @@ pub async fn chat_completion(
                         )) => {
                             total_decoded_tokens += final_decoded_length;
 
-                            // Send final chunk
+                            // Check if we need to parse tool calls (external tool mode)
+                            let is_external_tool_mode = params_clone.mcp_mode == Some(false);
+                            let (tool_calls, has_tool_calls) =
+                                if is_external_tool_mode && !accumulated_output.is_empty() {
+                                    let tool_parser = ToolParser::new();
+                                    let parsed = tool_parser.parse(&accumulated_output);
+                                    let has_calls = !parsed.is_empty();
+                                    crate::log_warn!(
+                                        "Parse tool call content: {:?}, result: {}",
+                                        accumulated_output,
+                                        if has_calls { "success" } else { "failed" }
+                                    );
+                                    (if has_calls { Some(parsed) } else { None }, has_calls)
+                                } else {
+                                    (None, false)
+                                };
+
+                            // Send final chunk with tool_calls if applicable
                             let final_chunk = ChatCompletionChunk {
                                 id: format!("seq-{}", current_seq_id),
                                 object: "chat.completion.chunk",
@@ -366,8 +421,13 @@ pub async fn chat_completion(
                                 model: model_id.to_string(),
                                 choices: vec![ChatChoiceChunk {
                                     index: 0,
-                                    delta: Delta { content: None },
-                                    finish_reason: if total_decoded_tokens >= max_tokens {
+                                    delta: Delta {
+                                        content: None,
+                                        tool_calls,
+                                    },
+                                    finish_reason: if has_tool_calls {
+                                        Some("tool_calls".to_string())
+                                    } else if total_decoded_tokens >= max_tokens {
                                         Some("length".to_string())
                                     } else {
                                         Some("stop".to_string())
@@ -381,6 +441,12 @@ pub async fn chat_completion(
                                 }),
                             };
 
+                            if has_tool_calls {
+                                crate::log_info!(
+                                    "Dump final chunk for tool call: {:?}",
+                                    final_chunk
+                                );
+                            }
                             let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
 
                             // Performance metrics
@@ -432,7 +498,10 @@ pub async fn chat_completion(
                                 model: model_id.to_string(),
                                 choices: vec![ChatChoiceChunk {
                                     index: 0,
-                                    delta: Delta { content: None },
+                                    delta: Delta {
+                                        content: None,
+                                        tool_calls: None,
+                                    },
                                     finish_reason: None,
                                     error: Some(vec![ErrorMsg { message: Some(e) }]),
                                 }],
