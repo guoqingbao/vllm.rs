@@ -45,25 +45,29 @@ impl ToolParser {
     }
 
     /// Parse tool calls from model output
+    /// Only parses tool calls from the final answer (after reasoning end markers)
     pub fn parse(&self, text: &str) -> Vec<ToolCall> {
         let mut calls = Vec::new();
         let mut call_id = 0;
 
+        // Extract only the final answer portion (after reasoning ends)
+        let final_answer = Self::extract_final_answer(text);
+
         // Try Qwen format first
-        if let Some(qwen_calls) = self.parse_qwen_format(text, &mut call_id) {
+        if let Some(qwen_calls) = self.parse_qwen_format(&final_answer, &mut call_id) {
             calls.extend(qwen_calls);
         }
 
         // Try generic JSON format
         if calls.is_empty() {
-            if let Some(json_calls) = self.parse_json_format(text, &mut call_id) {
+            if let Some(json_calls) = self.parse_json_format(&final_answer, &mut call_id) {
                 calls.extend(json_calls);
             }
         }
 
         // Try code block format
         if calls.is_empty() {
-            if let Some(block_calls) = self.parse_code_block_format(text, &mut call_id) {
+            if let Some(block_calls) = self.parse_code_block_format(&final_answer, &mut call_id) {
                 calls.extend(block_calls);
             }
         }
@@ -71,16 +75,51 @@ impl ToolParser {
         calls
     }
 
-    /// Parse Qwen's <tool_call> format
+    /// Extract the final answer portion from model output, skipping reasoning blocks.
+    /// Returns the text after reasoning end markers, or the full text if no reasoning found.
+    pub fn extract_final_answer(text: &str) -> String {
+        // Reasoning end markers used by different models
+        let reasoning_end_markers = [
+            "</think>",     // Common thinking format
+            "</thought>",   // Alternative thinking format
+            "<|/think|>",   // Qwen-style special tokens
+            "[/THINK]",     // Bracket format
+            "</reasoning>", // Reasoning tag
+        ];
+
+        // Find the last occurrence of any reasoning end marker
+        let mut last_end_pos = None;
+        for marker in &reasoning_end_markers {
+            if let Some(pos) = text.rfind(marker) {
+                let end_pos = pos + marker.len();
+                if last_end_pos.is_none() || end_pos > last_end_pos.unwrap() {
+                    last_end_pos = Some(end_pos);
+                }
+            }
+        }
+
+        // Return content after the last reasoning end marker, or full text if none found
+        if let Some(pos) = last_end_pos {
+            text[pos..].to_string()
+        } else {
+            text.to_string()
+        }
+    }
+
+    /// Parse XML-wrapped tool call formats (<tool_call>)
     fn parse_qwen_format(&self, text: &str, call_id: &mut usize) -> Option<Vec<ToolCall>> {
-        let re = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>").ok()?;
         let mut calls = Vec::new();
 
-        for cap in re.captures_iter(text) {
-            if let Some(json_str) = cap.get(1) {
-                if let Ok(parsed) = serde_json::from_str::<Value>(json_str.as_str()) {
-                    if let Some(call) = self.value_to_tool_call(&parsed, call_id) {
-                        calls.push(call);
+        // Try both <tool_call> formats
+        for pattern in &[r"(?s)<tool_call>\s*(.*?)\s*</tool_call>"] {
+            if let Ok(re) = Regex::new(pattern) {
+                for cap in re.captures_iter(text) {
+                    if let Some(json_str) = cap.get(1) {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(json_str.as_str()) {
+                            if let Some(call) = self.value_to_tool_call(&parsed, call_id) {
+                                calls.push(call);
+                            }
+                        }
                     }
                 }
             }
@@ -183,11 +222,12 @@ impl ToolParser {
         ))
     }
 
-    /// Check if text contains any tool calls
+    /// Check if text contains any tool calls (only explicit XML tags in final answer)
+    /// Note: Raw JSON patterns are NOT checked to avoid false positives in reasoning
     pub fn has_tool_calls(&self, text: &str) -> bool {
-        // Quick checks for common patterns
-        text.contains("<tool_call>")
-            || (text.contains("\"name\"") && text.contains("\"arguments\""))
+        let final_answer = Self::extract_final_answer(text);
+        // Only check for explicit XML-wrapped tool calls
+        final_answer.contains("<tool_call>")
     }
 }
 

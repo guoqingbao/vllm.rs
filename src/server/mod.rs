@@ -167,14 +167,14 @@ pub struct ChatResponseMessage {
     pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ChatCompletionChunk {
     pub id: String,
     pub object: &'static str,
@@ -184,12 +184,12 @@ pub struct ChatCompletionChunk {
     pub usage: Option<Usage>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ErrorMsg {
     pub message: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ChatChoiceChunk {
     pub index: usize,
     pub delta: Delta,
@@ -197,9 +197,12 @@ pub struct ChatChoiceChunk {
     pub error: Option<Vec<ErrorMsg>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct Delta {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
 }
 
 #[derive(Serialize)]
@@ -866,7 +869,14 @@ pub async fn run_server(
         crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
         format!("0.0.0.0:{}", 0)
     } else {
-        crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}/v1/", port);
+        crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}", port);
+        crate::log_warn!("📡 Supported endpoints:");
+        crate::log_warn!("   - POST /v1/chat/completions");
+        crate::log_warn!("   - POST /v1/embeddings");
+        crate::log_warn!("   - GET  /v1/models");
+        crate::log_warn!("   - GET  /v1/usage");
+        crate::log_warn!("   - POST /tokenize");
+        crate::log_warn!("   - POST /detokenize");
         format!("0.0.0.0:{}", port)
     };
 
