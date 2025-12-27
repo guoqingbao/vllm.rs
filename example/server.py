@@ -36,7 +36,6 @@ def parse_args():
     parser.add_argument("--mcp_config", type=str, default=None)
     parser.add_argument("--mcp_command", type=str, default=None)
     parser.add_argument("--mcp_args", type=str, default=None)
-    parser.add_argument("--force-cache", action="store_true")
 
     return parser.parse_args()
 
@@ -79,7 +78,6 @@ def run_server(args):
         mcp_config=args.mcp_config,
         mcp_command=args.mcp_command,
         mcp_args=args.mcp_args,
-        force_cache=args.force_cache,
     )
 
     engine = Engine(cfg, args.dtype)

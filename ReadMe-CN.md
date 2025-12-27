@@ -87,11 +87,7 @@
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
    
    💡 2. 预编译包`context cache` 依赖于Flash attention, 如需FP8 KvCache，请重新编译并去除`flash-context`特性
-   
-   ⬇️ 仅适用于 `单 GPU（CUDA）`的其他预编译 Python 包（压缩包），下载链接：
-   1. [不含 `nccl` 功能的包](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL.tar.gz)
 
-   2. [不含 `nccl` 和 `flash-attn` 功能的包](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL-and-flash-attn.tar.gz)
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
 python3 -m pip install vllm_rs
@@ -102,7 +98,7 @@ python3 -m pip install vllm_rs
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
-   💡当`context-cache`启用时，使用`--force-cache` 强制启用fingerprint对话检测，此时客户端无需提供 `session_id`
+   💡当`context-cache`启用时，如客户端未提供 `session_id`，则启用fingerprint检测自动分配session_id，
 
    ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`context-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
 
@@ -350,7 +346,6 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
 | `--context-cache`   | 启用上下文缓存，用于多轮对话 |
-| `--foce-cache`       | 启用Fingerprint对话标识检测，当 `--context-cache`同时启用时，自动进行上下文缓存，无需客户端显示传入 `session_id`  |
 
 ### MCP配置参数
 

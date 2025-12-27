@@ -90,11 +90,6 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 
    💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
 
-   ⬇️ Other prebuild (compressed) Python packages for `Single GPU` only (CUDA), download links:
-   1. [Package without `nccl` feature](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL.tar.gz)
-
-   2. [Package without `nccl` and `flash-attn` features](https://github.com/guoqingbao/vllm.rs/releases/download/v0.5.4/vllm_rs-0.5.8-cp38-abi3-no-NCCL-and-flash-attn.tar.gz)
-
 ```shell
 # NCCL library is required for CUDA. (For single GPU usage, you may choose other prebuilt packages or Rust mode.)
 python3 -m pip install vllm_rs
@@ -106,7 +101,7 @@ python3 -m pip install vllm_rs
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
-💡When `context-cache` enabled, `--force-cache` enables fingerprint-based session detection if `session_id` not provided in the client side.
+💡When `context-cache` enabled, fingerprint-based session detection is enabled by default if `session_id` not provided in the client side.
 
  ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `context-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
 
@@ -115,7 +110,7 @@ python3 -m pip install vllm_rs
 
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache --force-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
 python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
 ```
@@ -376,7 +371,6 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--context-cache`   | Enable context caching for multi-turn conversations |
-| `--foce-cache`       | Enable fingerprint-based session detection when `--context-cache` also enabled, no `session_id` needed in this case for context cache |
 
 ### MCP Configuration
 
