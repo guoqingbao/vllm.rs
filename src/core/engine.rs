@@ -1188,10 +1188,11 @@ impl LLMEngine {
         for (param, messages) in params.iter().zip(message_list.iter()) {
             // Fingerprint-based automatic session detection
             let mut param = param.clone();
-            if param.session_id.is_none()
-                && self.econfig.flash_context.unwrap_or(false)
-                && self.econfig.force_cache.unwrap_or(false)
-            {
+            let has_session = param.session_id.is_some();
+            let flash_enabled = self.econfig.flash_context.unwrap_or(false);
+            let force_enabled = self.econfig.force_cache.unwrap_or(false);
+
+            if !has_session && flash_enabled && force_enabled {
                 // Build messages as (role, content) tuples for fingerprint computation
                 let msg_tuples: Vec<(String, String)> = messages
                     .iter()
@@ -1203,6 +1204,10 @@ impl LLMEngine {
                     .fingerprint_manager
                     .find_or_create_session(fingerprint, &msg_tuples);
                 param.session_id = Some(session_id);
+            } else if force_enabled && !flash_enabled {
+                crate::log_warn!(
+                    "force_cache is enabled but flash_context is not - fingerprint detection skipped"
+                );
             }
 
             let (prompt, image_idx) = self.apply_chat_template(&param, messages, false);
@@ -1395,10 +1400,11 @@ impl LLMEngine {
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
         // Fingerprint-based automatic session detection
         let mut params = params.clone();
-        if params.session_id.is_none()
-            && self.econfig.flash_context.unwrap_or(false)
-            && self.econfig.force_cache.unwrap_or(false)
-        {
+        let has_session = params.session_id.is_some();
+        let flash_enabled = self.econfig.flash_context.unwrap_or(false);
+        let force_enabled = self.econfig.force_cache.unwrap_or(false);
+
+        if !has_session && flash_enabled && force_enabled {
             // Build messages as (role, content) tuples for fingerprint computation
             let msg_tuples: Vec<(String, String)> = messages
                 .iter()
@@ -1410,6 +1416,10 @@ impl LLMEngine {
                 .fingerprint_manager
                 .find_or_create_session(fingerprint, &msg_tuples);
             params.session_id = Some(session_id);
+        } else if force_enabled && !flash_enabled {
+            crate::log_warn!(
+                "force_cache is enabled but flash_context is not - fingerprint detection skipped"
+            );
         }
 
         let (prompt, image_idx) = self.apply_chat_template(&params, messages, false);

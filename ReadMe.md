@@ -102,11 +102,11 @@ python3 -m pip install vllm_rs
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
-💡You can use **any client compatible with the OpenAI API** to interact
-
 💡Start with `--ui-server` will also start ChatGPT-like web server, no external chat client required in that case.
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
+
+💡When `context-cache` enabled, `--force-cache` enables fingerprint-based session detection if `session_id` not provided in the client side.
 
  ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `context-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
 
@@ -115,7 +115,7 @@ python3 -m pip install vllm_rs
 
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache --force-cache
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
 python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
 ```
@@ -376,6 +376,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--context-cache`   | Enable context caching for multi-turn conversations |
+| `--foce-cache`       | Enable fingerprint-based session detection when `--context-cache` also enabled, no `session_id` needed in this case for context cache |
 
 ### MCP Configuration
 

@@ -73,6 +73,7 @@ class EngineConfig:
     mcp_config: Optional[str]
     mcp_command: Optional[str]
     mcp_args: Optional[str]
+    force_cache: Optional[bool]
 
 @dataclass
 class SamplingParams:
