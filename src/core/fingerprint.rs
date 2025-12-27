@@ -10,19 +10,26 @@ use std::collections::HashMap;
 const FINGERPRINT_CHAR_LEN: usize = 32;
 
 /// Fingerprint for a single message (role + text characteristics)
+/// For assistant messages, only last_chars is used for matching (ignoring thinking content)
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct MessageFingerprint {
     pub role: String,
-    pub text_len: usize,
-    pub first_chars: String,
+    /// Text length - None for assistant (to handle thinking content)
+    pub text_len: Option<usize>,
+    /// First chars - None for assistant (thinking content varies)
+    pub first_chars: Option<String>,
+    /// Last chars - always used (actual answer ends the same)
     pub last_chars: String,
 }
 
 impl MessageFingerprint {
     /// Create fingerprint from role and content text
+    /// Note: For assistant messages, only last_chars is used (to handle thinking content)
+    /// For other roles, all fields are used for matching
     pub fn from_text(role: &str, content: &str) -> Self {
-        let text_len = content.len();
-        let first_chars: String = content.chars().take(FINGERPRINT_CHAR_LEN).collect();
+        // Normalize content: trim whitespace
+        let content = content.trim();
+
         let last_chars: String = content
             .chars()
             .rev()
@@ -31,10 +38,23 @@ impl MessageFingerprint {
             .chars()
             .rev()
             .collect();
+
+        // For assistant messages, only use last_chars (thinking content varies)
+        // For other roles (user, system), use all fields
+        let is_assistant = role == "assistant";
+
         Self {
             role: role.to_string(),
-            text_len,
-            first_chars,
+            text_len: if is_assistant {
+                None
+            } else {
+                Some(content.len())
+            },
+            first_chars: if is_assistant {
+                None
+            } else {
+                Some(content.chars().take(FINGERPRINT_CHAR_LEN).collect())
+            },
             last_chars,
         }
     }
@@ -231,17 +251,38 @@ mod tests {
     fn test_message_fingerprint() {
         let fp = MessageFingerprint::from_text("user", "Hello, how are you?");
         assert_eq!(fp.role, "user");
-        assert_eq!(fp.text_len, 19);
-        assert_eq!(fp.first_chars, "Hello, how are you?");
+        assert_eq!(fp.text_len, Some(19));
+        assert_eq!(fp.first_chars, Some("Hello, how are you?".to_string()));
         assert_eq!(fp.last_chars, "Hello, how are you?");
     }
 
     #[test]
+    fn test_assistant_fingerprint_ignores_thinking() {
+        // Assistant messages should only use last_chars (ignore thinking at start)
+        let thinking_content =
+            "Let me think... The user wants to know about X. I should explain Y.";
+        let answer_content = "Here is the answer.";
+        let full_response = format!("{} {}", thinking_content, answer_content);
+
+        let fp = MessageFingerprint::from_text("assistant", &full_response);
+        assert_eq!(fp.role, "assistant");
+        // text_len and first_chars should be None for assistant
+        assert_eq!(fp.text_len, None);
+        assert_eq!(fp.first_chars, None);
+        // last_chars should be set
+        assert!(fp.last_chars.ends_with("the answer."));
+    }
+
+    #[test]
     fn test_long_message_fingerprint() {
+        // Test with user role (should have all fields)
         let long_content = "a".repeat(100);
-        let fp = MessageFingerprint::from_text("assistant", &long_content);
-        assert_eq!(fp.text_len, 100);
-        assert_eq!(fp.first_chars.len(), FINGERPRINT_CHAR_LEN);
+        let fp = MessageFingerprint::from_text("user", &long_content);
+        assert_eq!(fp.text_len, Some(100));
+        assert_eq!(
+            fp.first_chars.as_ref().map(|s| s.len()),
+            Some(FINGERPRINT_CHAR_LEN)
+        );
         assert_eq!(fp.last_chars.len(), FINGERPRINT_CHAR_LEN);
     }
 
