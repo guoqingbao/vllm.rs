@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         args.mcp_config.clone(),
         args.mcp_args.clone(),
         Some(args.no_flash_attn),
+        Some(args.force_cache),
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

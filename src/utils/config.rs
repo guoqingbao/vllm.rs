@@ -245,6 +245,8 @@ pub struct EngineConfig {
     pub mcp_config: Option<String>,
     pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
+    /// Force fingerprint-based session detection when session_id is not provided
+    pub force_cache: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -305,6 +307,9 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
+    /// Force fingerprint-based session detection when session_id is not provided
+    #[pyo3(get, set)]
+    pub force_cache: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -334,6 +339,7 @@ impl EngineConfig {
         mcp_config: Option<String>,
         mcp_args: Option<Vec<String>>,
         disable_flash_attn: Option<bool>,
+        force_cache: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -376,6 +382,7 @@ impl EngineConfig {
             mcp_config,
             mcp_args,
             disable_flash_attn,
+            force_cache,
         }
     }
 }

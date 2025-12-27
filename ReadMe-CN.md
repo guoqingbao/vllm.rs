@@ -98,11 +98,11 @@ python3 -m pip install vllm_rs
 ```
 
 ### 🌐✨ API Server + ChatGPT风格内置网页
-   💡你可以使用**任何兼容 OpenAI API 的客户端**进行交互
-   
    💡使用`--ui-server`会同时启动ChatGPT风格网页, 此时无需其它客户端。
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
+
+   💡当`context-cache`启用时，使用`--force-cache` 强制启用fingerprint对话检测，此时客户端无需提供 `session_id`
 
    ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`context-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
 
@@ -350,6 +350,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
 | `--context-cache`   | 启用上下文缓存，用于多轮对话 |
+| `--foce-cache`       | 启用Fingerprint对话标识检测，当 `--context-cache`同时启用时，自动进行上下文缓存，无需客户端显示传入 `session_id`  |
 
 ### MCP配置参数
 

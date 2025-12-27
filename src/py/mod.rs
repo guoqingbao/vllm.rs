@@ -286,7 +286,7 @@ impl EngineConfig {
         generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
         server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
-        disable_flash_attn=None))]
+        disable_flash_attn=None, force_cache=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -312,6 +312,7 @@ impl EngineConfig {
         mcp_config: Option<String>,
         mcp_args: Option<String>,
         disable_flash_attn: Option<bool>,
+        force_cache: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -362,6 +363,7 @@ impl EngineConfig {
             mcp_config,
             mcp_args,
             disable_flash_attn,
+            force_cache,
         }
     }
 }

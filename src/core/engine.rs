@@ -1,4 +1,5 @@
 //src/core/engine.rs
+use super::fingerprint::FingerprintManager;
 use super::runner::{ModelRunner, RunnerType, Seqs};
 use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
@@ -102,6 +103,8 @@ pub struct LLMEngine {
     has_vision: bool,
     model_name: String,
     pub img_cfg: Option<ImageProcessConfig>,
+    /// Fingerprint manager for automatic session detection
+    fingerprint_manager: FingerprintManager,
 }
 
 impl LLMEngine {
@@ -429,6 +432,7 @@ impl LLMEngine {
             has_vision: config.is_multi_model.unwrap_or(false),
             img_cfg,
             model_name,
+            fingerprint_manager: FingerprintManager::new(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -821,6 +825,21 @@ impl LLMEngine {
                             }
                         }
                     }
+
+                    // Extend fingerprint for auto-sessions when sequence completes
+                    // This allows subsequent requests to match the conversation
+                    if let Some((_, session_id)) =
+                        self.active_sessions.iter().find(|(id, _)| *id == seq_id)
+                    {
+                        if session_id.starts_with("auto_session_") {
+                            // Decode the output to get the assistant response text
+                            if let Ok(decoded_text) = self.tokenizer.decode(&s.output_ids, true) {
+                                self.fingerprint_manager
+                                    .extend_session_fingerprint(&session_id.clone(), &decoded_text);
+                            }
+                        }
+                    }
+
                     self.stream_senders.remove(&seq_id);
                     self.stream_decoders.remove(&seq_id);
                     if let Some(_) = self.active_requests.get(&seq_id) {
@@ -942,6 +961,10 @@ impl LLMEngine {
             if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
                 if !self.scheduler.try_swap_out_by_id(seq_id, false) {
                     self.scheduler.release_cache(seq_id);
+                    // Also remove fingerprint for auto-sessions
+                    if session_id.starts_with("auto_session_") {
+                        self.fingerprint_manager.remove_session(&session_id);
+                    }
                     if self.econfig.server_mode.unwrap_or(true) {
                         crate::log_warn!(
                             "🗑️ Seq {} - cache removed (session id {})!\n",
@@ -1163,9 +1186,33 @@ impl LLMEngine {
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            let (prompt, image_idx) = self.apply_chat_template(param, messages, false);
+            // Fingerprint-based automatic session detection
+            let mut param = param.clone();
+            let has_session = param.session_id.is_some();
+            let flash_enabled = self.econfig.flash_context.unwrap_or(false);
+            let force_enabled = self.econfig.force_cache.unwrap_or(false);
+
+            if !has_session && flash_enabled && force_enabled {
+                // Build messages as (role, content) tuples for fingerprint computation
+                let msg_tuples: Vec<(String, String)> = messages
+                    .iter()
+                    .map(|m| (m.role.clone(), m.content.clone()))
+                    .collect();
+
+                let fingerprint = FingerprintManager::compute_fingerprint(&msg_tuples);
+                let session_id = self
+                    .fingerprint_manager
+                    .find_or_create_session(fingerprint, &msg_tuples);
+                param.session_id = Some(session_id);
+            } else if force_enabled && !flash_enabled {
+                crate::log_warn!(
+                    "force_cache is enabled but flash_context is not - fingerprint detection skipped"
+                );
+            }
+
+            let (prompt, image_idx) = self.apply_chat_template(&param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
+                self.add_request(&param, &prompt, RequestType::Completion, &images, image_idx)
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1341,6 +1388,8 @@ impl LLMEngine {
         self.scheduler.clear_finished();
         self.scheduler.release_waitings();
         self.active_sessions.clear();
+        // Reset fingerprint manager when all resources are freed
+        self.fingerprint_manager = FingerprintManager::new();
     }
 
     pub fn generate_stream(
@@ -1349,8 +1398,32 @@ impl LLMEngine {
         messages: &Vec<Message>,
         images: Option<ImageData>, //collection of images of the full conversation
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        let (prompt, image_idx) = self.apply_chat_template(params, messages, false);
-        match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
+        // Fingerprint-based automatic session detection
+        let mut params = params.clone();
+        let has_session = params.session_id.is_some();
+        let flash_enabled = self.econfig.flash_context.unwrap_or(false);
+        let force_enabled = self.econfig.force_cache.unwrap_or(false);
+
+        if !has_session && flash_enabled && force_enabled {
+            // Build messages as (role, content) tuples for fingerprint computation
+            let msg_tuples: Vec<(String, String)> = messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect();
+
+            let fingerprint = FingerprintManager::compute_fingerprint(&msg_tuples);
+            let session_id = self
+                .fingerprint_manager
+                .find_or_create_session(fingerprint, &msg_tuples);
+            params.session_id = Some(session_id);
+        } else if force_enabled && !flash_enabled {
+            crate::log_warn!(
+                "force_cache is enabled but flash_context is not - fingerprint detection skipped"
+            );
+        }
+
+        let (prompt, image_idx) = self.apply_chat_template(&params, messages, false);
+        match self.add_request(&params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)

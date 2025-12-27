@@ -473,6 +473,11 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub context_cache: bool,
 
+    /// Force fingerprint-based session detection when session_id is not provided
+    /// Requires --context-cache to be enabled
+    #[arg(long, default_value_t = false)]
+    pub force_cache: bool,
+
     #[arg(long, default_value_t = false)]
     pub server: bool, //server mode
 

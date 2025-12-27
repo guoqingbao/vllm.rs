@@ -80,6 +80,8 @@ pub struct ModelRunner {
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
+    /// Whether this runner is on the first rank (for logging)
+    is_first_rank: bool,
 }
 
 impl ModelRunner {
@@ -194,6 +196,7 @@ impl ModelRunner {
             seq_tokens: RwLock::new(HashMap::new()),
             guidance_states: RwLock::new(HashMap::new()),
             transfer,
+            is_first_rank: comm.rank() == 0,
         })
     }
 
@@ -702,11 +705,13 @@ impl ModelRunner {
                     });
                 let user_params = &seqs[0].sampling_params;
 
-                // Log thinking parameter whenever user provides it (independent of other sampling config)
-                crate::log_warn!(
-                    "User's thinking preference for reasoning models: {:?}",
-                    user_params.thinking
-                );
+                // Log thinking parameter only from first rank to avoid duplicate logs in multi-GPU
+                if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                    crate::log_warn!(
+                        "User's thinking preference for reasoning models: {:?}",
+                        user_params.thinking
+                    );
+                }
 
                 // Determine frequency/presence penalties (user params > generation_cfg)
                 let gen_cfg_freq = self
@@ -724,37 +729,43 @@ impl ModelRunner {
 
                 let sampling = if has_valid_sampling_cfg {
                     let cfg = self.config.generation_cfg.as_ref().unwrap();
-                    crate::log_warn!(
-                        "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
-                        cfg.temperature,
-                        cfg.top_k,
-                        cfg.top_p,
-                        frequency_penalty,
-                        presence_penalty
-                    );
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                            cfg.temperature,
+                            cfg.top_k,
+                            cfg.top_p,
+                            frequency_penalty,
+                            presence_penalty
+                        );
+                    }
                     LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
                 } else {
                     let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
                         && (matches!(user_params.top_k, Some(k) if k > 0)
                             || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
                     if has_user_config {
-                        crate::log_warn!(
-                            "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
-                            user_params.temperature,
-                            user_params.top_k,
-                            user_params.top_p,
-                            frequency_penalty,
-                            presence_penalty
-                        );
+                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                            crate::log_warn!(
+                                "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                                user_params.temperature,
+                                user_params.top_k,
+                                user_params.top_p,
+                                frequency_penalty,
+                                presence_penalty
+                            );
+                        }
                         LogitsProcessor::get_strategy(
                             user_params.temperature,
                             user_params.top_k,
                             user_params.top_p,
                         )
                     } else {
-                        crate::log_warn!(
-                            "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
-                        );
+                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                            crate::log_warn!(
+                                "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
+                            );
+                        }
                         Sampling::TopKThenTopP {
                             k: 32,
                             p: 0.95,
