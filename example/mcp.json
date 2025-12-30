@@ -5,8 +5,15 @@
             "args": [
                 "-y",
                 "@modelcontextprotocol/server-filesystem",
-                "~/"
+                "./"
             ]
+        },
+        "deepwiki": {
+            "url": "https://mcp.deepwiki.com/mcp",
+            "headers": {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache"
+            }
         }
     }
 }

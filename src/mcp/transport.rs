@@ -36,6 +36,9 @@ pub enum TransportError {
 
     #[error("Parse error: {0}")]
     Parse(String),
+
+    #[error("HTTP error: {0}")]
+    Http(String),
 }
 
 /// Stdio transport for communicating with local MCP server processes
@@ -115,33 +118,322 @@ impl Drop for StdioTransport {
     }
 }
 
-/// In-memory transport for testing (not thread-safe, for single-threaded tests only)
+/// In-memory transport for testing (thread-safe via crossbeam channels)
 pub struct MemoryTransport {
-    tx: std::sync::mpsc::Sender<String>,
-    rx: std::sync::mpsc::Receiver<String>,
+    tx: crossbeam::channel::Sender<String>,
+    rx: crossbeam::channel::Receiver<String>,
 }
 
 impl MemoryTransport {
     /// Create a pair of connected transports for testing
     pub fn pair() -> (Self, Self) {
-        let (tx1, rx1) = std::sync::mpsc::channel();
-        let (tx2, rx2) = std::sync::mpsc::channel();
+        let (tx1, rx1) = crossbeam::channel::unbounded();
+        let (tx2, rx2) = crossbeam::channel::unbounded();
 
         (Self { tx: tx1, rx: rx2 }, Self { tx: tx2, rx: rx1 })
     }
+}
 
-    pub fn send(&mut self, message: &str) -> Result<(), TransportError> {
+impl Transport for MemoryTransport {
+    fn send(&mut self, message: &str) -> Result<(), TransportError> {
         self.tx
             .send(message.to_string())
             .map_err(|_| TransportError::Closed)
     }
 
-    pub fn receive(&mut self) -> Result<String, TransportError> {
+    fn receive(&mut self) -> Result<String, TransportError> {
         self.rx.recv().map_err(|_| TransportError::Closed)
     }
 
-    #[allow(dead_code)]
-    pub fn close(&mut self) -> Result<(), TransportError> {
+    fn close(&mut self) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+/// HTTP transport for communicating with remote MCP servers via HTTP/SSE
+/// Supports both "Streamable HTTP" (newer) and "HTTP+SSE" (older) transport modes.
+pub struct HttpTransport {
+    client: reqwest::blocking::Client,
+    base_url: String,
+    post_url: String, // URL for POSTing messages (may differ from base_url for HTTP+SSE)
+    headers: std::collections::HashMap<String, String>,
+    response_buffer: std::collections::VecDeque<String>,
+    initialized: bool,
+    session_id: Option<String>, // Mcp-Session-Id from server for subsequent requests
+}
+
+impl HttpTransport {
+    /// Create a new HTTP transport for a remote MCP server
+    pub fn new(
+        url: impl Into<String>,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<Self, TransportError> {
+        let base_url = url.into();
+        crate::log_info!("Connecting to remote MCP server at: {}", base_url);
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| TransportError::Http(format!("Failed to create HTTP client: {e}")))?;
+
+        Ok(Self {
+            client,
+            post_url: base_url.clone(), // Initially same as base_url, may change after SSE init
+            base_url,
+            headers,
+            response_buffer: std::collections::VecDeque::new(),
+            initialized: false,
+            session_id: None,
+        })
+    }
+
+    /// Try to initialize using older HTTP+SSE transport (GET the endpoint URL)
+    /// Per MCP spec: Issue a GET request to the server URL, expecting SSE stream
+    /// with an endpoint event as the first event.
+    fn try_sse_init(&mut self) -> Result<(), TransportError> {
+        // GET the same URL (not /sse) - per MCP spec backwards compatibility
+        let mut request = self
+            .client
+            .get(&self.base_url)
+            .header("Accept", "text/event-stream");
+
+        // Add custom headers
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| TransportError::Http(format!("SSE connection failed: {e}")))?;
+
+        if !response.status().is_success() {
+            return Err(TransportError::Http(format!(
+                "SSE init failed: {} {}",
+                response.status().as_u16(),
+                response.status().canonical_reason().unwrap_or("Unknown")
+            )));
+        }
+
+        // Parse SSE response to find endpoint event
+        let response_text = response
+            .text()
+            .map_err(|e| TransportError::Http(format!("Failed to read SSE response: {e}")))?;
+
+        // Parse SSE events to find the endpoint event
+        // Format: "event: endpoint\ndata: /messages?session_id=xxx\n\n"
+        let mut found_endpoint_event = false;
+        for line in response_text.lines() {
+            if line.starts_with("event: endpoint") {
+                found_endpoint_event = true;
+                continue;
+            }
+            if line.starts_with("data: ") && found_endpoint_event {
+                let endpoint = line[6..].trim();
+                // The endpoint is a relative or absolute URL for POST
+                if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+                    self.post_url = endpoint.to_string();
+                } else if endpoint.starts_with('/') {
+                    // Relative URL - combine with base (extract scheme://host)
+                    if let Some(idx) = self.base_url.find("://") {
+                        let after_scheme = &self.base_url[idx + 3..];
+                        let host_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+                        let base = &self.base_url[..idx + 3 + host_end];
+                        self.post_url = format!("{}{}", base, endpoint);
+                    } else {
+                        self.post_url =
+                            format!("{}{}", self.base_url.trim_end_matches('/'), endpoint);
+                    }
+                } else {
+                    self.post_url = format!("{}/{}", self.base_url.trim_end_matches('/'), endpoint);
+                }
+                self.initialized = true;
+                return Ok(());
+            }
+        }
+
+        Err(TransportError::Http(
+            "SSE init: no endpoint event received".to_string(),
+        ))
+    }
+
+    /// Parse SSE event data from response text
+    /// Only extracts JSON-RPC messages (starting with '{'), filtering out ping and other non-JSON events
+    fn parse_sse_events(text: &str) -> Vec<String> {
+        let mut events = Vec::new();
+        let mut current_data = String::new();
+
+        for line in text.lines() {
+            if line.starts_with("data: ") {
+                current_data.push_str(&line[6..]);
+            } else if line.is_empty() && !current_data.is_empty() {
+                // End of event - only add if it looks like JSON (starts with '{')
+                let trimmed = current_data.trim();
+                if trimmed.starts_with('{') {
+                    events.push(std::mem::take(&mut current_data));
+                } else {
+                    // Skip non-JSON events like 'ping'
+                    current_data.clear();
+                }
+            }
+            // Ignore "event:" lines and other SSE metadata
+        }
+        // Handle case where there's no trailing newline
+        if !current_data.is_empty() {
+            let trimmed = current_data.trim();
+            if trimmed.starts_with('{') {
+                events.push(current_data);
+            }
+        }
+
+        events
+    }
+}
+
+impl Transport for HttpTransport {
+    fn send(&mut self, message: &str) -> Result<(), TransportError> {
+        // First request: try Streamable HTTP, fall back to HTTP+SSE if needed
+        if !self.initialized {
+            // Try Streamable HTTP (direct POST)
+            let mut request = self
+                .client
+                .post(&self.post_url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream");
+
+            for (key, value) in &self.headers {
+                request = request.header(key.as_str(), value.as_str());
+            }
+
+            let response = request.body(message.to_string()).send();
+
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() || status == reqwest::StatusCode::ACCEPTED {
+                        self.initialized = true;
+                        return self.handle_response(resp);
+                    } else if status.is_client_error() {
+                        // 4xx error - try HTTP+SSE fallback
+                        if self.try_sse_init().is_ok() {
+                            // SSE init succeeded, now POST to the endpoint
+                            return self.send_post(message);
+                        } else {
+                            return Err(TransportError::Http(format!(
+                                "HTTP error: {} {}",
+                                status.as_u16(),
+                                status.canonical_reason().unwrap_or("Unknown")
+                            )));
+                        }
+                    } else {
+                        return Err(TransportError::Http(format!(
+                            "HTTP error: {} {}",
+                            status.as_u16(),
+                            status.canonical_reason().unwrap_or("Unknown")
+                        )));
+                    }
+                }
+                Err(e) => {
+                    // Network error - try SSE fallback
+                    if self.try_sse_init().is_ok() {
+                        return self.send_post(message);
+                    }
+                    return Err(TransportError::Http(format!("HTTP request failed: {e}")));
+                }
+            }
+        }
+
+        self.send_post(message)
+    }
+
+    fn receive(&mut self) -> Result<String, TransportError> {
+        self.response_buffer
+            .pop_front()
+            .ok_or(TransportError::Closed)
+    }
+
+    fn close(&mut self) -> Result<(), TransportError> {
+        self.response_buffer.clear();
+        Ok(())
+    }
+}
+
+impl HttpTransport {
+    fn send_post(&mut self, message: &str) -> Result<(), TransportError> {
+        let mut request = self
+            .client
+            .post(&self.post_url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+
+        // Include session ID if we have one (required by some servers)
+        if let Some(ref session_id) = self.session_id {
+            request = request.header("Mcp-Session-Id", session_id.as_str());
+        }
+
+        for (key, value) in &self.headers {
+            request = request.header(key.as_str(), value.as_str());
+        }
+
+        let response = request
+            .body(message.to_string())
+            .send()
+            .map_err(|e| TransportError::Http(format!("HTTP request failed: {e}")))?;
+
+        self.handle_response(response)
+    }
+
+    fn handle_response(
+        &mut self,
+        response: reqwest::blocking::Response,
+    ) -> Result<(), TransportError> {
+        let status = response.status();
+        if !status.is_success() && status != reqwest::StatusCode::ACCEPTED {
+            return Err(TransportError::Http(format!(
+                "HTTP error: {} {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("Unknown")
+            )));
+        }
+
+        // Capture Mcp-Session-Id header if present (required for subsequent requests)
+        if let Some(session_id) = response.headers().get("mcp-session-id") {
+            if let Ok(session_str) = session_id.to_str() {
+                self.session_id = Some(session_str.to_string());
+            }
+        }
+
+        // For 202 Accepted (notifications/responses), there's no response body
+        if status == reqwest::StatusCode::ACCEPTED {
+            return Ok(());
+        }
+
+        // Check content type to determine how to parse response
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let response_text = response
+            .text()
+            .map_err(|e| TransportError::Http(format!("Failed to read response: {e}")))?;
+
+        if content_type.contains("text/event-stream") {
+            // Parse SSE events
+            let events = Self::parse_sse_events(&response_text);
+            for event in events {
+                if !event.is_empty() {
+                    self.response_buffer.push_back(event);
+                }
+            }
+        } else {
+            // JSON response
+            if !response_text.is_empty() {
+                self.response_buffer.push_back(response_text);
+            }
+        }
+
         Ok(())
     }
 }
@@ -236,5 +528,38 @@ mod tests {
             framing::parse_message(notification).unwrap(),
             McpMessage::Notification(_)
         ));
+    }
+
+    #[test]
+    fn test_http_transport_sse_parsing() {
+        // Test SSE event parsing with single event
+        let sse_single = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let events = HttpTransport::parse_sse_events(sse_single);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
+
+        // Test SSE event parsing with multiple events
+        let sse_multi = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notify1\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+        let events = HttpTransport::parse_sse_events(sse_multi);
+        assert_eq!(events.len(), 2);
+
+        // Test SSE event without trailing newline
+        let sse_no_newline = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}";
+        let events = HttpTransport::parse_sse_events(sse_no_newline);
+        assert_eq!(events.len(), 1);
+
+        // Test empty input
+        let events = HttpTransport::parse_sse_events("");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_http_transport_new() {
+        let headers = std::collections::HashMap::from([(
+            "Authorization".to_string(),
+            "Bearer token".to_string(),
+        )]);
+        let transport = HttpTransport::new("https://example.com/mcp", headers);
+        assert!(transport.is_ok());
     }
 }

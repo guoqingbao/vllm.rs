@@ -72,8 +72,6 @@ pub struct FingerprintManager {
     /// Pending response fingerprints: session_id -> (first_chars, last_chars)
     /// Used to match assistant messages in subsequent requests
     pending_responses: HashMap<String, (String, String)>,
-    /// Counter for generating unique session IDs
-    next_session_id: usize,
 }
 
 impl Default for FingerprintManager {
@@ -88,7 +86,6 @@ impl FingerprintManager {
             fingerprint_to_session: HashMap::new(),
             session_to_fingerprint: HashMap::new(),
             pending_responses: HashMap::new(),
-            next_session_id: 0,
         }
     }
 
@@ -123,10 +120,9 @@ impl FingerprintManager {
         self.fingerprint_to_session.get(fingerprint).cloned()
     }
 
-    /// Register a new fingerprint with a generated session_id
+    /// Register a new fingerprint with a generated session_id (UUID for multi-user security)
     pub fn register_session(&mut self, fingerprint: FingerprintVec) -> String {
-        let session_id = format!("auto_session_{}", self.next_session_id);
-        self.next_session_id += 1;
+        let session_id = format!("auto_{}", uuid::Uuid::new_v4());
         self.fingerprint_to_session
             .insert(fingerprint.clone(), session_id.clone());
         self.session_to_fingerprint
@@ -324,7 +320,7 @@ mod tests {
         ];
         let fp1 = FingerprintManager::compute_fingerprint(&messages1);
         let session_id = manager.find_or_create_session(fp1.clone(), &messages1);
-        assert!(session_id.starts_with("auto_session_"));
+        assert!(session_id.starts_with("auto_"));
 
         // Same fingerprint should return same session
         let session_id2 = manager.find_or_create_session(fp1, &messages1);

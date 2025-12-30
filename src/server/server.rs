@@ -27,6 +27,110 @@ use std::time::Duration;
 use tokio::task;
 use uuid::Uuid;
 
+/// Helper struct to manage streaming response chunks
+/// Provides clean API for sending tokens, errors, and status notifications
+struct StreamingContext {
+    seq_id: usize,
+    model_id: String,
+    created: u64,
+    response_tx: flume::Sender<ChatResponse>,
+}
+
+impl StreamingContext {
+    fn new(
+        seq_id: usize,
+        model_id: String,
+        created: u64,
+        response_tx: flume::Sender<ChatResponse>,
+    ) -> Self {
+        Self {
+            seq_id,
+            model_id,
+            created,
+            response_tx,
+        }
+    }
+
+    /// Send a content token chunk. Returns false if client disconnected.
+    fn send_token(&self, token: &str) -> bool {
+        let chunk = ChatCompletionChunk {
+            id: format!("seq-{}", self.seq_id),
+            object: "chat.completion.chunk",
+            created: self.created,
+            model: self.model_id.clone(),
+            choices: vec![ChatChoiceChunk {
+                index: 0,
+                delta: Delta {
+                    content: Some(token.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+                error: None,
+            }],
+            usage: None,
+        };
+        self.response_tx
+            .try_send(ChatResponse::Chunk(chunk))
+            .is_ok()
+    }
+
+    /// Send an error chunk with finish_reason="error"
+    fn send_error(&self, error: &str) {
+        let chunk = ChatCompletionChunk {
+            id: format!("seq-{}", self.seq_id),
+            object: "chat.completion.chunk",
+            created: self.created,
+            model: self.model_id.clone(),
+            choices: vec![ChatChoiceChunk {
+                index: 0,
+                delta: Delta {
+                    content: None,
+                    tool_calls: None,
+                },
+                finish_reason: Some("error".to_string()),
+                error: Some(vec![ErrorMsg {
+                    message: Some(error.to_string()),
+                }]),
+            }],
+            usage: None,
+        };
+        let _ = self.response_tx.try_send(ChatResponse::Chunk(chunk));
+    }
+
+    /// Send a status notification (e.g., tool execution progress)
+    fn send_status(&self, message: &str) -> bool {
+        let chunk = ChatCompletionChunk {
+            id: format!("seq-{}", self.seq_id),
+            object: "chat.completion.chunk",
+            created: self.created,
+            model: self.model_id.clone(),
+            choices: vec![ChatChoiceChunk {
+                index: 0,
+                delta: Delta {
+                    content: Some(message.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+                error: None,
+            }],
+            usage: None,
+        };
+        self.response_tx
+            .try_send(ChatResponse::Chunk(chunk))
+            .is_ok()
+    }
+
+    /// Check if client is still connected
+    fn is_connected(&self) -> bool {
+        !self.response_tx.is_disconnected()
+    }
+
+    /// Update seq_id (after tool call resumption)
+    fn set_seq_id(&mut self, seq_id: usize) {
+        self.seq_id = seq_id;
+    }
+}
+
 fn tool_format_for_model(model_id: &str) -> ToolFormat {
     let model_id = model_id.to_lowercase();
     if model_id.contains("qwen") {
@@ -191,8 +295,21 @@ pub async fn chat_completion(
             let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
 
+            // Create streaming context for clean helper methods
+            let mut stream_ctx =
+                StreamingContext::new(seq_id, model_id.to_string(), created, response_tx.clone());
+
             // Track if we're inside a tool call (for token buffering)
             let mut in_tool_call = false;
+            // Reasoning marker pairs: (start, end) - only matched end closes the block
+            const REASONING_MARKERS: &[(&str, &str)] = &[
+                ("<think>", "</think>"),
+                ("<|think|>", "<|/think|>"),
+                ("[THINK]", "[/THINK]"),
+                ("<thought>", "</thought>"),
+            ];
+            // Track which reasoning marker pair is active (None = not in reasoning)
+            let mut active_reasoning_end: Option<&'static str> = None;
             // Check if we should buffer tool calls (both MCP internal and external tool modes)
             // mcp_mode: Some(true) = MCP internal, Some(false) = external tools, None = no tools
             let should_buffer_tool_calls = params_clone.mcp_mode.is_some();
@@ -218,8 +335,28 @@ pub async fn chat_completion(
                             // Always accumulate for tool call parsing
                             accumulated_output.push_str(&token);
 
+                            // Track reasoning block state using paired markers
+                            if active_reasoning_end.is_none() {
+                                // Check for any reasoning start marker
+                                for &(start, end) in REASONING_MARKERS {
+                                    if token.contains(start) || accumulated_output.ends_with(start)
+                                    {
+                                        active_reasoning_end = Some(end);
+                                        break;
+                                    }
+                                }
+                            } else if let Some(end_marker) = active_reasoning_end {
+                                // Check only for the paired end marker
+                                if token.contains(end_marker)
+                                    || accumulated_output.ends_with(end_marker)
+                                {
+                                    active_reasoning_end = None;
+                                }
+                            }
+
                             // When tools are available, detect tool call start and buffer tokens
-                            if should_buffer_tool_calls {
+                            // But ONLY if we're not inside a reasoning block
+                            if should_buffer_tool_calls && active_reasoning_end.is_none() {
                                 // Only detect EXPLICIT XML tool call tags to avoid false positives
                                 // Optimization: only check when token could be part of tool call marker
                                 if !in_tool_call {
@@ -228,6 +365,10 @@ pub async fn chat_completion(
                                     if token.contains("<tool_call>")
                                         || accumulated_output.ends_with("<tool_call>")
                                     {
+                                        crate::log_info!(
+                                            "[Seq {}] Detected <tool_call>, buffering started",
+                                            current_seq_id
+                                        );
                                         in_tool_call = true;
                                         // Don't send tool call content to client
                                         continue;
@@ -240,29 +381,11 @@ pub async fn chat_completion(
                                 }
                             }
 
-                            // Send token to client (only if not buffering tool call)
-                            let chunk = ChatCompletionChunk {
-                                id: format!("seq-{}", current_seq_id),
-                                object: "chat.completion.chunk",
-                                created,
-                                model: model_id.to_string(),
-                                choices: vec![ChatChoiceChunk {
-                                    index: 0,
-                                    delta: Delta {
-                                        content: Some(token.clone()),
-                                        tool_calls: None,
-                                    },
-                                    finish_reason: None,
-                                    error: None,
-                                }],
-                                usage: None,
-                            };
-
-                            if let Err(e) = response_tx.try_send(ChatResponse::Chunk(chunk)) {
+                            // Send token to client using helper (only if not buffering tool call)
+                            if !stream_ctx.send_token(&token) {
                                 crate::log_error!(
-                                    "[Seq {}] Stream send to client error: {:?}",
-                                    current_seq_id,
-                                    e
+                                    "[Seq {}] Stream send to client error (disconnected)",
+                                    current_seq_id
                                 );
                                 let mut e = engine_clone.write();
                                 e.cancel(current_seq_id);
@@ -284,9 +407,6 @@ pub async fn chat_completion(
 
                             total_decoded_tokens += pause_decoded_length;
 
-                            // Reset in_tool_call state
-                            in_tool_call = false;
-
                             // Parse tool calls from accumulated output
                             let tool_parser = ToolParser::new();
                             let parsed_calls = tool_parser.parse(&accumulated_output);
@@ -294,7 +414,7 @@ pub async fn chat_completion(
                             if !parsed_calls.is_empty() {
                                 if let Some(mcp_manager) = data.mcp_manager.as_ref() {
                                     // Check if client is still connected before executing tools
-                                    if response_tx.is_disconnected() {
+                                    if !stream_ctx.is_connected() {
                                         crate::log_warn!(
                                             "[Seq {}] Client disconnected, aborting tool execution",
                                             current_seq_id
@@ -310,6 +430,27 @@ pub async fn chat_completion(
                                         parsed_calls.len()
                                     );
 
+                                    // Wrap tool execution notifications in reasoning block
+                                    // This allows UIs to collapse/style tool execution differently
+                                    stream_ctx.send_status("\n<think>");
+
+                                    // Notify client about tool execution (keeps connection alive and informs user)
+                                    for call in &parsed_calls {
+                                        let tool_name = call.function.name.as_str();
+                                        // Trim args to max 1024 chars for readability
+                                        let args_str = &call.function.arguments;
+                                        let args_display = if args_str.len() > 1024 {
+                                            format!("{}...", &args_str[..1024])
+                                        } else {
+                                            args_str.clone()
+                                        };
+                                        let status_msg = format!(
+                                            "Executing tool: {} \nArguments: {}\n",
+                                            tool_name, args_display
+                                        );
+                                        stream_ctx.send_status(&status_msg);
+                                    }
+
                                     // Execute tool calls with timeout using async version
                                     let exec_result = execute_mcp_tool_calls_async(
                                         parsed_calls.clone(),
@@ -317,6 +458,9 @@ pub async fn chat_completion(
                                         current_messages.clone(),
                                     )
                                     .await;
+
+                                    // Close reasoning block after tool execution
+                                    stream_ctx.send_status("</think>\n");
 
                                     // Update context with tool calls and results
                                     current_messages = exec_result.followup_messages.clone();
@@ -365,6 +509,8 @@ pub async fn chat_completion(
                                                     "Tool follow-up generation failed: {:?}",
                                                     e
                                                 );
+                                                // Send error to client using helper
+                                                stream_ctx.send_error(&format!("{:?}", e));
                                                 break 'outer;
                                             }
                                         }
@@ -374,7 +520,10 @@ pub async fn chat_completion(
                                     decoded_length = 0;
                                     decode_start_time = 0;
                                     accumulated_output.clear();
+                                    in_tool_call = false;
+                                    active_reasoning_end = None;
                                     current_stream = new_stream;
+                                    stream_ctx.set_seq_id(current_seq_id);
 
                                     // Continue outer loop to process new stream
                                     continue 'outer;

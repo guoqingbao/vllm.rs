@@ -16,7 +16,8 @@ Tool calling allows LLMs to invoke external functions/tools to gather informatio
 
 The **Model Context Protocol (MCP)** is a standardized protocol for connecting LLMs to external tools and services. vLLM.rs supports:
 
-- **Stdio transport**: Connect to MCP servers via command-line processes
+- **Stdio transport**: Connect to local MCP servers via command-line processes
+- **HTTP/SSE transport**: Connect to remote MCP servers via HTTP (with custom headers for authentication)
 - **Multi-server support**: Configure multiple MCP servers with automatic tool name prefixing
 - **Automatic tool injection**: MCP tools are injected into the prompt when configured
 - **Internal tool execution**: Tool calls are executed automatically with 60-second timeout
@@ -41,7 +42,7 @@ cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K
 
 ### 2. Multiple MCP Servers (Config File)
 
-Create `mcp.json`:
+Create `mcp.json` with local and/or remote servers:
 
 ```json
 {
@@ -54,11 +55,11 @@ Create `mcp.json`:
                 "~/"
             ]
         },
-        "github": {
-            "command": "npx",
-            "args": ["-y", "@modelcontextprotocol/server-github"],
-            "env": {
-                "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_..."
+        "deepwiki": {
+            "url": "https://mcp.deepwiki.com/mcp",
+            "headers": {
+                "Accept": "text/event-stream",
+                "Cache-Control": "no-cache"
             }
         }
     }
@@ -79,11 +80,11 @@ or Rust:
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 
 target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache \
-  --mcp-config ./mcp.json
+  --mcp-config example/mcp.json
 
 # Metal/macOS
 cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K_M.gguf --ui-server --context-cache \
-  --mcp-config ./mcp.json
+  --mcp-config example/mcp.json
 ```
 
 ---
@@ -224,6 +225,8 @@ User Request
 
 ### Config File Format
 
+#### Local Servers (Stdio Transport)
+
 ```json
 {
     "mcpServers": {
@@ -237,6 +240,24 @@ User Request
     }
 }
 ```
+
+#### Remote Servers (HTTP/SSE Transport)
+
+```json
+{
+    "mcpServers": {
+        "server_name": {
+            "url": "https://mcp.example.com/api/",
+            "headers": {
+                "Authorization": "Bearer YOUR_TOKEN",
+                "Accept": "text/event-stream"
+            }
+        }
+    }
+}
+```
+
+> **Note:** Each server must have either `command` (local) or `url` (remote), not both. You can mix local and remote servers in the same config file.
 
 ### Tool Name Prefixing
 

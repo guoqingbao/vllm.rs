@@ -370,7 +370,16 @@ impl Scheduler {
             if let Some(mcp_mode) = self.running[idx].sampling_params.mcp_mode {
                 // Check if this is a tool call end (supports both XML </tool_call> and JSON } patterns)
                 // We check BEFORE borrowing seq mutably
-                if self.is_tool_call_end(token, idx) {
+                let is_end = self.is_tool_call_end(token, idx);
+                if is_end {
+                    crate::log_info!(
+                        "[Seq {}] Detected </tool_call> token {} (mcp_mode: {})",
+                        seq_id,
+                        token,
+                        mcp_mode
+                    );
+                }
+                if is_end {
                     let seq = &mut self.running[idx];
                     seq.append_token(token);
                     if mcp_mode {

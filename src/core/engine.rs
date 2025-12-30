@@ -831,7 +831,7 @@ impl LLMEngine {
                     if let Some((_, session_id)) =
                         self.active_sessions.iter().find(|(id, _)| *id == seq_id)
                     {
-                        if session_id.starts_with("auto_session_") {
+                        if session_id.starts_with("auto_") {
                             // Decode the output to get the assistant response text
                             if let Ok(decoded_text) = self.tokenizer.decode(&s.output_ids, true) {
                                 self.fingerprint_manager
@@ -962,7 +962,7 @@ impl LLMEngine {
                 if !self.scheduler.try_swap_out_by_id(seq_id, false) {
                     self.scheduler.release_cache(seq_id);
                     // Also remove fingerprint for auto-sessions
-                    if session_id.starts_with("auto_session_") {
+                    if session_id.starts_with("auto_") {
                         self.fingerprint_manager.remove_session(&session_id);
                     }
                     if self.econfig.server_mode.unwrap_or(true) {
