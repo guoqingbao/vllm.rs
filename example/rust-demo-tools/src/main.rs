@@ -51,8 +51,7 @@ fn main() -> anyhow::Result<()> {
 
     let tools = vec![weather_tool.clone(), search_tool.clone()];
 
-    // Qwen format
-    let qwen_prompt = ToolFormat::Qwen.format_tools(&tools);
+    let qwen_prompt = ToolFormat::format_tools(&tools);
     println!("Qwen Format:\n{}\n", qwen_prompt);
 
     // === Part 3: Parse Tool Calls from Model Output ===

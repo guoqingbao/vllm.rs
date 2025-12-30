@@ -131,19 +131,6 @@ impl StreamingContext {
     }
 }
 
-fn tool_format_for_model(model_id: &str) -> ToolFormat {
-    let model_id = model_id.to_lowercase();
-    if model_id.contains("qwen") {
-        ToolFormat::Qwen
-    } else if model_id.contains("llama") || model_id.contains("mistral") {
-        ToolFormat::Llama
-    } else if model_id.contains("phi") {
-        ToolFormat::Phi4
-    } else {
-        ToolFormat::Generic
-    }
-}
-
 fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool> {
     if let Some(tools) = request_tools {
         if !tools.is_empty() {
@@ -213,11 +200,7 @@ pub async fn chat_completion(
     let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
     if has_tools {
-        let model_hint = request.model.clone().unwrap_or_else(|| {
-            let e = data.engine.read();
-            e.get_model_info().1
-        });
-        let tool_prompt = tool_format_for_model(&model_hint).format_tools(&resolved_tools);
+        let tool_prompt = ToolFormat::format_tools(&resolved_tools);
 
         // Merge with existing system prompt if present, otherwise insert new one
         if !chat_messages.is_empty() && chat_messages[0].role == "system" {

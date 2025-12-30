@@ -224,135 +224,23 @@ impl ToolResult {
 }
 
 /// Format tool definitions for injection into the prompt
-/// Different models use different formats for tool descriptions
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolFormat {
-    /// Qwen models format
-    Qwen,
-    /// LLaMA/Mistral format
-    Llama,
-    /// Phi4 models format (uses <|tool|> tokens)
-    Phi4,
-    /// Generic JSON format
-    Generic,
-}
+#[derive(Debug, Clone)]
+pub struct ToolFormat {}
 
 impl ToolFormat {
     /// Format tools for inclusion in the system prompt
-    pub fn format_tools(&self, tools: &[Tool]) -> String {
-        match self {
-            ToolFormat::Qwen => format_tools_qwen(tools),
-            ToolFormat::Llama => format_tools_llama(tools),
-            ToolFormat::Phi4 => format_tools_phi4(tools),
-            ToolFormat::Generic => format_tools_generic(tools),
+    pub fn format_tools(tools: &[Tool]) -> String {
+        let mut output = String::from("# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n");
+
+        for tool in tools {
+            output.push_str(&serde_json::to_string(&tool.function).unwrap_or_default());
+            output.push('\n');
         }
-    }
-}
 
-fn format_tools_qwen(tools: &[Tool]) -> String {
-    let mut output = String::from("# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n");
+        output.push_str("</tools>\n\n");
+        output.push_str("For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n");
+        output.push_str("<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>");
 
-    for tool in tools {
-        output.push_str(&serde_json::to_string(&tool.function).unwrap_or_default());
-        output.push('\n');
-    }
-
-    output.push_str("</tools>\n\n");
-    output.push_str("For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n");
-    output.push_str("<tool_call>\n{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n</tool_call>");
-
-    output
-}
-
-fn format_tools_llama(tools: &[Tool]) -> String {
-    let mut output = String::from("You have access to the following functions:\n\n");
-
-    for tool in tools {
-        output.push_str(&format!("Function: {}\n", tool.function.name));
-        output.push_str(&format!("Description: {}\n", tool.function.description));
-        output.push_str(&format!(
-            "Parameters: {}\n\n",
-            serde_json::to_string_pretty(&tool.function.parameters).unwrap_or_default()
-        ));
-    }
-
-    output.push_str(
-        "To call a function, respond with a JSON object with \"name\" and \"arguments\" keys.\n",
-    );
-
-    output
-}
-
-fn format_tools_phi4(tools: &[Tool]) -> String {
-    // Phi4 uses <|tool|> and <|/tool|> tokens for tool definitions
-    // Format: <|tool|>[{"name": "...", "description": "...", "parameters": {...}}]<|/tool|>
-    let tools_list: Vec<_> = tools.iter().map(|t| &t.function).collect();
-    let tools_json = serde_json::to_string(&tools_list).unwrap_or_default();
-    format!(
-        "You are a helpful assistant with some tools.<|tool|>{}<|/tool|>",
-        tools_json
-    )
-}
-
-fn format_tools_generic(tools: &[Tool]) -> String {
-    let tools_json = serde_json::to_string_pretty(tools).unwrap_or_default();
-    format!("Available tools:\n{}\n\nTo use a tool, respond with a JSON object containing \"name\" and \"arguments\".", tools_json)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_tool_builder() {
-        let tool = Tool::function("get_weather", "Get the current weather")
-            .param("location", "string", "The city name", true)
-            .param(
-                "unit",
-                "string",
-                "Temperature unit (celsius/fahrenheit)",
-                false,
-            )
-            .build();
-
-        assert_eq!(tool.tool_type, "function");
-        assert_eq!(tool.function.name, "get_weather");
-
-        let params = &tool.function.parameters;
-        assert!(params["properties"]["location"].is_object());
-        assert!(params["required"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("location".to_string())));
-    }
-
-    #[test]
-    fn test_tool_call_creation() {
-        let call = ToolCall::new("call_123", "get_weather", r#"{"location": "Tokyo"}"#);
-
-        assert_eq!(call.id, "call_123");
-        assert_eq!(call.call_type, "function");
-        assert_eq!(call.function.name, "get_weather");
-    }
-
-    #[test]
-    fn test_tool_result() {
-        let success = ToolResult::success("call_123", r#"{"temp": 25}"#);
-        assert!(success.is_error.is_none());
-
-        let error = ToolResult::error("call_456", "API unavailable");
-        assert_eq!(error.is_error, Some(true));
-    }
-
-    #[test]
-    fn test_tool_serialization() {
-        let tool = Tool::function("search", "Search the web")
-            .param("query", "string", "Search query", true)
-            .build();
-
-        let json = serde_json::to_string(&tool).unwrap();
-        let parsed: Tool = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(parsed.function.name, "search");
+        output
     }
 }

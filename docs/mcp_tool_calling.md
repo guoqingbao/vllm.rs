@@ -24,7 +24,72 @@ The **Model Context Protocol (MCP)** is a standardized protocol for connecting L
 
 ---
 
-## Quick Start
+## Tool Calling Modes
+
+vLLM.rs supports two distinct modes for handling tool calls:
+
+### Mode 1: External Tool Handling (User-provided)
+
+When user provides their own tools, vLLM.rs:
+1. Uses user's tool definitions
+2. Detects tool calls in model output
+3. **Finishes the stream** at `</tool_call>` for client-side execution
+
+```python
+# User provides tools → stream finishes at tool call for external handling
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"}
+                }
+            }
+        }
+    }],
+    stream=True
+)
+
+# Stream will have finish_reason when tool call detected
+# Parse tool calls and execute externally
+```
+
+### Mode 2: Internal MCP Execution (Automatic, Advanced)
+
+When MCP is configured and no user tools are provided, vLLM.rs automatically:
+1. Injects MCP tools into the prompt
+2. Detects tool calls in model output
+3. Executes tools via MCP servers
+4. Resumes generation with tool results
+
+```python
+import openai
+
+client = openai.OpenAI(base_url="http://localhost:8000/v1", api_key="empty")
+
+# No tools provided → MCP tools are auto-injected and executed
+response = client.chat.completions.create(
+    model="default",
+    messages=[{"role": "user", "content": "List files in current directory (./)"}],
+    stream=True
+)
+
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="")
+```
+
+---
+
+## Internal tool call execution (Advanced)
+
+💡 You need to start MCP server (local/remote) along with vllm.rs, and vllm.rs will call them automatically.
 
 ### 1. Single MCP Server (CLI)
 
@@ -89,70 +154,7 @@ cargo run --release --features metal -- --m Qwen/Qwen3-8B-GGUF --f Qwen3-8B-Q4_K
 
 ---
 
-## Tool Calling Modes
-
-vLLM.rs supports two distinct modes for handling tool calls:
-
-### Mode 1: Internal MCP Execution (Automatic)
-
-When MCP is configured and no user tools are provided, vLLM.rs automatically:
-1. Injects MCP tools into the prompt
-2. Detects tool calls in model output
-3. Executes tools via MCP servers
-4. Resumes generation with tool results
-
-```python
-import openai
-
-client = openai.OpenAI(base_url="http://localhost:8000/v1", api_key="empty")
-
-# No tools provided → MCP tools are auto-injected and executed
-response = client.chat.completions.create(
-    model="default",
-    messages=[{"role": "user", "content": "List files in current directory (./)"}],
-    stream=True
-)
-
-for chunk in response:
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="")
-```
-
-### Mode 2: External Tool Handling (User-provided)
-
-When user provides their own tools, vLLM.rs:
-1. Uses user's tool definitions
-2. Detects tool calls in model output
-3. **Finishes the stream** at `</tool_call>` for client-side execution
-
-```python
-# User provides tools → stream finishes at tool call for external handling
-response = client.chat.completions.create(
-    model="default",
-    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
-    tools=[{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get weather for a location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                }
-            }
-        }
-    }],
-    stream=True
-)
-
-# Stream will have finish_reason when tool call detected
-# Parse tool calls and execute externally
-```
-
----
-
-## Behavior Matrix
+### Behavior Matrix
 
 | Has Request Tools | MCP Configured | Tool Mode | Streaming Behavior |
 |-------------------|----------------|-----------|-------------------|
@@ -163,7 +165,7 @@ response = client.chat.completions.create(
 
 ---
 
-## Streaming Tool Execution
+### Streaming Tool Internal Execution
 
 When MCP is configured and a tool call is detected during streaming:
 
