@@ -1,5 +1,5 @@
 use crate::core::engine::{LLMEngine, StreamItem, GLOBAL_RT};
-use crate::core::{GenerationOutput, SyncCollectionResult};
+use crate::core::GenerationOutput;
 use crate::server::{build_messages_and_images, run_server, ChatMessage};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
@@ -178,15 +178,9 @@ impl Engine {
         let results = GLOBAL_RT
             .block_on(async { LLMEngine::collect_sync_results(receivers, tokenizer).await })?;
 
-        // Extract GenerationOutput from SyncCollectionResult
+        // Extract GenerationOutput
         for result in results {
-            match result {
-                SyncCollectionResult::Completed(output) => return Ok(output),
-                SyncCollectionResult::ToolCallPause { .. } => {
-                    // In simple API, tool call pause is not supported - return error
-                    candle_core::bail!("Tool call detected but simple API does not support MCP tool calling. Use the server API instead.");
-                }
-            }
+            return Ok(result);
         }
 
         candle_core::bail!("No generation output returned")

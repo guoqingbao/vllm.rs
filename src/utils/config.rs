@@ -403,10 +403,8 @@ pub struct SamplingParams {
     pub presence_penalty: Option<f32>,
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>, // enable reasoning
-    /// Tool mode for streaming tool call handling:
-    /// - None: No tools, ignore </tool_call> detection
-    /// - Some(false): External tools, finish stream at </tool_call>
-    /// - Some(true): MCP internal, pause stream, execute, resume
+    /// Tool mode for tool call handling.
+    /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
 }
@@ -431,10 +429,8 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub presence_penalty: Option<f32>,
-    /// Tool mode for streaming tool call handling:
-    /// - None: No tools, ignore </tool_call> detection
-    /// - Some(false): External tools, finish stream at </tool_call>
-    /// - Some(true): MCP internal, pause stream, execute, resume
+    /// Tool mode for tool call handling.
+    /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[pyo3(get, set)]
     pub mcp_mode: Option<bool>,
     #[pyo3(get, set)]

@@ -111,14 +111,25 @@ impl ToolParser {
         let mut calls = Vec::new();
 
         // Try both <tool_call> formats
-        for pattern in &[r"(?s)<tool_call>\s*(.*?)\s*</tool_call>"] {
-            if let Ok(re) = Regex::new(pattern) {
-                for cap in re.captures_iter(text) {
-                    if let Some(json_str) = cap.get(1) {
-                        if let Ok(parsed) = serde_json::from_str::<Value>(json_str.as_str()) {
-                            if let Some(call) = self.value_to_tool_call(&parsed, call_id) {
-                                calls.push(call);
-                            }
+        // Use a more flexible regex that allows for missing closing > if at end of string
+        // This handles cases where generation stops exactly on </tool_call
+        // Pattern: <tool_call> ... </tool_call>?
+        // Note: We use a single regex with optional > to avoid duplicate matches
+        let pattern = r"(?s)<tool_call>\s*(.*?)\s*</tool_call>?";
+
+        if let Ok(re) = Regex::new(pattern) {
+            for cap in re.captures_iter(text) {
+                if let Some(json_str) = cap.get(1) {
+                    // Validate that whatever we captured looks like JSON before parsing
+                    // This prevents matching random text if </tool_call> is missing entirely and we match to end of string
+                    let trimmed = json_str.as_str().trim();
+                    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+                        continue;
+                    }
+
+                    if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                        if let Some(call) = self.value_to_tool_call(&parsed, call_id) {
+                            calls.push(call);
                         }
                     }
                 }
@@ -228,6 +239,33 @@ impl ToolParser {
         let final_answer = Self::extract_final_answer(text);
         // Only check for explicit XML-wrapped tool calls
         final_answer.contains("<tool_call>")
+    }
+
+    /// Check if text contains a complete, parseable tool call
+    /// Returns true only if the tool call has valid structure with both tags and valid JSON
+    pub fn has_complete_tool_call(&self, text: &str) -> bool {
+        let final_answer = Self::extract_final_answer(text);
+
+        // Must have both opening and closing tags
+        if !final_answer.contains("<tool_call>") || !final_answer.contains("</tool_call>") {
+            return false;
+        }
+
+        // Try to parse - if successful, it's complete
+        !self.parse(&final_answer).is_empty()
+    }
+
+    /// Check if text could be a partial tool call tag (for lookback detection)
+    /// Used to detect when we might be in the middle of receiving "<tool_call>"
+    pub fn could_be_partial_tag(text: &str) -> bool {
+        const TAG: &str = "<tool_call>";
+        // Check if end of text matches any prefix of tag (length 1 to len-1)
+        for i in 1..TAG.len() {
+            if text.ends_with(&TAG[..i]) {
+                return true;
+            }
+        }
+        false
     }
 }
 

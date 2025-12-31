@@ -39,23 +39,6 @@ pub struct GenerationOutput {
     pub decode_output: String,
 }
 
-/// Result from sync collection - either completed normally or paused for tool call
-#[derive(Debug, Clone)]
-pub enum SyncCollectionResult {
-    /// Generation completed normally
-    Completed(GenerationOutput),
-    /// Generation paused for tool call, needs resume with session_id
-    ToolCallPause {
-        session_id: String,
-        seq_id: usize,
-        prompt_length: usize,
-        output_ids: Vec<u32>,
-        prompt_start_time: usize,
-        decode_start_time: usize,
-        decoded_length: usize,
-    },
-}
-
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {

@@ -5,7 +5,7 @@ use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
 use crate::core::scheduler::PD_PREFILL_STATUS_CHECK_COOLING_PERIOD;
 use crate::core::sequence::{DecodeSequence, SequenceStatus};
-use crate::core::{GenerationOutput, SyncCollectionResult};
+use crate::core::GenerationOutput;
 use crate::models::layers::distributed::Comm;
 #[cfg(feature = "nccl")]
 use crate::models::layers::distributed::Id;
@@ -66,14 +66,6 @@ pub enum StreamItem {
     Completion((usize, usize, usize, Vec<u32>)), //completion
     Done((usize, usize, usize, usize)),          //streaming end
     Error(String),
-    /// Tool call pause - generation paused for MCP execution
-    /// Contains: (session_id for resume, prompt_start_time, decode_start_time, decoded_length)
-    ToolCallPause {
-        session_id: String,
-        prompt_start_time: usize,
-        decode_start_time: usize,
-        decoded_length: usize,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -743,53 +735,7 @@ impl LLMEngine {
             if let Some(s) = sq {
                 let seq_id = s.id;
                 if s.is_finished() {
-                    // Check if this is a tool call pause (not a real finish)
-                    if let Some(session_id) = &s.tool_call_session_id {
-                        if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
-                            if let Some(request_type) = self.request_types.get(&seq_id) {
-                                let prompt_start_time = s.created_time();
-                                let decode_start_time = self
-                                    .decode_start_times
-                                    .get(&seq_id)
-                                    .copied()
-                                    .unwrap_or(prompt_start_time);
-
-                                crate::log_info!(
-                                    "[Seq {}] Sending ToolCallPause with session_id: {} (request_type: {:?})",
-                                    seq_id,
-                                    session_id,
-                                    request_type
-                                );
-
-                                // For stream requests, send the last token before pause
-                                if *request_type == RequestType::Stream {
-                                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                        if let Some(tok) = decoder.step(s.last_token) {
-                                            let _ = sender.try_send(StreamItem::Token(tok.clone()));
-                                        }
-                                    }
-                                } else {
-                                    let _ = sender.try_send(StreamItem::TokenID(s.last_token));
-                                }
-
-                                // Emit ToolCallPause for both stream and completion requests
-                                let _ = sender.try_send(StreamItem::ToolCallPause {
-                                    session_id: session_id.clone(),
-                                    prompt_start_time,
-                                    decode_start_time,
-                                    decoded_length: s.output_ids.len(),
-                                });
-                            }
-                        }
-                        // Don't remove senders/decoders - they will be reused for follow-up
-                        // The sequence will be resumed via get_cache with the session_id
-                        if self.econfig.server_mode.unwrap_or(true) {
-                            self.scheduler.print_free_blocks();
-                        }
-                        continue; // Skip normal finish handling
-                    }
-
-                    // Normal finish handling - tool call detection is now done in scheduler
+                    // Normal finish handling
 
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -807,6 +753,18 @@ impl LLMEngine {
                             } else {
                                 decode_finish_time
                             };
+
+                            if s.is_tool_call_end { //finish early, we need to send the last token
+                                if *request_type == RequestType::Stream {
+                                    if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
+                                        if let Some(tok) = decoder.step(s.last_token) {
+                                            let _ = sender.try_send(StreamItem::Token(tok.clone()));
+                                        }
+                                    }
+                                } else {
+                                    let _ = sender.try_send(StreamItem::TokenID(s.last_token));
+                                }
+                            }
 
                             if *request_type == RequestType::Stream {
                                 let _ = sender.try_send(StreamItem::Done((
@@ -1220,7 +1178,7 @@ impl LLMEngine {
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
         tokenizer: Arc<Tokenizer>,
-    ) -> Result<Vec<SyncCollectionResult>> {
+    ) -> Result<Vec<GenerationOutput>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
         let decode_start_time_clone = Arc::clone(&decode_start_time);
@@ -1266,7 +1224,7 @@ impl LLMEngine {
                 let decode_start_time_clone = decode_start_time.clone();
                 let tokenizer = Arc::clone(&tokenizer);
                 task::spawn(async move {
-                    let mut output: Option<SyncCollectionResult> = None;
+                    let mut output: Option<GenerationOutput> = None;
                     let mut collected_token_ids: Vec<u32> = Vec::new();
 
                     while let Some(msg) = rx.recv().await {
@@ -1282,7 +1240,7 @@ impl LLMEngine {
                                     .decode(&decoded_ids, true)
                                     .expect("unable to decode!");
 
-                                output = Some(SyncCollectionResult::Completed(GenerationOutput {
+                                output = Some(GenerationOutput {
                                     seq_id,
                                     prompt_length,
                                     prompt_start_time: prompt_start,
@@ -1290,7 +1248,7 @@ impl LLMEngine {
                                     decode_finish_time: decode_finish,
                                     decoded_length: decoded_len,
                                     decode_output,
-                                }));
+                                });
                                 break;
                             }
                             StreamItem::Token(_) => {
@@ -1328,29 +1286,6 @@ impl LLMEngine {
                             }
                             StreamItem::Done(_) => {
                                 crate::log_info!("Sequence [seq_id {}] finished!", seq_id);
-                                break;
-                            }
-                            StreamItem::ToolCallPause {
-                                session_id,
-                                prompt_start_time,
-                                decode_start_time,
-                                decoded_length,
-                            } => {
-                                // Return tool call pause info for caller to handle
-                                crate::log_info!(
-                                    "Sequence [seq_id {}] tool call pause with session_id: {}",
-                                    seq_id,
-                                    session_id
-                                );
-                                output = Some(SyncCollectionResult::ToolCallPause {
-                                    session_id,
-                                    seq_id,
-                                    prompt_length,
-                                    output_ids: collected_token_ids.clone(),
-                                    prompt_start_time,
-                                    decode_start_time,
-                                    decoded_length,
-                                });
                                 break;
                             }
                             StreamItem::Error(e) => {

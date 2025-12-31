@@ -5,7 +5,7 @@
 
 use super::transport::{framing, Transport, TransportError};
 use super::types::*;
-use crate::tools::Tool;
+
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -59,17 +59,6 @@ impl McpServer {
     /// Register a tool with an optional handler
     pub fn register_tool(&mut self, tool: McpTool, handler: Option<ToolHandler>) {
         self.tools.insert(tool.name.clone(), (tool, handler));
-    }
-
-    /// Register a tool from our internal Tool type
-    pub fn register_internal_tool(&mut self, tool: &Tool, handler: Option<ToolHandler>) {
-        let mcp_tool = McpTool {
-            name: tool.function.name.clone(),
-            description: Some(tool.function.description.clone()),
-            input_schema: tool.function.parameters.clone(),
-            output_schema: None,
-        };
-        self.register_tool(mcp_tool, handler);
     }
 
     /// Register a resource

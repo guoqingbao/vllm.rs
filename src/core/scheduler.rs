@@ -363,43 +363,24 @@ impl Scheduler {
             }
 
             // Check for tool call end token BEFORE checking EOS
-            // Handle three mcp_mode states:
-            // - None: No tools, ignore </tool_call> detection (continue streaming)
-            // - Some(false): External tools, finish stream at </tool_call>
-            // - Some(true): MCP internal, pause stream, execute, resume
-            if let Some(mcp_mode) = self.running[idx].sampling_params.mcp_mode {
+            // When tools are enabled (mcp_mode.is_some()), finish stream at </tool_call>
+            if self.running[idx].sampling_params.mcp_mode.is_some() {
                 // Check if this is a tool call end (supports both XML </tool_call> and JSON } patterns)
                 // We check BEFORE borrowing seq mutably
                 let is_end = self.is_tool_call_end(token, idx);
                 if is_end {
                     crate::log_info!(
-                        "[Seq {}] Detected </tool_call> token {} (mcp_mode: {})",
+                        "[Seq {}] Detected </tool_call> token {}, finishing for external handling",
                         seq_id,
-                        token,
-                        mcp_mode
+                        token
                     );
-                }
-                if is_end {
                     let seq = &mut self.running[idx];
                     seq.append_token(token);
-                    if mcp_mode {
-                        // MCP internal mode: pause stream, cache context for follow-up
-                        crate::log_info!(
-                            "[Seq {}] Tool call end detected, pausing for MCP execution",
-                            seq_id
-                        );
-                        let _session_id = self.force_cache_for_tool_call(idx, active_sessions);
-                        continue;
-                    } else {
-                        // External tool mode: finish stream so user can handle tool calls
-                        crate::log_info!(
-                            "[Seq {}] Tool call end detected, finishing stream for external handling",
-                            seq_id
-                        );
-                        seq.status = SequenceStatus::Finished;
-                        self.block_manager.deallocate(seq);
-                        continue;
-                    }
+                    seq.is_tool_call_end = true;
+                    // External tool mode: finish stream so client can handle tool calls
+                    seq.status = SequenceStatus::Finished;
+                    self.block_manager.deallocate(seq);
+                    continue;
                 }
             }
 
@@ -487,11 +468,6 @@ impl Scheduler {
 
                 seq.token_ids.extend(new_tokens_ids.clone());
                 seq.output_ids.clear();
-
-                // CRITICAL: Clear tool_call_session_id from previous tool call cycle
-                // This prevents spurious ToolCallPause when this sequence finishes normally
-                // New tool calls will set a new session_id if they occur
-                seq.tool_call_session_id = None;
 
                 if let Some(img) = &images {
                     let mut img = img.clone(); // update the images
@@ -1194,35 +1170,5 @@ impl Scheduler {
         }
 
         false
-    }
-
-    /// Force context-cache for tool call continuation, generating session_id if needed
-    /// Returns the session_id to be used for resuming generation
-    pub fn force_cache_for_tool_call(
-        &mut self,
-        idx: usize,
-        active_sessions: &mut VecDeque<(usize, String)>,
-    ) -> String {
-        let seq = &mut self.running[idx];
-
-        // Generate session_id if not present in sampling params
-        let session_id = seq.sampling_params.session_id.clone().unwrap_or_else(|| {
-            let id = format!("tool_call_{}", seq.id);
-            seq.sampling_params.session_id = Some(id.clone());
-            id
-        });
-
-        // Add to active sessions if not already present
-        if !active_sessions.iter().any(|(id, _)| *id == seq.id) {
-            active_sessions.push_back((seq.id, session_id.clone()));
-        }
-
-        // Set the tool_call_session_id on the sequence for engine to detect
-        seq.tool_call_session_id = Some(session_id.clone());
-
-        // Force swap_out_or_cache to preserve the KV cache
-        self.swap_out_or_cache(idx, session_id.clone());
-
-        session_id
     }
 }

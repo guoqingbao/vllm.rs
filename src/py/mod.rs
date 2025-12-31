@@ -91,17 +91,8 @@ impl Engine {
                         PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
                     })?;
 
-                // Extract GenerationOutput from SyncCollectionResult
-                let outputs: Vec<GenerationOutput> = results
-                    .into_iter()
-                    .filter_map(|r| match r {
-                        SyncCollectionResult::Completed(output) => Some(output),
-                        SyncCollectionResult::ToolCallPause { .. } => {
-                            // Python sync API does not support MCP tool calling
-                            None
-                        }
-                    })
-                    .collect();
+                // GenerationOutput is returned directly
+                let outputs: Vec<GenerationOutput> = results;
 
                 Ok(outputs)
             })
@@ -164,7 +155,6 @@ impl PyStreamItem {
             StreamItem::Completion(_) => "COMPLETION",
             StreamItem::Done(_) => "DONE",
             StreamItem::Error(_) => "ERROR",
-            StreamItem::ToolCallPause { .. } => "TOOL_CALL_PAUSE",
         }
     }
 
@@ -182,18 +172,6 @@ impl PyStreamItem {
             StreamItem::Completion(c) => (c.0, c.1, c.2, c.3.clone()).into_py_any(py),
             StreamItem::Done(d) => (d.0, d.1, d.2, d.3).into_py_any(py),
             StreamItem::Error(e) => e.into_py_any(py),
-            StreamItem::ToolCallPause {
-                session_id,
-                prompt_start_time,
-                decode_start_time,
-                decoded_length,
-            } => (
-                session_id.clone(),
-                *prompt_start_time,
-                *decode_start_time,
-                *decoded_length,
-            )
-                .into_py_any(py),
         }
     }
 
