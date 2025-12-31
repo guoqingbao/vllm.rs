@@ -1,7 +1,7 @@
 use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
-use crate::core::{GenerationOutput, SyncCollectionResult};
+use crate::core::GenerationOutput;
 use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
