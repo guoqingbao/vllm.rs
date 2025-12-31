@@ -543,6 +543,7 @@ impl ModelRunner {
             }
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             let seqlen_k = if self.config.flash_context.unwrap_or(false)
+                || self.config.prefix_cache.unwrap_or(false)
                 || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {
                 seq.num_cached_tokens + num_tokens
@@ -602,7 +603,7 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        // Handle context cache
+        // Handle cached prefix KV reuse
         let (context_lens, block_tables) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
             let context_lens_t = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;

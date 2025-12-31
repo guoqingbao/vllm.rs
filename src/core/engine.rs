@@ -1,5 +1,4 @@
 //src/core/engine.rs
-use super::fingerprint::FingerprintManager;
 use super::runner::{ModelRunner, RunnerType, Seqs};
 use super::scheduler::{Scheduler, KVCACHE_SWAP_THRESHOLD};
 use super::sequence::Sequence;
@@ -38,7 +37,7 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -89,14 +88,11 @@ pub struct LLMEngine {
     decode_length: HashMap<usize, usize>,
     last_check_throughput_time: usize,
     active_requests: HashSet<usize>,
-    active_sessions: VecDeque<(usize, String)>,
     cancelled_sequences: Vec<usize>,
     stop_flag: Arc<AtomicBool>,
     has_vision: bool,
     model_name: String,
     pub img_cfg: Option<ImageProcessConfig>,
-    /// Fingerprint manager for automatic session detection
-    fingerprint_manager: FingerprintManager,
 }
 
 impl LLMEngine {
@@ -418,13 +414,11 @@ impl LLMEngine {
             decode_length: HashMap::new(),
             last_check_throughput_time: 0,
             active_requests: HashSet::new(),
-            active_sessions: VecDeque::new(),
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
             has_vision: config.is_multi_model.unwrap_or(false),
             img_cfg,
             model_name,
-            fingerprint_manager: FingerprintManager::new(),
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -494,77 +488,14 @@ impl LLMEngine {
             params.frequency_penalty = frequency_penalty;
             params.presence_penalty = presence_penalty;
         }
-        let session_id = params.session_id.clone();
-        let session_id = if session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
-            None
-        } else {
-            session_id.clone()
-        };
-
-        let seq_id = if let Some(session_id) = session_id {
-            if self.econfig.server_mode.unwrap_or(true) {
-                crate::log_warn!(
-                    "Cached {} sessions: {:?} ({} tokens cached).",
-                    self.active_sessions.len(),
-                    self.active_sessions,
-                    self.get_num_cached_tokens(),
-                );
-            }
-
-            // Try to reuse cached sequence if available
-            let seq_id = if self.scheduler.has_cache(&session_id) {
-                match self.scheduler.get_cache(
-                    &session_id,
-                    token_ids.clone(),
-                    &mut self.active_sessions,
-                    images,
-                    image_idx,
-                ) {
-                    Ok(id) => Some(id),
-                    Err(e) => {
-                        crate::log_warn!("Get cache error: {:?}", e);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            let seq_id = seq_id.unwrap_or_else(|| {
-                // Cache miss: create new sequence
-                let seq = Sequence::new(
-                    token_ids,
-                    self.econfig.block_size,
-                    params,
-                    images,
-                    image_idx,
-                );
-                let id = self.scheduler.add(seq);
-
-                // Update active_sessions queue
-                if let Some(pos) = self
-                    .active_sessions
-                    .iter()
-                    .position(|(_, s)| s == &session_id)
-                {
-                    self.active_sessions.remove(pos);
-                }
-                self.active_sessions.push_back((id, session_id.clone()));
-                id
-            });
-
-            seq_id
-        } else {
-            let seq = Sequence::new(
-                token_ids,
-                self.econfig.block_size,
-                params,
-                images,
-                image_idx,
-            );
-            let seq_id = self.scheduler.add(seq);
-            seq_id
-        };
+        let seq = Sequence::new(
+            token_ids,
+            self.econfig.block_size,
+            params,
+            images,
+            image_idx,
+        );
+        let seq_id = self.scheduler.add(seq);
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -634,7 +565,7 @@ impl LLMEngine {
         pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
 
         // Get scheduled sequence indexes and prefill flag
-        let (scheduled_ids, is_prefill) = match self.scheduler.schedule(&mut self.active_sessions) {
+        let (scheduled_ids, is_prefill) = match self.scheduler.schedule() {
             Ok((ids, prefill)) => (ids, prefill),
             Err(_) => (vec![], true),
         };
@@ -705,16 +636,11 @@ impl LLMEngine {
                     return Ok(0);
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
-                    self.scheduler.postprocess(
-                        &finished_indices,
-                        &output_ids,
-                        &mut self.active_sessions,
-                    );
+                    self.scheduler.postprocess(&finished_indices, &output_ids);
                     DecodedIds(Either::Left(finished_indices))
                 }
             } else {
-                self.scheduler
-                    .postprocess(&scheduled_ids, &output_ids, &mut self.active_sessions);
+                self.scheduler.postprocess(&scheduled_ids, &output_ids);
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
@@ -754,7 +680,8 @@ impl LLMEngine {
                                 decode_finish_time
                             };
 
-                            if s.is_tool_call_end { //finish early, we need to send the last token
+                            if s.is_tool_call_end {
+                                //finish early, we need to send the last token
                                 if *request_type == RequestType::Stream {
                                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                         if let Some(tok) = decoder.step(s.last_token) {
@@ -780,20 +707,6 @@ impl LLMEngine {
                                     decode_finish_time,
                                     s.output_ids.clone(),
                                 )));
-                            }
-                        }
-                    }
-
-                    // Extend fingerprint for auto-sessions when sequence completes
-                    // This allows subsequent requests to match the conversation
-                    if let Some((_, session_id)) =
-                        self.active_sessions.iter().find(|(id, _)| *id == seq_id)
-                    {
-                        if session_id.starts_with("auto_") {
-                            // Decode the output to get the assistant response text
-                            if let Ok(decoded_text) = self.tokenizer.decode(&s.output_ids, true) {
-                                self.fingerprint_manager
-                                    .extend_session_fingerprint(&session_id.clone(), &decoded_text);
                             }
                         }
                     }
@@ -826,9 +739,7 @@ impl LLMEngine {
                                 s.len(),
                                 time_costs as f32 / 1000f32,
                                 s.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
-                                if let Some(_) =
-                                    self.active_sessions.iter().position(|(id, _)| *id == s.id)
-                                {
+                                if s.num_cached_tokens > 0 {
                                     ", cache included"
                                 } else {
                                     ""
@@ -908,46 +819,14 @@ impl LLMEngine {
     }
 
     pub fn try_release_cache(&mut self, tokens_required: usize) -> bool {
-        let initial_available_tokens = self.get_available_kv_tokens();
-        let mut active_session_reqeusts = VecDeque::new();
-        while let Some((seq_id, session_id)) = self.active_sessions.pop_front() {
-            if self.active_requests.contains(&seq_id) {
-                active_session_reqeusts.push_back((seq_id, session_id.clone()));
-                continue;
-            };
-            // Release GPU cached, not swapped out
-            if self.scheduler.get_cached_status(&session_id) == SequenceStatus::Cached {
-                if !self.scheduler.try_swap_out_by_id(seq_id, false) {
-                    self.scheduler.release_cache(seq_id);
-                    // Also remove fingerprint for auto-sessions
-                    if session_id.starts_with("auto_") {
-                        self.fingerprint_manager.remove_session(&session_id);
-                    }
-                    if self.econfig.server_mode.unwrap_or(true) {
-                        crate::log_warn!(
-                            "🗑️ Seq {} - cache removed (session id {})!\n",
-                            seq_id,
-                            session_id
-                        );
-                    }
-                } else {
-                    // Swapped out but still in cached sessions
-                    crate::log_warn!(
-                        "Swapped out cache for Seq {} (session_id {}).",
-                        seq_id,
-                        session_id,
-                    );
-                    active_session_reqeusts.push_back((seq_id, session_id.clone()));
-                }
-            }
-            if self.scheduler.get_available_kv_tokens() > tokens_required {
-                break;
-            }
+        if tokens_required == 0 {
+            return self.scheduler.evict_prefix_cache_blocks(1) > 0;
         }
-        // Push back active session requests
-        self.active_sessions.extend(active_session_reqeusts);
 
-        initial_available_tokens - self.get_available_kv_tokens() > 0
+        let required_blocks = tokens_required.div_ceil(self.econfig.block_size);
+        self.scheduler
+            .evict_prefix_cache_until_free(required_blocks)
+            > 0
     }
 
     pub fn check_canceled(&mut self, reason: Option<String>) {
@@ -957,13 +836,6 @@ impl LLMEngine {
         for i in 0..self.cancelled_sequences.len() {
             let seq_id = self.cancelled_sequences[i];
             self.scheduler.cancel(seq_id);
-            if let Some(pos) = self
-                .active_sessions
-                .iter()
-                .position(|(id, _)| *id == seq_id)
-            {
-                self.active_sessions.remove(pos);
-            }
             if let Some(_) = self.active_requests.get(&seq_id) {
                 self.active_requests.remove(&seq_id);
             }
@@ -1052,39 +924,8 @@ impl LLMEngine {
         let enable_thinking = params.thinking.unwrap_or(false);
         prompt_template.set_enable_thinking(enable_thinking);
 
-        let mut context_cache_reqeust = false;
-
-        let session_id =
-            if params.session_id.is_some() && !self.econfig.flash_context.unwrap_or(false) {
-                crate::log_warn!("`session_id` detected but `context-cache` is not enabled!");
-                None
-            } else {
-                params.session_id.clone()
-            };
-
-        if let Some(session_id) = &session_id {
-            if self.scheduler.has_cache(&session_id) {
-                //context cache, only retrieve the last message
-                context_cache_reqeust = true;
-                prompt_template.set_messages(&vec![messages[messages.len() - 1].clone()]);
-            }
-        }
-
-        let image_idx: i32 = if context_cache_reqeust {
-            if messages[messages.len() - 1].num_images > 0 {
-                // Find the image index of the current context request
-                let mut idx = 0;
-                for i in 0..messages.len() - 1 {
-                    idx += messages[i].num_images;
-                }
-                idx as i32
-            } else {
-                -1 // No image for the continued request
-            }
-        } else {
-            prompt_template.set_messages(messages);
-            0 // Start from beginning (no context-cache)
-        };
+        prompt_template.set_messages(messages);
+        let image_idx: i32 = 0;
         let prompt_processed = prompt_template
             .apply_chat_template(log)
             .map_err(candle_core::Error::wrap);
@@ -1144,29 +985,9 @@ impl LLMEngine {
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            // Fingerprint-based automatic session detection
-            // When context-cache is enabled and no session_id provided, auto-detect via fingerprint
-            let mut param = param.clone();
-            let has_session = param.session_id.is_some();
-            let flash_enabled = self.econfig.flash_context.unwrap_or(false);
-
-            if !has_session && flash_enabled {
-                // Build messages as (role, content) tuples for fingerprint computation
-                let msg_tuples: Vec<(String, String)> = messages
-                    .iter()
-                    .map(|m| (m.role.clone(), m.content.clone()))
-                    .collect();
-
-                let fingerprint = FingerprintManager::compute_fingerprint(&msg_tuples);
-                let session_id = self
-                    .fingerprint_manager
-                    .find_or_create_session(fingerprint, &msg_tuples);
-                param.session_id = Some(session_id);
-            }
-
-            let (prompt, image_idx) = self.apply_chat_template(&param, messages, false);
+            let (prompt, image_idx) = self.apply_chat_template(param, messages, false);
             if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(&param, &prompt, RequestType::Completion, &images, image_idx)
+                self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
             {
                 receivers.push((seq_id, prompt_length, rx));
             }
@@ -1318,9 +1139,6 @@ impl LLMEngine {
         crate::log_error!("***Release all resources for future usage!");
         self.scheduler.clear_finished();
         self.scheduler.release_waitings();
-        self.active_sessions.clear();
-        // Reset fingerprint manager when all resources are freed
-        self.fingerprint_manager = FingerprintManager::new();
     }
 
     pub fn generate_stream(
@@ -1329,28 +1147,8 @@ impl LLMEngine {
         messages: &Vec<Message>,
         images: Option<ImageData>, //collection of images of the full conversation
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        // Fingerprint-based automatic session detection
-        // When context-cache is enabled and no session_id provided, auto-detect via fingerprint
-        let mut params = params.clone();
-        let has_session = params.session_id.is_some();
-        let flash_enabled = self.econfig.flash_context.unwrap_or(false);
-
-        if !has_session && flash_enabled {
-            // Build messages as (role, content) tuples for fingerprint computation
-            let msg_tuples: Vec<(String, String)> = messages
-                .iter()
-                .map(|m| (m.role.clone(), m.content.clone()))
-                .collect();
-
-            let fingerprint = FingerprintManager::compute_fingerprint(&msg_tuples);
-            let session_id = self
-                .fingerprint_manager
-                .find_or_create_session(fingerprint, &msg_tuples);
-            params.session_id = Some(session_id);
-        }
-
-        let (prompt, image_idx) = self.apply_chat_template(&params, messages, false);
-        match self.add_request(&params, &prompt, RequestType::Stream, &images, image_idx) {
+        let (prompt, image_idx) = self.apply_chat_template(params, messages, false);
+        match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {
                 candle_core::bail!("{:?}", e)
@@ -1366,34 +1164,21 @@ impl LLMEngine {
                     .econfig
                     .max_model_len
                     .ok_or_else(|| candle_core::Error::msg("max_model_len not set!"))?;
-                let token_used = if let Some((seq_id, _)) =
-                    self.active_sessions.iter().find(|(_, v)| *v == sid)
-                {
-                    self.scheduler.get_seq_token_usage(*seq_id)?
-                } else {
-                    candle_core::bail!("Seq with session_id {} not found", sid)
-                };
+                let (seq_id, status) =
+                    self.scheduler.find_seq_by_session_id(&sid).ok_or_else(|| {
+                        candle_core::Error::msg(format!("Seq with session_id {} not found", sid))
+                    })?;
+                let token_used = self.scheduler.get_seq_token_usage(seq_id)?;
 
                 let total_kv_cache_tokens = self.scheduler.get_total_kv_tokens();
                 let (swap_used, total_swap_memory) = self.scheduler.get_cpu_swap_usage();
 
-                let mut session_status = "Waiting".to_string();
-                if self.scheduler.has_cache(&sid) {
-                    let status = self.scheduler.get_cached_status(&sid).to_string();
-                    if status == "FinishSwapped" {
-                        session_status = "Swapped".to_string();
-                    } else {
-                        session_status = status.clone();
+                let session_status = match status {
+                    SequenceStatus::FinishSwapped | SequenceStatus::Swapped => {
+                        "Swapped".to_string()
                     }
-                } else if let Some((seq_id, _)) =
-                    self.active_sessions.iter().find(|(_, v)| v == &sid)
-                {
-                    if self.active_requests.contains(&seq_id) {
-                        session_status = "Running".to_string();
-                    }
-                } else {
-                    session_status = "Finished".to_string()
-                }
+                    _ => status.to_string(),
+                };
 
                 Ok(UsageResponse {
                     token_used,

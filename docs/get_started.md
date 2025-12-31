@@ -4,7 +4,7 @@ This guide walks through building and running vLLM.rs across CUDA/Metal, differe
 
 ## Build & features
 - **Backends**: `--features cuda[,nccl,graph,flash-attn,flash-context]` or `--features metal`. CPU-only is supported but slow.
-- **Quant/accel toggles**: `--fp8-kvcache` (KV in FP8, CUDA), `--flash-context` (Ampere+, long compile), `--context-cache` (session reuse).
+- **Quant/accel toggles**: `--fp8-kvcache` (KV in FP8, CUDA), `--flash-context` (Ampere+, long compile), `--prefix-cache` (prefix KV reuse).
 - **Python bindings**: add feature `python` when building wheels (`./build.sh --features python`).
 
 ### Build (CUDA)
@@ -30,7 +30,7 @@ cargo build --release --features metal
 - **CUDA text model (chat/server)**  
   ```bash
   target/release/vllm-rs --m Qwen/Qwen2.5-7B-Instruct --max-model-len 131072 \
-    --kv-fraction 0.6 --context-cache --ui-server
+    --kv-fraction 0.6 --prefix-cache --ui-server
   ```
 - **Metal (Mac) text model**  
   ```bash
@@ -38,20 +38,20 @@ cargo build --release --features metal
   ```
 - **GGUF quantized**  
   ```bash
-  target/release/vllm-rs --f /path/model-Q4_K_M.gguf --max-model-len 65536 --context-cache
+  target/release/vllm-rs --f /path/model-Q4_K_M.gguf --max-model-len 65536 --prefix-cache
   ```
 - **Embeddings** (same server; OpenAI `/v1/embeddings`)  
   ```bash
-  target/release/vllm-rs --m Qwen/Qwen2.5-7B-Instruct --context-cache
+  target/release/vllm-rs --m Qwen/Qwen2.5-7B-Instruct --prefix-cache
   # curl -d '{"input":"hello","embedding_type":"mean"}' http://localhost:8000/v1/embeddings
   ```
 - **Multimodal**  
   ```bash
   # Update image in the Chat UI
-  target/release/vllm-rs --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+  target/release/vllm-rs --m Qwen/Qwen3-VL-8B-Instruct --ui-server --prefix-cache
   ```
 
-Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA KV share), `--cpu-mem-fold` (CPU swap ratio), `--port`, `--fp8-kvcache`, `--context-cache`, `--ui-server`, `--batch` (perf test).
+Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA KV share), `--cpu-mem-fold` (CPU swap ratio), `--port`, `--fp8-kvcache`, `--prefix-cache`, `--prefix-cache-max-tokens`, `--ui-server`, `--batch` (perf test).
 
 ## 4) Multi-rank (single node)
 - **NCCL multi-GPU**  
@@ -64,18 +64,18 @@ Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA
 - **PD server (prefill host, usually memory-rich)**  
   ```bash
   target/release/vllm-rs --pd-server --port 8000 \
-    --m Qwen/Qwen3-30B-A3B-Instruct-2507 --context-cache
+    --m Qwen/Qwen3-30B-A3B-Instruct-2507 --prefix-cache
   ```
 - **PD client (decode host)**  
   ```bash
   target/release/vllm-rs --server --pd-client --pd-url 0.0.0.0:8000 \
-    --m Qwen/Qwen3-30B-A3B-Instruct-2507 --context-cache
+    --m Qwen/Qwen3-30B-A3B-Instruct-2507 --prefix-cache
   ```
 - Same weights/config on both ends; Local IPC used automatically on same node CUDA, TCP when `--pd-url` is set. Monitor logs for transfer and swap events.
 
-## Context cache
-- Enable with `--context-cache` (CUDA/Metal). Reuse a `session_id` across turns to skip re-prefill.  
-  First turn: `{"messages":[...],"session_id":"chat-123"}`; follow-up: send only new message with same `session_id`.
+## Prefix cache
+- Enable with `--prefix-cache` (CUDA/Metal). Prefix reuse is automatic; no `session_id` required.
+- Use `--prefix-cache-max-tokens` to cap the cache size (rounded down to block size).
 - Tune `--max-model-len`, `--kv-fraction`, `--cpu-mem-fold`; avoid overcommitting KV or cache will swap/evict.
 
 ## APIs (OpenAI-style)

@@ -12,7 +12,7 @@
 ## ✨ 主要特性
 
 * 🔧 **纯 Rust 后端** – 完全**不依赖 PyTorch**
-* 🚀 **高性能** (支持**上下文缓存、PD分离**)
+* 🚀 **高性能** (支持**前缀缓存、PD分离**)
 * 🧠 **极简核心** – 核心逻辑仅 **<3000 行** Rust 代码
 * 💻 **跨平台支持** – 支持 **CUDA**（Linux/Windows）与 **Metal**（macOS）
 * 🤖 **内置API 服务与ChatGPT风格网页** – Rust 原生实现的聊天与 API/Web 服务
@@ -76,7 +76,7 @@
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [Embedding](docs/embeddings.md)
 - [多模态 (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
-- [上下文缓存](docs/context-cache.md)
+- [前缀缓存](docs/prefix-cache.md)
 - [Rust库](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [性能测试](docs/performance.md)
@@ -86,7 +86,7 @@
 ### 📦 从pip安装
    💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
    
-   💡 2. 预编译包`context cache` 依赖于Flash attention, 如需FP8 KvCache，请重新编译并去除`flash-context`特性
+   💡 2. 预编译包启用了`flash-context`特性，如需FP8 KvCache，请重新编译并去除`flash-context`特性
 
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
@@ -98,18 +98,18 @@ python3 -m pip install vllm_rs
 
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
-   💡当`context-cache`启用时，如客户端未提供 `session_id`，则启用fingerprint检测自动分配session_id，
+   💡前缀缓存为自动匹配公共前缀，无需 `session_id`。
 
-   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`context-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
+   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`prefix-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
 
   <details open>
     <summary>单卡 + GGUF模型</summary>
 
   ```bash
   # CUDA
-  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --context-cache
+  python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.7 --ui-server --prefix-cache
   # Metal/MacOS (MacOS Tahoe之前的系统可能会存在生成过慢问题)
-  python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
+  python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --prefix-cache
    ```
   </details>
 
@@ -117,7 +117,7 @@ python3 -m pip install vllm_rs
     <summary>多卡 + 本地GGUF模型</summary>
 
    ```bash
-   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --ui-server --context-cache
+   python3 -m vllm_rs.server --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --d 0,1 --ui-server --prefix-cache
    ```
   </details>
 
@@ -128,7 +128,7 @@ python3 -m pip install vllm_rs
 
    ```bash
    # 同时将权重量化为Q4K格式，启用最长上下文：
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --context-cache
+   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
    ```
   </details>
 
@@ -137,7 +137,7 @@ python3 -m pip install vllm_rs
 
 ```bash
 # 使用内置ChatUI上传或提及图片url (格式 '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --prefix-cache
 ```
 
   <details>
@@ -194,7 +194,7 @@ cargo build --release --features metal
     <summary>多卡量化模型</summary>
 
    ```bash
-   target/release/vllm-rs --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --context-cache
+   target/release/vllm-rs --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --prefix-cache
    ```
   </details>
 
@@ -213,7 +213,7 @@ cargo build --release --features metal
 通过Model Context Protocol让LLM调用外部工具。
 
 ```bash
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache --mcp-config ./mcp.json
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache --mcp-config ./mcp.json
 ```
 查看 [**MCP文档 →**](docs/mcp_tool_calling.md)
 
@@ -271,7 +271,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
 
 > ⚠️ 启用 Flash Attention（CUDA）时，首次编译可能需要较长时间。
 
-> ⚠️ 启用 上下文缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh`编译 或 `run.sh`运行）
+> ⚠️ 启用 前缀缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh`编译 或 `run.sh`运行）
 
 ### 🛠️ 环境要求
 
@@ -345,7 +345,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |
 | `--ui-server`       |  服务模式: 启动API服务，同时启动ChatGPT风格的内置对话网页服务 |
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
-| `--context-cache`   | 启用上下文缓存，用于多轮对话 |
+| `--prefix-cache`   | 启用前缀缓存，用于多轮对话 |
+| `--prefix-cache-max-tokens`   | 限制前缀缓存大小（按 block size 向下取整） |
 
 ### MCP配置参数
 
@@ -370,10 +371,10 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] 多卡并行推理（Safetensors模型、GPTQ/AWQ及GGUF量化模型）
 * [x] Metal/macOS平台Prompt处理加速
 * [x] 分块预填充（Chunked Prefill）
-* [x] 上下文缓存 (使用`context-cache`参数)
+* [x] 前缀缓存 (使用`prefix-cache`参数)
 * [x] 从Hugginface Hub下载并加载模型
 * [ ] 从ModelScope下载并加载 (中国大陆地区)
-* [x] Metal/macOS平台上下文缓存
+* [x] Metal/macOS平台前缀缓存
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)

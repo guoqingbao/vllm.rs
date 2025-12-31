@@ -24,7 +24,8 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--frequency-penalty", type=float, default=None)
     parser.add_argument("--presence-penalty", type=float, default=None)
-    parser.add_argument("--context-cache", action="store_true")
+    parser.add_argument("--prefix-cache", action="store_true")
+    parser.add_argument("--prefix-cache-max-tokens", type=int, default=None)
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
     parser.add_argument("--kv-fraction", type=float, default=None)
@@ -69,7 +70,9 @@ def run_server(args):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=args.context_cache,
+        flash_context=args.prefix_cache,
+        prefix_cache=args.prefix_cache,
+        prefix_cache_max_tokens=args.prefix_cache_max_tokens,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=True,
         cpu_mem_fold=args.cpu_mem_fold,
