@@ -1121,7 +1121,7 @@ pub fn prepare_engine_config(
     #[cfg(feature = "nccl")]
     let use_runner = if num_shards > 1 {
         // if !econfig.flash_context.unwrap_or(false) {
-        //     crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if context-cache or flash-context feature built-in!");
+        //     crate::log_warn!("Prefix cache is forced to be enabled under multi-rank inference if prefix-cache or flash-context feature built-in!");
         //     econfig.flash_context = Some(true);
         // }
         true

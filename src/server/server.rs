@@ -301,12 +301,6 @@ pub async fn chat_completion(
                         // Don't detect tool calls inside code blocks (they're examples/documentation)
                         if token.contains("```") || accumulated_output.ends_with("```") {
                             in_code_block = !in_code_block;
-                            if in_code_block {
-                                crate::log_info!(
-                                    "[Seq {}] Entering code block, tool call detection paused",
-                                    current_seq_id
-                                );
-                            }
                         }
 
                         // When tools are available, use state machine for tool call detection

@@ -238,6 +238,8 @@ pub struct EngineConfig {
     pub generation_cfg: Option<GenerationConfig>,
     pub seed: Option<u64>,
     pub flash_context: Option<bool>,
+    pub prefix_cache: Option<bool>,
+    pub prefix_cache_max_tokens: Option<usize>,
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
@@ -293,6 +295,10 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub flash_context: Option<bool>,
     #[pyo3(get, set)]
+    pub prefix_cache: Option<bool>,
+    #[pyo3(get, set)]
+    pub prefix_cache_max_tokens: Option<usize>,
+    #[pyo3(get, set)]
     pub fp8_kvcache: Option<bool>,
     #[pyo3(get, set)]
     pub server_mode: Option<bool>,
@@ -325,6 +331,8 @@ impl EngineConfig {
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
         flash_context: Option<bool>,
+        prefix_cache: Option<bool>,
+        prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
@@ -340,11 +348,11 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if flash_context.unwrap_or(false)
+        if prefix_cache.unwrap_or(false)
             && fp8_kvcache.unwrap_or(false)
             && (cfg!(feature = "metal") || cfg!(feature = "flash-context"))
         {
-            panic!("Error: context-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context` (`--context-cache`)).");
+            panic!("Error: prefix-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
         }
 
         Self {
@@ -369,6 +377,8 @@ impl EngineConfig {
             generation_cfg,
             seed,
             flash_context,
+            prefix_cache,
+            prefix_cache_max_tokens,
             fp8_kvcache,
             server_mode,
             pd_config,

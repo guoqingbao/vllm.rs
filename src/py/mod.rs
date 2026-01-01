@@ -1,7 +1,7 @@
 use crate::core::engine::LLMEngine;
 use crate::core::engine::StreamItem;
 use crate::core::engine::GLOBAL_RT;
-use crate::core::{GenerationOutput, SyncCollectionResult};
+use crate::core::GenerationOutput;
 use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
@@ -261,7 +261,8 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
+        generation_cfg=None, seed=None, flash_context = None,
+        prefix_cache=None, prefix_cache_max_tokens=None, fp8_kvcache=None,
         server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         disable_flash_attn=None))]
@@ -281,6 +282,8 @@ impl EngineConfig {
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
         flash_context: Option<bool>,
+        prefix_cache: Option<bool>,
+        prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
@@ -296,12 +299,11 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
+        if prefix_cache.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
             if cfg!(feature = "metal") {
-                panic!("Error: fp8 kvcache is not compatible under context-context on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`).");
+                panic!("Error: fp8 kvcache is not compatible with prefix cache on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
             } else {
-                panic!("Error: This python package build has flash-context (context-cache using flash attention), which does not compatible with fp8 kvcache
-                !\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`) when building the package.");
+                panic!("Error: This python package build has flash-context kernels which are not compatible with fp8 kvcache when prefix cache is enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`) when building the package.");
             }
         }
 
@@ -333,6 +335,8 @@ impl EngineConfig {
             generation_cfg,
             seed,
             flash_context,
+            prefix_cache,
+            prefix_cache_max_tokens,
             fp8_kvcache,
             server_mode,
             pd_config,

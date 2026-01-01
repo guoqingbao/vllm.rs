@@ -474,7 +474,11 @@ pub struct Args {
     pub seed: Option<u64>, //seed for reproduce the results
 
     #[arg(long, default_value_t = false)]
-    pub context_cache: bool,
+    pub prefix_cache: bool,
+
+    /// Max cached prefix size in tokens (rounded down to block size).
+    #[arg(long, default_value = None)]
+    pub prefix_cache_max_tokens: Option<usize>,
 
     #[arg(long, default_value_t = false)]
     pub server: bool, //server mode

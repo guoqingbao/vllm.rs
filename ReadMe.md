@@ -77,7 +77,7 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
-- [Context cache](docs/context-cache.md)
+- [Prefix cache](docs/prefix-cache.md)
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
@@ -101,18 +101,18 @@ python3 -m pip install vllm_rs
 
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
-💡When `context-cache` enabled, fingerprint-based session detection is enabled by default if `session_id` not provided in the client side.
+💡Prefix cache is automatic and does not require `session_id`.
 
- ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `context-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
+ ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `prefix-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
 
   <details open>
     <summary>Single GPU + GGUF model</summary>
 
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --context-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --prefix-cache
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
-python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --context-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --prefix-cache
 ```
 
   </details>
@@ -121,7 +121,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --u
     <summary>Multi-GPU + Safetensors model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --context-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
 ```
 
   </details>
@@ -131,7 +131,7 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-serv
 
 ```bash
 # Load as Q4K format, enable maximum context length:
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1 --ui-server --context-cache
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
 ```
 
   </details>
@@ -142,7 +142,7 @@ python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,
 
 ```bash
 # Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --context-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --prefix-cache
 ```
 
   </details>
@@ -180,9 +180,9 @@ cargo build --release --features metal
 
   ```bash
   # CUDA
-  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache
+  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS
-  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --context-cache
+  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```
   
   <details open>
@@ -190,7 +190,7 @@ cargo build --release --features metal
 
   ```bash
   # Replace "--ui-server" with "--server" will only start API server
-  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --context-cache
+  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --prefix-cache
   ```
 
   </details>
@@ -199,7 +199,7 @@ cargo build --release --features metal
     <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --context-cache
+  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --prefix-cache
   ```
 
   </details>
@@ -224,7 +224,7 @@ Enable LLMs to call external tools via Model Context Protocol.
 
 ```bash
 # Start with multiple mcp servers
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --context-cache --mcp-config ./mcp.json
+python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache --mcp-config ./mcp.json
 ```
 
 See [**MCP Documentation →**](docs/mcp_tool_calling.md)
@@ -322,7 +322,7 @@ maturin build --release --features cuda,python
 # Naive CUDA (+CUDA Graph, experimental)
 ./build.sh --release --features cuda,graph,python
 
-# CUDA (with context-cache and FP8 KV Cache, no Flash Attention, compatible with V100) 
+# CUDA (with prefix-cache and FP8 KV Cache, no Flash Attention, compatible with V100) 
 ./build.sh --release --features cuda,nccl,python
 
 # CUDA (+Flash Attention, only used in prefill stage) 
@@ -331,7 +331,7 @@ maturin build --release --features cuda,python
 # CUDA (+Flash Attention for decoding, +high prefill throughput, long time to build) 
 ./build.sh --release --features cuda,nccl,flash-context,python
 
-# macOS (Metal, single GPU only, with Context-cache and FP8 kvcache)
+# macOS (Metal, single GPU only, with prefix-cache and FP8 kvcache)
 maturin build --release --features metal,python
 ```
 
@@ -370,7 +370,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP (used when the PD server and client are on different machines) |
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
-| `--context-cache`   | Enable context caching for multi-turn conversations |
+| `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
+| `--prefix-cache-max-tokens`   | Cap prefix cache size in tokens (rounded down to block size) |
 
 ### MCP Configuration
 
@@ -396,10 +397,10 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Multi-gpu inference (Safetensors, GPTQ, AWQ, GGUF)
 * [x] Speedup prompt processing on Metal/macOS
 * [x] Chunked Prefill
-* [x] Session-based context cache (available on `CUDA` when `context-cache` enabled)
+* [x] Prefix cache (available on `CUDA` when `prefix-cache` enabled)
 * [x] Model loading from hugginface hub
 * [ ] Model loading from ModelScope (China)
-* [x] Context cache for Metal/macOS
+* [x] Prefix cache for Metal/macOS
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)

@@ -40,7 +40,7 @@ message = Message("user", "How are you?")]
 outputs = engine.generate_sync([params, params], [[message], [message]])
 print(outputs)
 
-params.session_id = xxx  # Pass session_id to enable context cache
+params.session_id = xxx  # Optional: track sessions in your own client
 
 # Single-request streaming generation
 (seq_id, prompt_length, stream) = engine.generate_stream(params, [message])
@@ -49,17 +49,14 @@ for item in stream:
    print(item.data)
 ```
 
-### 🤖 Client Usage of Context Cache
+### 🤖 Client Usage of Prefix Cache
 
 **Key changes for the client:**
 
 ```python
-import uuid
 import openai
-use_context_cache = True #flag to use context_cache
-# create session_id for each new chat session and use it throughout that session (session cache will be cleared if the client aborted the connection)
-session_id = str(uuid.uuid4())
-extra_body = {"session_id": session_id if use_context_cache else None }
+use_prefix_cache = True # flag to enable prefix cache on the server
+extra_body = {}
 
 # vllm.rs service url
 openai.api_key = "EMPTY"
@@ -72,7 +69,7 @@ response = openai.chat.completions.create(
    max_tokens = max_tokens,
    temperature = temperature,
    top_p = top_p,
-   extra_body = extra_body, #pass session_id through extra_body
+   extra_body = extra_body, # prefix cache is automatic; no session_id required
 )
 
 ```
@@ -84,7 +81,7 @@ response = openai.chat.completions.create(
     <summary>Chat with Qwen3-32B-A3B model</summary>
 
 ```bash
-# Context-cache automatically enabled under chat mode
+# Prefix cache automatically enabled under chat mode
 python3 -m vllm_rs.chat --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
 ```
 
