@@ -668,11 +668,28 @@ pub fn convert_chat_message(
     if role == "tool" {
         if let Some(tool_call_id) = &msg.tool_call_id {
             if let Some(content) = &msg.content {
+                let mut tool_text = String::new();
                 match content {
                     MessageContentType::PureText(text) => {
-                        prompt = format!("[Tool Result for {}]: {}", tool_call_id, text);
+                        tool_text.push_str(text);
                     }
-                    _ => {}
+                    MessageContentType::Single(item) => {
+                        if let MessageContent::Text { text } = item {
+                            tool_text.push_str(text);
+                        }
+                    }
+                    MessageContentType::Multi(items) => {
+                        for item in items {
+                            if let MessageContent::Text { text } = item {
+                                tool_text.push_str(text);
+                                tool_text.push(' ');
+                            }
+                        }
+                    }
+                }
+                let tool_text_trimmed = tool_text.trim();
+                if !tool_text_trimmed.is_empty() {
+                    prompt = format!("[Tool Result for {}]: {}", tool_call_id, tool_text_trimmed);
                 }
             }
         }
