@@ -73,5 +73,7 @@ COPY --from=builder /vllm.rs/target/release/vllm-rs /usr/local/bin/vllm-rs
 RUN chmod +x /usr/local/bin/vllm-rs
 
 # Only the `devel` builder image provides symlinks, restore the `libnccl.so` symlink:
-RUN ln -s libnccl.so.2 /usr/lib/x86_64-linux-gnu/libnccl.so
+RUN test -d /usr/lib/aarch64-linux-gnu && \
+  ln -s libnccl.so.2 /usr/lib/aarch64-linux-gnu/libnccl.so || \
+  ln -s libnncl.so.2 /usr/lib/x86_64-linux-gnu/libnccl.so
 
