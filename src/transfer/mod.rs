@@ -70,6 +70,9 @@ pub struct PdConfig {
 /// Serializable handle for a CUDA IPC memory region.
 /// This is a wrapper around the `cudaIpcMemHandle_t` struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(target_arch = "aarch64")]
+pub struct CudaIpcMemHandle(Vec<u8>, Vec<usize>, SerializableDType); // Simplified as bytes. See cuda.rs for real impl.
+#[cfg(not(target_arch = "aarch64"))]
 pub struct CudaIpcMemHandle(Vec<i8>, Vec<usize>, SerializableDType); // Simplified as bytes. See cuda.rs for real impl.
 
 /// A handle abstracting *how* to get the KV cache data.
