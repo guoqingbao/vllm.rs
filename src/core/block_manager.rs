@@ -118,16 +118,19 @@ impl BlockManager {
         }
     }
 
-    pub fn can_allocate(&mut self, seq: &Sequence) -> bool {
+    pub fn required_blocks(&mut self, seq: &Sequence) -> usize {
         if let Some(prefix_cache) = self.prefix_cache.as_mut() {
             let prefix_match = prefix_cache.match_prefix(&seq.token_ids);
             let matched_blocks =
                 self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
-            let required_blocks = seq.num_blocks().saturating_sub(matched_blocks);
-            self.free_block_ids.len() >= required_blocks
+            seq.num_blocks().saturating_sub(matched_blocks)
         } else {
-            self.free_block_ids.len() >= seq.num_blocks()
+            seq.num_blocks()
         }
+    }
+
+    pub fn can_allocate(&mut self, seq: &Sequence) -> bool {
+        self.free_block_ids.len() >= self.required_blocks(seq)
     }
 
     pub fn can_allocate_without_prefix(&self, seq: &Sequence) -> bool {

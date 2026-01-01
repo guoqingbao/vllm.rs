@@ -522,12 +522,7 @@ impl ModelRunner {
         let mut max_seqlen_q = 0;
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
-        let CHUNK_SIZE: usize =
-            if self.config.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
-                4096
-            } else {
-                8192
-            };
+        let CHUNK_SIZE: usize = 8192;
         let mut max_context_len = 0;
         for seq in seqs {
             let seqlen = seq.len();
@@ -542,7 +537,7 @@ impl ModelRunner {
                 max_context_len = seqlen;
             }
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            let seqlen_k = if self.config.flash_context.unwrap_or(false)
+            let seqlen_k = if self.config.prefix_cache.unwrap_or(false)
                 || self.config.prefix_cache.unwrap_or(false)
                 || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {

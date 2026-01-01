@@ -261,9 +261,8 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None,
-        prefix_cache=None, prefix_cache_max_tokens=None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
+        generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
+        fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         disable_flash_attn=None))]
     pub fn new(
@@ -281,7 +280,6 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
-        flash_context: Option<bool>,
         prefix_cache: Option<bool>,
         prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
@@ -334,7 +332,6 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
-            flash_context,
             prefix_cache,
             prefix_cache_max_tokens,
             fp8_kvcache,

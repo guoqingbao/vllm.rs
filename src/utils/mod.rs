@@ -1127,7 +1127,7 @@ pub fn prepare_engine_config(
         true
     } else {
         if cfg!(feature = "flash-context") || cfg!(feature = "python") {
-            econfig.flash_context.unwrap_or(false)
+            econfig.prefix_cache.unwrap_or(false)
         } else {
             false
         }

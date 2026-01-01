@@ -66,7 +66,6 @@ class EngineConfig:
     device_id: Optional[int]
     generation_cfg: Optional[GenerationConfig]
     seed: Optional[int]
-    flash_context: Optional[bool]
     prefix_cache: Optional[bool]
     prefix_cache_max_tokens: Optional[int]
     fp8_kvcache: Optional[bool]

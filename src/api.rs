@@ -121,7 +121,6 @@ impl EngineBuilder {
             None,
             None,
             self.prefix_cache,
-            self.prefix_cache,
             self.prefix_cache_max_tokens,
             self.fp8_kvcache,
             None,

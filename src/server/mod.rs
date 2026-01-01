@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub model: Option<String>,
@@ -73,15 +73,35 @@ impl Default for EmbeddingStrategy {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+pub enum ImageUrlContent {
+    Url(String),
+    Object {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+}
+
+impl ImageUrlContent {
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Url(url) => url,
+            Self::Object { url, .. } => url,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum MessageContent {
     // pure text (classic chat format)
-    #[serde(alias = "input_text")]
+    #[serde(alias = "input_text", alias = "text")]
     Text { text: String },
 
     // URL image: "image_url": "https://..."
     #[serde(alias = "image_url")]
-    ImageUrl { image_url: String },
+    ImageUrl { image_url: ImageUrlContent },
 
     // Base64 format: "data:image/jpeg;base64,xxxxx"
     #[serde(alias = "image_base64")]
@@ -92,6 +112,7 @@ pub enum MessageContent {
 #[serde(untagged)]
 pub enum MessageContentType {
     PureText(String),
+    Single(MessageContent),
     Multi(Vec<MessageContent>),
 }
 
@@ -677,33 +698,13 @@ pub fn convert_chat_message(
             MessageContentType::PureText(text) => {
                 prompt.push_str(text);
             }
+            MessageContentType::Single(item) => {
+                append_message_item(item, &mut prompt, &mut images)?;
+                prompt.push(' '); // keep spacing readable
+            }
             MessageContentType::Multi(items) => {
                 for item in items {
-                    match item {
-                        MessageContent::Text { text } => {
-                            prompt.push_str(text);
-                        }
-                        MessageContent::ImageUrl { image_url } => {
-                            let img = load_image_from_url(image_url)?;
-                            crate::log_info!(
-                                "Chat image downloaded: {} x {}",
-                                img.width(),
-                                img.height()
-                            );
-                            prompt.push_str(&IMAGE_PLACEHOLDER);
-                            images.push(img);
-                        }
-                        MessageContent::ImageBase64 { image_base64 } => {
-                            let img = load_image_from_base64(image_base64)?;
-                            crate::log_info!(
-                                "Chat image decoded: {} x {}",
-                                img.width(),
-                                img.height()
-                            );
-                            prompt.push_str(&IMAGE_PLACEHOLDER);
-                            images.push(img);
-                        }
-                    }
+                    append_message_item(item, &mut prompt, &mut images)?;
                     prompt.push(' '); // keep spacing readable
                 }
             }
@@ -718,6 +719,39 @@ pub fn convert_chat_message(
     }
 
     Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
+}
+
+fn append_message_item(
+    item: &MessageContent,
+    prompt: &mut String,
+    images: &mut Vec<image::DynamicImage>,
+) -> Result<()> {
+    match item {
+        MessageContent::Text { text } => {
+            prompt.push_str(text);
+        }
+        MessageContent::ImageUrl { image_url } => {
+            let url = image_url.url();
+            let img = if url.starts_with("data:") {
+                let img = load_image_from_base64(url)?;
+                crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
+                img
+            } else {
+                let img = load_image_from_url(url)?;
+                crate::log_info!("Chat image downloaded: {} x {}", img.width(), img.height());
+                img
+            };
+            prompt.push_str(&IMAGE_PLACEHOLDER);
+            images.push(img);
+        }
+        MessageContent::ImageBase64 { image_base64 } => {
+            let img = load_image_from_base64(image_base64)?;
+            crate::log_info!("Chat image decoded: {} x {}", img.width(), img.height());
+            prompt.push_str(&IMAGE_PLACEHOLDER);
+            images.push(img);
+        }
+    }
+    Ok(())
 }
 
 pub fn build_messages_and_images(

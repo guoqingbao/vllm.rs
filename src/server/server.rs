@@ -148,6 +148,10 @@ pub async fn chat_completion(
             if let Some(ref content) = chat_messages[0].content {
                 let existing_content = match content {
                     super::MessageContentType::PureText(text) => text.clone(),
+                    super::MessageContentType::Single(item) => match item {
+                        super::MessageContent::Text { text } => text.clone(),
+                        _ => String::new(),
+                    },
                     super::MessageContentType::Multi(items) => items
                         .iter()
                         .filter_map(|item| match item {

@@ -62,7 +62,6 @@ def build_engine_config(args, num_of_prompts, prefix_cache):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=prefix_cache,
         prefix_cache=prefix_cache,
         prefix_cache_max_tokens=args.prefix_cache_max_tokens,
         fp8_kvcache=args.fp8_kvcache,
