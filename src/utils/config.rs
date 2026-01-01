@@ -237,7 +237,6 @@ pub struct EngineConfig {
     pub device_ids: Option<Vec<usize>>,
     pub generation_cfg: Option<GenerationConfig>,
     pub seed: Option<u64>,
-    pub flash_context: Option<bool>,
     pub prefix_cache: Option<bool>,
     pub prefix_cache_max_tokens: Option<usize>,
     pub fp8_kvcache: Option<bool>,
@@ -293,8 +292,6 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub seed: Option<u64>,
     #[pyo3(get, set)]
-    pub flash_context: Option<bool>,
-    #[pyo3(get, set)]
     pub prefix_cache: Option<bool>,
     #[pyo3(get, set)]
     pub prefix_cache_max_tokens: Option<usize>,
@@ -330,7 +327,6 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
-        flash_context: Option<bool>,
         prefix_cache: Option<bool>,
         prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
@@ -376,7 +372,6 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
-            flash_context,
             prefix_cache,
             prefix_cache_max_tokens,
             fp8_kvcache,

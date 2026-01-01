@@ -461,21 +461,6 @@ impl LLMEngine {
             params.max_tokens = Some(max_model_len - length);
         }
 
-        let tokens_required = length.div_ceil(self.econfig.block_size) * self.econfig.block_size;
-        let available_tokens = self.scheduler.get_available_kv_tokens();
-
-        if tokens_required >= available_tokens {
-            // Release cache for unactive sessions
-            let _ = self.try_release_cache(tokens_required);
-            if tokens_required > self.scheduler.get_available_kv_tokens() {
-                candle_core::bail!(
-                    "Remaining {} kvcache tokens, but your prompt length requires {}, please request later!",
-                    self.scheduler.get_available_kv_tokens(),
-                    tokens_required
-                );
-            }
-        }
-
         if let Some(gen_cfg) = &self.econfig.generation_cfg {
             let temperature = params.temperature.or(gen_cfg.temperature);
             let top_k = params.top_k.or(gen_cfg.top_k);
@@ -495,6 +480,29 @@ impl LLMEngine {
             images,
             image_idx,
         );
+
+        let mut required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+        let mut available_blocks = self.scheduler.block_manager.get_num_free_blocks();
+
+        while required_blocks > available_blocks {
+            // Release cache for unactive sessions.
+            let required_tokens = required_blocks * self.econfig.block_size;
+            if !self.try_release_cache(required_tokens) {
+                break;
+            }
+            required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+            available_blocks = self.scheduler.block_manager.get_num_free_blocks();
+        }
+
+        if required_blocks > available_blocks {
+            let available_tokens = available_blocks * self.econfig.block_size;
+            let required_tokens = required_blocks * self.econfig.block_size;
+            candle_core::bail!(
+                "Remaining {} kvcache tokens, but your prompt requires {} new tokens, please request later!",
+                available_tokens,
+                required_tokens
+            );
+        }
         let seq_id = self.scheduler.add(seq);
 
         if *request_type == RequestType::Stream {
@@ -522,7 +530,7 @@ impl LLMEngine {
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
         let (seq_id, prompt_length) =
             self.add_request_(params, prompt, &request_type, images, image_idx)?;
-        let (tx, rx) = channel(4096);
+        let (tx, rx) = channel(1024);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
         if self.econfig.server_mode.unwrap_or(true) && request_type != RequestType::Completion {
@@ -1224,16 +1232,6 @@ impl LLMEngine {
                 }
             }
 
-            let tokens_required =
-                token_ids.len().div_ceil(self.econfig.block_size) * self.econfig.block_size;
-            if tokens_required > self.scheduler.get_available_kv_tokens() {
-                candle_core::bail!(
-                    "Remaining {} kvcache tokens, but embedding requires {}, please retry later",
-                    self.scheduler.get_available_kv_tokens(),
-                    tokens_required
-                );
-            }
-
             let mut seq = Sequence::new(
                 token_ids.clone(),
                 self.econfig.block_size,
@@ -1241,17 +1239,23 @@ impl LLMEngine {
                 &None,
                 -1,
             );
+            let required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+            let available_blocks = self.scheduler.block_manager.get_num_free_blocks();
+            if required_blocks > available_blocks {
+                let available_tokens = available_blocks * self.econfig.block_size;
+                let required_tokens = required_blocks * self.econfig.block_size;
+                candle_core::bail!(
+                    "Remaining {} kvcache tokens, but embedding requires {} new tokens, please retry later",
+                    available_tokens,
+                    required_tokens
+                );
+            }
             self.scheduler.block_manager.allocate(&mut seq)?;
 
             let mut chunked_mean: Option<Vec<f32>> = None;
             let mut last_vec: Option<Vec<f32>> = None;
             let mut processed_tokens = 0usize;
-            let chunk_size =
-                if self.econfig.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
-                    4096
-                } else {
-                    8192
-                };
+            let chunk_size = 8192;
 
             while seq.num_cached_tokens < seq.len() {
                 let remaining = seq.len() - seq.num_cached_tokens;

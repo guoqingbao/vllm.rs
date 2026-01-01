@@ -70,7 +70,6 @@ def run_server(args):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=args.prefix_cache,
         prefix_cache=args.prefix_cache,
         prefix_cache_max_tokens=args.prefix_cache_max_tokens,
         fp8_kvcache=args.fp8_kvcache,

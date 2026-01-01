@@ -500,12 +500,7 @@ impl Scheduler {
     ) -> (Vec<usize>, Vec<usize>) {
         let mut finished_seqs = Vec::new();
         let mut remove_ids = Vec::new();
-        let CHUNK_SIZE: usize =
-            if self.cfg.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
-                4096
-            } else {
-                8192
-            };
+        let CHUNK_SIZE: usize = 8192;
         for (i, id) in scheduled_ids.iter().enumerate() {
             if *id < self.running.len() {
                 let seq = &self.running[*id];

@@ -169,7 +169,6 @@ async fn main() -> Result<()> {
         generation_cfg,
         args.seed,
         Some(prefix_cache),
-        Some(prefix_cache),
         args.prefix_cache_max_tokens,
         Some(args.fp8_kvcache),
         Some(args.server || args.ui_server || !interactive),
