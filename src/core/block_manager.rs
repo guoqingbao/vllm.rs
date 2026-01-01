@@ -106,7 +106,7 @@ impl BlockManager {
             seq.block_table.push(block_id as u32);
         }
         if let Some(last_block_id) = seq.block_table.last() {
-            let _ = self.try_clear_blocks(vec![*last_block_id]);
+            self.clear_blocks_guard(vec![*last_block_id], "allocate_fresh/last_block");
         }
         Ok(())
     }
@@ -196,7 +196,7 @@ impl BlockManager {
             }
         }
         if !new_blocks.is_empty() {
-            let _ = self.try_clear_blocks(new_blocks);
+            self.clear_blocks_guard(new_blocks, "ensure_allocate/new_blocks");
         }
         Ok(())
     }
@@ -277,7 +277,7 @@ impl BlockManager {
             new_blocks.push(block_id as u32);
         }
         if !new_blocks.is_empty() {
-            let _ = self.try_clear_blocks(new_blocks);
+            self.clear_blocks_guard(new_blocks, "allocate_with_prefix/new_blocks");
         }
 
         Ok(())
@@ -387,6 +387,36 @@ impl BlockManager {
             }
         }
         total_evicted
+    }
+
+    fn clear_blocks_guard(&mut self, block_ids: Vec<u32>, context: &str) {
+        let mut safe = Vec::new();
+        for block_id in block_ids {
+            let idx = block_id as usize;
+            if idx >= self.blocks.len() {
+                crate::log_error!(
+                    "ClearBlocks guard: invalid block id {} in {}",
+                    block_id,
+                    context
+                );
+                continue;
+            }
+            let ref_count = self.blocks[idx].ref_count;
+            if ref_count > 1 {
+                crate::log_error!(
+                    "ClearBlocks guard: block {} has ref_count {} in {}, skipping",
+                    block_id,
+                    ref_count,
+                    context
+                );
+                continue;
+            }
+            safe.push(block_id);
+        }
+        if safe.is_empty() {
+            return;
+        }
+        let _ = self.try_clear_blocks(safe);
     }
 
     pub fn get_num_total_blocks(&self) -> usize {

@@ -473,6 +473,33 @@ impl LLMEngine {
             params.frequency_penalty = frequency_penalty;
             params.presence_penalty = presence_penalty;
         }
+
+        if let Some(stop_sequences) = &params.stop_sequences {
+            let mut stop_token_ids = Vec::new();
+            for sequence in stop_sequences {
+                if sequence.is_empty() {
+                    continue;
+                }
+                match self.tokenizer.encode(sequence.as_str(), false) {
+                    Ok(encoding) => {
+                        let ids = encoding.get_ids();
+                        if !ids.is_empty() {
+                            stop_token_ids.push(ids.to_vec());
+                        }
+                    }
+                    Err(err) => {
+                        crate::log_warn!(
+                            "Failed to encode stop sequence '{}': {:?}",
+                            sequence,
+                            err
+                        );
+                    }
+                }
+            }
+            if !stop_token_ids.is_empty() {
+                params.stop_token_ids = Some(stop_token_ids);
+            }
+        }
         let seq = Sequence::new(
             token_ids,
             self.econfig.block_size,

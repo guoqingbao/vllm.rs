@@ -419,12 +419,21 @@ impl Scheduler {
                 }
             }
 
+            let hit_stop_sequence = self.is_stop_sequence_end(token, &self.running[idx]);
             let seq = &mut self.running[idx];
 
-            if self.eos_token_id.contains(&token)
+            if hit_stop_sequence
+                || self.eos_token_id.contains(&token)
                 || seq.output_len() >= seq.sampling_params.max_tokens.unwrap_or(16384)
                 || seq.len() > self.cfg.max_num_batched_tokens
             {
+                if hit_stop_sequence {
+                    crate::log_info!(
+                        "[Seq {}] Detected stop sequence token {}, finishing",
+                        seq_id,
+                        token
+                    );
+                }
                 seq.status = SequenceStatus::Finished;
                 self.block_manager.cache_sequence(seq);
                 self.block_manager.deallocate(seq);
@@ -962,6 +971,40 @@ impl Scheduler {
                         return true;
                     }
                 }
+            }
+        }
+
+        false
+    }
+
+    fn is_stop_sequence_end(&self, token: u32, seq: &Sequence) -> bool {
+        let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
+            return false;
+        };
+        if stop_sequences.is_empty() {
+            return false;
+        }
+
+        for stop in stop_sequences {
+            if stop.is_empty() {
+                continue;
+            }
+            if stop.len() == 1 {
+                if stop[0] == token {
+                    return true;
+                }
+                continue;
+            }
+
+            let prior_len = seq.output_ids.len();
+            if stop.len() - 1 > prior_len {
+                continue;
+            }
+            let start_idx = prior_len + 1 - stop.len();
+            if seq.output_ids[start_idx..] == stop[..stop.len() - 1]
+                && stop[stop.len() - 1] == token
+            {
+                return true;
             }
         }
 

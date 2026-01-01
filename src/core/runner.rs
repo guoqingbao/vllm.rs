@@ -1006,20 +1006,21 @@ impl ModelRunner {
         }
     }
 
-    pub fn clear_blocks(&self, block_ids: Vec<u32>) -> Result<bool> {
-        fn cache_clear(gpu_cache: &Vec<(Tensor, Tensor)>, block_ids: &Vec<u32>) -> Result<bool> {
-            if gpu_cache.is_empty() || block_ids.is_empty() {
-                return Ok(true);
-            }
+    pub fn clear_blocks(&self, _block_ids: Vec<u32>) -> Result<bool> {
+        Ok(true)
+        // fn cache_clear(gpu_cache: &Vec<(Tensor, Tensor)>, block_ids: &Vec<u32>) -> Result<bool> {
+        //     if gpu_cache.is_empty() || block_ids.is_empty() {
+        //         return Ok(true);
+        //     }
 
-            for i in 0..gpu_cache.len() {
-                cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
-                cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
-            }
+        //     for i in 0..gpu_cache.len() {
+        //         cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
+        //         cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
+        //     }
 
-            Ok(true)
-        }
+        //     Ok(true)
+        // }
 
-        cache_clear(&*self.get_kv_cache(), &block_ids)
+        // cache_clear(&*self.get_kv_cache(), &block_ids)
     }
 }
