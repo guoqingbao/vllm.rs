@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use toktrie::TokTrie;
-const MAX_PARALLEL_SAMPLING: usize = 32;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -827,13 +826,9 @@ impl ModelRunner {
             logits.to_owned()
         };
 
-        let tokens = if batch_size <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs)
-        {
-            self.logit_processor
-                .sample_with_strategy(&logits, &cached_params.sampling)?
-        } else {
-            logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-        };
+        let tokens = self
+            .logit_processor
+            .sample_with_strategy(&logits, &cached_params.sampling)?;
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {

@@ -203,14 +203,14 @@ impl LogitsProcessor {
             // For strategies that don't specify k or p, we use sensible defaults that
             // preserve the intended behavior:
             // - TopK: Use p=1.0 to disable top-p filtering (only top-k applies)
-            // - TopP: Use k=128 (kernel's max) so top-p can select from a wide candidate pool
+            // - TopP: Use k=256 (kernel's max) so top-p can select from a wide candidate pool
             // - TopKThenTopP: Use both user-specified k and p
             let (k, p, t) = match sampling {
                 Sampling::TopKThenTopP { k, p, temperature } => (*k, *p, *temperature),
                 // Pure top-k: disable top-p by setting p=1.0 (100% of mass allowed)
                 Sampling::TopK { k, temperature } => (*k, 1.0, *temperature),
-                // Pure top-p: use max k=128 so top-p can consider enough candidates
-                Sampling::TopP { p, temperature } => (128, *p, *temperature),
+                // Pure top-p: use max k=256 so top-p can consider enough candidates
+                Sampling::TopP { p, temperature } => (256, *p, *temperature),
                 _ => (0, 0.0, 0.0), // Marker for unsupported strategies
             };
 
