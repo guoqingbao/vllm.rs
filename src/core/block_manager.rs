@@ -4,12 +4,14 @@ use super::runner::RunnerType;
 use super::sequence::{Sequence, SequenceStatus};
 use crate::def_broadcast_message_to_runners;
 use crate::runner::{receive_local, send_local, MessageType};
+use crate::utils::image::ImageData;
 use candle_core::Result;
 use interprocess::{local_socket::Stream as LocalStream, TryClone};
 use parking_lot::RwLock;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,9 +120,18 @@ impl BlockManager {
         }
     }
 
+    fn image_prefix_seed(images: &ImageData) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        images.raw.hash(&mut hasher);
+        images.shape.hash(&mut hasher);
+        images.patches.hash(&mut hasher);
+        hasher.finish()
+    }
+
     pub fn required_blocks(&mut self, seq: &Sequence) -> usize {
         if let Some(prefix_cache) = self.prefix_cache.as_mut() {
-            let prefix_match = prefix_cache.match_prefix(&seq.token_ids);
+            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+            let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
             let matched_blocks =
                 self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
             seq.num_blocks().saturating_sub(matched_blocks)
@@ -238,7 +249,8 @@ impl BlockManager {
         let mut last_hash = None;
 
         if prefix_cache.enabled() {
-            let prefix_match = prefix_cache.match_prefix(tokens);
+            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+            let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed);
             last_hash = prefix_match.last_hash;
             matched_blocks =
                 self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);
@@ -320,7 +332,9 @@ impl BlockManager {
             full_blocks
         );
 
-        let PrefixCacheUpdate { inserted, evicted } = prefix_cache.insert_prefix(tokens, &blocks);
+        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+        let PrefixCacheUpdate { inserted, evicted } =
+            prefix_cache.insert_prefix_with_seed(tokens, &blocks, seed);
         for block_id in inserted {
             self.increment_block_ref(block_id);
         }

@@ -66,6 +66,10 @@ impl PrefixCache {
     }
 
     pub fn match_prefix(&mut self, tokens: &[u32]) -> PrefixMatch {
+        self.match_prefix_with_seed(tokens, None)
+    }
+
+    pub fn match_prefix_with_seed(&mut self, tokens: &[u32], seed: Option<u64>) -> PrefixMatch {
         if !self.enabled() {
             return PrefixMatch {
                 matched_blocks: 0,
@@ -82,7 +86,7 @@ impl PrefixCache {
         }
 
         let mut matched = 0usize;
-        let mut parent_hash = 0u64;
+        let mut parent_hash = seed.unwrap_or(0u64);
         let mut last_hash = None;
         for block_tokens in tokens.chunks(self.block_size).take(full_blocks) {
             let hash = Self::hash_block(parent_hash, block_tokens);
@@ -118,6 +122,15 @@ impl PrefixCache {
     }
 
     pub fn insert_prefix(&mut self, tokens: &[u32], blocks: &[usize]) -> PrefixCacheUpdate {
+        self.insert_prefix_with_seed(tokens, blocks, None)
+    }
+
+    pub fn insert_prefix_with_seed(
+        &mut self,
+        tokens: &[u32],
+        blocks: &[usize],
+        seed: Option<u64>,
+    ) -> PrefixCacheUpdate {
         if !self.enabled() {
             return PrefixCacheUpdate {
                 inserted: Vec::new(),
@@ -135,7 +148,7 @@ impl PrefixCache {
         }
 
         let mut inserted = Vec::new();
-        let mut parent_hash = None;
+        let mut parent_hash = seed;
         for (block_id, block_tokens) in blocks
             .iter()
             .zip(tokens.chunks(self.block_size))

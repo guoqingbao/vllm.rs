@@ -57,7 +57,7 @@
 
 ## 🧠 支持的模型架构
 
-* ✅ LLaMa 系列（LLaMa2、LLaMa3）
+* ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）
 * ✅ Qwen2 Moe 系列（使用Qwen3 MoE流程+共享专家层）
 * ✅ Qwen3 MoE 系列
@@ -387,6 +387,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Embedding API**
 * [x] **Tokenize/Detokenize API**
 * [x] **MCP集成与工具调用**
+* [x] **公共前缀缓存**
+* [x] **Claude/Anthropic API 兼容服务器**
 
 ## 📚 参考项目
 
