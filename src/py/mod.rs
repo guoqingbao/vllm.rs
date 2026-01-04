@@ -372,6 +372,8 @@ impl SamplingParams {
             frequency_penalty,
             presence_penalty,
             mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
             thinking,
         }
     }
@@ -388,6 +390,8 @@ impl SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
             thinking: None,
         }
     }

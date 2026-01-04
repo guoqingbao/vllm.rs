@@ -1,6 +1,6 @@
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8010",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8000",
     "ANTHROPIC_MODEL": "default",
     "ANTHROPIC_SMALL_FAST_MODEL": "default",
     "ANTHROPIC_AUTH_TOKEN": "sk-dummy",

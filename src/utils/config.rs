@@ -406,6 +406,10 @@ pub struct SamplingParams {
     pub session_id: Option<String>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>, // enable reasoning
     /// Tool mode for tool call handling.
@@ -434,6 +438,11 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub presence_penalty: Option<f32>,
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
     /// Tool mode for tool call handling.
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[pyo3(get, set)]
@@ -466,6 +475,8 @@ impl SamplingParams {
             frequency_penalty,
             presence_penalty,
             mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
             thinking,
         }
     }
@@ -481,6 +492,8 @@ impl SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
             thinking: None,
         }
     }
@@ -498,6 +511,8 @@ impl Default for SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
             thinking: None,
         }
     }

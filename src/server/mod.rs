@@ -1,5 +1,6 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+pub mod claude_server;
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
@@ -912,6 +913,11 @@ pub async fn run_server(
             }),
         )
         .route("/v1/chat/completions", post(server::chat_completion))
+        .route("/v1/messages", post(claude_server::messages))
+        .route(
+            "/v1/messages/count_tokens",
+            post(claude_server::count_tokens),
+        )
         .route("/v1/embeddings", post(server::create_embeddings))
         .route("/v1/usage", get(server::get_usage))
         .route("/tokenize", post(server::tokenize))
@@ -925,8 +931,10 @@ pub async fn run_server(
         format!("0.0.0.0:{}", 0)
     } else {
         crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}", port);
-        crate::log_warn!("📡 Supported endpoints:");
+        crate::log_warn!("📡 Supported endpoints (OpenAI/Claude):");
         crate::log_warn!("   - POST /v1/chat/completions");
+        crate::log_warn!("   - POST /v1/messages");
+        crate::log_warn!("   - POST /v1/messages/count_tokens");
         crate::log_warn!("   - POST /v1/embeddings");
         crate::log_warn!("   - GET  /v1/models");
         crate::log_warn!("   - GET  /v1/usage");

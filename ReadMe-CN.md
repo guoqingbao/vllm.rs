@@ -74,7 +74,7 @@
 ## 📚 文档
 - [快速开始](docs/get_started.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
-- [Claude Code (LiteLLM代理 与 vLLM.rs推理后端)](docs/claude_code.md)
+- [Claude Code (Anthropic-compatible API server)](docs/claude_code.md)
 - [Embedding](docs/embeddings.md)
 - [多模态 (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [前缀缓存](docs/prefix-cache.md)

@@ -213,6 +213,20 @@ pub fn validate_arguments(schema: &Value, arguments: &Value) -> Result<(), Strin
         }
     }
 
+    if let Some(additional) = schema.get("additionalProperties") {
+        if additional == &Value::Bool(false) {
+            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+                if let Some(args_obj) = arguments.as_object() {
+                    for key in args_obj.keys() {
+                        if !properties.contains_key(key) {
+                            return Err(format!("Unexpected field: {}", key));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         if let Some(args_obj) = arguments.as_object() {
             for (key, value) in args_obj {
@@ -227,28 +241,109 @@ pub fn validate_arguments(schema: &Value, arguments: &Value) -> Result<(), Strin
 }
 
 fn validate_type(schema: &Value, value: &Value, field_name: &str) -> Result<(), String> {
-    let expected_type = schema.get("type").and_then(|t| t.as_str());
+    if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
+        if !enum_values.iter().any(|v| v == value) {
+            return Err(format!("Field '{}' must be one of enum values", field_name));
+        }
+    }
 
-    match expected_type {
-        Some("string") if !value.is_string() => {
-            Err(format!("Field '{}' must be a string", field_name))
+    let expected_type = schema.get("type");
+    if let Some(type_list) = expected_type.and_then(|t| t.as_array()) {
+        let mut matches = false;
+        for entry in type_list {
+            if let Some(kind) = entry.as_str() {
+                if type_matches(kind, value) {
+                    matches = true;
+                    break;
+                }
+            }
         }
-        Some("number") if !value.is_number() => {
-            Err(format!("Field '{}' must be a number", field_name))
+        if !matches {
+            return Err(format!("Field '{}' has invalid type", field_name));
         }
-        Some("integer") if !value.is_i64() && !value.is_u64() => {
-            Err(format!("Field '{}' must be an integer", field_name))
+    } else if let Some(kind) = expected_type.and_then(|t| t.as_str()) {
+        if !type_matches(kind, value) {
+            return Err(format!("Field '{}' has invalid type", field_name));
         }
-        Some("boolean") if !value.is_boolean() => {
-            Err(format!("Field '{}' must be a boolean", field_name))
+    }
+
+    match expected_type.and_then(|t| t.as_str()) {
+        Some("string") => {
+            if let Some(min_len) = schema.get("minLength").and_then(|v| v.as_u64()) {
+                if value.as_str().map_or(0, |s| s.len() as u64) < min_len {
+                    return Err(format!("Field '{}' is too short", field_name));
+                }
+            }
+            if let Some(max_len) = schema.get("maxLength").and_then(|v| v.as_u64()) {
+                if value.as_str().map_or(0, |s| s.len() as u64) > max_len {
+                    return Err(format!("Field '{}' is too long", field_name));
+                }
+            }
         }
-        Some("array") if !value.is_array() => {
-            Err(format!("Field '{}' must be an array", field_name))
+        Some("number") | Some("integer") => {
+            if let Some(min) = schema.get("minimum").and_then(|v| v.as_f64()) {
+                if value.as_f64().map_or(true, |n| n < min) {
+                    return Err(format!("Field '{}' is below minimum", field_name));
+                }
+            }
+            if let Some(max) = schema.get("maximum").and_then(|v| v.as_f64()) {
+                if value.as_f64().map_or(true, |n| n > max) {
+                    return Err(format!("Field '{}' is above maximum", field_name));
+                }
+            }
         }
-        Some("object") if !value.is_object() => {
-            Err(format!("Field '{}' must be an object", field_name))
+        Some("array") => {
+            if let Some(min) = schema.get("minItems").and_then(|v| v.as_u64()) {
+                if value.as_array().map_or(0, |a| a.len() as u64) < min {
+                    return Err(format!("Field '{}' has too few items", field_name));
+                }
+            }
+            if let Some(max) = schema.get("maxItems").and_then(|v| v.as_u64()) {
+                if value.as_array().map_or(0, |a| a.len() as u64) > max {
+                    return Err(format!("Field '{}' has too many items", field_name));
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                if let Some(array) = value.as_array() {
+                    for item in array {
+                        validate_type(items, item, field_name)?;
+                    }
+                }
+            }
         }
-        _ => Ok(()),
+        Some("object") => {
+            if let Some(min) = schema.get("minProperties").and_then(|v| v.as_u64()) {
+                if value.as_object().map_or(0, |o| o.len() as u64) < min {
+                    return Err(format!("Field '{}' has too few properties", field_name));
+                }
+            }
+            if let Some(max) = schema.get("maxProperties").and_then(|v| v.as_u64()) {
+                if value.as_object().map_or(0, |o| o.len() as u64) > max {
+                    return Err(format!("Field '{}' has too many properties", field_name));
+                }
+            }
+            if let Some(schema_obj) = schema.as_object() {
+                if schema_obj.contains_key("properties") || schema_obj.contains_key("required") {
+                    return validate_arguments(schema, value);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn type_matches(expected: &str, value: &Value) -> bool {
+    match expected {
+        "string" => value.is_string(),
+        "number" => value.is_number(),
+        "integer" => value.is_i64() || value.is_u64(),
+        "boolean" => value.is_boolean(),
+        "array" => value.is_array(),
+        "object" => value.is_object(),
+        "null" => value.is_null(),
+        _ => true,
     }
 }
 
@@ -363,5 +458,19 @@ mod tests {
 
         let search = common::web_search_schema();
         assert!(search["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn test_additional_properties() {
+        let schema = SchemaBuilder::object()
+            .string_prop("path", "Path", true)
+            .no_additional_properties()
+            .build();
+
+        let valid = json!({"path": "."});
+        let invalid = json!({"path": ".", "extra": "nope"});
+
+        assert!(validate_arguments(&schema, &valid).is_ok());
+        assert!(validate_arguments(&schema, &invalid).is_err());
     }
 }
