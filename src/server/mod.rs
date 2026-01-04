@@ -9,8 +9,8 @@ use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
 use crate::utils::image::{
-    get_tensor_raw_data, load_image_from_base64, load_image_from_url, ImageData,
-    ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
+    compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
+    ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
 };
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
@@ -811,11 +811,16 @@ pub fn build_messages_and_images(
             images_shape[0],
             images_shape
         );
+        let cfg = img_cfg.unwrap();
+        let tokens_per_image = compute_tokens_per_image(cfg, &image_sizes);
         Some(ImageData {
             raw: images_raw,
             shape: images_shape,
             patches: image_sizes,
             image_idx: 0,
+            image_token_offset: 0,
+            tokens_per_image,
+            image_token_id: cfg.image_token_id,
         })
     } else {
         None

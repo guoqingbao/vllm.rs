@@ -14,7 +14,7 @@ use crate::utils::config::Config;
 use crate::utils::image::ImageData;
 use crate::utils::progress::ProgressLike;
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::{Conv2d, Conv2dConfig};
 use either::Either;
 use parking_lot::RwLock;
@@ -690,7 +690,7 @@ impl Gemma3ForConditionalGeneration {
         let mut xs = (self.embed_tokens.forward(input_ids)? * self.embed_scale)?;
 
         // vision projection and embedding
-        if let Some(images) = &images {
+        if let Some(images) = images {
             let image_mask = input_ids.eq(self.config.image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(candle_core::D::Minus1)?
@@ -719,14 +719,49 @@ impl Gemma3ForConditionalGeneration {
             }
 
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-            let image_features = self.vision_tower(&image_tensor, image_sizes)?;
+            if indices.shape().dim(0)? > 0 {
+                let image_features = self.vision_tower(&image_tensor, image_sizes)?;
+                let hidden = xs.dim(D::Minus1)?;
+                let indices_len = indices.shape().dim(0)?;
+                if indices_len % hidden != 0 {
+                    candle_core::bail!(
+                        "image indices length {} not divisible by hidden size {}",
+                        indices_len,
+                        hidden
+                    );
+                }
+                let tokens_in_chunk = indices_len / hidden;
+                let total_tokens = image_features.dim(0)?;
+                let start = images.image_token_offset.min(total_tokens);
+                let end = start + tokens_in_chunk;
+                if end > total_tokens {
+                    candle_core::bail!(
+                        "image token slice out of range: start {}, len {}, total {}",
+                        start,
+                        tokens_in_chunk,
+                        total_tokens
+                    );
+                }
+                let image_features = if start > 0 || end < total_tokens {
+                    image_features.narrow(0, start, tokens_in_chunk)?
+                } else {
+                    image_features
+                };
 
-            let mut x_flat = xs.flatten_all()?;
-            let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
+                let mut x_flat = xs.flatten_all()?;
+                let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
 
-            x_flat =
-                x_flat.scatter_add(&indices, &(image_flat - x_flat.gather(&indices, 0)?)?, 0)?;
-            xs = x_flat.reshape(xs.shape())?;
+                x_flat = x_flat.scatter_add(
+                    &indices,
+                    &(image_flat - x_flat.gather(&indices, 0)?)?,
+                    0,
+                )?;
+                xs = x_flat.reshape(xs.shape())?;
+            } else {
+                crate::log_info!(
+                    "Skip image embedding because no image tokens found in this chunk!"
+                );
+            }
         }
 
         // Followings are language model logics

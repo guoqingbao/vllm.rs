@@ -7,6 +7,7 @@ use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 use crate::utils::guidance::GuidanceState;
+use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
 use crate::{
@@ -408,11 +409,17 @@ impl ModelRunner {
         let images = if let Seqs::SeqRefs(s) = &seqs {
             // We do not batch multimodel prefill
             if let Some(images) = &s[0].images {
-                if images.image_idx == -1 {
-                    crate::log_warn!("Image excluded in this turn!");
+                if images.image_idx == -1 || !is_prefill {
                     None
                 } else {
-                    Some(images)
+                    compute_image_slice(&s[0].token_ids, s[0].num_cached_tokens, images).map(
+                        |(image_idx, token_offset)| {
+                            let mut images = images.clone();
+                            images.image_idx = image_idx;
+                            images.image_token_offset = token_offset;
+                            images
+                        },
+                    )
                 }
             } else {
                 None
@@ -420,6 +427,7 @@ impl ModelRunner {
         } else {
             None
         };
+        let images = images.as_ref();
 
         let logits = crate::model_call!(
             &self.model,

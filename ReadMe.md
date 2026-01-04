@@ -58,7 +58,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 ## 🧠 Supported Architectures
 
-* ✅ LLaMa (LLaMa2, LLaMa3)
+* ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
 * ✅ Qwen (Qwen2, Qwen3)
 * ✅ Qwen2 Moe
 * ✅ Qwen3 Moe
@@ -413,6 +413,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Embedding API**
 * [x] **Tokenize/Detokenize API**
 * [x] **MCP Integration & Tool Calling**
+* [x] **Prefix Caching**
+* [x] **Claude/Anthropic-compatible API Server**
 ---
 
 ## 📚 References

@@ -822,6 +822,7 @@ pub fn get_arch_rope(
         ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
         ("LlamaForConditionalGeneration", false),
+        ("IQuestCoderForCausalLM", false),
         ("Glm4ForCausalLM", true),
         ("glm4", true),
         ("qwen2", false),
@@ -861,6 +862,7 @@ pub fn get_arch_rope(
         | "MistralForCausalLM"
         | "Mistral3ForConditionalGeneration"
         | "LlamaForConditionalGeneration"
+        | "IQuestCoderForCausalLM"
         | "llama"
         | "mistral"
         | "mistral3"
