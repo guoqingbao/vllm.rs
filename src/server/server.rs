@@ -218,7 +218,6 @@ pub async fn chat_completion(
             #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
             #[allow(unused_assignments, unused_variables)]
-            let mut decoded_length = 0usize;
             let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
 
@@ -278,7 +277,6 @@ pub async fn chat_completion(
                                 .unwrap()
                                 .as_millis() as u64;
                         }
-                        decoded_length += 1;
 
                         // Always accumulate for tool call parsing
                         accumulated_output.push_str(&token);

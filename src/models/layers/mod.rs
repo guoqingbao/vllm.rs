@@ -63,7 +63,7 @@ impl VarBuilderX<'_> {
         }
     }
 
-    pub fn pp(&self, name: &str) -> VarBuilderX {
+    pub fn pp(&self, name: &str) -> VarBuilderX<'_> {
         match &self.0 {
             Either::Left(vb) => VarBuilderX(Either::Left(vb.pp(name))),
             Either::Right(vb) => VarBuilderX(Either::Right(vb.pp(name))),
