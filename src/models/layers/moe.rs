@@ -22,6 +22,7 @@ pub struct FusedMoe {
     w_size_n: usize,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
+    routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
@@ -143,6 +144,7 @@ impl FusedMoe {
             w_size_n,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
@@ -161,6 +163,10 @@ impl FusedMoe {
 
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
+        }
+
+        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
+            topk_weights = (topk_weights * routed_scaling_factor)?;
         }
 
         let (expert_ids, sorted_token_ids) = if is_prefill {
@@ -223,6 +229,7 @@ pub struct FusedMoeGGUF {
     down_experts: Arc<QTensor>,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
+    routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
@@ -321,6 +328,7 @@ impl FusedMoeGGUF {
             down_experts,
             act: cfg.hidden_act,
             norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
@@ -372,6 +380,7 @@ impl FusedMoeGGUF {
             down_experts,
             act: cfg.hidden_act,
             norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size: 1,
@@ -397,6 +406,9 @@ impl FusedMoeGGUF {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
 
+        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
+            topk_weights = (topk_weights * routed_scaling_factor)?;
+        }
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
             {
@@ -461,6 +473,7 @@ pub struct FusedMoeISQ {
     down_experts: QTensor,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
+    routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
     world_size: usize,
@@ -639,6 +652,7 @@ impl FusedMoeISQ {
             down_experts,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm),
             world_size,
@@ -663,7 +677,9 @@ impl FusedMoeISQ {
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
-
+        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
+            topk_weights = (topk_weights * routed_scaling_factor)?;
+        }
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
             {

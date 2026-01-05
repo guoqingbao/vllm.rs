@@ -65,6 +65,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
+* ✅ GLM4 MoE (4.6/4.7)
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini, etc.)
 * ✅ Gemma3 (Multimodal model, No flash-attn support)
 * ✅ Qwen3-VL (Dense, Multimodal model)
@@ -405,7 +406,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
-* [ ] Additional model support (GLM 4.6, Kimi K2 Thinking, etc.)
+* [ ] Additional model support (LLaMa 4, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
