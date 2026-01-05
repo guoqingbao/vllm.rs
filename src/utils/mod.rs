@@ -393,24 +393,58 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     };
 
     let mod_cfg = if arch.to_string() == "qwen3moe" || arch.to_string() == "qwen2moe" {
-        let shared_expert_intermediate_size = if arch.to_string() == "qwen2moe" {
-            Some(
-                md_get(format!("{arch}.expert_shared_feed_forward_length").as_str())?.to_u32()?
-                    as usize,
-            )
+        let expert_feed_forward_length =
+            md_get(format!("{arch}.expert_feed_forward_length").as_str())?.to_u32()? as usize;
+        let expert_weights_norm = md_get(format!("{arch}.expert_weights_norm").as_str());
+        let expert_weights_norm = if expert_weights_norm.is_ok() {
+            expert_weights_norm.unwrap().to_bool().ok()
         } else {
-            None //qwen3 moe has no shared experts
+            None
         };
+
+        let expert_weights_scale = md_get(format!("{arch}.expert_weights_scale").as_str());
+        let expert_weights_scale = if expert_weights_scale.is_ok() {
+            expert_weights_scale.unwrap().to_f64().ok()
+        } else {
+            None
+        };
+
+        let leading_dense_block_count =
+            md_get(format!("{arch}.leading_dense_block_count").as_str());
+        let leading_dense_block_count = if leading_dense_block_count.is_ok() {
+            Some(leading_dense_block_count.unwrap().to_u32()? as usize)
+        } else {
+            None
+        };
+
+        let expert_shared_count = md_get(format!("{arch}.expert_shared_count").as_str());
+        let expert_shared_count = if expert_shared_count.is_ok() {
+            Some(expert_shared_count.unwrap().to_u32()? as usize)
+        } else {
+            None
+        };
+        let expert_shared_feed_forward_length =
+            md_get(format!("{arch}.expert_shared_feed_forward_length").as_str());
+        let expert_shared_feed_forward_length = if expert_shared_feed_forward_length.is_ok() {
+            Some(expert_shared_feed_forward_length.unwrap().to_u32()? as usize)
+        } else if arch.to_string() == "glm4moe" {
+            Some(expert_feed_forward_length)
+        } else {
+            None
+        };
+
         Some(MoEConfig {
-            moe_intermediate_size: md_get(format!("{arch}.expert_feed_forward_length").as_str())?
-                .to_u32()? as usize,
-            shared_expert_intermediate_size,
+            moe_intermediate_size: expert_feed_forward_length,
+            shared_expert_intermediate_size: expert_shared_feed_forward_length,
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
-            norm_topk_prob: shared_expert_intermediate_size.is_none(),
+            norm_topk_prob: expert_weights_norm.unwrap_or(false),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
                 as usize,
+            first_k_dense_replace: leading_dense_block_count,
+            n_shared_experts: expert_shared_count,
+            routed_scaling_factor: expert_weights_scale,
         })
     } else {
         None
@@ -571,7 +605,7 @@ pub fn init_config_tokenizer(
         let architectures = config.architectures.as_ref().unwrap();
         if matches!(
             architectures[0].as_str(),
-            "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM"
+            "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM" | "Glm4MoeForCausalLM"
         ) {
             let moe_cfg: MoEConfig = serde_json::from_slice(
                 &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
@@ -816,6 +850,7 @@ pub fn get_arch_rope(
         ("Qwen3ForConditionalGeneration", false),
         ("Qwen3VLForConditionalGeneration", false),
         ("Qwen3VLMoeForConditionalGeneration", false),
+        ("Glm4MoeForCausalLM", false),
         ("Phi3ForCausalLM", false),
         ("Phi4ForCausalLM", false),
         ("MistralForCausalLM", false),
@@ -890,6 +925,10 @@ pub fn get_arch_rope(
         }
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
             ModelType::GLM4,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "Glm4MoeForCausalLM" | "glm4moe" => (
+            ModelType::GLM4MoE,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
