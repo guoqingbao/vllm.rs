@@ -127,12 +127,16 @@ enum BincodeEosTokenId {
 pub struct MoEConfig {
     pub moe_intermediate_size: usize,
     pub shared_expert_intermediate_size: Option<usize>,
+    #[serde(alias = "n_routed_experts")]
     pub num_experts: Option<usize>,
     pub mlp_only_layers: Option<Vec<usize>>,
     pub decoder_sparse_step: Option<usize>,
     #[serde(default)]
     pub norm_topk_prob: bool,
     pub num_experts_per_tok: usize,
+    pub routed_scaling_factor: Option<f64>,
+    pub first_k_dense_replace: Option<usize>,
+    pub n_shared_experts: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -530,6 +534,7 @@ pub enum ModelType {
     Mistral,
     GLM4,
     GLM4VL,
+    GLM4MoE,
     Yi,
     StableLM,
     DeepSeek,

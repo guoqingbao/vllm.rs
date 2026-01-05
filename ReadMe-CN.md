@@ -64,6 +64,7 @@
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
+* ✅ GLM4 MoE (4.6/4.7)
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini等)
 * ✅ Gemma3 (多模态，不支持Flash Attention)
 * ✅ Qwen3-VL (Dense, 多模态)
@@ -379,7 +380,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
-* [ ] 支持更多模型类型（GLM 4.6, Kimi K2 Thinking等）
+* [ ] 支持更多模型类型（LLaMa 4, Kimi K2 Thinking等）
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
