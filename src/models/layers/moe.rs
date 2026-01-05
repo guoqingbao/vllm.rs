@@ -33,33 +33,45 @@ impl FusedMoe {
         cfg: &Config,
         experts_vb: VarBuilderX,
         comm: Rc<Comm>,
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<(Tensor, Tensor, Tensor)> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
-        let mut gate_up_experts = Vec::with_capacity(num_experts);
+        let mut gate_experts = Vec::with_capacity(num_experts);
+        let mut up_experts = Vec::with_capacity(num_experts);
         let mut down_experts = Vec::with_capacity(num_experts);
 
-        let (gate_up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
+        let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
             match &experts_vb.0 {
                 Either::Left(vb) => {
                     // Qwen3 VL MoE non-standard naming approach
-                    let gate_expert = vb.get_with_hints(
-                        (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
+                    let gate_up_expert = vb.get_with_hints(
+                        (
+                            num_experts,
+                            cfg.hidden_size,
+                            moe_cfg.moe_intermediate_size * 2,
+                        ),
                         "gate_up_proj",
-                        shard(1, comm.rank(), comm.world_size() * 2),
+                        Default::default(),
                     )?;
-                    let up_expert = vb.get_with_hints(
-                        (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                        "gate_up_proj",
-                        shard(1, comm.world_size() + comm.rank(), comm.world_size() * 2),
-                    )?;
+                    let gate_expert = gate_up_expert
+                        .narrow(D::Minus1, 0, moe_cfg.moe_intermediate_size)?
+                        .t()?;
+                    let up_expert = gate_up_expert
+                        .narrow(
+                            D::Minus1,
+                            moe_cfg.moe_intermediate_size,
+                            moe_cfg.moe_intermediate_size,
+                        )?
+                        .t()?;
                     (
-                        Tensor::cat(&[&gate_expert, &up_expert], 1)?,
+                        gate_expert,
+                        up_expert,
                         vb.get_with_hints(
-                            (cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
                             "down_proj",
-                            shard(2, comm.rank(), comm.world_size()),
-                        )?,
+                            shard(1, comm.rank(), comm.world_size()),
+                        )?
+                        .t()?,
                     )
                 }
                 _ => candle_core::bail!("invalid varbuild or quant config!"),
@@ -85,19 +97,20 @@ impl FusedMoe {
                             "weight",
                             shard(1, comm.rank(), comm.world_size()),
                         )?;
-                        gate_up_experts.push(Tensor::cat(&[&gate_expert, &up_expert], 0)?);
+                        gate_experts.push(gate_expert);
+                        up_experts.push(up_expert);
                         down_experts.push(down_expert);
                     }
                     _ => candle_core::bail!("invalid varbuild or quant config!"),
                 }
             }
             (
-                Tensor::stack(&gate_up_experts, 0)?,
+                Tensor::stack(&gate_experts, 0)?,
+                Tensor::stack(&up_experts, 0)?,
                 Tensor::stack(&down_experts, 0)?,
             )
         };
-
-        Ok((gate_up_experts, down_experts))
+        Ok((gate_experts, up_experts, down_experts))
     }
 
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
@@ -118,7 +131,8 @@ impl FusedMoe {
             dtype,
         )?;
 
-        let (gate_up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
+        let gate_up_w = Tensor::cat(&[&gate_w, &up_w], D::Minus2)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
 
@@ -442,8 +456,8 @@ impl FusedMoeGGUF {
 
 pub struct FusedMoeISQ {
     gate: Linear,
-    gate_up_experts: QTensor,
-    w_size_n: usize,
+    gate_experts: QTensor,
+    up_experts: QTensor,
     down_experts: QTensor,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
@@ -503,7 +517,8 @@ impl FusedMoeISQ {
             DType::F32,
         )?;
 
-        let (gate_up_experts, down_experts) = if moe_cfg.moe_intermediate_size / comm.world_size()
+        let (gate_experts, up_experts, down_experts) = if moe_cfg.moe_intermediate_size
+            / comm.world_size()
             % block_size
             == 0
         {
@@ -520,21 +535,32 @@ impl FusedMoeISQ {
                 match &experts_vb.0 {
                     Either::Left(vb) => {
                         // Qwen3 VL MoE non-standard naming approach
-                        let gate_expert = vb.get_with_hints(
-                            (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
+                        let gate_up_expert = vb.get_with_hints(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
                             "gate_up_proj",
-                            shard(1, 0, 2),
+                            Default::default(),
                         )?;
-                        let up_expert = vb.get_with_hints(
-                            (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                            "gate_up_proj",
-                            shard(1, 1, 2),
-                        )?;
-                        let down_expert = vb.get_with_hints(
-                            (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                            "down_proj",
-                            Shard::default(),
-                        )?;
+                        let gate_expert = gate_up_expert
+                            .narrow(D::Minus1, 0, moe_cfg.moe_intermediate_size)?
+                            .t()?;
+                        let up_expert = gate_up_expert
+                            .narrow(
+                                D::Minus1,
+                                moe_cfg.moe_intermediate_size,
+                                moe_cfg.moe_intermediate_size,
+                            )?
+                            .t()?;
+                        let down_expert = vb
+                            .get_with_hints(
+                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "down_proj",
+                                Shard::default(),
+                            )?
+                            .t()?;
                         (gate_expert, up_expert, down_expert)
                     }
                     Either::Right(_) => panic!("invalid varbuild!"),
@@ -598,23 +624,18 @@ impl FusedMoeISQ {
             let down_experts =
                 down_experts.narrow(2, comm.rank() * moe_intermediate_chunk, last_remain_size)?;
 
-            (
-                Tensor::cat(&[gate_experts, up_experts], candle_core::D::Minus2)?,
-                down_experts,
-            )
+            (gate_experts, up_experts, down_experts)
         };
 
-        // pack gate_proj and up_proj
-        let w_size_n = gate_up_experts.dim(1)? / 2;
-
-        let gate_up_experts = QTensor::quantize(&gate_up_experts, quant_type)?;
+        let gate_experts = QTensor::quantize(&gate_experts, quant_type)?;
+        let up_experts = QTensor::quantize(&up_experts, quant_type)?;
         let down_experts = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
         let world_size = comm.world_size();
 
         Ok(Self {
             gate,
-            gate_up_experts,
-            w_size_n,
+            gate_experts,
+            up_experts,
             down_experts,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
@@ -656,9 +677,9 @@ impl FusedMoeISQ {
         };
 
         let ys = {
-            let gate_up = moe::moe_gemm_gguf(
+            let gate = moe::moe_gemm_gguf(
                 &xs,
-                &self.gate_up_experts,
+                &self.gate_experts,
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
@@ -666,12 +687,16 @@ impl FusedMoeISQ {
                 is_prefill,
                 self.dtype,
             )?;
-            let gate = gate_up
-                .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-                .contiguous()?;
-            let up = gate_up
-                .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-                .contiguous()?;
+            let up = moe::moe_gemm_gguf(
+                &xs,
+                &self.up_experts,
+                &None,
+                &sorted_token_ids,
+                &expert_ids,
+                self.num_experts_per_tok,
+                is_prefill,
+                self.dtype,
+            )?;
             let down_inputs = (up * gate.apply(&self.act)?)?;
             moe::moe_gemm_gguf(
                 &down_inputs,
