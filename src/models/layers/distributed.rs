@@ -8,6 +8,7 @@ pub use candle_core::cuda_backend::cudarc::nccl::safe::{Comm, Id};
 use candle_core::CustomOp1;
 use candle_core::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor};
 use candle_nn::var_builder::Shard;
+use either::Either;
 #[cfg(not(feature = "nccl"))]
 pub struct Comm {}
 #[cfg(not(feature = "nccl"))]
@@ -312,6 +313,72 @@ impl MergedParallelColumnLinear {
             biases: vec![None; chunks],
         })
     }
+
+    pub fn load_merged_chunks(
+        in_dim: usize,
+        out_dim: usize,
+        chunk_dim: usize,
+        chunks: Vec<usize>,
+        vb: VarBuilderX,
+        comm: Rc<Comm>,
+        quant_cfg: &Option<QuantConfig>,
+        quant: &Option<String>,
+        dtype: DType,
+    ) -> Result<Self> {
+        if quant_cfg.is_some() || vb.is_qvar_builder() {
+            candle_core::bail!(
+                "Merged quantized weight is not supported at the moment, using ISQ instead!"
+            );
+        }
+        let mut vec_linear = Vec::<TensorParallelColumnLinear>::new();
+        match vb.0 {
+            Either::Left(v) => {
+                let weight = v.get((out_dim, in_dim), "weight")?;
+                let weight = if weight.dtype() != dtype {
+                    weight.to_dtype(dtype)?
+                } else {
+                    weight
+                };
+                let mut chunk_start = 0;
+                use crate::models::layers::linear::{LinearX, QLinear};
+                for chunk_idx in 0..chunks.len() {
+                    let chunk_size = chunks[chunk_idx];
+                    let ws = weight.narrow(chunk_dim, chunk_start, chunk_size)?;
+                    let c_chunk_size = ws.dim(0)? / comm.world_size();
+                    let ws_chunk = ws
+                        .narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
+                        .contiguous()?;
+                    chunk_start += chunk_size;
+
+                    let ln = crate::models::layers::linear::Linear::new(ws_chunk, None);
+                    let linear = if let Some(quantized_type) = quant {
+                        let quantized_type = if chunk_idx == chunks.len() - 1 {
+                            "q8_0".to_string()
+                        } else {
+                            quantized_type.clone()
+                        };
+                        LinearX(Either::Right(QLinear::from_linear_x(
+                            ln,
+                            quantized_type,
+                            dtype,
+                        )?))
+                    } else {
+                        LinearX(Either::Left(ln))
+                    };
+                    let ln = TensorParallelColumnLinear { linear };
+                    vec_linear.push(ln);
+                }
+            }
+            _ => {
+                candle_core::bail!("Quantized qkv weight not supported!")
+            }
+        }
+
+        Ok(Self {
+            linears: vec_linear,
+            biases: vec![None; chunks.len()],
+        })
+    }
 }
 
 impl TensorParallelRowLinear {
@@ -337,32 +404,13 @@ impl TensorParallelRowLinear {
     }
 }
 
-// pub fn rms_norm(size: usize, eps: f64, vb: VarBuilder) -> Result<RmsNorm> {
-//     let weight = vb.get_with_hints(size, "weight", shard(0, 0, 1))?;
-//     Ok(RmsNorm::new(weight, eps))
-// }
-
-// pub fn layer_norm(size: usize, eps: f64, affine: bool, vb: VarBuilder) -> Result<LayerNorm> {
-//     let weight = vb.get_with_hints(size, "weight", Shard::default())?;
-//     if affine {
-//         Ok(LayerNorm::new(weight, vb.get(size, "bias")?, eps))
-//     } else {
-//         Ok(LayerNorm::new_no_bias(weight, eps))
-//     }
-// }
-
-// pub fn embedding(vocab_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Embedding> {
-//     let embeddings = vb.get((vocab_size, hidden_size), "weight")?;
-//     Ok(Embedding::new(embeddings, hidden_size))
-// }
-
 impl ReplicatedLinear {
     pub fn from(linear: Linear) -> Result<Self> {
         Ok(Self { linear })
     }
 
     pub fn from_weight_bias(weight: Tensor, bias: Option<Tensor>) -> Result<Self> {
-        let linear = Linear::new(weight, bias, &None);
+        let linear = Linear::new(weight, bias, &None)?;
         Ok(Self { linear })
     }
 

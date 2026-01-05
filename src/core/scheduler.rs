@@ -2,16 +2,18 @@
 use super::runner::RunnerType;
 use super::{
     block_manager::BlockManager,
+    prefix_cache::PrefixCacheConfig,
     sequence::{Sequence, SequenceStatus},
 };
 use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
-use crate::utils::image::ImageData;
 use candle_core::Result;
 use parking_lot::RwLock;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokenizers::Tokenizer;
 pub struct Scheduler {
     waiting: VecDeque<Sequence>,
     running: Vec<Sequence>,
@@ -20,8 +22,15 @@ pub struct Scheduler {
     pub block_manager: BlockManager,
     next_seq_id: usize,
     eos_token_id: Vec<u32>,
+    /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
+    tool_call_end_token_ids: Vec<u32>,
+    /// Token ID for } character (used for JSON tool call detection)
+    json_end_token_id: Option<u32>,
+    /// Tokenizer for decoding output to check JSON tool call patterns
+    tokenizer: Option<Arc<Tokenizer>>,
+    /// Regex for detecting JSON tool calls
+    tool_call_regex: Regex,
     cfg: EngineConfig,
-    cached_seqs: VecDeque<(usize, String)>,
     pd_config: Option<PdConfig>,
     is_last_prefill: bool,
 }
@@ -33,8 +42,48 @@ const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 10
 pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 500; // check prefill status on PD server every 1 second
 pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
 
+fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
+    let enabled = econfig.prefix_cache.unwrap_or(false);
+    if !enabled {
+        return PrefixCacheConfig {
+            enabled: false,
+            max_cached_blocks: 0,
+        };
+    }
+
+    let mut max_cached_blocks = if let Some(max_tokens) = econfig.prefix_cache_max_tokens {
+        max_tokens / econfig.block_size
+    } else {
+        ((econfig.num_blocks as f32) * 0.25f32) as usize
+    };
+
+    if max_cached_blocks > econfig.num_blocks {
+        max_cached_blocks = econfig.num_blocks;
+    }
+
+    if max_cached_blocks == 0 {
+        crate::log_warn!("Prefix cache enabled but max cached blocks is 0; disabling.");
+        return PrefixCacheConfig {
+            enabled: false,
+            max_cached_blocks: 0,
+        };
+    }
+
+    crate::log_warn!(
+        "Prefix cache enabled: {} blocks ({} tokens).",
+        max_cached_blocks,
+        max_cached_blocks * econfig.block_size
+    );
+
+    PrefixCacheConfig {
+        enabled: true,
+        max_cached_blocks,
+    }
+}
+
 impl Scheduler {
     pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
+        let prefix_cache_cfg = build_prefix_cache_config(econfig);
         Self {
             waiting: VecDeque::new(),
             running: Vec::new(),
@@ -45,6 +94,7 @@ impl Scheduler {
                 econfig.num_blocks,
                 (econfig.cpu_mem_fold.unwrap_or(0.5f32) * econfig.num_blocks as f32) as usize,
                 econfig.block_size,
+                prefix_cache_cfg,
             ),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
@@ -52,11 +102,34 @@ impl Scheduler {
                 Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
                 _ => vec![],
             },
+            // Tool call end tokens will be set by engine after tokenizer is initialized
+            tool_call_end_token_ids: Vec::new(),
+            json_end_token_id: None,
+            tokenizer: None,
+            // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
+            // We use (?s) to allow dot matching newlines
+            tool_call_regex: Regex::new(r#"(?s)\{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$"#).unwrap(),
             cfg: econfig.clone(),
-            cached_seqs: VecDeque::new(),
             pd_config: econfig.pd_config.clone(),
             is_last_prefill: false,
         }
+    }
+
+    /// Set tool call end token IDs (called by engine after tokenizer is available)
+    pub fn set_tool_call_end_tokens(&mut self, token_ids: Vec<u32>) {
+        self.tool_call_end_token_ids = token_ids;
+    }
+
+    /// Set tokenizer for JSON tool call detection (called by engine after initialization)
+    pub fn set_tokenizer(&mut self, tokenizer: Arc<Tokenizer>) {
+        // Get the token ID for "}" character
+        if let Ok(tokens) = tokenizer.encode("}", false) {
+            if let Some(&token_id) = tokens.get_ids().last() {
+                self.json_end_token_id = Some(token_id);
+                crate::log_info!("JSON end token ID (}}) set to: {}", token_id);
+            }
+        }
+        self.tokenizer = Some(tokenizer);
     }
 
     pub fn add(&mut self, mut seq: Sequence) -> usize {
@@ -72,10 +145,7 @@ impl Scheduler {
     }
 
     /// Schedule sequences and return their indexes in `running` along with prefill flag
-    pub fn schedule(
-        &mut self,
-        active_sessions: &mut VecDeque<(usize, String)>,
-    ) -> Result<(Vec<usize>, bool)> {
+    pub fn schedule(&mut self) -> Result<(Vec<usize>, bool)> {
         let mut scheduled_ids = Vec::new();
         let mut num_tokens = 0;
 
@@ -107,7 +177,7 @@ impl Scheduler {
 
         // Prefill phase: move sequences from waiting to running if possible
         while let Some(mut seq) = self.waiting.pop_front() {
-            // We do not transfer context-cache request
+            // Try to transfer prefill requests to PD server when applicable
             if self.is_pd_mode() && !self.is_pd_server() && self.try_transfer(&mut seq) {
                 break;
             }
@@ -152,7 +222,7 @@ impl Scheduler {
 
         // Client: Check for finished prefills
         if self.is_pd_mode() && !self.is_pd_server() {
-            self.try_receive_kvcache(active_sessions)?;
+            self.try_receive_kvcache()?;
         }
 
         // Swap back seq from cpu memory if possible
@@ -161,22 +231,16 @@ impl Scheduler {
             && (self.kv_cache_usage_percent() < KVCACHE_SWAP_THRESHOLD * 0.9
                 || (self.running.is_empty() && self.kv_cache_usage_percent() <= 0.3f32))
         {
-            self.try_swap_in(active_sessions);
+            self.try_swap_in();
         } else if !preempt_ids.is_empty() || self.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD
         {
             // Requests unable to be processed at the current moment
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            // If we have cached sequence, we swap them out to CPU first
-            if let Some((is_swapped, s_id, s_len)) = self.try_swap_out_oldest_cache(active_sessions)
-            {
-                crate::log_warn!(
-                    "{} cached Seq {} ({} tokens)!",
-                    if is_swapped { "Swap out" } else { "Release" },
-                    s_id,
-                    s_len
-                );
+            let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+            if evicted > 0 {
+                crate::log_warn!("Evicted {} prefix cache block(s) under pressure.", evicted);
             } else if !preempt_ids.is_empty() && self.running.len() > 1 {
                 if let Some((idx, _)) = preempt_ids
                     .iter()
@@ -260,13 +324,17 @@ impl Scheduler {
         Ok(0)
     }
 
+    pub fn find_seq_by_session_id(&self, session_id: &str) -> Option<(usize, SequenceStatus)> {
+        self.running
+            .iter()
+            .chain(self.waiting.iter())
+            .chain(self.cached.iter())
+            .find(|seq| seq.sampling_params.session_id.as_deref() == Some(session_id))
+            .map(|seq| (seq.id, seq.status))
+    }
+
     /// Postprocess output tokens and modify sequences by indexes
-    pub fn postprocess(
-        &mut self,
-        ids: &[usize],
-        output_ids: &[u32],
-        active_sessions: &VecDeque<(usize, String)>,
-    ) {
+    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[u32]) {
         for (i, &idx) in ids.iter().enumerate() {
             // Sequence may swapped out
             if idx >= self.running.len() {
@@ -328,182 +396,60 @@ impl Scheduler {
                 continue; // Go to next sequence in postprocess
             }
 
+            // Check for tool call end token BEFORE checking EOS
+            // When tools are enabled (mcp_mode.is_some()), finish stream at </tool_call>
+            if self.running[idx].sampling_params.mcp_mode.is_some() {
+                // Check if this is a tool call end (supports both XML </tool_call> and JSON } patterns)
+                // We check BEFORE borrowing seq mutably
+                let is_end = self.is_tool_call_end(token, idx);
+                if is_end {
+                    crate::log_info!(
+                        "[Seq {}] Detected </tool_call> token {}, finishing for external handling",
+                        seq_id,
+                        token
+                    );
+                    let seq = &mut self.running[idx];
+                    seq.append_token(token);
+                    seq.is_tool_call_end = true;
+                    // External tool mode: finish stream so client can handle tool calls
+                    seq.status = SequenceStatus::Finished;
+                    self.block_manager.cache_sequence(seq);
+                    self.block_manager.deallocate(seq);
+                    continue;
+                }
+            }
+
+            let hit_stop_sequence = self.is_stop_sequence_end(token, &self.running[idx]);
             let seq = &mut self.running[idx];
 
-            if self.eos_token_id.contains(&token)
+            if hit_stop_sequence
+                || self.eos_token_id.contains(&token)
                 || seq.output_len() >= seq.sampling_params.max_tokens.unwrap_or(16384)
                 || seq.len() > self.cfg.max_num_batched_tokens
             {
-                if let Some((_, v)) = active_sessions.iter().find(|(k, _)| *k == seq.id) {
-                    self.swap_out_or_cache(idx, v.clone());
-                } else {
-                    // Resources for non context-cache requests will be removed immediately when finished
-                    seq.status = SequenceStatus::Finished;
-                    self.block_manager.deallocate(seq);
+                if hit_stop_sequence {
+                    crate::log_info!(
+                        "[Seq {}] Detected stop sequence token {}, finishing",
+                        seq_id,
+                        token
+                    );
                 }
+                seq.status = SequenceStatus::Finished;
+                self.block_manager.cache_sequence(seq);
+                self.block_manager.deallocate(seq);
             } else {
                 seq.append_token(token);
             }
         }
     }
 
-    pub fn has_cache(&self, session_id: &String) -> bool {
-        self.cached_seqs.iter().any(|(_, v)| v == session_id)
-    }
-
-    // Get number of cached tokens for this session
-    pub fn get_cached_status(&self, session_id: &String) -> SequenceStatus {
-        let seq_map_entry = self
-            .cached_seqs
-            .iter()
-            .find(|(_, v)| v == session_id)
-            .map(|(id, _)| *id);
-        if let Some(target_seq_id) = seq_map_entry {
-            if let Some(i) = self.cached.iter().position(|s| s.id == target_seq_id) {
-                return self.cached[i].status;
-            }
-            return SequenceStatus::Running;
-        }
-        SequenceStatus::Finished
-    }
-
-    pub fn get_cache(
-        &mut self,
-        session_id: &String,
-        new_tokens_ids: Vec<u32>,
-        active_sessions: &mut VecDeque<(usize, String)>,
-        images: &Option<ImageData>,
-        image_idx: i32,
-    ) -> Result<usize> {
-        let seq_map_entry = self
-            .cached_seqs
-            .iter()
-            .find(|(_, v)| v == session_id)
-            .map(|(id, _)| *id);
-        if let Some(target_seq_id) = seq_map_entry {
-            let cache_index = self.cached.iter().position(|s| s.id == target_seq_id);
-            if let Some(i) = cache_index {
-                // Found it in GPU memory or Swap memory
-                crate::log_info!(
-                    "\nSeq {} - continued with {} new tokens ({} cached tokens, session_id {})\n",
-                    target_seq_id,
-                    new_tokens_ids.len(),
-                    self.cached[i].token_ids.len(),
-                    session_id.clone()
-                );
-                let mut seq = self.cached.remove(i);
-                if seq.status == SequenceStatus::FinishSwapped
-                    && !self.block_manager.can_swap_in(&seq)
-                {
-                    if let Some((is_swapped, s_id, s_len)) =
-                        self.try_swap_out_oldest_cache(active_sessions)
-                    {
-                        crate::log_warn!(
-                            "{} cached Seq {} ({} tokens)!",
-                            if is_swapped { "Swap out" } else { "Release" },
-                            s_id,
-                            s_len
-                        );
-                    } else {
-                        self.cached.push(seq);
-                        candle_core::bail!("Seq {} swapped out but currently no resources to swap in for execution, please request later!", target_seq_id);
-                    }
-                }
-
-                seq.token_ids.extend(new_tokens_ids.clone());
-                seq.output_ids.clear();
-                if let Some(img) = &images {
-                    let mut img = img.clone(); // update the images
-                    img.image_idx = image_idx;
-                    seq.images = Some(img);
-                } else {
-                    seq.images = None;
-                }
-                //in context-cache, we dont' recreate sequences, so we need to update created_time
-                seq.created_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("Time went backwards")
-                    .as_millis() as usize;
-
-                if seq.status == SequenceStatus::FinishSwapped {
-                    seq.clear_block_table(); //reallocate block table since previous gpu blocks were freed
-                    seq.swapped_time = Some(seq.created_time);
-                }
-
-                let mut failed_reason = None;
-                if let Err(e) = self.block_manager.ensure_allocate(&mut seq) {
-                    failed_reason = Some(e);
-                }
-
-                // Swap in data from CPU (if swapped out previously)
-                if seq.status == SequenceStatus::FinishSwapped && failed_reason.is_none() {
-                    if let Err(e) = self.block_manager.swap_in(&mut seq) {
-                        // swap in failed: mark finished and free gpu blocks
-                        crate::log_warn!("Failed to swap in seq {}: {:?}", seq.id, e);
-                        failed_reason = Some(e);
-                    }
-                }
-
-                if let Some(e) = failed_reason {
-                    seq.status = SequenceStatus::Finished;
-                    self.block_manager.deallocate(&seq);
-                    if let Some(pos) = self
-                        .cached_seqs
-                        .iter()
-                        .position(|(id, _)| *id == target_seq_id)
-                    {
-                        self.cached_seqs.remove(pos);
-                    }
-                    candle_core::bail!("{:?}", e);
-                }
-                seq.status = SequenceStatus::Waiting; //active this sequence (from cached/swaped in to waiting)
-                self.waiting.push_back(seq.clone());
-                Ok(target_seq_id)
-            } else {
-                // Found in mapping, but missing in memory (Pollution/Eviction Desync)
-                // Remove the stale mapping
-                if let Some(pos) = self
-                    .cached_seqs
-                    .iter()
-                    .position(|(id, _)| *id == target_seq_id)
-                {
-                    self.cached_seqs.remove(pos);
-                }
-                candle_core::bail!(
-                    "Cache inconsistency: Session {} mapped to seq {} but data is missing.",
-                    session_id,
-                    target_seq_id
-                );
-            }
-        } else {
-            candle_core::bail!("Cache for session {} not found!", session_id);
-        }
-    }
-
     pub fn clear_finished(&mut self) {
         let is_pd_server = self.is_pd_server();
-        let mut remove_ids = Vec::new();
-        for i in 0..self.running.len() {
-            let (status, seq_id) = (self.running[i].status, self.running[i].id);
-            if !is_pd_server
-                && (status == SequenceStatus::Cached || status == SequenceStatus::FinishSwapped)
-            {
-                let seq: &mut Sequence = &mut self.running[i];
-                seq.output_ids.clear();
-                remove_ids.push(seq_id);
-                self.cached.push(seq.clone());
-            }
-            if status == SequenceStatus::Finished {
-                // This seq marked as finised and no need to cache, release cache if available
-                self.release_cache(seq_id);
-                if is_pd_server {
-                    self.print_free_blocks();
-                }
+        for seq in &self.running {
+            if seq.status == SequenceStatus::Finished && is_pd_server {
+                self.print_free_blocks();
             }
         }
-        self.running.retain(|s| !remove_ids.contains(&s.id));
-
-        // Remove finished sequences from running vector
         self.running
             .retain(|seq| seq.status != SequenceStatus::Finished);
         self.waiting
@@ -512,12 +458,10 @@ impl Scheduler {
 
     pub fn release_waitings(&mut self) {
         // Release all waiting sequences since there are no more resources (kv cache)
-        let mut decode_ids = Vec::new();
         for i in 0..self.waiting.len() {
             let seq = &mut self.waiting[i];
             seq.status = SequenceStatus::Finished;
             self.block_manager.deallocate(seq);
-            decode_ids.push(i);
         }
         self.waiting.clear();
         for i in 0..self.cached.len() {
@@ -528,7 +472,7 @@ impl Scheduler {
             self.block_manager.free_cpu_swap_for_seq(seq.id);
         }
         self.cached.clear();
-        self.cached_seqs.clear();
+        self.block_manager.clear_prefix_cache();
     }
 
     pub fn release_cache(&mut self, seq_id: usize) {
@@ -541,9 +485,6 @@ impl Scheduler {
             }
             seq.status = SequenceStatus::Finished;
             self.block_manager.deallocate(&seq);
-        }
-        if let Some(pos) = self.cached_seqs.iter().position(|(id, _)| *id == seq_id) {
-            self.cached_seqs.remove(pos);
         }
     }
 
@@ -568,12 +509,7 @@ impl Scheduler {
     ) -> (Vec<usize>, Vec<usize>) {
         let mut finished_seqs = Vec::new();
         let mut remove_ids = Vec::new();
-        let CHUNK_SIZE: usize =
-            if self.cfg.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
-                4096
-            } else {
-                8192
-            };
+        let CHUNK_SIZE: usize = 8192;
         for (i, id) in scheduled_ids.iter().enumerate() {
             if *id < self.running.len() {
                 let seq = &self.running[*id];
@@ -654,8 +590,7 @@ impl Scheduler {
         }
     }
 
-    pub fn try_swap_in(&mut self, active_sessions: &mut VecDeque<(usize, String)>) {
-        let available_kvcache_tokens = self.get_available_kv_tokens();
+    pub fn try_swap_in(&mut self) {
         let cur_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards")
@@ -675,6 +610,7 @@ impl Scheduler {
                 continue;
             }
 
+            let available_kvcache_tokens = self.get_available_kv_tokens();
             if !self.block_manager.can_swap_in(&self.cached[i])
                 || (available_kvcache_tokens - seq_len < MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP)
             {
@@ -683,15 +619,11 @@ impl Scheduler {
                     continue;
                 }
 
-                // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((is_swapped, s_id, s_len)) =
-                    self.try_swap_out_oldest_cache(active_sessions)
-                {
+                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                if evicted > 0 {
                     crate::log_warn!(
-                        "{} cached Seq {} ({} tokens) for swap-in Seq {}!",
-                        if is_swapped { "Swap out" } else { "Releae" },
-                        s_id,
-                        s_len,
+                        "Evicted {} prefix cache block(s) for swap-in Seq {}.",
+                        evicted,
                         seq_id
                     );
                     break;
@@ -781,39 +713,6 @@ impl Scheduler {
         return false;
     }
 
-    pub fn try_swap_out_oldest_cache(
-        &mut self,
-        active_sessions: &mut VecDeque<(usize, String)>,
-    ) -> Option<(bool, usize, usize)> {
-        if let Some((pos, _)) = self
-            .cached
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.status == SequenceStatus::Cached)
-            .min_by_key(|(_, s)| s.id)
-        // <-- smallest sequence id
-        {
-            let (seq_id, seq_len) = (self.cached[pos].id, self.cached[pos].len());
-            if self.try_swap_out(pos, false) {
-                Some((true, seq_id, seq_len))
-            } else {
-                crate::log_warn!(
-                    "Unable to swap out Seq {}, force release it's resources ({} tokens)!",
-                    seq_id,
-                    seq_len
-                );
-                self.release_cache(seq_id);
-                if let Some(pos) = active_sessions.iter().position(|(k, _)| k == &seq_id) {
-                    active_sessions.remove(pos);
-                }
-
-                Some((false, seq_id, seq_len))
-            }
-        } else {
-            None
-        }
-    }
-
     pub fn try_swap_out_by_id(&mut self, seq_id: usize, is_running: bool) -> bool {
         if is_running {
             if let Some(pos) = self.running.iter().position(|seq| seq.id == seq_id) {
@@ -825,40 +724,6 @@ impl Scheduler {
             }
         }
         false
-    }
-
-    pub fn swap_out_or_cache(&mut self, idx: usize, v: String) {
-        let kvcache_usage_percentage = self.kv_cache_usage_percent();
-        let mut seq = &mut self.running[idx];
-        if kvcache_usage_percentage > KVCACHE_SWAP_THRESHOLD
-            && !seq.block_table.is_empty()
-            && self.block_manager.can_swap_out(seq)
-            && self.block_manager.ensure_allocate(&mut seq).is_ok()
-        {
-            // Reach the kvcache threashold and we have cpu memory to swap out
-            match self.block_manager.swap_out(seq) {
-                Ok(_) => {
-                    seq.status = SequenceStatus::FinishSwapped;
-                    seq.num_cached_tokens = seq.len();
-                    self.block_manager.deallocate(&seq);
-                    if !self.cached_seqs.iter().any(|(_, v_)| v_ == &v) {
-                        self.cached_seqs.push_back((seq.id, v.clone()));
-                    }
-                }
-                Err(e) => {
-                    crate::log_warn!("Failed to swap out seq {}: {:?}", seq.id, e);
-                    seq.status = SequenceStatus::Finished;
-                    self.block_manager.deallocate(seq);
-                }
-            }
-        } else {
-            // Sufficient GPU KV Cache, no need to swap, mark as cached in GPU memory
-            seq.status = SequenceStatus::Cached;
-            seq.num_cached_tokens = seq.len();
-            if !self.cached_seqs.iter().any(|(_, v_)| v_ == &v) {
-                self.cached_seqs.push_back((seq.id, v.clone()));
-            }
-        }
     }
 
     pub fn is_pd_mode(&self) -> bool {
@@ -876,9 +741,8 @@ impl Scheduler {
     pub fn is_suitable_for_transfer(&self, seq: &Sequence) -> bool {
         if seq.status == SequenceStatus::Swapped // swapped out sequence
             || seq.status == SequenceStatus::FinishSwapped // swapped out and finished sequence
-            || seq.len() < PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD // prefill length < 128
-            || (self.cfg.flash_context.unwrap_or(false) // Context-cache request
-            && self.cached_seqs.iter().position(|(id, _)| id == &seq.id).is_some())
+            || seq.len() < PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD
+        // prefill length < 128
         {
             false
         } else {
@@ -887,10 +751,7 @@ impl Scheduler {
     }
 
     /// Client: Check for finished prefills and move them to the running queue.
-    pub fn try_receive_kvcache(
-        &mut self,
-        active_sessions: &mut VecDeque<(usize, String)>,
-    ) -> Result<()> {
+    pub fn try_receive_kvcache(&mut self) -> Result<()> {
         let mut finished_seq_ids = Vec::new();
         let cur_time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -910,18 +771,16 @@ impl Scheduler {
                 continue;
             }
             // We have the data. Can we allocate space for it?
-            if !self.block_manager.can_allocate(&self.transferred[idx]) {
+            if !self
+                .block_manager
+                .can_allocate_without_prefix(&self.transferred[idx])
+            {
                 // Not enough memory right now. Put data back and try later.
-
-                // KvCache not sufficent, try if we can swap-out cached seq
-                if let Some((is_swapped, s_id, s_len)) =
-                    self.try_swap_out_oldest_cache(active_sessions)
-                {
+                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                if evicted > 0 {
                     crate::log_warn!(
-                        "{} cached Seq {} ({} tokens) for Seq {} KvCache receiving!",
-                        if is_swapped { "Swap out" } else { "Release" },
-                        s_id,
-                        s_len,
+                        "Evicted {} prefix cache block(s) for Seq {} KvCache receiving!",
+                        evicted,
                         seq_id
                     );
                     break;
@@ -936,7 +795,8 @@ impl Scheduler {
             }
 
             // Allocate GPU blocks for the sequence
-            self.block_manager.allocate(&mut self.transferred[idx])?;
+            self.block_manager
+                .allocate_without_prefix(&mut self.transferred[idx])?;
 
             // Perform the actual KV cache data transfer
             let mut success = false;
@@ -1012,14 +872,16 @@ impl Scheduler {
     }
 
     pub fn get_num_cached_tokens(&self) -> usize {
-        let mut num_cached_tokens = 0;
-        for i in 0..self.cached.len() {
-            num_cached_tokens += self.cached[i].num_cached_tokens;
-        }
-        for i in 0..self.running.len() {
-            num_cached_tokens += self.running[i].num_cached_tokens;
-        }
-        num_cached_tokens
+        self.block_manager.prefix_cache_blocks() * self.block_manager.get_block_size()
+    }
+
+    pub fn evict_prefix_cache_until_free(&mut self, min_free_blocks: usize) -> usize {
+        self.block_manager
+            .evict_prefix_cache_until_free(min_free_blocks)
+    }
+
+    pub fn evict_prefix_cache_blocks(&mut self, blocks: usize) -> usize {
+        self.block_manager.evict_prefix_cache_blocks(blocks)
     }
 
     pub fn get_available_kv_tokens(&self) -> usize {
@@ -1082,5 +944,70 @@ impl Scheduler {
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
         1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32)
+    }
+
+    /// Check if the given token is a tool call end token
+    /// This supports both:
+    /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
+    /// 2. JSON end token "}" combined with Regex validation for {..."name":..., "arguments":...} pattern
+    pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
+        // 1. Check for explicit tool call end tokens (XML style)
+        if self.tool_call_end_token_ids.contains(&token) {
+            return true;
+        }
+
+        // 2. Check for JSON style tool call using Regex
+        // This handles models like Qwen3 that output raw JSON without XML tags
+        if self.json_end_token_id == Some(token) {
+            if let Some(tokenizer) = &self.tokenizer {
+                // Temporarily add the token to get complete output for decoding
+                let mut temp_output = self.running[idx].output_ids.to_vec();
+                temp_output.push(token);
+
+                if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
+                    // Check for JSON tool call pattern using Regex
+                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
+                    if self.tool_call_regex.is_match(&decoded) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn is_stop_sequence_end(&self, token: u32, seq: &Sequence) -> bool {
+        let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
+            return false;
+        };
+        if stop_sequences.is_empty() {
+            return false;
+        }
+
+        for stop in stop_sequences {
+            if stop.is_empty() {
+                continue;
+            }
+            if stop.len() == 1 {
+                if stop[0] == token {
+                    return true;
+                }
+                continue;
+            }
+
+            let prior_len = seq.output_ids.len();
+            if stop.len() - 1 > prior_len {
+                continue;
+            }
+            let start_idx = prior_len + 1 - stop.len();
+            if seq.output_ids[start_idx..] == stop[..stop.len() - 1]
+                && stop[stop.len() - 1] == token
+            {
+                return true;
+            }
+        }
+
+        false
     }
 }

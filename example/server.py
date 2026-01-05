@@ -1,4 +1,7 @@
 import argparse
+import multiprocessing as mp
+import os
+import signal
 import sys
 import warnings
 from vllm_rs import Engine, EngineConfig, GenerationConfig, PdConfig, PdMethod, PdRole
@@ -21,7 +24,8 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--frequency-penalty", type=float, default=None)
     parser.add_argument("--presence-penalty", type=float, default=None)
-    parser.add_argument("--context-cache", action="store_true")
+    parser.add_argument("--prefix-cache", action="store_true")
+    parser.add_argument("--prefix-cache-max-tokens", type=int, default=None)
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
     parser.add_argument("--kv-fraction", type=float, default=None)
@@ -30,20 +34,15 @@ def parse_args():
     parser.add_argument("--pd-url", help="Url like `192.168.1.100:8888` \
         used for TCP/IP communication between PD server and client", type=str, default=None)
     parser.add_argument("--ui-server", action="store_true")
+    parser.add_argument("--mcp_config", type=str, default=None)
+    parser.add_argument("--mcp_command", type=str, default=None)
+    parser.add_argument("--mcp_args", type=str, default=None)
 
     return parser.parse_args()
 
-def main():
-    args = parse_args()
-
-    # limit default max_num_seqs to 1 on MacOs (due to limited gpu memory)
+def run_server(args):
+    # Build and run the engine in a child process so the parent can handle Ctrl+C.
     max_num_seqs = 1 if sys.platform == "darwin" else args.max_num_seqs
-    # max_model_len = 32768 if sys.platform == "darwin" else args.max_model_len
-    # if args.max_model_len is None:
-    #     if max_num_seqs > 0:
-    #         max_model_len =  max_model_len // max_num_seqs
-    # else:
-    #     max_model_len = args.max_model_len
 
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
@@ -71,12 +70,16 @@ def main():
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=args.context_cache,
+        prefix_cache=args.prefix_cache,
+        prefix_cache_max_tokens=args.prefix_cache_max_tokens,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=True,
         cpu_mem_fold=args.cpu_mem_fold,
         kv_fraction=args.kv_fraction,
         pd_config=pd_config,
+        mcp_config=args.mcp_config,
+        mcp_command=args.mcp_command,
+        mcp_args=args.mcp_args,
     )
 
     engine = Engine(cfg, args.dtype)
@@ -85,6 +88,35 @@ def main():
     # if args.max_model_len is None:
     #     warnings.warn(f"Warning: max_model_len is not given, default to {max_model_len}, max kvcache tokens {max_kvcache_tokens}.")
     engine.start_server(args.port, args.ui_server) # this will block
+
+
+def main():
+    args = parse_args()
+    ctx = mp.get_context("spawn")
+    server_proc = ctx.Process(target=run_server, args=(args,))
+    server_proc.start()
+
+    def _shutdown(signum, frame):
+        if server_proc.is_alive():
+            try:
+                os.kill(server_proc.pid, signal.SIGINT)
+            except OSError:
+                pass
+            server_proc.join(timeout=2.0)
+            if server_proc.is_alive():
+                server_proc.terminate()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
+        while server_proc.is_alive():
+            server_proc.join(timeout=0.5)
+    except KeyboardInterrupt:
+        _shutdown(signal.SIGINT, None)
+
+    sys.exit(server_proc.exitcode or 0)
 
 
 if __name__ == "__main__":

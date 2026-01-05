@@ -12,7 +12,7 @@ use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::{models::layers::distributed::Comm, utils::image::ImageData};
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 use config::Qwen3VLConfig;
 use vision::Qwen3VLVisionModel;
 
@@ -50,6 +50,8 @@ impl Qwen3VLForConditionalGeneration {
                 .map_err(candle_core::Error::wrap)?;
         cfg.text_config = config.clone();
 
+        crate::log_info!("Loading vision tower...");
+
         let vision_model =
             Qwen3VLVisionModel::new(&cfg.vision_config, &vb.pp("model.visual"), dtype, device)?;
 
@@ -61,6 +63,7 @@ impl Qwen3VLForConditionalGeneration {
             .architectures
             .unwrap_or(vec!["Qwen3VLForConditionalGeneration".to_string()]);
         let arch = arch[0].as_str();
+        crate::log_info!("Loading language model...");
         let text_model = if matches!(arch, "Qwen3VLMoeForConditionalGeneration") {
             Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
                 &vb,
@@ -70,7 +73,7 @@ impl Qwen3VLForConditionalGeneration {
                 is_rope_i,
                 device,
                 progress_reporter,
-                Some("model.language_model".to_string()),
+                Some("model.language_model.".to_string()),
             )?)
         } else {
             Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
@@ -81,7 +84,7 @@ impl Qwen3VLForConditionalGeneration {
                 is_rope_i,
                 device,
                 progress_reporter,
-                Some("model.language_model".to_string()),
+                Some("model.language_model.".to_string()),
             )?)
         };
 
@@ -112,7 +115,7 @@ impl Qwen3VLForConditionalGeneration {
         let mut visual_pos_masks: Option<Tensor> = None;
         let mut deepstack_visual_embeds: Option<Vec<Tensor>> = None;
 
-        if let Some(images) = &images {
+        if let Some(images) = images {
             let mut pixel_values = images.to_tensor_f32(&device)?.to_dtype(dtype)?;
             let mut patches = Vec::new();
             for (h, w) in &images.patches {
@@ -166,14 +169,59 @@ impl Qwen3VLForConditionalGeneration {
                 .to_dtype(DType::U32)?;
             use attention_rs::ops::NonZeroOp;
             let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
+            if indices.shape().dim(0)? > 0 {
+                let hidden = input_embeds.dim(D::Minus1)?;
+                let indices_len = indices.shape().dim(0)?;
+                if indices_len % hidden != 0 {
+                    candle_core::bail!(
+                        "image indices length {} not divisible by hidden size {}",
+                        indices_len,
+                        hidden
+                    );
+                }
+                let tokens_in_chunk = indices_len / hidden;
+                let total_tokens = image_embeds.dim(0)?;
+                let start = images.image_token_offset.min(total_tokens);
+                let end = start + tokens_in_chunk;
+                if end > total_tokens {
+                    candle_core::bail!(
+                        "image token slice out of range: start {}, len {}, total {}",
+                        start,
+                        tokens_in_chunk,
+                        total_tokens
+                    );
+                }
+                let image_embeds = if start > 0 || end < total_tokens {
+                    image_embeds.narrow(0, start, tokens_in_chunk)?
+                } else {
+                    image_embeds
+                };
+                let deepstack_image_embeds = deepstack_image_embeds
+                    .into_iter()
+                    .map(|t| {
+                        if start > 0 || end < total_tokens {
+                            t.narrow(0, start, tokens_in_chunk)
+                        } else {
+                            Ok(t)
+                        }
+                    })
+                    .collect::<Result<Vec<_>>>()?;
 
-            let mut x_flat = input_embeds.flatten_all()?;
-            let image_flat = image_embeds.flatten_all()?;
+                let mut x_flat = input_embeds.flatten_all()?;
+                let image_flat = image_embeds.flatten_all()?;
 
-            x_flat =
-                x_flat.scatter_add(&indices, &(image_flat - x_flat.gather(&indices, 0)?)?, 0)?;
-            input_embeds = x_flat.reshape(input_embeds.shape())?;
-            deepstack_visual_embeds = Some(deepstack_image_embeds);
+                x_flat = x_flat.scatter_add(
+                    &indices,
+                    &(image_flat - x_flat.gather(&indices, 0)?)?,
+                    0,
+                )?;
+                input_embeds = x_flat.reshape(input_embeds.shape())?;
+                deepstack_visual_embeds = Some(deepstack_image_embeds);
+            } else {
+                crate::log_info!(
+                    "Skip image embedding because no image tokens found in this chunk!"
+                );
+            }
         }
 
         match &self.text_model {
@@ -199,6 +247,9 @@ impl Qwen3VLForConditionalGeneration {
     }
 
     pub fn get_vocab_size(&self) -> usize {
-        todo!()
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.get_vocab_size(),
+            Qwen3TextModel::MoE(m) => m.get_vocab_size(),
+        }
     }
 }

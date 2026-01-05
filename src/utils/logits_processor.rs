@@ -20,6 +20,8 @@ pub enum Sampling {
 pub struct LogitsProcessor {
     rng: Arc<Mutex<rand::rngs::StdRng>>,
     pub sampling: Sampling,
+    #[cfg(feature = "cuda")]
+    fast_sampler: Arc<std::sync::Mutex<attention_rs::sampler::Sampler>>, // Use Mutex because Sampler has interior mutability (Mutex) but Rust needs to know who owns it. Wait, Sampler contains Mutexes, so it's thread-safe?
 }
 
 impl LogitsProcessor {
@@ -28,6 +30,8 @@ impl LogitsProcessor {
         Self {
             rng: Arc::new(Mutex::new(rng)),
             sampling,
+            #[cfg(feature = "cuda")]
+            fast_sampler: Arc::new(std::sync::Mutex::new(attention_rs::sampler::Sampler::new())),
         }
     }
 
@@ -190,11 +194,42 @@ impl LogitsProcessor {
         vec_ret
     }
 
-    pub fn sample(
-        &self,
-        logits: &Tensor,
-        sampling_params: &Option<SamplingParams>,
-    ) -> Result<Vec<u32>> {
+    /// Sample tokens using a pre-computed sampling strategy.
+    /// This is more efficient than `sample()` when the strategy is already computed and cached.
+    pub fn sample_with_strategy(&self, logits: &Tensor, sampling: &Sampling) -> Result<Vec<u32>> {
+        #[cfg(feature = "cuda")]
+        {
+            // Extract k, p, and temperature based on the sampling strategy.
+            // For strategies that don't specify k or p, we use sensible defaults that
+            // preserve the intended behavior:
+            // - TopK: Use p=1.0 to disable top-p filtering (only top-k applies)
+            // - TopP: Use k=256 (kernel's max) so top-p can select from a wide candidate pool
+            // - TopKThenTopP: Use both user-specified k and p
+            let (k, p, t) = match sampling {
+                Sampling::TopKThenTopP { k, p, temperature } => (*k, *p, *temperature),
+                // Pure top-k: disable top-p by setting p=1.0 (100% of mass allowed)
+                Sampling::TopK { k, temperature } => (*k, 1.0, *temperature),
+                // Pure top-p: use max k=256 so top-p can consider enough candidates
+                Sampling::TopP { p, temperature } => (256, *p, *temperature),
+                _ => (0, 0.0, 0.0), // Marker for unsupported strategies
+            };
+
+            // Only use CUDA fast path for supported sampling strategies
+            let should_run = matches!(
+                sampling,
+                Sampling::TopKThenTopP { .. } | Sampling::TopK { .. } | Sampling::TopP { .. }
+            );
+
+            if should_run && k > 0 {
+                let seed = {
+                    use rand::RngCore;
+                    self.rng.lock().next_u64()
+                };
+                let sampler = self.fast_sampler.lock().unwrap();
+                return sampler.sample_cuda(logits, k, p as f32, t, seed);
+            }
+        }
+
         let logits = logits.to_dtype(DType::F32)?;
         let batch = logits.layout().dims()[0];
         let prs = |temperature: f64| -> Result<Tensor> {
@@ -203,12 +238,7 @@ impl LogitsProcessor {
             Ok(prs)
         };
 
-        let sampling = sampling_params.as_ref().map_or_else(
-            || self.sampling.to_owned(),
-            |param| LogitsProcessor::get_strategy(param.temperature, param.top_k, param.top_p),
-        );
-
-        let next_tokens = match &sampling {
+        let next_tokens = match sampling {
             Sampling::ArgMax => self.sample_argmax(&logits)?,
             Sampling::All { temperature } => {
                 let prs = prs(*temperature as f64)?.to_vec2()?;
@@ -239,6 +269,18 @@ impl LogitsProcessor {
             }
         };
         Ok(next_tokens)
+    }
+
+    pub fn sample(
+        &self,
+        logits: &Tensor,
+        sampling_params: &Option<SamplingParams>,
+    ) -> Result<Vec<u32>> {
+        let sampling = sampling_params.as_ref().map_or_else(
+            || self.sampling.to_owned(),
+            |param| LogitsProcessor::get_strategy(param.temperature, param.top_k, param.top_p),
+        );
+        self.sample_with_strategy(logits, &sampling)
     }
 
     fn apply_penalties(

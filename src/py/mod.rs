@@ -91,7 +91,10 @@ impl Engine {
                         PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
                     })?;
 
-                Ok(results)
+                // GenerationOutput is returned directly
+                let outputs: Vec<GenerationOutput> = results;
+
+                Ok(outputs)
             })
         })
     }
@@ -258,8 +261,10 @@ impl EngineConfig {
         hf_token=None, hf_token_path=None,
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
-        generation_cfg=None, seed=None, flash_context = None, fp8_kvcache=None,
-        server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None, disable_flash_attn=None))]
+        generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
+        fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
+        mcp_command=None, mcp_config=None, mcp_args=None,
+        disable_flash_attn=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -275,12 +280,16 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
-        flash_context: Option<bool>,
+        prefix_cache: Option<bool>,
+        prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        mcp_command: Option<String>,
+        mcp_config: Option<String>,
+        mcp_args: Option<String>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -288,14 +297,19 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if flash_context.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
+        if prefix_cache.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
             if cfg!(feature = "metal") {
-                panic!("Error: fp8 kvcache is not compatible under context-context on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`).");
+                panic!("Error: fp8 kvcache is not compatible with prefix cache on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
             } else {
-                panic!("Error: This python package build has flash-context (context-cache using flash attention), which does not compatible with fp8 kvcache
-                !\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--context-context`) when building the package.");
+                panic!("Error: This python package build has flash-context kernels which are not compatible with fp8 kvcache when prefix cache is enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`) when building the package.");
             }
         }
+
+        let mcp_args = if let Some(mcp_args) = mcp_args {
+            Some(mcp_args.split(',').map(|s| s.to_string()).collect())
+        } else {
+            None
+        };
 
         Self {
             model_id,
@@ -318,10 +332,14 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
-            flash_context,
+            prefix_cache,
+            prefix_cache_max_tokens,
             fp8_kvcache,
             server_mode,
             pd_config,
+            mcp_command,
+            mcp_config,
+            mcp_args,
             disable_flash_attn,
         }
     }
@@ -332,7 +350,7 @@ impl SamplingParams {
     #[new]
     #[pyo3(signature = (temperature=None, max_tokens=None,
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
-        frequency_penalty=None, presence_penalty=None))]
+        frequency_penalty=None, presence_penalty=None, thinking=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
@@ -342,6 +360,7 @@ impl SamplingParams {
         session_id: Option<String>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        thinking: Option<bool>,
     ) -> Self {
         Self {
             temperature,
@@ -352,6 +371,10 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking,
         }
     }
 
@@ -366,6 +389,10 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking: None,
         }
     }
 }

@@ -13,6 +13,12 @@ pub struct ImageData {
     pub shape: Vec<usize>,
     pub patches: Vec<(usize, usize)>,
     pub image_idx: i32,
+    #[serde(default)]
+    pub image_token_offset: usize,
+    #[serde(default)]
+    pub tokens_per_image: Vec<usize>,
+    #[serde(default)]
+    pub image_token_id: Option<u32>,
 }
 
 impl ImageData {
@@ -20,6 +26,136 @@ impl ImageData {
         let floats: &[f32] = bytemuck::cast_slice(&self.raw);
         Tensor::from_slice(floats, self.shape.clone(), device)
     }
+}
+
+pub fn compute_tokens_per_image(
+    cfg: &ImageProcessConfig,
+    image_sizes: &[(usize, usize)],
+) -> Vec<usize> {
+    if image_sizes.is_empty() {
+        return Vec::new();
+    }
+    match cfg.model_type {
+        ModelType::Gemma3 => {
+            if let Some(tokens) = cfg.mm_tokens_per_image {
+                return vec![tokens; image_sizes.len()];
+            }
+            let denom = cfg.patch_size * cfg.spatial_merge_size;
+            if denom == 0 {
+                return vec![0; image_sizes.len()];
+            }
+            image_sizes
+                .iter()
+                .map(|&(h, w)| (h / denom) * (w / denom))
+                .collect()
+        }
+        ModelType::Qwen3VL => {
+            let merge = cfg.spatial_merge_size;
+            let merge_area = merge * merge;
+            image_sizes
+                .iter()
+                .map(|&(h, w)| {
+                    if merge_area == 0 {
+                        0
+                    } else {
+                        (h * w) / merge_area
+                    }
+                })
+                .collect()
+        }
+        _ => {
+            let denom = cfg.patch_size * cfg.spatial_merge_size;
+            if denom == 0 {
+                return vec![0; image_sizes.len()];
+            }
+            image_sizes
+                .iter()
+                .map(|&(h, w)| (h / denom) * (w / denom))
+                .collect()
+        }
+    }
+}
+
+pub fn compute_image_slice(
+    token_ids: &[u32],
+    num_cached_tokens: usize,
+    images: &ImageData,
+) -> Option<(i32, usize)> {
+    let base_idx = images.image_idx;
+    if base_idx < 0 {
+        return None;
+    }
+    let num_images = if !images.tokens_per_image.is_empty() {
+        images.tokens_per_image.len()
+    } else {
+        images.patches.len()
+    };
+    if num_images == 0 {
+        return None;
+    }
+    let base_idx = base_idx as usize;
+    if num_cached_tokens == 0 {
+        return if base_idx < num_images {
+            Some((base_idx as i32, 0))
+        } else {
+            None
+        };
+    }
+    let cached_len = num_cached_tokens.min(token_ids.len());
+    if cached_len == 0 {
+        return if base_idx < num_images {
+            Some((base_idx as i32, 0))
+        } else {
+            None
+        };
+    }
+
+    let Some(image_token_id) = images.image_token_id else {
+        return if base_idx < num_images {
+            Some((base_idx as i32, 0))
+        } else {
+            None
+        };
+    };
+    if images.tokens_per_image.is_empty() {
+        return if base_idx < num_images {
+            Some((base_idx as i32, 0))
+        } else {
+            None
+        };
+    }
+
+    let cached_tokens = &token_ids[..cached_len];
+    let cached_image_tokens = cached_tokens
+        .iter()
+        .filter(|&&id| id == image_token_id)
+        .count();
+    let mut remaining = cached_image_tokens;
+    let mut prefix_idx = 0usize;
+    let mut token_offset = 0usize;
+    for &tokens in &images.tokens_per_image {
+        if tokens == 0 {
+            break;
+        }
+        if remaining >= tokens {
+            remaining -= tokens;
+            prefix_idx += 1;
+        } else {
+            token_offset = remaining;
+            break;
+        }
+    }
+
+    let mut image_idx = prefix_idx;
+    if base_idx > image_idx {
+        image_idx = base_idx;
+        token_offset = 0;
+    }
+    if image_idx >= num_images {
+        return None;
+    }
+    let image_idx = image_idx.min(i32::MAX as usize) as i32;
+    Some((image_idx, token_offset))
 }
 // load from url
 pub fn load_image_from_url(url: &str) -> Result<DynamicImage> {
@@ -132,6 +268,7 @@ pub struct ImageProcessConfig {
     image_break_token: Option<String>,
     image_end_token: String,
     pub spatial_merge_size: usize,
+    pub mm_tokens_per_image: Option<usize>,
     pub do_normalize: Option<bool>,
     pub do_resize: Option<bool>,
     pub image_mean: Option<[f32; 3]>,
@@ -144,6 +281,7 @@ pub struct ImageProcessConfig {
     pub scale_factor: Option<f32>,
     pub resampling: Option<usize>,
     pub model_type: ModelType,
+    pub image_token_id: Option<u32>,
 }
 
 impl ImageProcessConfig {
@@ -164,6 +302,7 @@ impl ImageProcessConfig {
             image_break_token,
             image_end_token,
             spatial_merge_size,
+            mm_tokens_per_image: None,
             image_mean: None,
             image_std: None,
             do_resize: Some(true),
@@ -176,6 +315,7 @@ impl ImageProcessConfig {
             scale_factor: None,
             temporal_patch_size: temporal_patch_size,
             model_type: ModelType::Mistral3VL,
+            image_token_id: None,
         }
     }
 }
@@ -365,6 +505,7 @@ pub fn get_image_config(
                 false,
             );
             img_cfg.model_type = ModelType::Mistral3VL;
+            img_cfg.image_token_id = Some(cfg.image_token_index as u32);
             Some(img_cfg)
         }
         ModelType::Gemma3 => {
@@ -389,6 +530,8 @@ pub fn get_image_config(
                 true,
             );
             img_cfg.model_type = ModelType::Gemma3;
+            img_cfg.image_token_id = Some(cfg.image_token_index as u32);
+            img_cfg.mm_tokens_per_image = Some(cfg.mm_tokens_per_image);
             img_cfg.scale_factor = Some(0.003921567);
             img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
             img_cfg.image_std = Some([0.5, 0.5, 0.5]);
@@ -416,6 +559,7 @@ pub fn get_image_config(
                 false,
             );
             img_cfg.model_type = ModelType::Qwen3VL;
+            img_cfg.image_token_id = Some(cfg.image_token_id);
             img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
             img_cfg.image_std = Some([0.5, 0.5, 0.5]);
             Some(img_cfg)

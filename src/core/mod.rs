@@ -1,5 +1,6 @@
 pub mod block_manager;
 pub mod engine;
+pub mod prefix_cache;
 pub mod runner;
 pub mod scheduler;
 pub mod sequence;
@@ -8,7 +9,7 @@ use pyo3::pyclass;
 
 #[cfg(feature = "python")]
 #[pyclass]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenerationOutput {
     #[pyo3(get)]
     pub seq_id: usize,
@@ -27,7 +28,7 @@ pub struct GenerationOutput {
 }
 
 #[cfg(not(feature = "python"))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenerationOutput {
     pub seq_id: usize,
     pub prompt_length: usize,

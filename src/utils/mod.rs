@@ -7,6 +7,7 @@ pub mod gguf_varbuilder;
 pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
+pub mod guidance;
 pub mod heartbeat;
 pub mod image;
 pub mod logits_processor;
@@ -465,6 +466,21 @@ fn is_multi_model(config_path: &PathBuf) -> Result<DummyMultiModelConfig> {
     Ok(config)
 }
 
+fn require_model_penalty(arch: String) -> bool {
+    matches!(
+        arch.as_str(),
+        "Glm4ForCausalLM"
+            | "Glm4ForConditionalGeneration"
+            | "glm4"
+            | "Phi3ForCausalLM"
+            | "Phi4ForCausalLM"
+            | "phi3"
+            | "phi4"
+            | "Gemma3ForConditionalGeneration"
+            | "Gemma3ForCausalLM"
+    )
+}
+
 pub fn init_config_tokenizer(
     econfig: &EngineConfig,
 ) -> Result<(
@@ -595,7 +611,19 @@ pub fn init_config_tokenizer(
             let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
             Some(cfg)
         } else {
-            None
+            if require_model_penalty(architectures[0].clone()) {
+                Some(GenerationConfig {
+                    temperature: Some(0.7),
+                    top_p: Some(0.9),
+                    top_k: None,
+                    frequency_penalty: Some(1.2),
+                    presence_penalty: Some(1.2),
+                    bos_token_id: None,
+                    eos_token_id: None,
+                })
+            } else {
+                None
+            }
         };
 
         // Handle jinja chat template
@@ -660,14 +688,10 @@ pub fn init_config_tokenizer(
         };
         let archs = config.architectures.as_ref().unwrap();
 
-        let generation_cfg = if matches!(
-            archs[0].as_str(),
-            "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4"
-        ) {
-            //default repetition penalty for glm4 models
+        let generation_cfg = if require_model_penalty(archs[0].clone()) {
             Some(GenerationConfig {
-                temperature: None,
-                top_p: None,
+                temperature: Some(0.7),
+                top_p: Some(0.9),
                 top_k: None,
                 frequency_penalty: Some(1.2),
                 presence_penalty: Some(1.2),
@@ -776,6 +800,12 @@ pub fn spawn_runner(
     }
 }
 
+pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
+    let black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+
+    black_list.contains(&architectures.as_str())
+}
+
 pub fn get_arch_rope(
     tokenizer: &Tokenizer,
     architectures: String,
@@ -786,15 +816,20 @@ pub fn get_arch_rope(
         ("Qwen3ForConditionalGeneration", false),
         ("Qwen3VLForConditionalGeneration", false),
         ("Qwen3VLMoeForConditionalGeneration", false),
+        ("Phi3ForCausalLM", false),
+        ("Phi4ForCausalLM", false),
         ("MistralForCausalLM", false),
         ("Mistral3ForConditionalGeneration", false),
         ("LlamaForCausalLM", false),
         ("LlamaForConditionalGeneration", false),
+        ("IQuestCoderForCausalLM", false),
         ("Glm4ForCausalLM", true),
         ("Glm4vForConditionalGeneration", true),
         ("glm4", true),
         ("qwen2", false),
         ("qwen3", false),
+        ("phi3", false),
+        ("phi4", false),
         ("llama", true),
         ("mistral", true),
         ("mistral3", false),
@@ -828,6 +863,7 @@ pub fn get_arch_rope(
         | "MistralForCausalLM"
         | "Mistral3ForConditionalGeneration"
         | "LlamaForConditionalGeneration"
+        | "IQuestCoderForCausalLM"
         | "llama"
         | "mistral"
         | "mistral3"
@@ -861,6 +897,9 @@ pub fn get_arch_rope(
             ModelType::GLM4VL,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
+        "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
+            (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
+        },
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
@@ -1089,13 +1128,13 @@ pub fn prepare_engine_config(
     #[cfg(feature = "nccl")]
     let use_runner = if num_shards > 1 {
         // if !econfig.flash_context.unwrap_or(false) {
-        //     crate::log_warn!("Context cache is forced to be enabled under multi-rank inference if context-cache or flash-context feature built-in!");
+        //     crate::log_warn!("Prefix cache is forced to be enabled under multi-rank inference if prefix-cache or flash-context feature built-in!");
         //     econfig.flash_context = Some(true);
         // }
         true
     } else {
         if cfg!(feature = "flash-context") || cfg!(feature = "python") {
-            econfig.flash_context.unwrap_or(false)
+            econfig.prefix_cache.unwrap_or(false)
         } else {
             false
         }
@@ -1149,6 +1188,12 @@ pub fn has_complete_safetensors(path: &Path) -> Result<bool> {
     use std::collections::HashSet;
     use std::fs;
 
+    // Check for single model.safetensors file (small models without sharding)
+    if path.join("model.safetensors").exists() {
+        return Ok(true);
+    }
+
+    // Check for sharded safetensors (e.g., model-00001-of-00005.safetensors format)
     let re = Regex::new(r"^.+-(\d{5})-of-(\d{5})\.safetensors$").unwrap();
 
     let mut found_indices = HashSet::new();

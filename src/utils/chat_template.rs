@@ -98,6 +98,10 @@ impl ChatTemplate {
         self.messages.extend(messages.clone());
     }
 
+    pub fn set_enable_thinking(&mut self, enable: bool) {
+        self.enable_thinking = enable;
+    }
+
     #[allow(dead_code)]
     fn clear_message(&mut self) {
         self.messages.clear()

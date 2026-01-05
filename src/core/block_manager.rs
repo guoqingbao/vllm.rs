@@ -1,14 +1,17 @@
 // src/core/block_manager.rs
+use super::prefix_cache::{PrefixCache, PrefixCacheConfig, PrefixCacheUpdate};
 use super::runner::RunnerType;
-use super::sequence::Sequence;
+use super::sequence::{Sequence, SequenceStatus};
 use crate::def_broadcast_message_to_runners;
 use crate::runner::{receive_local, send_local, MessageType};
+use crate::utils::image::ImageData;
 use candle_core::Result;
 use interprocess::{local_socket::Stream as LocalStream, TryClone};
 use parking_lot::RwLock;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,6 +38,7 @@ pub struct BlockManager {
     swapped_map: HashMap<usize, Vec<usize>>,
     block_size: usize,
     runners: Arc<RwLock<RunnerType>>,
+    prefix_cache: Option<PrefixCache>,
 }
 
 impl BlockManager {
@@ -43,6 +47,7 @@ impl BlockManager {
         num_blocks: usize,
         num_cpu_blocks: usize,
         block_size: usize,
+        prefix_cache: PrefixCacheConfig,
     ) -> Self {
         let mut blocks = Vec::with_capacity(num_blocks);
         let mut free_block_ids = VecDeque::with_capacity(num_blocks);
@@ -65,6 +70,12 @@ impl BlockManager {
             free_cpu_block_ids.push_back(i);
         }
 
+        let prefix_cache = if prefix_cache.enabled && prefix_cache.max_cached_blocks > 0 {
+            Some(PrefixCache::new(block_size, prefix_cache))
+        } else {
+            None
+        };
+
         Self {
             blocks,
             free_block_ids,
@@ -74,6 +85,7 @@ impl BlockManager {
             swapped_map: HashMap::new(),
             block_size,
             runners,
+            prefix_cache,
         }
     }
 
@@ -86,19 +98,7 @@ impl BlockManager {
         block
     }
 
-    fn deallocate_block(&mut self, block_id: usize) {
-        assert_eq!(self.blocks[block_id].ref_count, 0);
-        if self.used_block_ids.remove(&block_id) {
-            self.free_block_ids.push_back(block_id);
-        }
-    }
-
-    pub fn can_allocate(&self, seq: &Sequence) -> bool {
-        self.free_block_ids.len() >= seq.num_blocks()
-    }
-
-    pub fn allocate(&mut self, seq: &mut Sequence) -> Result<()> {
-        assert!(seq.block_table.is_empty());
+    fn allocate_fresh(&mut self, seq: &mut Sequence) -> Result<()> {
         for _ in 0..seq.num_blocks() {
             let block_id = self
                 .free_block_ids
@@ -108,19 +108,66 @@ impl BlockManager {
             seq.block_table.push(block_id as u32);
         }
         if let Some(last_block_id) = seq.block_table.last() {
-            let _ = self.try_clear_blocks(vec![*last_block_id]);
+            self.clear_blocks_guard(vec![*last_block_id], "allocate_fresh/last_block");
         }
         Ok(())
     }
 
+    fn deallocate_block(&mut self, block_id: usize) {
+        assert_eq!(self.blocks[block_id].ref_count, 0);
+        if self.used_block_ids.remove(&block_id) {
+            self.free_block_ids.push_back(block_id);
+        }
+    }
+
+    fn image_prefix_seed(images: &ImageData) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        images.raw.hash(&mut hasher);
+        images.shape.hash(&mut hasher);
+        images.patches.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    pub fn required_blocks(&mut self, seq: &Sequence) -> usize {
+        if let Some(prefix_cache) = self.prefix_cache.as_mut() {
+            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+            let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
+            let matched_blocks =
+                self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
+            seq.num_blocks().saturating_sub(matched_blocks)
+        } else {
+            seq.num_blocks()
+        }
+    }
+
+    pub fn can_allocate(&mut self, seq: &Sequence) -> bool {
+        self.free_block_ids.len() >= self.required_blocks(seq)
+    }
+
+    pub fn can_allocate_without_prefix(&self, seq: &Sequence) -> bool {
+        self.free_block_ids.len() >= seq.num_blocks()
+    }
+
+    pub fn allocate(&mut self, seq: &mut Sequence) -> Result<()> {
+        assert!(seq.block_table.is_empty());
+        if self.prefix_cache.is_some() {
+            let mut prefix_cache = self.prefix_cache.take().unwrap();
+            let result = self.allocate_with_prefix(seq, &mut prefix_cache);
+            self.prefix_cache = Some(prefix_cache);
+            result
+        } else {
+            self.allocate_fresh(seq)
+        }
+    }
+
+    pub fn allocate_without_prefix(&mut self, seq: &mut Sequence) -> Result<()> {
+        assert!(seq.block_table.is_empty());
+        self.allocate_fresh(seq)
+    }
+
     pub fn deallocate(&mut self, seq: &Sequence) {
         for &block_id in seq.block_table.iter().rev() {
-            let block_id = block_id as usize;
-            let block = &mut self.blocks[block_id];
-            block.ref_count = block.ref_count.saturating_sub(1);
-            if block.ref_count == 0 {
-                self.deallocate_block(block_id);
-            }
+            self.decrement_block_ref(block_id as usize);
         }
     }
 
@@ -160,9 +207,230 @@ impl BlockManager {
             }
         }
         if !new_blocks.is_empty() {
-            let _ = self.try_clear_blocks(new_blocks);
+            self.clear_blocks_guard(new_blocks, "ensure_allocate/new_blocks");
         }
         Ok(())
+    }
+
+    fn increment_block_ref(&mut self, block_id: usize) {
+        let block = &mut self.blocks[block_id];
+        if block.ref_count == 0 {
+            self.free_block_ids.retain(|&id| id != block_id);
+            self.used_block_ids.insert(block_id);
+        }
+        block.ref_count += 1;
+    }
+
+    fn decrement_block_ref(&mut self, block_id: usize) {
+        let block = &mut self.blocks[block_id];
+        block.ref_count = block.ref_count.saturating_sub(1);
+        if block.ref_count == 0 {
+            self.deallocate_block(block_id);
+        }
+    }
+
+    fn adjusted_matched_blocks(&self, tokens_len: usize, matched_blocks: usize) -> usize {
+        let full_blocks = tokens_len / self.block_size;
+        if matched_blocks == full_blocks && tokens_len % self.block_size == 0 && matched_blocks > 0
+        {
+            matched_blocks - 1
+        } else {
+            matched_blocks
+        }
+    }
+
+    fn allocate_with_prefix(
+        &mut self,
+        seq: &mut Sequence,
+        prefix_cache: &mut PrefixCache,
+    ) -> Result<()> {
+        let tokens = &seq.token_ids;
+        let mut matched_blocks = 0usize;
+        let mut last_hash = None;
+
+        if prefix_cache.enabled() {
+            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+            let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed);
+            last_hash = prefix_match.last_hash;
+            matched_blocks =
+                self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);
+        }
+
+        let cached_tokens = matched_blocks * self.block_size;
+        if matched_blocks > 0 {
+            crate::log_info!(
+                "Prefix cache hit seq {} ({} cached tokens, {} blocks)",
+                seq.id,
+                cached_tokens,
+                matched_blocks
+            );
+            if let Some(hash) = last_hash {
+                let mut cached_blocks = prefix_cache.blocks_for_match(hash);
+                cached_blocks.truncate(matched_blocks);
+                for block_id in cached_blocks {
+                    self.increment_block_ref(block_id);
+                    seq.block_table.push(block_id as u32);
+                }
+            }
+        } else if prefix_cache.enabled() && tokens.len() >= self.block_size {
+            crate::log_info!("Prefix cache miss seq {} ({} tokens)", seq.id, tokens.len());
+        }
+
+        seq.num_cached_tokens = cached_tokens;
+
+        let mut new_blocks = Vec::new();
+        for _ in seq.block_table.len()..seq.num_blocks() {
+            let block_id = self
+                .free_block_ids
+                .pop_front()
+                .ok_or_else(|| candle_core::Error::msg("No free blocks available, retry later!"))?;
+            self.allocate_block(block_id);
+            seq.block_table.push(block_id as u32);
+            new_blocks.push(block_id as u32);
+        }
+        if !new_blocks.is_empty() {
+            self.clear_blocks_guard(new_blocks, "allocate_with_prefix/new_blocks");
+        }
+
+        Ok(())
+    }
+
+    pub fn cache_sequence(&mut self, seq: &Sequence) {
+        let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+            return;
+        };
+        if !prefix_cache.enabled() {
+            return;
+        }
+        if matches!(
+            seq.status,
+            SequenceStatus::Swapped | SequenceStatus::FinishSwapped
+        ) {
+            return;
+        }
+
+        let tokens = &seq.token_ids;
+        let full_blocks = tokens.len() / self.block_size;
+        if full_blocks == 0 {
+            return;
+        }
+        if seq.block_table.len() < full_blocks {
+            return;
+        }
+
+        let blocks: Vec<usize> = seq
+            .block_table
+            .iter()
+            .take(full_blocks)
+            .map(|&id| id as usize)
+            .collect();
+
+        crate::log_info!(
+            "Prefix cache insert seq {} ({} tokens, {} blocks)",
+            seq.id,
+            tokens.len(),
+            full_blocks
+        );
+
+        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+        let PrefixCacheUpdate { inserted, evicted } =
+            prefix_cache.insert_prefix_with_seed(tokens, &blocks, seed);
+        for block_id in inserted {
+            self.increment_block_ref(block_id);
+        }
+        for block_id in evicted {
+            self.decrement_block_ref(block_id);
+        }
+    }
+
+    pub fn prefix_cache_enabled(&self) -> bool {
+        self.prefix_cache
+            .as_ref()
+            .map_or(false, |cache| cache.enabled())
+    }
+
+    pub fn prefix_cache_blocks(&self) -> usize {
+        self.prefix_cache
+            .as_ref()
+            .map_or(0, |cache| cache.cached_blocks())
+    }
+
+    pub fn clear_prefix_cache(&mut self) {
+        let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+            return;
+        };
+        let evicted = prefix_cache.clear();
+        for block_id in evicted {
+            self.decrement_block_ref(block_id);
+        }
+    }
+
+    pub fn evict_prefix_cache_blocks(&mut self, num_blocks: usize) -> usize {
+        let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+            return 0;
+        };
+        if num_blocks == 0 {
+            return 0;
+        }
+        let evicted = prefix_cache.evict_blocks(num_blocks);
+        let count = evicted.len();
+        for block_id in evicted {
+            self.decrement_block_ref(block_id);
+        }
+        count
+    }
+
+    pub fn evict_prefix_cache_until_free(&mut self, min_free_blocks: usize) -> usize {
+        let mut total_evicted = 0;
+        loop {
+            if self.free_block_ids.len() >= min_free_blocks {
+                break;
+            }
+            let evicted = {
+                let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+                    break;
+                };
+                prefix_cache.evict_blocks(1)
+            };
+            if evicted.is_empty() {
+                break;
+            }
+            total_evicted += evicted.len();
+            for block_id in evicted {
+                self.decrement_block_ref(block_id);
+            }
+        }
+        total_evicted
+    }
+
+    fn clear_blocks_guard(&mut self, block_ids: Vec<u32>, context: &str) {
+        let mut safe = Vec::new();
+        for block_id in block_ids {
+            let idx = block_id as usize;
+            if idx >= self.blocks.len() {
+                crate::log_error!(
+                    "ClearBlocks guard: invalid block id {} in {}",
+                    block_id,
+                    context
+                );
+                continue;
+            }
+            let ref_count = self.blocks[idx].ref_count;
+            if ref_count > 1 {
+                crate::log_error!(
+                    "ClearBlocks guard: block {} has ref_count {} in {}, skipping",
+                    block_id,
+                    ref_count,
+                    context
+                );
+                continue;
+            }
+            safe.push(block_id);
+        }
+        if safe.is_empty() {
+            return;
+        }
+        let _ = self.try_clear_blocks(safe);
     }
 
     pub fn get_num_total_blocks(&self) -> usize {
@@ -297,6 +565,13 @@ impl BlockManager {
         // Need at least as many free CPU blocks as the sequence currently owns.
         #[cfg(feature = "cuda")]
         {
+            if seq
+                .block_table
+                .iter()
+                .any(|&id| self.blocks[id as usize].ref_count > 1)
+            {
+                return false;
+            }
             let needed = seq.num_blocks();
             self.free_cpu_block_ids.len() > needed
         }

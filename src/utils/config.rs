@@ -80,6 +80,41 @@ impl Serialize for EosTokenId {
     }
 }
 
+impl EosTokenId {
+    /// Merge `other` into `self`, returning the combined token set.
+    /// - Single + Single => Multiple([a, b])
+    /// - Single + Multiple => Multiple([a, ...])
+    /// - Multiple + Single => Multiple([... , b])
+    /// - Multiple + Multiple => Multiple([... , ...])
+    pub fn merge(self, other: EosTokenId) -> EosTokenId {
+        let mut out = self.into_vec();
+        out.extend(other.into_vec());
+        EosTokenId::Multiple(out)
+    }
+
+    /// Like merge, but de-duplicates while preserving first-seen order.
+    pub fn merge_dedup(self, other: EosTokenId) -> EosTokenId {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::<u32>::new();
+        let mut out = Vec::<u32>::new();
+
+        for id in self.into_vec().into_iter().chain(other.into_vec()) {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+        EosTokenId::Multiple(out)
+    }
+
+    fn into_vec(self) -> Vec<u32> {
+        match self {
+            EosTokenId::Single(x) => vec![x],
+            EosTokenId::Multiple(v) => v,
+        }
+    }
+}
+
 // To make the "tagged" logic work for bincode, we need a separate
 // definition of the enum with derived traits. We keep it private inside this module.
 #[derive(Serialize, Deserialize)]
@@ -161,6 +196,24 @@ pub struct Config {
     pub extra_config_json: Option<String>,
 }
 
+impl Config {
+    pub fn apply_generation_cfg(&mut self, generation_cfg: Option<&GenerationConfig>) {
+        let Some(gcfg) = generation_cfg else { return };
+
+        // BOS merge (fill if missing; config wins)
+        if self.bos_token_id.is_none() {
+            self.bos_token_id = gcfg.bos_token_id;
+        }
+
+        // EOS merge (combine if both present)
+        self.eos_token_id = match (self.eos_token_id.take(), gcfg.eos_token_id.as_ref()) {
+            (None, None) => None,
+            (None, Some(e)) => Some(e.clone()),
+            (Some(e), None) => Some(e),
+            (Some(e), Some(other)) => Some(e.merge(other.clone())),
+        };
+    }
+}
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
@@ -184,10 +237,14 @@ pub struct EngineConfig {
     pub device_ids: Option<Vec<usize>>,
     pub generation_cfg: Option<GenerationConfig>,
     pub seed: Option<u64>,
-    pub flash_context: Option<bool>,
+    pub prefix_cache: Option<bool>,
+    pub prefix_cache_max_tokens: Option<usize>,
     pub fp8_kvcache: Option<bool>,
     pub server_mode: Option<bool>,
     pub pd_config: Option<PdConfig>,
+    pub mcp_command: Option<String>,
+    pub mcp_config: Option<String>,
+    pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -235,13 +292,21 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub seed: Option<u64>,
     #[pyo3(get, set)]
-    pub flash_context: Option<bool>,
+    pub prefix_cache: Option<bool>,
+    #[pyo3(get, set)]
+    pub prefix_cache_max_tokens: Option<usize>,
     #[pyo3(get, set)]
     pub fp8_kvcache: Option<bool>,
     #[pyo3(get, set)]
     pub server_mode: Option<bool>,
     #[pyo3(get, set)]
     pub pd_config: Option<PdConfig>,
+    #[pyo3(get, set)]
+    pub mcp_command: Option<String>,
+    #[pyo3(get, set)]
+    pub mcp_config: Option<String>,
+    #[pyo3(get, set)]
+    pub mcp_args: Option<Vec<String>>,
     pub disable_flash_attn: Option<bool>,
 }
 
@@ -262,12 +327,16 @@ impl EngineConfig {
         device_ids: Option<Vec<usize>>,
         generation_cfg: Option<GenerationConfig>,
         seed: Option<u64>,
-        flash_context: Option<bool>,
+        prefix_cache: Option<bool>,
+        prefix_cache_max_tokens: Option<usize>,
         fp8_kvcache: Option<bool>,
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
+        mcp_command: Option<String>,
+        mcp_config: Option<String>,
+        mcp_args: Option<Vec<String>>,
         disable_flash_attn: Option<bool>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -275,11 +344,11 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if flash_context.unwrap_or(false)
+        if prefix_cache.unwrap_or(false)
             && fp8_kvcache.unwrap_or(false)
             && (cfg!(feature = "metal") || cfg!(feature = "flash-context"))
         {
-            panic!("Error: context-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--flash-context` (`--context-cache`)).");
+            panic!("Error: prefix-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
         }
 
         Self {
@@ -303,10 +372,14 @@ impl EngineConfig {
             device_ids: Some(device_ids),
             generation_cfg,
             seed,
-            flash_context,
+            prefix_cache,
+            prefix_cache_max_tokens,
             fp8_kvcache,
             server_mode,
             pd_config,
+            mcp_command,
+            mcp_config,
+            mcp_args,
             disable_flash_attn,
         }
     }
@@ -333,6 +406,16 @@ pub struct SamplingParams {
     pub session_id: Option<String>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>, // enable reasoning
+    /// Tool mode for tool call handling.
+    /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
+    #[serde(default)]
+    pub mcp_mode: Option<bool>,
 }
 
 #[cfg(feature = "python")]
@@ -355,6 +438,18 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     #[pyo3(get, set)]
     pub presence_penalty: Option<f32>,
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
+    /// Tool mode for tool call handling.
+    /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
+    #[pyo3(get, set)]
+    pub mcp_mode: Option<bool>,
+    #[pyo3(get, set)]
+    #[serde(alias = "enable_thinking")]
+    pub thinking: Option<bool>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -368,6 +463,7 @@ impl SamplingParams {
         session_id: Option<String>,
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
+        thinking: Option<bool>,
     ) -> Self {
         Self {
             temperature,
@@ -378,6 +474,10 @@ impl SamplingParams {
             session_id,
             frequency_penalty,
             presence_penalty,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking,
         }
     }
 
@@ -391,6 +491,10 @@ impl SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking: None,
         }
     }
 }
@@ -406,6 +510,10 @@ impl Default for SamplingParams {
             session_id: None,
             frequency_penalty: None,
             presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking: None,
         }
     }
 }
@@ -418,6 +526,7 @@ pub enum ModelType {
     Gemma,
     Gemma3,
     Phi,
+    Phi4,
     Mistral,
     GLM4,
     GLM4VL,

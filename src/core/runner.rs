@@ -4,10 +4,11 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
-use crate::utils::config::SamplingParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::logits_processor::LogitsProcessor;
+use crate::utils::guidance::GuidanceState;
+use crate::utils::image::compute_image_slice;
+use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
@@ -15,6 +16,7 @@ use crate::{
     models::glm4_vl::Glm4VForConditionalGeneration,
     models::llama::LLaMaForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
+    models::phi4::Phi4ForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
@@ -28,7 +30,15 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-const MAX_PARALLEL_SAMPLING: usize = 32;
+use toktrie::TokTrie;
+
+/// Cached sampling parameters computed once during prefill, reused during decode
+#[derive(Clone, Debug)]
+pub struct CachedSamplingParams {
+    pub sampling: Sampling,
+    pub frequency_penalty: Option<f32>,
+    pub presence_penalty: Option<f32>,
+}
 
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
@@ -39,6 +49,7 @@ pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
     Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
+    Phi4(Arc<Phi4ForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
@@ -66,9 +77,13 @@ pub struct ModelRunner {
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
     logit_processor: LogitsProcessor,
-    sampling_params: RwLock<SamplingParams>,
+    /// Cached sampling strategy computed once during prefill, reused during decode
+    cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
+    guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
+    /// Whether this runner is on the first rank (for logging)
+    is_first_rank: bool,
 }
 
 impl ModelRunner {
@@ -84,6 +99,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
+        toktrie: Option<Arc<TokTrie>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -99,6 +115,7 @@ impl ModelRunner {
                 Qwen3 => Qwen3ForCausalLM,
                 Qwen3MoE => Qwen3MoEForCausalLM,
                 LLaMa => LLaMaForCausalLM,
+                Phi4 => Phi4ForCausalLM,
                 GLM4 => GLM4ForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
@@ -115,6 +132,7 @@ impl ModelRunner {
                 Qwen3 => EmbedInputs,
                 Qwen3MoE => EmbedInputs,
                 LLaMa => EmbedInputs,
+                Phi4 => EmbedInputs,
                 GLM4 => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
@@ -178,9 +196,11 @@ impl ModelRunner {
                 config.hidden_size,
             ),
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
-            sampling_params: RwLock::new(SamplingParams::default()),
+            cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
+            guidance_states: RwLock::new(HashMap::new()),
             transfer,
+            is_first_rank: comm.rank() == 0,
         })
     }
 
@@ -393,11 +413,17 @@ impl ModelRunner {
         let images = if let Seqs::SeqRefs(s) = &seqs {
             // We do not batch multimodel prefill
             if let Some(images) = &s[0].images {
-                if images.image_idx == -1 {
-                    crate::log_warn!("Image excluded in this turn!");
+                if images.image_idx == -1 || !is_prefill {
                     None
                 } else {
-                    Some(images)
+                    compute_image_slice(&s[0].token_ids, s[0].num_cached_tokens, images).map(
+                        |(image_idx, token_offset)| {
+                            let mut images = images.clone();
+                            images.image_idx = image_idx;
+                            images.image_token_offset = token_offset;
+                            images
+                        },
+                    )
                 }
             } else {
                 None
@@ -405,6 +431,7 @@ impl ModelRunner {
         } else {
             None
         };
+        let images = images.as_ref();
 
         let logits = crate::model_call!(
             &self.model,
@@ -414,6 +441,7 @@ impl ModelRunner {
                 Qwen3 => false,
                 Qwen3MoE => false,
                 LLaMa => false,
+                Phi4 => false,
                 GLM4 => false,
                 Mistral3VL => images,
                 Gemma3 => images,
@@ -436,6 +464,7 @@ impl ModelRunner {
                 Qwen3 => false,
                 Qwen3MoE => false,
                 LLaMa => false,
+                Phi4 => false,
                 GLM4 => false,
                 Gemma3 => None,
             },
@@ -505,12 +534,7 @@ impl ModelRunner {
         let mut max_seqlen_q = 0;
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
-        let CHUNK_SIZE: usize =
-            if self.config.flash_context.unwrap_or(false) && cfg!(feature = "flash-context") {
-                4096
-            } else {
-                8192
-            };
+        let CHUNK_SIZE: usize = 8192;
         let mut max_context_len = 0;
         for seq in seqs {
             let seqlen = seq.len();
@@ -525,7 +549,8 @@ impl ModelRunner {
                 max_context_len = seqlen;
             }
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            let seqlen_k = if self.config.flash_context.unwrap_or(false)
+            let seqlen_k = if self.config.prefix_cache.unwrap_or(false)
+                || self.config.prefix_cache.unwrap_or(false)
                 || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
             {
                 seq.num_cached_tokens + num_tokens
@@ -585,7 +610,7 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        // Handle context cache
+        // Handle cached prefix KV reuse
         let (context_lens, block_tables) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
             let context_lens_t = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
@@ -594,6 +619,7 @@ impl ModelRunner {
         } else {
             (None, None)
         };
+        let cu_seqlens_q_vec = cu_seqlens_q.clone();
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
@@ -608,6 +634,7 @@ impl ModelRunner {
             max_seqlen_k,
             max_context_len,
             disable_flash_attn: self.config.disable_flash_attn,
+            seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -657,85 +684,176 @@ impl ModelRunner {
             max_seqlen_k: 0,
             max_context_len,
             disable_flash_attn: None,
+            seqlens: None,
         };
 
         Ok((input_ids, positions, input_metadata))
     }
 
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        let seq_ids: Vec<usize> = match seqs {
-            Seqs::SeqRefs(seqs) => seqs.into_iter().map(|s| s.id()).collect(),
-            Seqs::DecodeVec(v) => v.into_iter().map(|s| s.id()).collect(),
+        let seq_ids: Vec<usize> = match &seqs {
+            Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.id()).collect(),
+            Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
 
-        let logits = if let Some(cfg) = &self.config.generation_cfg {
-            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
-                let frequency_penalty = cfg.frequency_penalty.unwrap_or(0.);
-                let presence_penalty = cfg.presence_penalty.unwrap_or(0.);
-                let seq_tokens = self.seq_tokens.write();
-                let reference_tokens: Vec<Vec<u32>> = seq_ids
-                    .iter()
-                    .map(|id| {
-                        if let Some(tokens) = seq_tokens.get(&id) {
-                            if tokens.len() > 128 {
-                                tokens[tokens.len().saturating_sub(128)..].to_vec()
-                            } else {
-                                vec![]
-                            }
+        // Get the batch size for deciding whether to use parallel sampling
+        let batch_size = match seqs {
+            Seqs::SeqRefs(seqs) => seqs.len(),
+            Seqs::DecodeVec(v) => v.len(),
+        };
+
+        // Compute and cache sampling params (including penalties) during prefill, reuse during decode
+        let cached_params = match (is_prefill, &seqs) {
+            // Prefill: compute sampling strategy and penalties, cache for decode phase
+            (true, Seqs::SeqRefs(seqs)) => {
+                // Check if generation_cfg has valid sampling params (temperature AND top_k/top_p)
+                let has_valid_sampling_cfg =
+                    self.config.generation_cfg.as_ref().map_or(false, |cfg| {
+                        cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
+                    });
+                let user_params = &seqs[0].sampling_params;
+
+                // Log thinking parameter only from first rank to avoid duplicate logs in multi-GPU
+                if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                    crate::log_warn!(
+                        "User's thinking preference for reasoning models: {:?}",
+                        user_params.thinking
+                    );
+                }
+
+                // Determine frequency/presence penalties (user params > generation_cfg)
+                let gen_cfg_freq = self
+                    .config
+                    .generation_cfg
+                    .as_ref()
+                    .and_then(|c| c.frequency_penalty);
+                let gen_cfg_pres = self
+                    .config
+                    .generation_cfg
+                    .as_ref()
+                    .and_then(|c| c.presence_penalty);
+                let frequency_penalty = user_params.frequency_penalty.or(gen_cfg_freq);
+                let presence_penalty = user_params.presence_penalty.or(gen_cfg_pres);
+
+                let sampling = if has_valid_sampling_cfg {
+                    let cfg = self.config.generation_cfg.as_ref().unwrap();
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "Using sampling from generation_config: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                            cfg.temperature,
+                            cfg.top_k,
+                            cfg.top_p,
+                            frequency_penalty,
+                            presence_penalty
+                        );
+                    }
+                    LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
+                } else {
+                    let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
+                        && (matches!(user_params.top_k, Some(k) if k > 0)
+                            || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
+                    if has_user_config {
+                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                            crate::log_warn!(
+                                "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                                user_params.temperature,
+                                user_params.top_k,
+                                user_params.top_p,
+                                frequency_penalty,
+                                presence_penalty
+                            );
+                        }
+                        LogitsProcessor::get_strategy(
+                            user_params.temperature,
+                            user_params.top_k,
+                            user_params.top_p,
+                        )
+                    } else {
+                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                            crate::log_warn!(
+                                "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
+                            );
+                        }
+                        Sampling::TopKThenTopP {
+                            k: 32,
+                            p: 0.95,
+                            temperature: 0.7,
+                        }
+                    }
+                };
+
+                let cached = CachedSamplingParams {
+                    sampling,
+                    frequency_penalty,
+                    presence_penalty,
+                };
+
+                // Cache for decode phase
+                *self.cached_sampling.write() = Some(cached.clone());
+                cached
+            }
+            // Decode or non-SeqRefs: use cached parameters
+            _ => self
+                .cached_sampling
+                .read()
+                .clone()
+                .unwrap_or(CachedSamplingParams {
+                    sampling: Sampling::TopKThenTopP {
+                        k: 32,
+                        p: 0.95,
+                        temperature: 0.7,
+                    },
+                    frequency_penalty: None,
+                    presence_penalty: None,
+                }),
+        };
+
+        // Apply penalties using cached values (same for all sequences in batch)
+        let has_any_penalty =
+            cached_params.frequency_penalty.is_some() || cached_params.presence_penalty.is_some();
+
+        let logits = if !is_prefill && has_any_penalty {
+            let seq_tokens = self.seq_tokens.write();
+            let reference_tokens: Vec<Vec<u32>> = seq_ids
+                .iter()
+                .map(|id| {
+                    if let Some(tokens) = seq_tokens.get(&id) {
+                        if tokens.len() > 128 {
+                            tokens[tokens.len().saturating_sub(128)..].to_vec()
                         } else {
                             vec![]
                         }
-                    })
-                    .collect();
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect();
 
-                self.logit_processor.apply_batch_repeat_penalty(
-                    logits,
-                    vec![frequency_penalty; reference_tokens.len()],
-                    vec![presence_penalty; reference_tokens.len()],
-                    reference_tokens,
-                )?
-            } else {
-                logits.to_owned()
-            }
+            self.logit_processor.apply_batch_repeat_penalty(
+                logits,
+                vec![cached_params.frequency_penalty.unwrap_or(0.0); batch_size],
+                vec![cached_params.presence_penalty.unwrap_or(0.0); batch_size],
+                reference_tokens,
+            )?
         } else {
             logits.to_owned()
         };
 
-        let tokens = match seqs {
-            Seqs::SeqRefs(seqs) => {
-                if is_prefill {
-                    *self.sampling_params.write() = seqs[0].sampling_params.clone();
-                }
-                if seqs.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    self.logit_processor
-                        .sample(&logits, &Some(seqs[0].sampling_params.clone()))?
-                } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-                }
-            }
-            Seqs::DecodeVec(v) => {
-                if v.len() <= std::cmp::min(MAX_PARALLEL_SAMPLING, self.config.max_num_seqs) {
-                    let sampling_params = self.sampling_params.read();
-                    self.logit_processor
-                        .sample(&logits, &Some(sampling_params.clone()))?
-                } else {
-                    logits.argmax(candle_core::D::Minus1)?.to_vec1::<u32>()?
-                }
-            }
-        };
+        let tokens = self
+            .logit_processor
+            .sample_with_strategy(&logits, &cached_params.sampling)?;
 
-        if let Some(cfg) = &self.config.generation_cfg {
-            if cfg.frequency_penalty.is_some() || cfg.presence_penalty.is_some() {
-                let mut seq_tokens = self.seq_tokens.write();
-                for i in 0..seq_ids.len() {
-                    if seq_tokens.contains_key(&seq_ids[i]) {
-                        seq_tokens
-                            .get_mut(&seq_ids[i])
-                            .expect("no entry")
-                            .push(tokens[i]);
-                    } else {
-                        seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
-                    }
+        // Track tokens for sequences when penalties are enabled
+        if has_any_penalty {
+            let mut seq_tokens = self.seq_tokens.write();
+            for i in 0..seq_ids.len() {
+                if seq_tokens.contains_key(&seq_ids[i]) {
+                    seq_tokens
+                        .get_mut(&seq_ids[i])
+                        .expect("no entry")
+                        .push(tokens[i]);
+                } else {
+                    seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
                 }
             }
         }
@@ -745,6 +863,8 @@ impl ModelRunner {
     pub fn finished(&self, id: usize) {
         let mut seq_tokens = self.seq_tokens.write();
         let _ = seq_tokens.remove(&id);
+        let mut guidance_states = self.guidance_states.write();
+        let _ = guidance_states.remove(&id);
     }
 
     pub fn get_model_vocab_size(&self) -> usize {
@@ -752,6 +872,7 @@ impl ModelRunner {
             Model::Qwen3(model) => model.get_vocab_size(),
             Model::Qwen3MoE(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
+            Model::Phi4(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
@@ -894,20 +1015,21 @@ impl ModelRunner {
         }
     }
 
-    pub fn clear_blocks(&self, block_ids: Vec<u32>) -> Result<bool> {
-        fn cache_clear(gpu_cache: &Vec<(Tensor, Tensor)>, block_ids: &Vec<u32>) -> Result<bool> {
-            if gpu_cache.is_empty() || block_ids.is_empty() {
-                return Ok(true);
-            }
+    pub fn clear_blocks(&self, _block_ids: Vec<u32>) -> Result<bool> {
+        Ok(true)
+        // fn cache_clear(gpu_cache: &Vec<(Tensor, Tensor)>, block_ids: &Vec<u32>) -> Result<bool> {
+        //     if gpu_cache.is_empty() || block_ids.is_empty() {
+        //         return Ok(true);
+        //     }
 
-            for i in 0..gpu_cache.len() {
-                cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
-                cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
-            }
+        //     for i in 0..gpu_cache.len() {
+        //         cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
+        //         cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
+        //     }
 
-            Ok(true)
-        }
+        //     Ok(true)
+        // }
 
-        cache_clear(&*self.get_kv_cache(), &block_ids)
+        // cache_clear(&*self.get_kv_cache(), &block_ids)
     }
 }

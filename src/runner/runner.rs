@@ -13,6 +13,7 @@ use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
 use vllm_rs::transfer::PdRole;
 use vllm_rs::transfer::Transfer;
+use vllm_rs::utils::guidance::load_toktrie_from_path;
 use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
@@ -137,6 +138,8 @@ fn main() -> anyhow::Result<()> {
                 None
             };
             let mut econfig = init_req.econfig.clone();
+            let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
+                .map(Arc::new);
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
@@ -149,6 +152,7 @@ fn main() -> anyhow::Result<()> {
                 device,
                 progress_reporter,
                 transfer,
+                toktrie,
                 stream_kv,
             )?;
 
@@ -162,15 +166,21 @@ fn main() -> anyhow::Result<()> {
             if !is_pd_server {
                 //No need graph capture for PD server
                 #[cfg(all(feature = "cuda", feature = "graph"))]
-                match runner.warmup_capture() {
-                    Ok(_) => {
-                        use colored::Colorize;
-                        eprintln!("{}", String::from("Cuda graph captured").yellow());
-                    }
-                    Err(e) => {
-                        use colored::Colorize;
-                        let s = format!("Graph capture failed: {:?}", e);
-                        eprintln!("{}", s.red());
+                let arch = init_req.config.architectures.as_ref().unwrap()[0].clone();
+                #[cfg(all(feature = "cuda", feature = "graph"))]
+                if vllm_rs::utils::is_no_cuda_graph_supprt(arch.clone()) {
+                    vllm_rs::log_info!("{arch} does not supprt CUDA graph");
+                } else {
+                    match runner.warmup_capture() {
+                        Ok(_) => {
+                            use colored::Colorize;
+                            eprintln!("{}", String::from("Cuda graph captured").yellow());
+                        }
+                        Err(e) => {
+                            use colored::Colorize;
+                            let s = format!("Graph capture failed: {:?}", e);
+                            eprintln!("{}", s.red());
+                        }
                     }
                 }
             }

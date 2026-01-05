@@ -144,7 +144,7 @@ impl Qwen3DecoderLayer {
                     }
                     .to_dtype(dtype)?;
 
-                    let shared_gate = Linear::new(ws, None, &None);
+                    let shared_gate = Linear::new(ws, None, &None)?;
 
                     let mlp = MLP::new(
                         if is_qvar_builder {
@@ -299,9 +299,9 @@ impl Qwen3MoEForCausalLM {
         prefix: Option<String>,
     ) -> Result<Self> {
         let has_prefix = prefix.is_some();
-        let prefix = prefix.unwrap_or("model".to_string());
+        let mut prefix = prefix.unwrap_or("model.".to_string());
         let gguf_prefix = if has_prefix {
-            prefix.clone() + "."
+            prefix.clone()
         } else {
             "".to_string()
         };
@@ -317,13 +317,24 @@ impl Qwen3MoEForCausalLM {
         let reporter = progress_reporter.clone();
 
         let is_qvar_builder = vb.is_qvar_builder();
+        let tie_word_embeddings = if !is_qvar_builder
+            && vb.has_key("embed_tokens.weight")
+            && !vb.has_key(&format!("{}embed_tokens.weight", prefix))
+        {
+            crate::log_error!("This model does not support decoding!");
+            prefix.clear(); // Some embedding model has no prefix
+            Some(true)
+        } else {
+            config.tie_word_embeddings
+        };
+
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
             if is_qvar_builder {
                 vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
             } else {
-                vb.pp(&format!("{}.embed_tokens", prefix))
+                vb.pp(&format!("{}embed_tokens", prefix))
             },
             if is_qvar_builder || config.quant.is_some() {
                 DType::F32
@@ -351,7 +362,7 @@ impl Qwen3MoEForCausalLM {
                     if is_qvar_builder {
                         format!("{}{}", gguf_prefix, key_map["layers"])
                     } else {
-                        format!("{}.layers", prefix)
+                        format!("{}layers", prefix)
                     },
                     i
                 )
@@ -372,7 +383,7 @@ impl Qwen3MoEForCausalLM {
             if is_qvar_builder {
                 vb.pp(&format!("{}{}", gguf_prefix, key_map["norm"]))
             } else {
-                vb.pp(&format!("{}.norm", prefix))
+                vb.pp(&format!("{}norm", prefix))
             },
             dtype,
             false,
@@ -381,11 +392,11 @@ impl Qwen3MoEForCausalLM {
         let lm_head = ReplicatedLinear::load_no_bias(
             config.hidden_size,
             vocab_size,
-            if config.tie_word_embeddings.is_some_and(|x| x) {
+            if tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
                     vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
                 } else {
-                    vb.pp(&format!("{}.embed_tokens", prefix))
+                    vb.pp(&format!("{}embed_tokens", prefix))
                 }
             } else {
                 if is_qvar_builder {
@@ -427,16 +438,7 @@ impl Qwen3MoEForCausalLM {
         deepstack_visual_embeds: &Option<Vec<Tensor>>,
         return_hidden: bool,
     ) -> Result<Tensor> {
-        let seqlens = if input_metadata.cu_seqlens_q.is_some() {
-            input_metadata
-                .cu_seqlens_q
-                .as_ref()
-                .unwrap()
-                .to_vec1::<u32>()?[1..]
-                .into()
-        } else {
-            Vec::new()
-        };
+        let seqlens = input_metadata.seqlens.clone().unwrap_or_default();
 
         let attention_mask = get_attention_causal_mask(
             &self.device,

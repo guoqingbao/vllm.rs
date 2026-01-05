@@ -66,10 +66,14 @@ class EngineConfig:
     device_id: Optional[int]
     generation_cfg: Optional[GenerationConfig]
     seed: Optional[int]
-    flash_context: Optional[bool]
+    prefix_cache: Optional[bool]
+    prefix_cache_max_tokens: Optional[int]
     fp8_kvcache: Optional[bool]
     server_mode: Optional[bool]
     pd_config: Optional[PdConfig]
+    mcp_config: Optional[str]
+    mcp_command: Optional[str]
+    mcp_args: Optional[str]
 
 @dataclass
 class SamplingParams:
@@ -150,9 +154,9 @@ class Engine:
         self,
     ) -> int:
         """
-        Call this function when context-cache feature enabled
+        Call this function when prefix-cache feature enabled
 
-        Return: total number of context cached for all requests
+        Return: total number of cached prefix tokens
         """
 
     def get_available_kv_tokens(

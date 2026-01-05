@@ -29,6 +29,90 @@ pub struct FusedMoe {
 }
 
 impl FusedMoe {
+    pub fn load_packed(
+        cfg: &Config,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+        let mut gate_experts = Vec::with_capacity(num_experts);
+        let mut up_experts = Vec::with_capacity(num_experts);
+        let mut down_experts = Vec::with_capacity(num_experts);
+
+        let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
+            match &experts_vb.0 {
+                Either::Left(vb) => {
+                    // Qwen3 VL MoE non-standard naming approach
+                    let gate_up_expert = vb.get_with_hints(
+                        (
+                            num_experts,
+                            cfg.hidden_size,
+                            moe_cfg.moe_intermediate_size * 2,
+                        ),
+                        "gate_up_proj",
+                        Default::default(),
+                    )?;
+                    let gate_expert = gate_up_expert
+                        .narrow(D::Minus1, 0, moe_cfg.moe_intermediate_size)?
+                        .t()?;
+                    let up_expert = gate_up_expert
+                        .narrow(
+                            D::Minus1,
+                            moe_cfg.moe_intermediate_size,
+                            moe_cfg.moe_intermediate_size,
+                        )?
+                        .t()?;
+                    (
+                        gate_expert,
+                        up_expert,
+                        vb.get_with_hints(
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "down_proj",
+                            shard(1, comm.rank(), comm.world_size()),
+                        )?
+                        .t()?,
+                    )
+                }
+                _ => candle_core::bail!("invalid varbuild or quant config!"),
+            }
+        } else {
+            for i in 0..num_experts {
+                let experts_vb = experts_vb.pp(format!("{}", i).as_str());
+                match &experts_vb.0 {
+                    Either::Left(vb) => {
+                        // n x k format
+                        let gate_expert = vb.pp("gate_proj").get_with_hints(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "weight",
+                            shard(0, comm.rank(), comm.world_size()),
+                        )?;
+                        let up_expert = vb.pp("up_proj").get_with_hints(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "weight",
+                            shard(0, comm.rank(), comm.world_size()),
+                        )?;
+                        let down_expert = vb.pp("down_proj").get_with_hints(
+                            (cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                            "weight",
+                            shard(1, comm.rank(), comm.world_size()),
+                        )?;
+                        gate_experts.push(gate_expert);
+                        up_experts.push(up_expert);
+                        down_experts.push(down_expert);
+                    }
+                    _ => candle_core::bail!("invalid varbuild or quant config!"),
+                }
+            }
+            (
+                Tensor::stack(&gate_experts, 0)?,
+                Tensor::stack(&up_experts, 0)?,
+                Tensor::stack(&down_experts, 0)?,
+            )
+        };
+        Ok((gate_experts, up_experts, down_experts))
+    }
+
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
@@ -47,46 +131,8 @@ impl FusedMoe {
             dtype,
         )?;
 
-        let experts_vb = vb.pp("experts");
-        let mut gate_up_experts = Vec::with_capacity(num_experts);
-        let mut down_experts = Vec::with_capacity(num_experts);
-
-        //pack experts
-        for i in 0..num_experts {
-            let experts_vb = experts_vb.pp(format!("{}", i).as_str());
-
-            let (gate_up_expert, down_expert) = match &experts_vb.0 {
-                Either::Left(vb) => {
-                    // n x k format
-                    let gate_expert = vb.pp("gate_proj").get_with_hints(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                        shard(0, comm.rank(), comm.world_size()),
-                    )?;
-                    let up_expert = vb.pp("up_proj").get_with_hints(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                        shard(0, comm.rank(), comm.world_size()),
-                    )?;
-                    let down_expert = vb.pp("down_proj").get_with_hints(
-                        (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                        "weight",
-                        shard(1, comm.rank(), comm.world_size()),
-                    )?;
-                    //pack gate_proj and up_proj
-                    let gate_up_expert = Tensor::cat(&[&gate_expert, &up_expert], 0)?;
-
-                    (gate_up_expert, down_expert)
-                }
-                _ => candle_core::bail!("invalid varbuild or quant config!"),
-            };
-
-            gate_up_experts.push(gate_up_expert);
-            down_experts.push(down_expert);
-        }
-
-        let gate_up_w = Tensor::stack(&gate_up_experts, 0)?;
-        let down_w = Tensor::stack(&down_experts, 0)?;
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
+        let gate_up_w = Tensor::cat(&[&gate_w, &up_w], D::Minus2)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
 
@@ -197,7 +243,7 @@ impl FusedMoeGGUF {
             }
         };
 
-        let gate = Linear::new(gate_ws, None, &None);
+        let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (
@@ -297,7 +343,7 @@ impl FusedMoeGGUF {
             }
         };
 
-        let gate = Linear::new(gate_ws, None, &None);
+        let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             Either::Right(v) => (
@@ -410,8 +456,8 @@ impl FusedMoeGGUF {
 
 pub struct FusedMoeISQ {
     gate: Linear,
-    gate_up_experts: QTensor,
-    w_size_n: usize,
+    gate_experts: QTensor,
+    up_experts: QTensor,
     down_experts: QTensor,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
@@ -471,136 +517,125 @@ impl FusedMoeISQ {
             DType::F32,
         )?;
 
-        let experts_vb = vb.pp("experts");
-        let mut gate_experts = Vec::with_capacity(num_experts);
-        let mut up_experts = Vec::with_capacity(num_experts);
-        let mut down_experts = Vec::with_capacity(num_experts);
+        let (gate_experts, up_experts, down_experts) = if moe_cfg.moe_intermediate_size
+            / comm.world_size()
+            % block_size
+            == 0
+        {
+            FusedMoe::load_packed(cfg, vb.pp("experts"), comm.clone())?
+        } else {
+            let experts_vb = vb.pp("experts");
+            let mut gate_experts = Vec::with_capacity(num_experts);
+            let mut up_experts = Vec::with_capacity(num_experts);
+            let mut down_experts = Vec::with_capacity(num_experts);
 
-        let moe_intermediate_chunk = get_moe_intermediate_chunk(block_size);
+            let moe_intermediate_chunk = get_moe_intermediate_chunk(block_size);
 
-        //pack experts
-        for i in 0..num_experts {
-            let experts_vb = experts_vb.pp(format!("{}", i).as_str());
-            let (gate_expert, up_expert, down_expert) = if moe_cfg.moe_intermediate_size
-                / comm.world_size()
-                % block_size
-                != 0
-            {
-                let (gate_expert, up_expert, down_expert) = match &experts_vb.0 {
-                    Either::Left(vb) => {
-                        let gate_expert = vb.pp("gate_proj").get_with_hints(
-                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "weight",
-                            Shard::default(),
-                        )?;
-                        let up_expert = vb.pp("up_proj").get_with_hints(
-                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "weight",
-                            Shard::default(),
-                        )?;
-                        let down_expert = vb.pp("down_proj").get_with_hints(
-                            (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                            "weight",
-                            Shard::default(),
-                        )?;
-                        (gate_expert, up_expert, down_expert)
-                    }
-                    Either::Right(_) => panic!("invalid varbuild!"),
-                };
-                let (gate_expert, up_expert, down_expert) = if comm.rank() * moe_intermediate_chunk
-                    + moe_intermediate_chunk
-                    < moe_cfg.moe_intermediate_size
-                {
-                    (
-                        gate_expert.narrow(
-                            0,
-                            comm.rank() * moe_intermediate_chunk,
-                            moe_intermediate_chunk,
-                        )?,
-                        up_expert.narrow(
-                            0,
-                            comm.rank() * moe_intermediate_chunk,
-                            moe_intermediate_chunk,
-                        )?,
-                        down_expert.narrow(
-                            1,
-                            comm.rank() * moe_intermediate_chunk,
-                            moe_intermediate_chunk,
-                        )?,
-                    )
-                } else {
-                    let last_remain_size =
-                        moe_cfg.moe_intermediate_size - comm.rank() * moe_intermediate_chunk;
-                    assert!(last_remain_size > 0 && last_remain_size % block_size == 0,
-                        "Unable to split moe_intermediate_size {} into {} ranks under block_size of {}! \n \
-                        \t*****Tips: you may try these gglm types: `q8_0` (recommend), `q4_0`, `q4_1`, `q5_0`, `q5_1` (with smaller block_size 32)",
-                        moe_cfg.moe_intermediate_size,
-                        comm.world_size(),
-                        block_size
-                    );
-                    let gate_expert = gate_expert.narrow(
-                        0,
-                        comm.rank() * moe_intermediate_chunk,
-                        last_remain_size,
-                    )?;
-                    let up_expert = up_expert.narrow(
-                        0,
-                        comm.rank() * moe_intermediate_chunk,
-                        last_remain_size,
-                    )?;
-                    let down_expert = down_expert.narrow(
-                        1,
-                        comm.rank() * moe_intermediate_chunk,
-                        last_remain_size,
-                    )?;
-                    (gate_expert, up_expert, down_expert)
-                };
-                (gate_expert, up_expert, down_expert)
-            } else {
+            let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
                 match &experts_vb.0 {
                     Either::Left(vb) => {
-                        let gate_expert = vb.pp("gate_proj").get_with_hints(
-                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "weight",
-                            shard(0, comm.rank(), comm.world_size()),
+                        // Qwen3 VL MoE non-standard naming approach
+                        let gate_up_expert = vb.get_with_hints(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
+                            "gate_up_proj",
+                            Default::default(),
                         )?;
-                        let up_expert = vb.pp("up_proj").get_with_hints(
-                            (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "weight",
-                            shard(0, comm.rank(), comm.world_size()),
-                        )?;
-                        let down_expert = vb.pp("down_proj").get_with_hints(
-                            (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                            "weight",
-                            shard(1, comm.rank(), comm.world_size()),
-                        )?;
+                        let gate_expert = gate_up_expert
+                            .narrow(D::Minus1, 0, moe_cfg.moe_intermediate_size)?
+                            .t()?;
+                        let up_expert = gate_up_expert
+                            .narrow(
+                                D::Minus1,
+                                moe_cfg.moe_intermediate_size,
+                                moe_cfg.moe_intermediate_size,
+                            )?
+                            .t()?;
+                        let down_expert = vb
+                            .get_with_hints(
+                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "down_proj",
+                                Shard::default(),
+                            )?
+                            .t()?;
                         (gate_expert, up_expert, down_expert)
                     }
                     Either::Right(_) => panic!("invalid varbuild!"),
                 }
+            } else {
+                //pack experts
+                for i in 0..num_experts {
+                    let experts_vb = experts_vb.pp(format!("{}", i).as_str());
+                    match &experts_vb.0 {
+                        Either::Left(vb) => {
+                            let gate_expert = vb.pp("gate_proj").get_with_hints(
+                                (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "weight",
+                                Shard::default(),
+                            )?;
+                            let up_expert = vb.pp("up_proj").get_with_hints(
+                                (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "weight",
+                                Shard::default(),
+                            )?;
+                            let down_expert = vb.pp("down_proj").get_with_hints(
+                                (cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                                "weight",
+                                Shard::default(),
+                            )?;
+                            gate_experts.push(gate_expert);
+                            up_experts.push(up_expert);
+                            down_experts.push(down_expert);
+                        }
+                        Either::Right(_) => panic!("invalid varbuild!"),
+                    }
+                }
+
+                (
+                    Tensor::stack(&gate_experts, 0)?,
+                    Tensor::stack(&up_experts, 0)?,
+                    Tensor::stack(&down_experts, 0)?,
+                )
             };
 
-            gate_experts.push(gate_expert);
-            up_experts.push(up_expert);
-            down_experts.push(down_expert);
-        }
-        let gate_experts = Tensor::stack(&gate_experts, 0)?;
-        let up_experts = Tensor::stack(&up_experts, 0)?;
-        let down_experts = Tensor::stack(&down_experts, 0)?;
+            let mut last_remain_size = moe_intermediate_chunk;
+            if comm.rank() * moe_intermediate_chunk + moe_intermediate_chunk
+                < moe_cfg.moe_intermediate_size
+            {
+            } else {
+                last_remain_size =
+                    moe_cfg.moe_intermediate_size - comm.rank() * moe_intermediate_chunk;
+                assert!(last_remain_size > 0 && last_remain_size % block_size == 0,
+                    "Unable to split moe_intermediate_size {} into {} ranks under block_size of {}! \n \
+                    \t*****Tips: you may try these gglm types: `q8_0` (recommend), `q4_0`, `q4_1`, `q5_0`, `q5_1` (with smaller block_size 32)",
+                    moe_cfg.moe_intermediate_size,
+                    comm.world_size(),
+                    block_size
+                );
+            };
 
-        // pack gate_proj and up_proj
-        let gate_up_experts = Tensor::cat(&[gate_experts, up_experts], candle_core::D::Minus2)?;
-        let w_size_n = gate_up_experts.dim(1)? / 2;
+            let gate_experts =
+                gate_experts.narrow(1, comm.rank() * moe_intermediate_chunk, last_remain_size)?;
+            let up_experts =
+                up_experts.narrow(1, comm.rank() * moe_intermediate_chunk, last_remain_size)?;
+            let down_experts =
+                down_experts.narrow(2, comm.rank() * moe_intermediate_chunk, last_remain_size)?;
 
-        let gate_up_experts = QTensor::quantize(&gate_up_experts, quant_type)?;
+            (gate_experts, up_experts, down_experts)
+        };
 
+        let gate_experts = QTensor::quantize(&gate_experts, quant_type)?;
+        let up_experts = QTensor::quantize(&up_experts, quant_type)?;
         let down_experts = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
         let world_size = comm.world_size();
 
         Ok(Self {
             gate,
-            gate_up_experts,
-            w_size_n,
+            gate_experts,
+            up_experts,
             down_experts,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
@@ -642,9 +677,9 @@ impl FusedMoeISQ {
         };
 
         let ys = {
-            let gate_up = moe::moe_gemm_gguf(
+            let gate = moe::moe_gemm_gguf(
                 &xs,
-                &self.gate_up_experts,
+                &self.gate_experts,
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
@@ -652,12 +687,16 @@ impl FusedMoeISQ {
                 is_prefill,
                 self.dtype,
             )?;
-            let gate = gate_up
-                .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-                .contiguous()?;
-            let up = gate_up
-                .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-                .contiguous()?;
+            let up = moe::moe_gemm_gguf(
+                &xs,
+                &self.up_experts,
+                &None,
+                &sorted_token_ids,
+                &expert_ids,
+                self.num_experts_per_tok,
+                is_prefill,
+                self.dtype,
+            )?;
             let down_inputs = (up * gate.apply(&self.act)?)?;
             moe::moe_gemm_gguf(
                 &down_inputs,

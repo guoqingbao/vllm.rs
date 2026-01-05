@@ -3,7 +3,6 @@ use clap::Parser;
 use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use std::sync::Arc;
-use uuid::Uuid;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
@@ -148,11 +147,11 @@ async fn main() -> Result<()> {
         None
     };
 
-    let mut context_cache = args.context_cache;
+    let mut prefix_cache = args.prefix_cache;
 
     if interactive && !args.server && !args.pd_server {
-        // force to use context_cache in chat mode
-        context_cache = true;
+        // force to use prefix cache in chat mode
+        prefix_cache = true;
     }
     let econfig = EngineConfig::new(
         args.model_id,
@@ -169,12 +168,16 @@ async fn main() -> Result<()> {
         args.device_ids.clone(),
         generation_cfg,
         args.seed,
-        Some(context_cache),
+        Some(prefix_cache),
+        args.prefix_cache_max_tokens,
         Some(args.fp8_kvcache),
         Some(args.server || args.ui_server || !interactive),
         args.cpu_mem_fold,
         args.kv_fraction,
         pd_config,
+        args.mcp_command.clone(),
+        args.mcp_config.clone(),
+        args.mcp_args.clone(),
         Some(args.no_flash_attn),
     );
 
@@ -228,13 +231,7 @@ async fn main() -> Result<()> {
         )),
     };
 
-    let mut request_params = params[0].clone();
-    request_params.session_id = if context_cache {
-        Some(format!("{}", Uuid::new_v4()))
-    } else {
-        None
-    };
-
+    let request_params = params[0].clone();
     let mut chat_history = Vec::<Message>::new();
     loop {
         if interactive {
@@ -267,7 +264,7 @@ async fn main() -> Result<()> {
                     } else {
                         print!("\n🌀 Chat history cleared. Start a new conversation.\n");
                         chat_history.clear(); //start a new chat
-                        if context_cache {
+                        if prefix_cache {
                             let e = engine.read();
                             chat_context_left =
                                 total_available_tokens - e.get_num_cached_tokens() as i64;
@@ -278,11 +275,6 @@ async fn main() -> Result<()> {
                             "Tokens left: {} (full)",
                             chat_context_left
                         ));
-                        request_params.session_id = if context_cache {
-                            Some(format!("{}", Uuid::new_v4()))
-                        } else {
-                            None
-                        };
                         continue;
                     }
                 }
@@ -354,7 +346,7 @@ async fn main() -> Result<()> {
                     decoded_length,
                     decode_output,
                 ) = handle.await.map_err(candle_core::Error::wrap)?;
-                if context_cache {
+                if prefix_cache {
                     let e = engine.read();
                     chat_context_left = total_available_tokens - e.get_num_cached_tokens() as i64;
                 } else {
@@ -382,7 +374,9 @@ async fn main() -> Result<()> {
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
-                LLMEngine::collect_sync_results(receivers, tokenizer).await?
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer).await?;
+                // GenerationOutput is returned directly
+                results
             }
         };
 

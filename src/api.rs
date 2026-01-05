@@ -28,7 +28,8 @@ pub struct EngineBuilder {
     dtype: Option<DType>,
     flash_attn: Option<bool>,
     fp8_kvcache: Option<bool>,
-    context_cache: Option<bool>,
+    prefix_cache: Option<bool>,
+    prefix_cache_max_tokens: Option<usize>,
     device_ids: Option<Vec<usize>>,
 }
 
@@ -40,7 +41,8 @@ impl EngineBuilder {
             dtype: None,
             flash_attn: None,
             fp8_kvcache: None,
-            context_cache: None,
+            prefix_cache: None,
+            prefix_cache_max_tokens: None,
             device_ids: None,
         }
     }
@@ -65,8 +67,13 @@ impl EngineBuilder {
         self
     }
 
-    pub fn with_context_cache(mut self, enabled: bool) -> Self {
-        self.context_cache = Some(enabled);
+    pub fn with_prefix_cache(mut self, enabled: bool) -> Self {
+        self.prefix_cache = Some(enabled);
+        self
+    }
+
+    pub fn with_prefix_cache_max_tokens(mut self, max_tokens: usize) -> Self {
+        self.prefix_cache_max_tokens = Some(max_tokens);
         self
     }
 
@@ -113,8 +120,12 @@ impl EngineBuilder {
             self.device_ids.clone(),
             None,
             None,
-            self.context_cache,
+            self.prefix_cache,
+            self.prefix_cache_max_tokens,
             self.fp8_kvcache,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -172,12 +183,15 @@ impl Engine {
             )
         };
 
-        let mut results = GLOBAL_RT
+        let results = GLOBAL_RT
             .block_on(async { LLMEngine::collect_sync_results(receivers, tokenizer).await })?;
 
-        results
-            .pop()
-            .ok_or_else(|| candle_core::Error::msg("No generation output returned"))
+        // Extract GenerationOutput
+        for result in results {
+            return Ok(result);
+        }
+
+        candle_core::bail!("No generation output returned")
     }
 
     pub fn generate_stream(

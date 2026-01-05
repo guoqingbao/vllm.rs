@@ -1,7 +1,6 @@
 import time
 import argparse
 import warnings
-import uuid
 import sys
 import readline # input without cutoff
 from vllm_rs import Engine, EngineConfig, SamplingParams, Message, GenerationConfig
@@ -33,7 +32,8 @@ def parse_args():
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--presence-penalty", type=float, default=None)
     parser.add_argument("--frequency-penalty", type=float, default=None)
-    parser.add_argument("--context-cache", action="store_true")
+    parser.add_argument("--prefix-cache", action="store_true")
+    parser.add_argument("--prefix-cache-max-tokens", type=int, default=None)
     parser.add_argument("--fp8-kvcache", action="store_true")
     parser.add_argument("--cpu-mem-fold", type=float, default=None)
     parser.add_argument("--kv-fraction", type=float, default=None)
@@ -41,7 +41,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_engine_config(args, num_of_prompts, context_cache):
+def build_engine_config(args, num_of_prompts, prefix_cache):
     generation_cfg = None
     if (args.temperature != None and (args.top_p != None or args.top_k != None)) or args.frequency_penalty != None or args.presence_penalty != None:
          generation_cfg = GenerationConfig(args.temperature, args.top_p, args.top_k, args.frequency_penalty, args.presence_penalty)
@@ -62,7 +62,8 @@ def build_engine_config(args, num_of_prompts, context_cache):
         isq=args.isq,
         device_ids=[int(d) for d in args.d.split(",")],
         generation_cfg=generation_cfg,
-        flash_context=context_cache,
+        prefix_cache=prefix_cache,
+        prefix_cache_max_tokens=args.prefix_cache_max_tokens,
         fp8_kvcache=args.fp8_kvcache,
         server_mode=False,
         cpu_mem_fold=args.cpu_mem_fold,
@@ -102,14 +103,14 @@ def main():
     args = parse_args()
     interactive = args.i
     interactive = True # disable non-interactive mode for now
-    context_cache = True # force to use context-cache in chat mode
+    prefix_cache = True # force to use prefix-cache in chat mode
     prompts = (
         args.prompts.split("|")
         if args.prompts and not interactive
         else ["How are you today?"]
     )
 
-    econfig = build_engine_config(args, len(prompts), context_cache)
+    econfig = build_engine_config(args, len(prompts), prefix_cache)
     engine = Engine(econfig, args.dtype)
 
     if args.prompts and interactive:
@@ -132,7 +133,6 @@ def main():
     total_available_tokens = engine.get_available_kv_tokens()
     tokens_left = total_available_tokens
     chat_history = []
-    session_id = str(uuid.uuid4())
     while True:
         if interactive:
             try:
@@ -143,10 +143,7 @@ def main():
                     continue
                 msg = Message(role="user", content=remove_surrogates(prompt_input))
                 chat_history.append(msg)
-                if context_cache:
-                    params.session_id = session_id
-                else:
-                    params.session_id = None
+                params.session_id = None
                 # (prompt_processed, prompt_uuid) = [
                 #     engine.apply_chat_template(params, chat_history, log=False)]
 
@@ -154,11 +151,10 @@ def main():
                 if chat_history:
                     print("\n🌀 Chat history cleared. Start a new conversation.")
                     chat_history.clear()
-                    if context_cache:
+                    if prefix_cache:
                         tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                     else:
                         tokens_left = total_available_tokens
-                    session_id = str(uuid.uuid4())
                     continue
                 else:
                     print("\n👋 Exiting.")
@@ -190,7 +186,7 @@ def main():
                 print()  # newline after streaming ends
                 if done_item != None:
                     prompt_start_time, decode_start_time, decode_finish_time, decoded_length = done_item
-                if context_cache:
+                if prefix_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens - prompt_length - decoded_length
@@ -210,7 +206,7 @@ def main():
                     outputs = []
             except KeyboardInterrupt:
                 stream.cancel()
-                if context_cache:
+                if prefix_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens
@@ -219,9 +215,8 @@ def main():
                     print("\n⏱️ [Unfinished] Decode throughput: ", round(decoded_length * 1000 / (current_millis() - decode_start_time), 2), " tokens/s")
                 continue
             except Exception as e:
-                session_id = str(uuid.uuid4())
                 chat_history.clear()
-                if context_cache:
+                if prefix_cache:
                     tokens_left = total_available_tokens - engine.get_num_cached_tokens()
                 else:
                     tokens_left = total_available_tokens
