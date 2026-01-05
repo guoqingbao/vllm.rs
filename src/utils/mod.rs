@@ -505,6 +505,7 @@ fn require_model_penalty(arch: String) -> bool {
         arch.as_str(),
         "Glm4ForCausalLM"
             | "Glm4ForConditionalGeneration"
+            // | "Glm4vForConditionalGeneration"
             | "glm4"
             | "Phi3ForCausalLM"
             | "Phi4ForCausalLM"
@@ -642,7 +643,12 @@ pub fn init_config_tokenizer(
             && Path::new(&generation_config_path).exists()
         {
             let str_cfg: Option<String> = std::fs::read_to_string(generation_config_path).ok();
-            let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
+            let mut cfg: GenerationConfig =
+                serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
+            if require_model_penalty(architectures[0].clone()) {
+                cfg.frequency_penalty = Some(1.2);
+                cfg.presence_penalty = Some(1.2);
+            }
             Some(cfg)
         } else {
             if require_model_penalty(architectures[0].clone()) {
@@ -938,7 +944,7 @@ pub fn get_arch_rope(
         ),
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
             (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
-        },
+        }
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),

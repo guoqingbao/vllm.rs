@@ -13,8 +13,8 @@ pub struct Glm4VConfig {
     pub text_config: Config,
     pub vision_config: VisionConfig,
     pub image_token_id: u32,
-    pub vision_start_token_id: u32,
-    pub vision_end_token_id: u32,
+    pub image_start_token_id: u32,
+    pub image_end_token_id: u32,
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantConfig>,
 }

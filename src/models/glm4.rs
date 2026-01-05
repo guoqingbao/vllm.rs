@@ -48,7 +48,11 @@ impl GLM4DecoderLayer {
             config.sliding_window,
             dtype,
         )?;
-
+        let gate_up_merged = if is_qvar_builder {
+            !vb.has_key("ffn_gate.weight")
+        } else {
+            vb.pp("mlp").has_key("gate_up_proj.weight")
+        };
         let mlp = MLP::new(
             if is_qvar_builder {
                 vb.clone()
@@ -61,7 +65,7 @@ impl GLM4DecoderLayer {
             &config.hidden_act,
             &config.quantization_config,
             &config.quant,
-            true, //gate and up merged
+            gate_up_merged, //gate and up merged
             dtype,
             "",
         )?;
@@ -187,31 +191,43 @@ impl GLM4ForCausalLM {
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         prefix: Option<String>,
     ) -> Result<Self> {
+        let has_prefix = prefix.is_some();
+        let mut prefix = prefix.unwrap_or("model.".to_string());
+        let gguf_prefix = if has_prefix {
+            prefix.clone()
+        } else {
+            "".to_string()
+        };
         let key_map: HashMap<&str, &str> = [
-            ("model.embed_tokens", "token_embd"),
+            ("embed_tokens", "token_embd"),
             ("lm_head", "output"),
-            ("model.norm", "output_norm"),
-            ("model.layers", "blk"),
+            ("norm", "output_norm"),
+            ("layers", "blk"),
         ]
         .iter()
         .cloned()
         .collect();
         let reporter = progress_reporter.clone();
-        let has_prefix = prefix.is_some();
-        let prefix = prefix.unwrap_or_else(|| "model".to_string());
-        let gguf_prefix = if has_prefix {
-            format!("{prefix}.")
-        } else {
-            "".to_string()
-        };
+
         let is_qvar_builder = vb.is_qvar_builder();
+        let tie_word_embeddings = if !is_qvar_builder
+            && vb.has_key("embed_tokens.weight")
+            && !vb.has_key(&format!("{}embed_tokens.weight", prefix))
+        {
+            crate::log_error!("This model does not support decoding!");
+            prefix.clear(); // Some embedding model has no prefix
+            Some(true)
+        } else {
+            config.tie_word_embeddings
+        };
+
         let (embed_tokens, vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
             if is_qvar_builder {
-                vb.pp(&format!("{}{}", gguf_prefix, key_map["model.embed_tokens"]))
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
             } else {
-                vb.pp(&format!("{prefix}.embed_tokens"))
+                vb.pp(&format!("{}embed_tokens", prefix))
             },
             if is_qvar_builder || config.quant.is_some() {
                 DType::F32
@@ -237,9 +253,9 @@ impl GLM4ForCausalLM {
                 vb.pp(format!(
                     "{}.{}",
                     if is_qvar_builder {
-                        format!("{}{}", gguf_prefix, key_map["model.layers"])
+                        format!("{}{}", gguf_prefix, key_map["layers"])
                     } else {
-                        format!("{prefix}.layers")
+                        format!("{}layers", prefix)
                     },
                     i
                 )
@@ -257,28 +273,28 @@ impl GLM4ForCausalLM {
             config.hidden_size,
             config.rms_norm_eps,
             if is_qvar_builder {
-                vb.pp(&format!("{}{}", gguf_prefix, key_map["model.norm"]))
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["norm"]))
             } else {
-                vb.pp(&format!("{prefix}.norm"))
+                vb.pp(&format!("{}norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(
             config.hidden_size,
             vocab_size,
-            if config.tie_word_embeddings.is_some_and(|x| x) {
+            if tie_word_embeddings.is_some_and(|x| x) {
                 if is_qvar_builder {
-                    vb.pp(&format!("{}{}", gguf_prefix, key_map["model.embed_tokens"]))
+                    vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
                 } else {
-                    vb.pp(&format!("{prefix}.embed_tokens"))
+                    vb.pp(&format!("{}embed_tokens", prefix))
                 }
             } else {
                 if is_qvar_builder {
-                    vb.pp(&format!("{}{}", gguf_prefix, key_map["lm_head"]))
+                    vb.pp(key_map["lm_head"])
                 } else {
-                    vb.pp(&format!("{prefix}.lm_head"))
+                    vb.pp("lm_head")
                 }
             },
             &None,

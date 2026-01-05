@@ -13,8 +13,8 @@ use crate::utils::progress::ProgressLike;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
-    models::glm4_vl::Glm4VForConditionalGeneration,
     models::glm4_moe::GLM4MoEForCausalLM,
+    models::glm4_vl::Glm4VForConditionalGeneration,
     models::llama::LLaMaForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::phi4::Phi4ForCausalLM,

@@ -1,7 +1,7 @@
 pub mod gemma3;
 pub mod glm4;
-pub mod glm4_vl;
 pub mod glm4_moe;
+pub mod glm4_vl;
 pub mod layers;
 pub mod llama;
 pub mod mistral3_vl;

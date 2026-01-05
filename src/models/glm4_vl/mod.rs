@@ -53,7 +53,7 @@ impl Glm4VForConditionalGeneration {
             is_rope_i,
             device,
             progress_reporter,
-            Some("model.language_model".to_string()),
+            Some("model.language_model.".to_string()),
         )?;
 
         Ok(Self {
