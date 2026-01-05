@@ -42,21 +42,22 @@ impl FusedMoe {
         let (gate_up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
             match &experts_vb.0 {
                 Either::Left(vb) => {
-                    let gate_expert = vb.pp("gate_up_proj").get_with_hints(
+                    // Qwen3 VL MoE non-standard naming approach
+                    let gate_expert = vb.get_with_hints(
                         (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                        "weight",
+                        "gate_up_proj",
                         shard(1, comm.rank(), comm.world_size() * 2),
                     )?;
-                    let up_expert = vb.pp("gate_up_proj").get_with_hints(
+                    let up_expert = vb.get_with_hints(
                         (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                        "weight",
+                        "gate_up_proj",
                         shard(1, comm.world_size() + comm.rank(), comm.world_size() * 2),
                     )?;
                     (
                         Tensor::cat(&[&gate_expert, &up_expert], 1)?,
-                        vb.pp("down_proj").get_with_hints(
+                        vb.get_with_hints(
                             (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                            "weight",
+                            "down_proj",
                             shard(2, comm.rank(), comm.world_size()),
                         )?,
                     )
@@ -518,19 +519,20 @@ impl FusedMoeISQ {
             let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
                 match &experts_vb.0 {
                     Either::Left(vb) => {
-                        let gate_expert = vb.pp("gate_up_proj").get_with_hints(
+                        // Qwen3 VL MoE non-standard naming approach
+                        let gate_expert = vb.get_with_hints(
                             (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                            "weight",
+                            "gate_up_proj",
                             shard(1, 0, 2),
                         )?;
-                        let up_expert = vb.pp("gate_up_proj").get_with_hints(
+                        let up_expert = vb.get_with_hints(
                             (moe_cfg.moe_intermediate_size * 2, cfg.hidden_size),
-                            "weight",
+                            "gate_up_proj",
                             shard(1, 1, 2),
                         )?;
-                        let down_expert = vb.pp("down_proj").get_with_hints(
+                        let down_expert = vb.get_with_hints(
                             (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                            "weight",
+                            "down_proj",
                             Shard::default(),
                         )?;
                         (gate_expert, up_expert, down_expert)
