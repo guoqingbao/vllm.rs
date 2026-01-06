@@ -17,9 +17,9 @@ use std::sync::Arc;
 #[allow(dead_code)]
 pub struct FusedMoe {
     gate: Linear,
-    gate_up_w: Tensor,
+    gate_w: Tensor,
+    up_w: Tensor,
     down_w: Tensor,
-    w_size_n: usize,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
@@ -133,15 +133,13 @@ impl FusedMoe {
         )?;
 
         let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
-        let gate_up_w = Tensor::cat(&[&gate_w, &up_w], D::Minus2)?;
         let world_size = comm.world_size();
-        let w_size_n = gate_up_w.dim(1)? / 2;
 
         Ok(Self {
             gate,
-            gate_up_w,
+            gate_w,
+            up_w,
             down_w,
-            w_size_n,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
@@ -182,9 +180,9 @@ impl FusedMoe {
         };
 
         //out (M, top_k, N)
-        let gate_up = moe::moe_gemm(
+        let gate = moe::moe_gemm(
             &xs,
-            &self.gate_up_w,
+            &self.gate_w,
             &None,
             &sorted_token_ids,
             &expert_ids,
@@ -192,15 +190,18 @@ impl FusedMoe {
             is_prefill,
         )?;
 
-        let gate = gate_up
-            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-            .contiguous()?;
-        let up = gate_up
-            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-            .contiguous()?;
+        let up = moe::moe_gemm(
+            &xs,
+            &self.up_w,
+            &None,
+            &sorted_token_ids,
+            &expert_ids,
+            self.num_experts_per_tok,
+            is_prefill,
+        )?;
 
         //(M * top_k, N // 2)
-        let down_inputs = (up * gate.apply(&self.act)?)?.reshape(((), self.w_size_n))?;
+        let down_inputs = (up * gate.apply(&self.act)?)?;
 
         //view(M, top_k, K) -> sum -> (M, K)
         let mut ys = moe::moe_gemm(
