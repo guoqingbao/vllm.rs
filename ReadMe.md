@@ -76,7 +76,8 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 ## 📚 Guides
 - [Get Started](docs/get_started.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
-- [Claude Code (Anthropic-compatible API server)](docs/claude_code.md)
+- [Work with Claude Code](docs/claude_code.md)
+- [Work with Goose AI Agent](docs/goose.md)
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Prefix cache](docs/prefix-cache.md)

@@ -456,7 +456,18 @@ pub async fn chat_completion(
                                 stream_ctx.send_token(&tool_call_buffer);
                             }
 
-                            (if has_calls { Some(parsed) } else { None }, has_calls)
+                            let tool_calls = if has_calls {
+                                Some(
+                                    parsed
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(idx, call)| call.with_index(idx))
+                                        .collect(),
+                                )
+                            } else {
+                                None
+                            };
+                            (tool_calls, has_calls)
                         } else {
                             (None, false)
                         };
