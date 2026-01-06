@@ -112,7 +112,7 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         // This eliminates the index_select kernel launch!
         #[cfg(any(feature = "cuda", feature = "metal"))]
         {
-	    use attention_rs::fused_rope::FusedRope;
+            use attention_rs::fused_rope::FusedRope;
             FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
             Ok(None)
         }
