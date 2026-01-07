@@ -11,7 +11,7 @@ use super::{
     EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
-
+use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::parser::ToolParser;
 use crate::tools::{Tool, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -109,9 +109,9 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let img_cfg = {
+    let (img_cfg, model_type) = {
         let e = data.engine.read();
-        e.img_cfg.clone()
+        (e.img_cfg.clone(), e.model_type.clone())
     };
 
     let requested_tools = request.tools.as_deref().unwrap_or_default();
@@ -140,7 +140,7 @@ pub async fn chat_completion(
     let has_tools = !resolved_tools.is_empty();
     let mut chat_messages = request.messages.clone();
     if has_tools {
-        let tool_prompt = ToolFormat::format_tools(&resolved_tools);
+        let tool_prompt = ToolFormat::get_tool_prompt(&model_type);
 
         // Merge with existing system prompt if present, otherwise insert new one
         if !chat_messages.is_empty() && chat_messages[0].role == "system" {
@@ -161,7 +161,7 @@ pub async fn chat_completion(
                         .collect::<Vec<_>>()
                         .join(" "),
                 };
-                let merged = format!("{}\n\n{}", tool_prompt, existing_content);
+                let merged = format!("{}\n\n{}", existing_content, tool_prompt);
                 chat_messages[0] = ChatMessage::text("system", merged);
             } else {
                 // System message exists but has no content, just use tool prompt
@@ -193,7 +193,7 @@ pub async fn chat_completion(
         }
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, &messages, image_data) {
+            match e.generate_stream(&params, &messages, image_data, &resolved_tools) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
@@ -210,67 +210,28 @@ pub async fn chat_completion(
 
         // Clone data needed for the async task
         let engine_clone = data.engine.clone();
-        let chat_messages_clone = chat_messages.clone();
         let params_clone = params.clone();
         let _img_cfg_clone = img_cfg.clone();
 
         task::spawn(async move {
             #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
-            #[allow(unused_assignments, unused_variables)]
-            let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
 
             // Create streaming context for clean helper methods
             let stream_ctx =
                 StreamingContext::new(seq_id, model_id.to_string(), created, response_tx.clone());
 
-            // State machine for tool call detection
-            // Normal: streaming normally
-            // MaybeToolCall: detected potential start (partial tag), buffering for confirmation
-            // InToolCall: confirmed tool call, fully buffering until end
-            #[derive(Debug, Clone, PartialEq)]
-            enum ToolCallState {
-                Normal,
-                MaybeToolCall,
-                InToolCall,
-            }
-            let mut tool_call_state = ToolCallState::Normal;
-            let mut tool_call_buffer = String::new(); // Buffer for potential/confirmed tool call content
+            // Initialize the stream tool parser (handles all tool call detection internally)
+            let mut tool_parser = StreamToolParser::new(model_type.clone(), model_id.to_string());
+            let should_parse_tools = params_clone.mcp_mode.is_some();
 
-            // Reasoning marker pairs: (start, end) - only matched end closes the block
-            const REASONING_MARKERS: &[(&str, &str)] = &[
-                ("<think>", "</think>"),
-                ("<|think|>", "<|/think|>"),
-                ("[THINK]", "[/THINK]"),
-                ("<thought>", "</thought>"),
-            ];
-            // Track which reasoning marker pair is active (None = not in reasoning)
-            let mut active_reasoning_end: Option<&'static str> = None;
-            // Track if we're inside a code block (```) - don't detect tool calls inside code blocks
-            let mut in_code_block = false;
-            // Check if we should buffer tool calls (when tools are enabled)
-            let should_buffer_tool_calls = params_clone.mcp_mode.is_some();
-
-            // Helper function to check for partial tool call tag
-            fn could_be_partial_tag(text: &str) -> bool {
-                const TAG: &str = "<tool_call>";
-                for i in 1..TAG.len() {
-                    if text.ends_with(&TAG[..i]) {
-                        return true;
-                    }
-                }
-                false
-            }
-
-            // Context that accumulates across tool call cycles
-            let _current_messages = chat_messages_clone.clone();
             let mut current_stream = stream;
             let current_seq_id = seq_id;
 
             while let Some(item) = current_stream.recv().await {
                 match item {
-                    StreamItem::Token(token) => {
+                    StreamItem::Token(token, token_id) => {
                         if decode_start_time == 0 {
                             decode_start_time = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -278,141 +239,63 @@ pub async fn chat_completion(
                                 .as_millis() as u64;
                         }
 
-                        // Always accumulate for tool call parsing
-                        accumulated_output.push_str(&token);
-
-                        // Track reasoning block state using paired markers
-                        if active_reasoning_end.is_none() {
-                            // Check for any reasoning start marker
-                            for &(start, end) in REASONING_MARKERS {
-                                if token.contains(start) || accumulated_output.ends_with(start) {
-                                    active_reasoning_end = Some(end);
-                                    break;
-                                }
-                            }
-                        } else if let Some(end_marker) = active_reasoning_end {
-                            // Check only for the paired end marker
-                            if token.contains(end_marker)
-                                || accumulated_output.ends_with(end_marker)
-                            {
-                                active_reasoning_end = None;
-                            }
-                        }
-
-                        // Track code block state (```) - toggle on each occurrence
-                        // Don't detect tool calls inside code blocks (they're examples/documentation)
-                        if token.contains("```") || accumulated_output.ends_with("```") {
-                            in_code_block = !in_code_block;
-                        }
-
-                        // When tools are available, use state machine for tool call detection
-                        // But ONLY if we're not inside a reasoning block OR a code block
-                        if should_buffer_tool_calls
-                            && active_reasoning_end.is_none()
-                            && !in_code_block
-                        {
-                            match tool_call_state.clone() {
-                                ToolCallState::Normal => {
-                                    // First check: does the current token contain the FULL tag?
-                                    // This handles cases where <tool_call> arrives in one token
-                                    if let Some(pos) = token.find("<tool_call>") {
-                                        crate::log_info!(
-                                                "[Seq {}] Detected <tool_call> in token, buffering started",
-                                                current_seq_id
-                                            );
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        tool_call_buffer.clear();
-                                        // Capture any content that came AFTER the tag in this token
-                                        let after_tag = &token[pos + 11..]; // len("<tool_call>") = 11
-                                        if !after_tag.is_empty() {
-                                            tool_call_buffer.push_str(after_tag);
-                                        }
-                                        continue; // Don't send this token
-                                    }
-                                    // Second check: did the tag just complete across tokens?
-                                    // This handles cases where tag spans multiple tokens
-                                    if accumulated_output.ends_with("<tool_call>") {
-                                        crate::log_info!(
-                                                "[Seq {}] Detected <tool_call> at end of accumulated output, buffering started",
-                                                current_seq_id
-                                            );
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        tool_call_buffer.clear();
-                                        continue; // Don't send this token
-                                    }
-                                    // Third check: partial tag match (could be starting a tool call)
-                                    if could_be_partial_tag(&accumulated_output) {
-                                        tool_call_state = ToolCallState::MaybeToolCall;
-                                        tool_call_buffer.push_str(&token);
-                                        continue; // Hold this token
-                                    }
-                                    // Normal streaming - send token
-                                }
-
-                                ToolCallState::MaybeToolCall => {
-                                    tool_call_buffer.push_str(&token);
-                                    // Check if we now have the full tag anywhere in the buffer
-                                    // This handles cases where the tag completes in the middle of a token
-                                    if let Some(tag_pos) = tool_call_buffer.find("<tool_call>") {
-                                        crate::log_info!(
-                                                "[Seq {}] Confirmed <tool_call> in buffer after partial match",
-                                                current_seq_id
-                                            );
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        // Only keep content after the tag
-                                        let after_tag_start = tag_pos + 11;
-                                        let after_tag =
-                                            tool_call_buffer[after_tag_start..].to_string();
-                                        tool_call_buffer.clear();
-                                        if !after_tag.is_empty() {
-                                            tool_call_buffer.push_str(&after_tag);
-                                        }
+                        // Use StreamToolParser for all tool call detection and buffering
+                        if should_parse_tools {
+                            match tool_parser.process_token(token_id, &token) {
+                                StreamResult::Content(text) => {
+                                    if text.is_empty() {
                                         continue;
                                     }
-
-                                    // Check if it's still a potential partial match
-                                    if could_be_partial_tag(&accumulated_output) {
-                                        continue; // Keep waiting
-                                    }
-                                    // False alarm - not a tool call tag
-                                    // Flush the buffered content as normal text
-
-                                    crate::log_info!(
-                                            "[Seq {}] False positive partial tag detected, flushing {} chars",
-                                            current_seq_id,
-                                            tool_call_buffer.len()
-                                        );
-                                    if !stream_ctx.send_token(&tool_call_buffer) {
+                                    // Send content to client
+                                    if !stream_ctx.send_token(&text) {
                                         crate::log_error!(
-                                            "[Seq {}] Stream send to client error (disconnected)",
+                                            "[Seq {}] Stream send error (disconnected)",
                                             current_seq_id
                                         );
                                         let mut e = engine_clone.write();
-
                                         e.cancel(current_seq_id);
                                         break;
                                     }
-                                    tool_call_buffer.clear();
-                                    tool_call_state = ToolCallState::Normal;
-                                    continue; // Token already in buffer, was sent
                                 }
-                                ToolCallState::InToolCall => {
-                                    // Keep buffering - scheduler will detect </tool_call>
-                                    tool_call_buffer.push_str(&token);
-                                    continue;
+                                StreamResult::Buffering => {
+                                    // Parser is buffering, don't send anything
+                                }
+                                StreamResult::FlushBuffer(text) => {
+                                    if text.is_empty() {
+                                        continue;
+                                    }
+                                    // False positive - flush buffered content as text
+                                    crate::log_info!(
+                                        "[Seq {}] Flushing {} chars (false positive)",
+                                        current_seq_id,
+                                        text.len()
+                                    );
+                                    if !stream_ctx.send_token(&text) {
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        break;
+                                    }
+                                }
+                                StreamResult::ToolCalls(tools) => {
+                                    let tool_chunk = tool_parser.create_tool_chunk(tools);
+                                    crate::log_info!("Tool chunk: {:?}", tool_chunk);
+                                    let _ = response_tx.try_send(ChatResponse::Chunk(tool_chunk));
                                 }
                             }
-                        }
-
-                        // Send token to client using helper (only if not buffering tool call)
-                        if !stream_ctx.send_token(&token) {
-                            crate::log_error!(
-                                "[Seq {}] Stream send to client error (disconnected)",
-                                current_seq_id
-                            );
-                            let mut e = engine_clone.write();
-                            e.cancel(current_seq_id);
-                            break;
+                        } else {
+                            // No tool parsing - stream directly
+                            if token.is_empty() {
+                                continue;
+                            }
+                            if !stream_ctx.send_token(&token) {
+                                crate::log_error!(
+                                    "[Seq {}] Stream send error (disconnected)",
+                                    current_seq_id
+                                );
+                                let mut e = engine_clone.write();
+                                e.cancel(current_seq_id);
+                                break;
+                            }
                         }
                     }
                     StreamItem::Done((
@@ -423,56 +306,55 @@ pub async fn chat_completion(
                     )) => {
                         total_decoded_tokens += final_decoded_length;
 
-                        // Check if we need to parse tool calls (tools enabled)
-                        // Only parse if we actually detected a tool call during streaming
-                        // (i.e., tool_call_state is InToolCall, not Normal or MaybeToolCall)
-                        // This prevents parsing tool calls that are inside code blocks
-                        // (examples/documentation) which were never buffered
-                        let should_parse_tool_calls = params_clone.mcp_mode.is_some()
-                            && !accumulated_output.is_empty()
-                            && tool_call_state == ToolCallState::InToolCall;
-
-                        let (tool_calls, has_tool_calls) = if should_parse_tool_calls {
-                            let tool_parser = ToolParser::new();
-                            let parsed = tool_parser.parse(&accumulated_output);
-                            let has_calls = !parsed.is_empty();
-                            crate::log_warn!(
-                                "Parse tool call content: {:?}, result: {}",
-                                accumulated_output,
-                                if has_calls { "success" } else { "failed" }
-                            );
-
-                            // If parsing failed but we have buffered content, flush it as text
-                            // This handles incomplete/truncated tool calls gracefully
-                            if !has_calls
-                                && tool_call_state != ToolCallState::Normal
-                                && !tool_call_buffer.is_empty()
-                            {
-                                crate::log_warn!(
-                                    "[Seq {}] Tool call parsing failed, flushing {} chars as text",
-                                    current_seq_id,
-                                    tool_call_buffer.len()
-                                );
-                                stream_ctx.send_token(&tool_call_buffer);
+                        // Finalize tool parsing and get any remaining tool calls
+                        let tool_calls = if should_parse_tools {
+                            match tool_parser.state() {
+                                ParserState::Buffering => {
+                                    // Finalize any buffered content
+                                    if let Some(parsed) = tool_parser.finalize() {
+                                        let has_calls = !parsed.is_empty();
+                                        if has_calls {
+                                            crate::log_info!(
+                                                "[Seq {}] Parsed {} tool call(s)",
+                                                current_seq_id,
+                                                parsed.len()
+                                            );
+                                        }
+                                        Some(parsed)
+                                    } else {
+                                        // Parse failed - flush any remaining buffer as text
+                                        let buffer = tool_parser.take_buffer();
+                                        if !buffer.is_empty() {
+                                            crate::log_warn!(
+                                                "[Seq {}] Tool parse failed, flushing {} chars",
+                                                current_seq_id,
+                                                buffer.len()
+                                            );
+                                            stream_ctx.send_token(&buffer);
+                                        }
+                                        None
+                                    }
+                                }
+                                ParserState::MaybeStart => {
+                                    let buffer = tool_parser.take_buffer();
+                                    if !buffer.is_empty() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool parse partial, flushing {} chars",
+                                            current_seq_id,
+                                            buffer.len()
+                                        );
+                                        stream_ctx.send_token(&buffer);
+                                    }
+                                    None
+                                }
+                                ParserState::Normal => None,
                             }
-
-                            let tool_calls = if has_calls {
-                                Some(
-                                    parsed
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(idx, call)| call.with_index(idx))
-                                        .collect(),
-                                )
-                            } else {
-                                None
-                            };
-                            (tool_calls, has_calls)
                         } else {
-                            (None, false)
+                            None
                         };
 
-                        // Send final chunk with tool_calls if applicable
+                        let has_tool_calls = tool_calls.is_some();
+                        // Send final chunk
                         let final_chunk = ChatCompletionChunk {
                             id: format!("seq-{}", current_seq_id),
                             object: "chat.completion.chunk",
@@ -501,17 +383,15 @@ pub async fn chat_completion(
                         };
 
                         if has_tool_calls {
-                            crate::log_info!("Dump final chunk for tool call: {:?}", final_chunk);
+                            crate::log_info!("Final chunk with tool calls: {:?}", final_chunk);
                         }
                         let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
 
                         // Performance metrics
-                        // Note: For resumed generation with cached context, timing may be unusual
-                        // Use saturating_sub to prevent underflow
                         let prompt_time_taken = if decode_start_time_done > prompt_start_time {
                             (decode_start_time_done - prompt_start_time) as f32 / 1000.0
                         } else {
-                            0.0 // Cached context, no real prompt time
+                            0.0
                         };
                         let decode_time_taken = if decode_finish_time > decode_start_time_done {
                             (decode_finish_time - decode_start_time_done) as f32 / 1000.0
@@ -522,7 +402,7 @@ pub async fn chat_completion(
                         crate::log_warn!("--- Performance Metrics ---");
                         if prompt_time_taken > 0.0 {
                             crate::log_info!(
-                                "[Seq {}] ⏱️ Prompt tokens: {} in {:.2}s ({:.2} t/s)",
+                                "[Seq {}] ⏱️ Prompt: {} tokens in {:.2}s ({:.2} t/s)",
                                 current_seq_id,
                                 prompt_length,
                                 prompt_time_taken,
@@ -530,13 +410,13 @@ pub async fn chat_completion(
                             );
                         } else {
                             crate::log_info!(
-                                "[Seq {}] ⏱️ Prompt tokens: {} (cached context)",
+                                "[Seq {}] ⏱️ Prompt: {} tokens (cached)",
                                 current_seq_id,
                                 prompt_length
                             );
                         }
                         crate::log_info!(
-                            "[Seq {}] ⏱️ Decoded tokens: {} in {:.2}s ({:.2} t/s)",
+                            "[Seq {}] ⏱️ Decoded: {} tokens in {:.2}s ({:.2} t/s)",
                             current_seq_id,
                             total_decoded_tokens,
                             decode_time_taken,
@@ -570,7 +450,6 @@ pub async fn chat_completion(
                     _ => {}
                 }
             }
-            // Stream ended without Done signal
 
             let _ = response_tx.try_send(ChatResponse::Done);
         });
@@ -624,6 +503,7 @@ pub async fn chat_completion(
                 &vec![current_params.clone()],
                 &vec![input_messages],
                 input_images,
+                &resolved_tools,
             ) {
                 Ok(receivers) => receivers,
                 Err(e) => {
@@ -885,7 +765,7 @@ pub async fn tokenize(
             let engine = data.engine.read();
             let mut template = engine.get_chat_template();
             template.set_messages(&converted_messages);
-            let prompt = match template.apply_chat_template(false) {
+            let prompt = match template.apply_chat_template(&Vec::new(), false) {
                 Ok(prompt) => prompt,
                 Err(e) => {
                     return ChatResponder::InternalError(format!(

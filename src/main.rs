@@ -286,7 +286,7 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, &chat_history, None) {
+                    match e.generate_stream(&request_params, &chat_history, None, &Vec::new()) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -307,7 +307,7 @@ async fn main() -> Result<()> {
                         let mut rx = stream;
                         while let Some(item) = rx.recv().await {
                             match item {
-                                StreamItem::Token(t) => {
+                                StreamItem::Token(t, _token_id) => {
                                     decode_output += &t.to_string();
                                     print!("{}", t);
                                     use std::io::Write;
@@ -370,7 +370,7 @@ async fn main() -> Result<()> {
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
                     (
-                        e.generate_sync(&params, &message_list, None)?,
+                        e.generate_sync(&params, &message_list, None, &Vec::new())?,
                         Arc::new(e.tokenizer.clone()),
                     )
                 };

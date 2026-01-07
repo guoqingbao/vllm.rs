@@ -13,10 +13,11 @@ use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
 use crate::server::{EmbeddingStrategy, UsageResponse};
+use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, EosTokenId, SamplingParams};
+use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::load_toktrie_from_path;
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
@@ -60,7 +61,7 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
 
 #[derive(Debug, Clone)]
 pub enum StreamItem {
-    Token(String),                               //streaming
+    Token(String, u32),                          //streaming: (text, token_id)
     TokenID(u32),                                //completion
     Completion((usize, usize, usize, Vec<u32>)), //completion
     Done((usize, usize, usize, usize)),          //streaming end
@@ -92,6 +93,7 @@ pub struct LLMEngine {
     stop_flag: Arc<AtomicBool>,
     has_vision: bool,
     model_name: String,
+    pub model_type: ModelType,
     pub img_cfg: Option<ImageProcessConfig>,
 }
 
@@ -392,7 +394,7 @@ impl LLMEngine {
             true,
         );
 
-        let img_cfg = get_image_config(model_type, &config)?;
+        let img_cfg = get_image_config(model_type.clone(), &config)?;
 
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()
@@ -417,6 +419,7 @@ impl LLMEngine {
             cancelled_sequences: Vec::new(),
             stop_flag: stop_flag.clone(),
             has_vision: config.is_multi_model.unwrap_or(false),
+            model_type,
             img_cfg,
             model_name,
         }));
@@ -719,9 +722,9 @@ impl LLMEngine {
                                 //finish early, we need to send the last token
                                 if *request_type == RequestType::Stream {
                                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                        if let Some(tok) = decoder.step(s.last_token) {
-                                            let _ = sender.try_send(StreamItem::Token(tok.clone()));
-                                        }
+                                        let tok = decoder.step(s.last_token).unwrap_or_default();
+                                        let _ =
+                                            sender.try_send(StreamItem::Token(tok, s.last_token));
                                     }
                                 } else {
                                     let _ = sender.try_send(StreamItem::TokenID(s.last_token));
@@ -800,16 +803,15 @@ impl LLMEngine {
                             if *request_type == RequestType::Stream {
                                 if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                     for token_id in token_ids {
-                                        if let Some(tok) = decoder.step(token_id) {
-                                            let result =
-                                                sender.try_send(StreamItem::Token(tok.clone()));
-                                            if result.is_err() {
-                                                crate::log_error!(
-                                                    "Error when sending token to client [seq_id {}]",
-                                                    seq_id
-                                                );
-                                                self.cancelled_sequences.push(seq_id);
-                                            }
+                                        let tok = decoder.step(token_id).unwrap_or_default();
+                                        let result =
+                                            sender.try_send(StreamItem::Token(tok, token_id));
+                                        if result.is_err() {
+                                            crate::log_error!(
+                                                "Error when sending token to client [seq_id {}]",
+                                                seq_id
+                                            );
+                                            self.cancelled_sequences.push(seq_id);
                                         }
                                     }
                                 }
@@ -950,6 +952,7 @@ impl LLMEngine {
         &mut self,
         params: &SamplingParams,
         messages: &Vec<Message>,
+        tools: &Vec<Tool>,
         log: bool,
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
@@ -962,7 +965,7 @@ impl LLMEngine {
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template
-            .apply_chat_template(log)
+            .apply_chat_template(tools, log)
             .map_err(candle_core::Error::wrap);
         let prompt = if prompt_processed.is_ok() {
             prompt_processed.unwrap()
@@ -1014,13 +1017,14 @@ impl LLMEngine {
         params: &Vec<SamplingParams>,
         message_list: &Vec<Vec<Message>>,
         images: Option<ImageData>,
+        tools: &Vec<Tool>,
     ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
         if params.len() != message_list.len() {
             candle_core::bail!("size of sampling parameters is not match with size of prompts!");
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            let (prompt, image_idx) = self.apply_chat_template(param, messages, false);
+            let (prompt, image_idx) = self.apply_chat_template(param, messages, tools, false);
             if let Ok((seq_id, prompt_length, rx)) =
                 self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
             {
@@ -1107,7 +1111,7 @@ impl LLMEngine {
                                 });
                                 break;
                             }
-                            StreamItem::Token(_) => {
+                            StreamItem::Token(_, _) => {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
 
                                 decode_start_time_clone
@@ -1181,8 +1185,9 @@ impl LLMEngine {
         params: &SamplingParams,
         messages: &Vec<Message>,
         images: Option<ImageData>, //collection of images of the full conversation
+        tools: &Vec<Tool>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
-        let (prompt, image_idx) = self.apply_chat_template(params, messages, false);
+        let (prompt, image_idx) = self.apply_chat_template(params, messages, tools, false);
         match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {

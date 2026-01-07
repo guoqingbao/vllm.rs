@@ -1,3 +1,4 @@
+use crate::tools::Tool;
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
@@ -107,7 +108,11 @@ impl ChatTemplate {
         self.messages.clear()
     }
 
-    pub fn apply_chat_template(&self, log: bool) -> Result<String, ApplyChatTemplateError> {
+    pub fn apply_chat_template(
+        &self,
+        tools: &Vec<Tool>,
+        log: bool,
+    ) -> Result<String, ApplyChatTemplateError> {
         if self.chat_template.is_none() {
             return Err(ApplyChatTemplateError::GetTemplateError(
                 minijinja::Error::new(minijinja::ErrorKind::CannotDeserialize, "Not found!"),
@@ -139,6 +144,7 @@ impl ChatTemplate {
               bos_token => self.bos_token,
               eos_token => self.eos_token,
               enable_thinking => self.enable_thinking,
+              tools => tools,
             })
             .map_err(ApplyChatTemplateError::RenderTemplateError)
     }

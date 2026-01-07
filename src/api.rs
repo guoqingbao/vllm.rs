@@ -1,6 +1,7 @@
 use crate::core::engine::{LLMEngine, StreamItem, GLOBAL_RT};
 use crate::core::GenerationOutput;
 use crate::server::{build_messages_and_images, run_server, ChatMessage};
+use crate::tools::Tool;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
 use crate::utils::get_dtype;
@@ -163,10 +164,11 @@ impl Engine {
         &mut self,
         params: SamplingParams,
         messages: Vec<ChatMessage>,
+        tools: Vec<Tool>,
     ) -> Result<GenerationOutput> {
         let img_cfg = { self.engine.read().img_cfg.clone() };
         let (messages, image_data) = build_messages_and_images(&messages, img_cfg.as_ref())?;
-        self.generate_messages(params, messages, image_data)
+        self.generate_messages(params, messages, image_data, tools)
     }
 
     pub fn generate_messages(
@@ -174,11 +176,12 @@ impl Engine {
         params: SamplingParams,
         messages: Vec<Message>,
         images: Option<crate::utils::image::ImageData>,
+        tools: Vec<Tool>,
     ) -> Result<GenerationOutput> {
         let (receivers, tokenizer) = {
             let mut engine = self.engine.write();
             (
-                engine.generate_sync(&vec![params], &vec![messages], images)?,
+                engine.generate_sync(&vec![params], &vec![messages], images, &tools)?,
                 Arc::new(engine.tokenizer.clone()),
             )
         };
@@ -198,13 +201,14 @@ impl Engine {
         &mut self,
         params: SamplingParams,
         messages: Vec<ChatMessage>,
+        tools: Vec<Tool>,
     ) -> Result<EngineStream> {
         let img_cfg = { self.engine.read().img_cfg.clone() };
         let (messages, image_data) = build_messages_and_images(&messages, img_cfg.as_ref())?;
 
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
-            engine.generate_stream(&params, &messages, image_data)?
+            engine.generate_stream(&params, &messages, image_data, &tools)?
         };
 
         Ok(EngineStream {

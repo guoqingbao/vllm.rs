@@ -237,38 +237,27 @@ impl ToolResult {
 pub struct ToolFormat {}
 
 impl ToolFormat {
-    /// Format tools for inclusion in the system prompt
-    /// Uses explicit instructions to ensure models output tool calls in the expected format
-    pub fn format_tools(tools: &[Tool]) -> String {
-        let rule = String::from(
-            "IMPORTANT: For each function call, you MUST wrapped function name and arguments in <tool_call></tool_call> tags.\n\n\
+    /// Get tool prompt for a specific model type
+    pub fn get_tool_prompt(model_type: &crate::utils::config::ModelType) -> String {
+        use crate::server::parser::ToolConfig;
+        let config = ToolConfig::for_model_type(model_type);
+        let start_tag = &config.start_token_str;
+        let end_tag = &config.end_token_str;
+        let rule = format!(
+            "MOST IMPORTANT INSTRUCTION, **MUST** FOLLOW: For each function call, you MUST wrap function name and arguments in {start_tag}{end_tag} tags.\n\n\
             Do NOT USE ANY code blocks. Required format:\n\
-            <tool_call>\n\
-            {\"name\": \"<function-name>\", \"arguments\": <args-json-object>}\n\
-            </tool_call>\n\n\
+            {start_tag}\n\
+            {{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}}\n\
+            {end_tag}\n\n\
             Rules:\n\
-            - Wrapper function name and arguments with <tool_call> and </tool_call> tags\n\
-            - Always use the exact <tool_call></tool_call> format shown above\n\
+            - Wrap function name and arguments with {start_tag} and {end_tag} tags\n\
+            - Always use the exact {start_tag}{end_tag} format shown above\n\
             - Do NOT USE ANY code blocks\n\
-            - The \"name\" and \"arguments\" are necessary fields\n",
+            - Tool-use must be placed **at the end** of your response, **top-level**, and not nested within other tags.\n\
+            - Always adhere to this format for the tool use to ensure proper parsing and execution.\n\
+            - The \"name\" and \"arguments\" are necessary fields\n\
+            - MUST FOLLOW the above instruction when using tool call!",
         );
-
-        let mut output = String::from(
-            "# Tools\n\n\
-            You may call one or more functions to assist with the user query.\n\n\
-            You are provided with function signatures within <tools></tools> XML tags:\n\
-            <tools>\n",
-        );
-        output.push_str(&rule);
-
-        for tool in tools {
-            output.push_str(&serde_json::to_string(&tool.function).unwrap_or_default());
-            output.push('\n');
-        }
-
-        output.push_str("</tools>\n\n");
-        output.push_str(&rule);
-
-        output
+        rule
     }
 }

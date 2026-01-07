@@ -77,7 +77,7 @@ impl Engine {
                     let mut engine = self.engine.write();
                     (
                         engine
-                            .generate_sync(&params, &message_list, None)
+                            .generate_sync(&params, &message_list, &Vec::new(), None)
                             .map_err(|e| {
                                 PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                             })?,
@@ -108,7 +108,7 @@ impl Engine {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, &messages, None)
+                .generate_stream(&params, &messages, &Vec::new(), None)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 
@@ -150,7 +150,7 @@ impl PyStreamItem {
     #[getter]
     fn datatype(&self) -> &'static str {
         match self.0 {
-            StreamItem::Token(_) => "TOKEN",
+            StreamItem::Token(_, _) => "TOKEN",
             StreamItem::TokenID(_) => "TOKEN_ID",
             StreamItem::Completion(_) => "COMPLETION",
             StreamItem::Done(_) => "DONE",
@@ -167,7 +167,7 @@ impl PyStreamItem {
     #[getter]
     fn data(&self, py: Python) -> PyResult<Py<PyAny>> {
         match &self.0 {
-            StreamItem::Token(s) => s.into_py_any(py),
+            StreamItem::Token(s, id) => (s, id).into_py_any(py),
             StreamItem::TokenID(id) => id.into_py_any(py),
             StreamItem::Completion(c) => (c.0, c.1, c.2, c.3.clone()).into_py_any(py),
             StreamItem::Done(d) => (d.0, d.1, d.2, d.3).into_py_any(py),

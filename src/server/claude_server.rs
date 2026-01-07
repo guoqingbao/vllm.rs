@@ -722,7 +722,7 @@ fn inject_tool_prompt(chat_messages: &mut Vec<ChatMessage>, tool_prompt: &str) {
                     .collect::<Vec<_>>()
                     .join(" "),
             };
-            let merged = format!("{}\n\n{}", tool_prompt, existing_content);
+            let merged = format!("{}\n\n{}", existing_content, tool_prompt);
             chat_messages[0] = ChatMessage::text("system", merged);
         } else {
             chat_messages[0] = ChatMessage::text("system", tool_prompt.to_string());
@@ -1127,8 +1127,13 @@ pub async fn messages(
     };
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
+    let model_type = {
+        let e = data.engine.read();
+        e.model_type.clone()
+    };
+
     if !resolved_tools.is_empty() {
-        let tool_prompt = ToolFormat::format_tools(&resolved_tools);
+        let tool_prompt = ToolFormat::get_tool_prompt(&model_type);
         inject_tool_prompt(&mut chat_messages, &tool_prompt);
     }
 
@@ -1157,7 +1162,7 @@ pub async fn messages(
     if use_stream {
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, &messages, image_data) {
+            match e.generate_stream(&params, &messages, image_data, &resolved_tools) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1343,7 +1348,7 @@ pub async fn messages(
                     .reset(time::Instant::now() + idle_timeout);
 
                 match item {
-                    StreamItem::Token(token) => {
+                    StreamItem::Token(token, _token_id) => {
                         total_decoded_tokens += 1;
                         accumulated_output.push_str(&token);
 
@@ -1791,7 +1796,7 @@ pub async fn messages(
 
         let receivers = {
             let mut e = data.engine.write();
-            match e.generate_sync(&vec![params], &vec![messages], image_data) {
+            match e.generate_sync(&vec![params], &vec![messages], image_data, &resolved_tools) {
                 Ok(receivers) => receivers,
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1912,7 +1917,7 @@ pub async fn count_tokens(
         extra: request.extra.clone(),
     };
 
-    let mut chat_messages = match build_chat_messages(&message_request) {
+    let chat_messages = match build_chat_messages(&message_request) {
         Ok(messages) => messages,
         Err(err) => {
             return ClaudeResponder::Error(
@@ -1927,14 +1932,6 @@ pub async fn count_tokens(
             );
         }
     };
-
-    if let Some(tools) = &message_request.tools {
-        let converted_tools = claude_tools_to_tools(tools);
-        if !converted_tools.is_empty() {
-            let tool_prompt = ToolFormat::format_tools(&converted_tools);
-            inject_tool_prompt(&mut chat_messages, &tool_prompt);
-        }
-    }
 
     let img_cfg = {
         let e = data.engine.read();
@@ -1959,7 +1956,7 @@ pub async fn count_tokens(
     let engine = data.engine.read();
     let mut template = engine.get_chat_template();
     template.set_messages(&messages);
-    let prompt = match template.apply_chat_template(false) {
+    let prompt = match template.apply_chat_template(&Vec::new(), false) {
         Ok(prompt) => prompt,
         Err(err) => {
             return ClaudeResponder::Error(
