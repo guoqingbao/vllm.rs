@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.7.10"
+version = "0.7.11"
 edition = "2021"
 default-run = "vllm-rs"
 

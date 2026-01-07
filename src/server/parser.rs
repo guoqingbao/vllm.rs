@@ -390,6 +390,7 @@ impl StreamToolParser {
                     let tool_calls = self.parse_buffer();
                     let result = if tool_calls.is_empty() {
                         // Parse failed - return buffered content
+                        crate::log_error!("Unable to parse tool call buffer: {}", self.buffer);
                         StreamResult::FlushBuffer(self.buffer.clone())
                     } else {
                         StreamResult::ToolCalls(tool_calls)
@@ -483,6 +484,15 @@ impl StreamToolParser {
             if let Some(call) = self.json_to_tool_call(&item) {
                 calls.push(call);
             }
+        } else if let Some(repaired) = self.repair_unbalanced_json(&clean_text) {
+            if repaired != clean_text {
+                crate::log_warn!("Tool call JSON missing closing braces; attempting repair");
+            }
+            if let Ok(item) = serde_json::from_str::<Value>(&repaired) {
+                if let Some(call) = self.json_to_tool_call(&item) {
+                    calls.push(call);
+                }
+            }
         }
 
         calls
@@ -543,6 +553,60 @@ impl StreamToolParser {
             return false;
         }
         end_tag.starts_with('<')
+    }
+
+    fn repair_unbalanced_json(&self, text: &str) -> Option<String> {
+        let trimmed = text.trim();
+        if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+            return None;
+        }
+
+        let mut in_string = false;
+        let mut escape = false;
+        let mut open_braces = 0usize;
+        let mut close_braces = 0usize;
+        let mut open_brackets = 0usize;
+        let mut close_brackets = 0usize;
+
+        for ch in trimmed.chars() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_string => {
+                    escape = true;
+                }
+                '"' => {
+                    in_string = !in_string;
+                }
+                '{' if !in_string => open_braces += 1,
+                '}' if !in_string => close_braces += 1,
+                '[' if !in_string => open_brackets += 1,
+                ']' if !in_string => close_brackets += 1,
+                _ => {}
+            }
+        }
+
+        if in_string {
+            return None;
+        }
+        if close_braces > open_braces || close_brackets > open_brackets {
+            return None;
+        }
+
+        if open_braces == close_braces && open_brackets == close_brackets {
+            return None;
+        }
+
+        let mut fixed = trimmed.to_string();
+        if open_brackets > close_brackets {
+            fixed.push_str(&"]".repeat(open_brackets - close_brackets));
+        }
+        if open_braces > close_braces {
+            fixed.push_str(&"}".repeat(open_braces - close_braces));
+        }
+        Some(fixed)
     }
 
     /// Convert JSON value to ToolCall
