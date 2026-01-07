@@ -11,9 +11,9 @@ Claude Code -> vLLM.rs (Anthropic-compatible)
 
 ```bash
 # Rust
-./target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --server --prefix-cache
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
 # Python
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-30B-A3B-Instruct --d 0,1 --server --prefix-cache
 ```
 
 ## 2) Configure Claude Code

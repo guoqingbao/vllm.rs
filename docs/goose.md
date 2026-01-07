@@ -10,11 +10,9 @@ Goose -> vLLM.rs (OpenAI-compatible)
 
 ```bash
 # Rust
-./target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --server --prefix-cache
-# Or
 ./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --w /path/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
 # Python
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-30B-A3B-Instruct --d 0,1 --server --prefix-cache
 ```
 
 ## 2) Configure Goose
@@ -53,7 +51,7 @@ goose configure
 │  vllm-rs
 │
 ◇  Provider API URL:
-│  http://10.9.112.41:8000/v1/
+│  http://127.0.0.1:8000/v1/
 │
 ◇  API key:
 │  ▪▪▪▪▪

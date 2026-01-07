@@ -68,6 +68,7 @@
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini等)
 * ✅ Gemma3 (多模态，不支持Flash Attention)
 * ✅ Qwen3-VL (Dense, 多模态)
+* ✅ MiroThinker-v1.5 (30B, 235B)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
 

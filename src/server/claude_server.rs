@@ -3,6 +3,7 @@ use super::{
     ServerData,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::parser::ToolParser;
 use crate::tools::schema::validate_arguments;
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
@@ -722,7 +723,7 @@ fn inject_tool_prompt(chat_messages: &mut Vec<ChatMessage>, tool_prompt: &str) {
                     .collect::<Vec<_>>()
                     .join(" "),
             };
-            let merged = format!("{}\n\n{}", tool_prompt, existing_content);
+            let merged = format!("{}\n\n{}", existing_content, tool_prompt);
             chat_messages[0] = ChatMessage::text("system", merged);
         } else {
             chat_messages[0] = ChatMessage::text("system", tool_prompt.to_string());
@@ -764,6 +765,26 @@ fn tool_calls_to_blocks(tool_calls: &[ToolCall]) -> Vec<ClaudeContentBlockOut> {
             }
         })
         .collect()
+}
+
+fn send_text_with_start(
+    stream_ctx: &ClaudeStreamingContext,
+    text_block_started: &mut bool,
+    text_block_index: usize,
+    text: &str,
+) -> Result<(), StreamSendError> {
+    if !*text_block_started {
+        let start_block = ClaudeContentBlockStartEvent {
+            event_type: "content_block_start",
+            index: text_block_index,
+            content_block: ClaudeContentBlockOut::Text {
+                text: String::new(),
+            },
+        };
+        stream_ctx.send_json_event("content_block_start", &start_block)?;
+        *text_block_started = true;
+    }
+    send_text_delta(stream_ctx, text_block_index, text)
 }
 
 fn send_text_delta(
@@ -1127,8 +1148,13 @@ pub async fn messages(
     };
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
+    let (model_type, tool_config) = {
+        let e = data.engine.read();
+        (e.model_type.clone(), e.tool_config.clone())
+    };
+
     if !resolved_tools.is_empty() {
-        let tool_prompt = ToolFormat::format_tools(&resolved_tools);
+        let tool_prompt = ToolFormat::get_tool_prompt(&model_type);
         inject_tool_prompt(&mut chat_messages, &tool_prompt);
     }
 
@@ -1157,7 +1183,7 @@ pub async fn messages(
     if use_stream {
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, &messages, image_data) {
+            match e.generate_stream(&params, &messages, image_data, &resolved_tools) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1182,6 +1208,8 @@ pub async fn messages(
         let engine_clone = data.engine.clone();
         let params_clone = params.clone();
         let stream_model_id = model_id.clone();
+        let stream_model_type = model_type.clone();
+        let stream_tool_config = tool_config.clone();
         let stream_tool_schemas = tool_schemas.clone();
 
         task::spawn(async move {
@@ -1246,7 +1274,6 @@ pub async fn messages(
 
             let message_id = format!("msg_{}", Uuid::new_v4().simple());
             let stream_ctx = ClaudeStreamingContext::new(seq_id, response_tx.clone());
-            let mut accumulated_output = String::new();
             let mut total_decoded_tokens = 0usize;
             let mut stream_finished = false;
             let idle_timeout = Duration::from_millis(
@@ -1284,34 +1311,13 @@ pub async fn messages(
 
             let mut text_block_started = false;
             let text_block_index = 0usize;
-
-            #[derive(Debug, Clone, PartialEq)]
-            enum ToolCallState {
-                Normal,
-                MaybeToolCall,
-                InToolCall,
-            }
-            let mut tool_call_state = ToolCallState::Normal;
-            let mut tool_call_buffer = String::new();
-            const REASONING_MARKERS: &[(&str, &str)] = &[
-                ("<think>", "</think>"),
-                ("<|think|>", "<|/think|>"),
-                ("[THINK]", "[/THINK]"),
-                ("<thought>", "</thought>"),
-            ];
-            let mut active_reasoning_end: Option<&'static str> = None;
-            let mut in_code_block = false;
-            let should_buffer_tool_calls = params_clone.mcp_mode.is_some();
-
-            fn could_be_partial_tag(text: &str) -> bool {
-                const TAG: &str = "<tool_call>";
-                for i in 1..TAG.len() {
-                    if text.ends_with(&TAG[..i]) {
-                        return true;
-                    }
-                }
-                false
-            }
+            let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+            let mut tool_parser = StreamToolParser::new_with_config(
+                &stream_model_type,
+                stream_model_id.clone(),
+                stream_tool_config,
+            );
+            let should_parse_tools = params_clone.mcp_mode.is_some();
 
             let mut current_stream = stream;
             'stream: loop {
@@ -1343,106 +1349,20 @@ pub async fn messages(
                     .reset(time::Instant::now() + idle_timeout);
 
                 match item {
-                    StreamItem::Token(token) => {
+                    StreamItem::Token(token, token_id) => {
                         total_decoded_tokens += 1;
-                        accumulated_output.push_str(&token);
 
-                        if active_reasoning_end.is_none() {
-                            for &(start, end) in REASONING_MARKERS {
-                                if token.contains(start) || accumulated_output.ends_with(start) {
-                                    active_reasoning_end = Some(end);
-                                    break;
-                                }
-                            }
-                        } else if let Some(end_marker) = active_reasoning_end {
-                            if token.contains(end_marker)
-                                || accumulated_output.ends_with(end_marker)
-                            {
-                                active_reasoning_end = None;
-                            }
-                        }
-
-                        if token.contains("```") || accumulated_output.ends_with("```") {
-                            in_code_block = !in_code_block;
-                        }
-
-                        if should_buffer_tool_calls
-                            && active_reasoning_end.is_none()
-                            && !in_code_block
-                        {
-                            match tool_call_state.clone() {
-                                ToolCallState::Normal => {
-                                    if let Some(pos) = token.find("<tool_call>") {
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        tool_call_buffer.clear();
-                                        let after_tag = &token[pos + 11..];
-                                        if !after_tag.is_empty() {
-                                            tool_call_buffer.push_str(after_tag);
-                                        }
+                        if should_parse_tools {
+                            match tool_parser.process_token(token_id, &token) {
+                                StreamResult::Content(text) => {
+                                    if text.is_empty() {
                                         continue;
                                     }
-                                    if accumulated_output.ends_with("<tool_call>") {
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        tool_call_buffer.clear();
-                                        continue;
-                                    }
-                                    if could_be_partial_tag(&accumulated_output) {
-                                        tool_call_state = ToolCallState::MaybeToolCall;
-                                        tool_call_buffer.push_str(&token);
-                                        continue;
-                                    }
-                                }
-                                ToolCallState::MaybeToolCall => {
-                                    tool_call_buffer.push_str(&token);
-                                    if let Some(tag_pos) = tool_call_buffer.find("<tool_call>") {
-                                        tool_call_state = ToolCallState::InToolCall;
-                                        let after_tag_start = tag_pos + 11;
-                                        let after_tag =
-                                            tool_call_buffer[after_tag_start..].to_string();
-                                        tool_call_buffer.clear();
-                                        if !after_tag.is_empty() {
-                                            tool_call_buffer.push_str(&after_tag);
-                                        }
-                                        continue;
-                                    }
-                                    if could_be_partial_tag(&accumulated_output) {
-                                        continue;
-                                    }
-                                    if text_block_started || !tool_call_buffer.is_empty() {
-                                        if !text_block_started {
-                                            let start_block = ClaudeContentBlockStartEvent {
-                                                event_type: "content_block_start",
-                                                index: text_block_index,
-                                                content_block: ClaudeContentBlockOut::Text {
-                                                    text: String::new(),
-                                                },
-                                            };
-                                            if let Err(err) = stream_ctx.send_json_event(
-                                                "content_block_start",
-                                                &start_block,
-                                            ) {
-                                                handle_stream_send_error(
-                                                    err,
-                                                    seq_id,
-                                                    &response_tx,
-                                                    text_block_started,
-                                                    text_block_index,
-                                                    total_decoded_tokens,
-                                                    true,
-                                                )
-                                                .await;
-                                                let mut e = engine_clone.write();
-                                                e.cancel(seq_id);
-                                                stream_finished = true;
-                                                break 'stream;
-                                            }
-                                            text_block_started = true;
-                                        }
-                                    }
-                                    if let Err(err) = send_text_delta(
+                                    if let Err(err) = send_text_with_start(
                                         &stream_ctx,
+                                        &mut text_block_started,
                                         text_block_index,
-                                        &tool_call_buffer,
+                                        &text,
                                     ) {
                                         handle_stream_send_error(
                                             err,
@@ -1459,28 +1379,45 @@ pub async fn messages(
                                         stream_finished = true;
                                         break 'stream;
                                     }
-                                    tool_call_buffer.clear();
-                                    tool_call_state = ToolCallState::Normal;
-                                    continue;
                                 }
-                                ToolCallState::InToolCall => {
-                                    tool_call_buffer.push_str(&token);
-                                    continue;
+                                StreamResult::Buffering => {}
+                                StreamResult::FlushBuffer(text) => {
+                                    if text.is_empty() {
+                                        continue;
+                                    }
+                                    if let Err(err) = send_text_with_start(
+                                        &stream_ctx,
+                                        &mut text_block_started,
+                                        text_block_index,
+                                        &text,
+                                    ) {
+                                        handle_stream_send_error(
+                                            err,
+                                            seq_id,
+                                            &response_tx,
+                                            text_block_started,
+                                            text_block_index,
+                                            total_decoded_tokens,
+                                            true,
+                                        )
+                                        .await;
+                                        let mut e = engine_clone.write();
+                                        e.cancel(seq_id);
+                                        stream_finished = true;
+                                        break 'stream;
+                                    }
+                                }
+                                StreamResult::ToolCalls(calls) => {
+                                    pending_tool_calls.extend(calls);
                                 }
                             }
-                        }
-
-                        if !text_block_started {
-                            let start_block = ClaudeContentBlockStartEvent {
-                                event_type: "content_block_start",
-                                index: text_block_index,
-                                content_block: ClaudeContentBlockOut::Text {
-                                    text: String::new(),
-                                },
-                            };
-                            if let Err(err) =
-                                stream_ctx.send_json_event("content_block_start", &start_block)
-                            {
+                        } else if !token.is_empty() {
+                            if let Err(err) = send_text_with_start(
+                                &stream_ctx,
+                                &mut text_block_started,
+                                text_block_index,
+                                &token,
+                            ) {
                                 handle_stream_send_error(
                                     err,
                                     seq_id,
@@ -1496,23 +1433,6 @@ pub async fn messages(
                                 stream_finished = true;
                                 break 'stream;
                             }
-                            text_block_started = true;
-                        }
-                        if let Err(err) = send_text_delta(&stream_ctx, text_block_index, &token) {
-                            handle_stream_send_error(
-                                err,
-                                seq_id,
-                                &response_tx,
-                                text_block_started,
-                                text_block_index,
-                                total_decoded_tokens,
-                                true,
-                            )
-                            .await;
-                            let mut e = engine_clone.write();
-                            e.cancel(seq_id);
-                            stream_finished = true;
-                            break 'stream;
                         }
                     }
                     StreamItem::Done((
@@ -1523,76 +1443,59 @@ pub async fn messages(
                     )) => {
                         total_decoded_tokens = final_decoded_length;
 
-                        let should_parse_tool_calls = params_clone.mcp_mode.is_some()
-                            && !accumulated_output.is_empty()
-                            && tool_call_state == ToolCallState::InToolCall;
-                        let (tool_calls, has_tool_calls) = if should_parse_tool_calls {
-                            let tool_parser = ToolParser::new();
-                            let parsed = tool_parser.parse(&accumulated_output);
-                            let has_calls = !parsed.is_empty();
-                            if !has_calls && !tool_call_buffer.is_empty() {
-                                if !text_block_started {
-                                    let start_block = ClaudeContentBlockStartEvent {
-                                        event_type: "content_block_start",
-                                        index: text_block_index,
-                                        content_block: ClaudeContentBlockOut::Text {
-                                            text: String::new(),
-                                        },
-                                    };
-                                    let _ = stream_ctx
-                                        .send_json_event("content_block_start", &start_block);
-                                    text_block_started = true;
-                                }
-                                let _ = send_text_delta(
-                                    &stream_ctx,
-                                    text_block_index,
-                                    &tool_call_buffer,
-                                );
-                            }
-
-                            if !has_calls {
-                                (Vec::new(), false)
-                            } else {
-                                let (valid, invalid) =
-                                    validate_tool_calls(&parsed, stream_tool_schemas.as_ref());
-                                if !invalid.is_empty() {
-                                    crate::log_warn!(
-                                        "[Seq {}] Dropping {} invalid tool call(s)",
-                                        seq_id,
-                                        invalid.len()
-                                    );
-                                    log_tool_calls("Invalid", seq_id, &invalid);
-                                }
-                                if valid.is_empty() {
-                                    if !tool_call_buffer.is_empty() {
-                                        if !text_block_started {
-                                            let start_block = ClaudeContentBlockStartEvent {
-                                                event_type: "content_block_start",
-                                                index: text_block_index,
-                                                content_block: ClaudeContentBlockOut::Text {
-                                                    text: String::new(),
-                                                },
-                                            };
-                                            let _ = stream_ctx.send_json_event(
-                                                "content_block_start",
-                                                &start_block,
+                        if should_parse_tools {
+                            match tool_parser.state() {
+                                ParserState::Buffering => {
+                                    if let Some(mut parsed) = tool_parser.finalize() {
+                                        pending_tool_calls.append(&mut parsed);
+                                    } else {
+                                        let buffer = tool_parser.take_buffer();
+                                        if !buffer.is_empty() {
+                                            let _ = send_text_with_start(
+                                                &stream_ctx,
+                                                &mut text_block_started,
+                                                text_block_index,
+                                                &buffer,
                                             );
-                                            text_block_started = true;
                                         }
-                                        let _ = send_text_delta(
+                                    }
+                                }
+                                ParserState::MaybeStart => {
+                                    let buffer = tool_parser.take_buffer();
+                                    if !buffer.is_empty() {
+                                        let _ = send_text_with_start(
                                             &stream_ctx,
+                                            &mut text_block_started,
                                             text_block_index,
-                                            &tool_call_buffer,
+                                            &buffer,
                                         );
                                     }
-                                    (Vec::new(), false)
-                                } else {
-                                    log_tool_calls("Valid", seq_id, &valid);
-                                    (valid, true)
                                 }
+                                ParserState::Normal => {}
                             }
-                        } else {
+                        }
+
+                        let (tool_calls, has_tool_calls) = if pending_tool_calls.is_empty() {
                             (Vec::new(), false)
+                        } else {
+                            let (valid, invalid) = validate_tool_calls(
+                                &pending_tool_calls,
+                                stream_tool_schemas.as_ref(),
+                            );
+                            if !invalid.is_empty() {
+                                crate::log_warn!(
+                                    "[Seq {}] Dropping {} invalid tool call(s)",
+                                    seq_id,
+                                    invalid.len()
+                                );
+                                log_tool_calls("Invalid", seq_id, &invalid);
+                            }
+                            if valid.is_empty() {
+                                (Vec::new(), false)
+                            } else {
+                                log_tool_calls("Valid", seq_id, &valid);
+                                (valid, true)
+                            }
                         };
 
                         let stop_reason = stop_reason_from_decoding(
@@ -1630,6 +1533,8 @@ pub async fn messages(
                         }
 
                         if has_tool_calls {
+                            let tool_blocks = tool_calls_to_blocks(&tool_calls);
+                            crate::log_info!("[Seq {}] Tool use blocks: {:?}", seq_id, tool_blocks);
                             for (idx, call) in tool_calls.iter().enumerate() {
                                 if let Err(err) =
                                     send_tool_use_block(&stream_ctx, next_block_index + idx, call)
@@ -1791,7 +1696,7 @@ pub async fn messages(
 
         let receivers = {
             let mut e = data.engine.write();
-            match e.generate_sync(&vec![params], &vec![messages], image_data) {
+            match e.generate_sync(&vec![params], &vec![messages], image_data, &resolved_tools) {
                 Ok(receivers) => receivers,
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1912,7 +1817,7 @@ pub async fn count_tokens(
         extra: request.extra.clone(),
     };
 
-    let mut chat_messages = match build_chat_messages(&message_request) {
+    let chat_messages = match build_chat_messages(&message_request) {
         Ok(messages) => messages,
         Err(err) => {
             return ClaudeResponder::Error(
@@ -1927,14 +1832,6 @@ pub async fn count_tokens(
             );
         }
     };
-
-    if let Some(tools) = &message_request.tools {
-        let converted_tools = claude_tools_to_tools(tools);
-        if !converted_tools.is_empty() {
-            let tool_prompt = ToolFormat::format_tools(&converted_tools);
-            inject_tool_prompt(&mut chat_messages, &tool_prompt);
-        }
-    }
 
     let img_cfg = {
         let e = data.engine.read();
@@ -1959,7 +1856,7 @@ pub async fn count_tokens(
     let engine = data.engine.read();
     let mut template = engine.get_chat_template();
     template.set_messages(&messages);
-    let prompt = match template.apply_chat_template(false) {
+    let prompt = match template.apply_chat_template(&Vec::new(), false) {
         Ok(prompt) => prompt,
         Err(err) => {
             return ClaudeResponder::Error(

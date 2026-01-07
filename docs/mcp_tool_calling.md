@@ -100,16 +100,48 @@ When using multiple MCP servers, tool names are prefixed with the server name to
 
 ---
 
-## Supported Tool Formats
+## Tool Call Parsing Architecture
 
-vLLM.rs automatically detects the appropriate tool format based on the model:
+vLLM.rs uses a dual-strategy approach for detecting tool calls in streaming responses.
 
-| Model Family | Tool Format |
-|--------------|-------------|
-| Qwen, Qwen2, Qwen3 | Qwen format |
-| Llama, Llama2, Llama3 | Llama format |
-| Mistral | Llama format |
-| Others | Generic format |
+### Detection Strategy
+
+1. **Token ID-based detection** (preferred): For models with dedicated tool call tokens
+   - Uses special token IDs defined in the tokenizer
+   - More robust and prevents false positives from text that looks like tool calls
+
+2. **Text-based detection** (fallback): For models without special tokens
+   - Uses pattern matching for start/end tag strings
+   - Applied when token IDs are not available
+
+### Model Support Matrix
+
+| Model Family | Detection Method | Start Token | End Token |
+|--------------|-----------------|-------------|-----------|
+| Qwen 2.5/3   | Token ID + Text | `<tool_call>` (151657) | `</tool_call>` (151658) |
+| Llama 3/3.1  | Token ID + Text | `<\|python_tag\|>` (128010) | `<\|eom_id\|>` (128008) |
+| Mistral      | Token ID + Text | `[TOOL_CALLS]` (9) | `]` |
+| Gemma        | Text only       | `<start_function_call>` | `<end_function_call>` |
+| Phi4, GLM4   | Text only       | `<tool_call>` | `</tool_call>` |
+
+### Buffering Logic
+
+The streaming tool parser uses a state machine:
+
+1. **Normal State**: Tokens stream through. Check for start trigger.
+2. **Buffering State**: On start detection, accumulate tokens silently.
+3. **End Detection**: When end token/text is detected:
+   - Parse buffer into structured tool calls
+   - If parsing succeeds: return `finish_reason: "tool_calls"`
+   - If parsing fails: flush buffered content as normal text
+
+### Content Filtering
+
+Tool calls are NOT detected inside:
+- **Reasoning blocks** (`<think>...</think>`, `<|think|>...<|/think|>`)
+- **Code blocks** (` ``` `)
+
+This prevents false positives from examples or documentation.
 
 ---
 

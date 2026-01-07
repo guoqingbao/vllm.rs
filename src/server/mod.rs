@@ -1,6 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 pub mod claude_server;
+pub mod parser;
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
@@ -18,6 +19,8 @@ use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use candle_core::{Result, Tensor};
+use colored::*;
+use local_ip_address::local_ip;
 use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
@@ -697,18 +700,18 @@ pub fn convert_chat_message(
         return Ok(Message::new(role, prompt.trim().to_owned(), 0));
     }
 
-    // Handle assistant messages with tool calls
-    if msg.tool_calls.is_some() {
-        if let Some(tool_calls) = &msg.tool_calls {
-            for tc in tool_calls {
-                prompt.push_str(&format!(
-                    "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>\n",
-                    tc.function.name, tc.function.arguments
-                ));
-            }
-        }
-        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
-    }
+    // // Handle assistant messages with tool calls
+    // if msg.tool_calls.is_some() {
+    //     if let Some(tool_calls) = &msg.tool_calls {
+    //         for tc in tool_calls {
+    //             prompt.push_str(&format!(
+    //                 "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>\n",
+    //                 tc.function.name, tc.function.arguments
+    //             ));
+    //         }
+    //     }
+    //     return Ok(Message::new(role, prompt.trim().to_owned(), 0));
+    // }
 
     // Normal message handling
     if let Some(content) = &msg.content {
@@ -935,16 +938,32 @@ pub async fn run_server(
         crate::log_warn!("🚀 PD server started, waiting for prefill request(s)...",);
         format!("0.0.0.0:{}", 0)
     } else {
-        crate::log_warn!("🚀 Chat server listening on http://0.0.0.0:{}", port);
-        crate::log_warn!("📡 Supported endpoints (OpenAI/Claude):");
-        crate::log_warn!("   - POST /v1/chat/completions");
-        crate::log_warn!("   - POST /v1/messages");
-        crate::log_warn!("   - POST /v1/messages/count_tokens");
-        crate::log_warn!("   - POST /v1/embeddings");
-        crate::log_warn!("   - GET  /v1/models");
-        crate::log_warn!("   - GET  /v1/usage");
-        crate::log_warn!("   - POST /tokenize");
-        crate::log_warn!("   - POST /detokenize");
+        let ip = local_ip().unwrap_or("127.0.0.1".parse().unwrap());
+        let local_url = format!("http://localhost:{port}/v1/");
+        let lan_url = format!("http://{ip}:{port}/v1/");
+
+        let api_server_url = format!(
+            "🧠 API server running at:\n   -  {} (Local Access) \n   -  {} (Remote Access)",
+            local_url, lan_url
+        );
+        println!("{}", api_server_url.cyan());
+
+        println!(
+            "{}",
+            format!("📡 Supported endpoints (OpenAI/Claude):").yellow()
+        );
+        println!("{}", format!("   - POST /v1/chat/completions").yellow());
+        println!("{}", format!("   - POST /v1/messages").yellow());
+        println!(
+            "{}",
+            format!("   - POST /v1/messages/count_tokens").yellow()
+        );
+        println!("{}", format!("   - POST /v1/embeddings").yellow());
+        println!("{}", format!("   - GET  /v1/models").yellow());
+        println!("{}", format!("   - GET  /v1/usage").yellow());
+        println!("{}", format!("   - POST /tokenize").yellow());
+        println!("{}", format!("   - POST /detokenize").yellow());
+        println!("");
         format!("0.0.0.0:{}", port)
     };
 
@@ -952,7 +971,7 @@ pub async fn run_server(
     let mut tasks = Vec::new();
     tasks.push(tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
-            eprintln!("Chat API server error: {e:?}");
+            eprintln!("API server error: {e:?}");
         }
     }));
 
