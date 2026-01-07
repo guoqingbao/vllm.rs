@@ -111,7 +111,11 @@ pub async fn chat_completion(
     params.thinking = request.thinking.clone();
     let (img_cfg, model_type, tool_config) = {
         let e = data.engine.read();
-        (e.img_cfg.clone(), e.model_type.clone(), e.tool_config.clone())
+        (
+            e.img_cfg.clone(),
+            e.model_type.clone(),
+            e.tool_config.clone(),
+        )
     };
 
     let requested_tools = request.tools.as_deref().unwrap_or_default();

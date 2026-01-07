@@ -12,8 +12,8 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
-use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::server::parser::ToolConfig;
+use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;

@@ -167,8 +167,7 @@ impl ToolConfig {
             }
         }
 
-        if !used_special && !self.end_token_str.is_empty() && self.end_token_str.starts_with('<')
-        {
+        if !used_special && !self.end_token_str.is_empty() && self.end_token_str.starts_with('<') {
             // Only use text tags that look like explicit tool markers to avoid false positives.
             if let Ok(encoded) = tokenizer.encode(self.end_token_str.as_str(), false) {
                 let ids = encoded.get_ids();
@@ -181,11 +180,7 @@ impl ToolConfig {
         tool_call_end_ids
     }
 
-    fn matches_single_token(
-        tokenizer: &Tokenizer,
-        text: &str,
-        token_ids: &HashSet<u32>,
-    ) -> bool {
+    fn matches_single_token(tokenizer: &Tokenizer, text: &str, token_ids: &HashSet<u32>) -> bool {
         if text.is_empty() {
             return false;
         }
@@ -232,11 +227,7 @@ impl StreamToolParser {
     }
 
     /// Create a new parser with a pre-validated tool config
-    pub fn new_with_config(
-        model_type: &ModelType,
-        model_id: String,
-        config: ToolConfig,
-    ) -> Self {
+    pub fn new_with_config(model_type: &ModelType, model_id: String, config: ToolConfig) -> Self {
         let parse_strategy = match model_type {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
             _ => "json",
