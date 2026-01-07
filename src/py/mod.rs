@@ -77,7 +77,7 @@ impl Engine {
                     let mut engine = self.engine.write();
                     (
                         engine
-                            .generate_sync(&params, &message_list, &Vec::new(), None)
+                            .generate_sync(&params, &message_list, None, &Vec::new())
                             .map_err(|e| {
                                 PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                             })?,
@@ -108,7 +108,7 @@ impl Engine {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, &messages, &Vec::new(), None)
+                .generate_stream(&params, &messages, None, &Vec::new())
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 

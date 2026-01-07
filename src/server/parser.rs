@@ -26,7 +26,7 @@ pub enum StreamResult {
     Content(String),
     /// Buffering - don't send anything yet
     Buffering,
-    /// Tool calls parsed - send tool chunk with finish_reason
+    /// Tool calls parsed - return tool calls for deferred emission
     ToolCalls(Vec<ToolCall>),
     /// False positive - flush accumulated buffer as content
     FlushBuffer(String),

@@ -217,6 +217,7 @@ pub async fn chat_completion(
             #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
             let mut total_decoded_tokens = 0usize;
+            let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
 
             // Create streaming context for clean helper methods
             let stream_ctx =
@@ -277,9 +278,7 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::ToolCalls(tools) => {
-                                    let tool_chunk = tool_parser.create_tool_chunk(tools);
-                                    crate::log_info!("Tool chunk: {:?}", tool_chunk);
-                                    let _ = response_tx.try_send(ChatResponse::Chunk(tool_chunk));
+                                    pending_tool_calls.extend(tools);
                                 }
                             }
                         } else {
@@ -306,21 +305,20 @@ pub async fn chat_completion(
                     )) => {
                         total_decoded_tokens += final_decoded_length;
 
-                        // Finalize tool parsing and get any remaining tool calls
-                        let tool_calls = if should_parse_tools {
+                        // Finalize tool parsing and collect any remaining tool calls
+                        if should_parse_tools {
                             match tool_parser.state() {
                                 ParserState::Buffering => {
                                     // Finalize any buffered content
-                                    if let Some(parsed) = tool_parser.finalize() {
-                                        let has_calls = !parsed.is_empty();
-                                        if has_calls {
+                                    if let Some(mut parsed) = tool_parser.finalize() {
+                                        if !parsed.is_empty() {
                                             crate::log_info!(
                                                 "[Seq {}] Parsed {} tool call(s)",
                                                 current_seq_id,
                                                 parsed.len()
                                             );
                                         }
-                                        Some(parsed)
+                                        pending_tool_calls.append(&mut parsed);
                                     } else {
                                         // Parse failed - flush any remaining buffer as text
                                         let buffer = tool_parser.take_buffer();
@@ -332,7 +330,6 @@ pub async fn chat_completion(
                                             );
                                             stream_ctx.send_token(&buffer);
                                         }
-                                        None
                                     }
                                 }
                                 ParserState::MaybeStart => {
@@ -345,15 +342,17 @@ pub async fn chat_completion(
                                         );
                                         stream_ctx.send_token(&buffer);
                                     }
-                                    None
                                 }
-                                ParserState::Normal => None,
+                                ParserState::Normal => {}
                             }
-                        } else {
-                            None
-                        };
+                        }
 
-                        let has_tool_calls = tool_calls.is_some();
+                        let tool_calls = if pending_tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(pending_tool_calls)
+                        };
+                        let has_any_tool_calls = tool_calls.is_some();
                         // Send final chunk
                         let final_chunk = ChatCompletionChunk {
                             id: format!("seq-{}", current_seq_id),
@@ -366,7 +365,7 @@ pub async fn chat_completion(
                                     content: None,
                                     tool_calls,
                                 },
-                                finish_reason: if has_tool_calls {
+                                finish_reason: if has_any_tool_calls {
                                     Some("tool_calls".to_string())
                                 } else if total_decoded_tokens >= max_tokens {
                                     Some("length".to_string())
@@ -382,7 +381,7 @@ pub async fn chat_completion(
                             }),
                         };
 
-                        if has_tool_calls {
+                        if has_any_tool_calls {
                             crate::log_info!("Final chunk with tool calls: {:?}", final_chunk);
                         }
                         let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
@@ -470,8 +469,7 @@ pub async fn chat_completion(
             ),
         )
     } else {
-        // Non-streaming with loop-based MCP tool calling (like stream path)
-        let current_messages = chat_messages.clone();
+        // Non-streaming
         let current_params = params.clone();
         let mut total_prompt_tokens = 0;
         let mut total_decoded_tokens = 0;
@@ -483,26 +481,16 @@ pub async fn chat_completion(
             Arc::new(e.tokenizer.clone())
         };
 
-        // MCP tool calling loop - continues until no more tool calls
-        let (input_messages, input_images) =
-            match build_messages_and_images(&current_messages, img_cfg.as_ref()) {
-                Ok(output) => output,
-                Err(e) => {
-                    crate::log_error!("Message processing failed: {:?}", e);
-                    return ChatResponder::InternalError(format!("Internal server error {:?}", e));
-                }
-            };
-
         crate::log_info!(
             "Received completion request with {} messages",
-            input_messages.len()
+            messages.len()
         );
         let receivers = {
             let mut e = data.engine.write();
             match e.generate_sync(
                 &vec![current_params.clone()],
-                &vec![input_messages],
-                input_images,
+                &vec![messages],
+                image_data,
                 &resolved_tools,
             ) {
                 Ok(receivers) => receivers,
