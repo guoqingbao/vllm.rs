@@ -13,6 +13,7 @@ use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
 use crate::server::{EmbeddingStrategy, UsageResponse};
+use crate::server::parser::ToolConfig;
 use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
@@ -94,6 +95,7 @@ pub struct LLMEngine {
     has_vision: bool,
     model_name: String,
     pub model_type: ModelType,
+    pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
 }
 
@@ -360,16 +362,16 @@ impl LLMEngine {
         let runners = Arc::new(RwLock::new(runners));
         let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
 
-        // Initialize tool call end tokens for detection
-        // Tokenize "</tool_call>" to get the token IDs for tool call end detection
-        if let Ok(tokens) = tokenizer.encode("</tool_call>", false) {
-            let tool_call_end_ids: Vec<u32> = tokens.get_ids().to_vec();
-            // We want to detect when the LAST token of "</tool_call>" is generated
-            // So we just need the last token ID
-            if let Some(&last_token) = tool_call_end_ids.last() {
-                scheduler.set_tool_call_end_tokens(vec![last_token]);
-                log_info!("Tool call end token ID set to: {}", last_token);
-            }
+        // Initialize tool call end tokens for detection based on model type.
+        let mut tool_config = ToolConfig::for_model_type(&model_type);
+        tool_config.validate_with_tokenizer(&tokenizer, &model_type);
+        let tool_call_end_ids = tool_config.tool_call_end_ids(&tokenizer);
+
+        if !tool_call_end_ids.is_empty() {
+            scheduler.set_tool_call_end_tokens(tool_call_end_ids.clone());
+            log_info!("Tool call end token IDs set to: {:?}", tool_call_end_ids);
+        } else {
+            log_info!("Tool call end token IDs not set (no reliable end token)");
         }
 
         // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
@@ -420,6 +422,7 @@ impl LLMEngine {
             stop_flag: stop_flag.clone(),
             has_vision: config.is_multi_model.unwrap_or(false),
             model_type,
+            tool_config,
             img_cfg,
             model_name,
         }));

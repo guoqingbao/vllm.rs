@@ -109,9 +109,9 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type) = {
+    let (img_cfg, model_type, tool_config) = {
         let e = data.engine.read();
-        (e.img_cfg.clone(), e.model_type.clone())
+        (e.img_cfg.clone(), e.model_type.clone(), e.tool_config.clone())
     };
 
     let requested_tools = request.tools.as_deref().unwrap_or_default();
@@ -213,6 +213,10 @@ pub async fn chat_completion(
         let params_clone = params.clone();
         let _img_cfg_clone = img_cfg.clone();
 
+        let tool_config = tool_config.clone();
+        let tool_parser =
+            StreamToolParser::new_with_config(&model_type, model_id.to_string(), tool_config);
+
         task::spawn(async move {
             #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
@@ -224,7 +228,7 @@ pub async fn chat_completion(
                 StreamingContext::new(seq_id, model_id.to_string(), created, response_tx.clone());
 
             // Initialize the stream tool parser (handles all tool call detection internally)
-            let mut tool_parser = StreamToolParser::new(model_type.clone(), model_id.to_string());
+            let mut tool_parser = tool_parser;
             let should_parse_tools = params_clone.mcp_mode.is_some();
 
             let mut current_stream = stream;

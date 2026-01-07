@@ -7,6 +7,7 @@ use crate::tools::{FunctionCall, ToolCall};
 use crate::utils::config::ModelType;
 use serde_json::Value;
 use std::collections::HashSet;
+use tokenizers::Tokenizer;
 
 /// Parser state for streaming tool call detection
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +120,83 @@ impl ToolConfig {
     pub fn has_end_tokens(&self) -> bool {
         !self.end_token_ids.is_empty()
     }
+
+    /// Validate special token IDs against the tokenizer, falling back to text-only matching if needed.
+    pub fn validate_with_tokenizer(&mut self, tokenizer: &Tokenizer, model_type: &ModelType) {
+        if self.has_start_tokens()
+            && !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
+        {
+            crate::log_warn!(
+                "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                model_type
+            );
+            self.start_token_ids.clear();
+        }
+
+        if self.has_end_tokens()
+            && !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids)
+        {
+            crate::log_error!(
+                "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                model_type
+            );
+            self.end_token_ids.clear();
+        }
+    }
+
+    /// Resolve tool call end token IDs using tokenizer and the validated config.
+    pub fn tool_call_end_ids(&self, tokenizer: &Tokenizer) -> Vec<u32> {
+        let mut tool_call_end_ids: Vec<u32> = Vec::new();
+
+        let mut used_special = false;
+        if self.has_end_tokens() {
+            let mut use_special = true;
+            if !self.end_token_str.is_empty() {
+                if let Ok(encoded) = tokenizer.encode(self.end_token_str.as_str(), false) {
+                    let ids = encoded.get_ids();
+                    if ids.len() != 1 || !self.end_token_ids.contains(&ids[0]) {
+                        use_special = false;
+                    }
+                } else {
+                    use_special = false;
+                }
+            }
+            if use_special {
+                tool_call_end_ids.extend(self.end_token_ids.iter().copied());
+                used_special = true;
+            }
+        }
+
+        if !used_special && !self.end_token_str.is_empty() && self.end_token_str.starts_with('<')
+        {
+            // Only use text tags that look like explicit tool markers to avoid false positives.
+            if let Ok(encoded) = tokenizer.encode(self.end_token_str.as_str(), false) {
+                let ids = encoded.get_ids();
+                if ids.len() == 1 {
+                    tool_call_end_ids.push(ids[0]);
+                }
+            }
+        }
+
+        tool_call_end_ids
+    }
+
+    fn matches_single_token(
+        tokenizer: &Tokenizer,
+        text: &str,
+        token_ids: &HashSet<u32>,
+    ) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        match tokenizer.encode(text, false) {
+            Ok(encoded) => {
+                let ids = encoded.get_ids();
+                ids.len() == 1 && token_ids.contains(&ids[0])
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 /// Streaming tool parser that handles tool call detection and buffering
@@ -150,6 +228,15 @@ impl StreamToolParser {
     /// Create a new parser for the given model type
     pub fn new(model_type: ModelType, model_id: String) -> Self {
         let config = ToolConfig::for_model_type(&model_type);
+        Self::new_with_config(&model_type, model_id, config)
+    }
+
+    /// Create a new parser with a pre-validated tool config
+    pub fn new_with_config(
+        model_type: &ModelType,
+        model_id: String,
+        config: ToolConfig,
+    ) -> Self {
         let parse_strategy = match model_type {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
             _ => "json",
