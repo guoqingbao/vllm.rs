@@ -132,6 +132,7 @@ impl EngineBuilder {
             None,
             None,
             disable_flash_attn,
+            None,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

@@ -257,6 +257,7 @@ impl ToolFormat {
             - Tool-use must be placed **at the end** of your response (**AFTER REASONING**), **top-level**, and not nested within other tags.\n\
             - Always adhere to this format for the tool use to ensure proper parsing and execution.\n\
             - The \"name\" and \"arguments\" are necessary fields\n\
+            - DO NOT call ANY functions that DOES NOT defined between <tool> and </tool>\n\
             - MUST FOLLOW the above instruction when using tool call!",
         );
         rule

@@ -81,7 +81,7 @@ pub struct LLMEngine {
     pub runners: Arc<RwLock<RunnerType>>,
     pub scheduler: Scheduler,
     pub tokenizer: Tokenizer,
-    econfig: EngineConfig,
+    pub econfig: EngineConfig,
     default_chat_template: String,
     template: ChatTemplate,
     stream_decoders: HashMap<usize, super::DecodeStreamType>,

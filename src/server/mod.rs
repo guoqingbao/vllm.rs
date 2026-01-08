@@ -499,6 +499,9 @@ pub struct Args {
     #[arg(long, default_value = None)]
     pub seed: Option<u64>, //seed for reproduce the results
 
+    #[arg(long)]
+    pub tool_prompt: Option<String>,
+
     #[arg(long, default_value_t = false)]
     pub prefix_cache: bool,
 

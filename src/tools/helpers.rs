@@ -38,6 +38,11 @@ pub fn filter_tool_calls(
         let schema = match schemas.get(&call.function.name) {
             Some(schema) => schema,
             None => {
+                crate::log_warn!(
+                    "Tool '{}' not found in schema map. Available tools: {:?}",
+                    call.function.name,
+                    schemas.keys().collect::<Vec<_>>()
+                );
                 invalid.push(call.clone());
                 continue;
             }
@@ -45,7 +50,13 @@ pub fn filter_tool_calls(
 
         let mut parsed_args = match serde_json::from_str::<Value>(&call.function.arguments) {
             Ok(value) => value,
-            Err(_) => {
+            Err(e) => {
+                crate::log_warn!(
+                    "Failed to parse arguments for tool '{}': {}. Args: {}",
+                    call.function.name,
+                    e,
+                    call.function.arguments
+                );
                 invalid.push(call.clone());
                 continue;
             }
@@ -58,6 +69,11 @@ pub fn filter_tool_calls(
         }
 
         if !parsed_args.is_object() {
+            crate::log_warn!(
+                "Arguments for tool '{}' must be a JSON object. Got: {:?}",
+                call.function.name,
+                parsed_args
+            );
             invalid.push(call.clone());
             continue;
         }
@@ -77,7 +93,16 @@ pub fn filter_tool_calls(
                 parsed_args.clone()
             };
 
-        if validate_arguments(schema, &filtered_args).is_ok() {
+        if let Err(e) = validate_arguments(schema, &filtered_args) {
+            crate::log_warn!(
+                "Schema validation failed for tool '{}': {}. Schema: {:?}, Args: {:?}",
+                call.function.name,
+                e,
+                schema,
+                filtered_args
+            );
+            invalid.push(call.clone());
+        } else {
             let normalized_args = serde_json::to_string(&filtered_args)
                 .unwrap_or_else(|_| call.function.arguments.clone());
             valid.push(ToolCall {
@@ -89,8 +114,6 @@ pub fn filter_tool_calls(
                     arguments: normalized_args,
                 },
             });
-        } else {
-            invalid.push(call.clone());
         }
     }
 

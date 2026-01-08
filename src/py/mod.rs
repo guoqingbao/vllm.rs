@@ -77,7 +77,7 @@ impl Engine {
                     let mut engine = self.engine.write();
                     (
                         engine
-                            .generate_sync(&params, &message_list, None, &Vec::new())
+                            .generate_sync(&params, &message_list, None, &Vec::new(), &None)
                             .map_err(|e| {
                                 PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                             })?,
@@ -108,7 +108,7 @@ impl Engine {
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
             engine
-                .generate_stream(&params, &messages, None, &Vec::new())
+                .generate_stream(&params, &messages, None, &Vec::new(), &None)
                 .map_err(|e| PyValueError::new_err(format!("stream error: {:?}", e)))?
         };
 
@@ -264,7 +264,7 @@ impl EngineConfig {
         generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
-        disable_flash_attn=None))]
+        disable_flash_attn=None, tool_prompt_template=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -291,6 +291,7 @@ impl EngineConfig {
         mcp_config: Option<String>,
         mcp_args: Option<String>,
         disable_flash_attn: Option<bool>,
+        tool_prompt_template: Option<String>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -341,6 +342,7 @@ impl EngineConfig {
             mcp_config,
             mcp_args,
             disable_flash_attn,
+            tool_prompt_template,
         }
     }
 }

@@ -1164,7 +1164,12 @@ pub async fn messages(
     };
 
     if !resolved_tools.is_empty() {
-        let mut tool_prompt = ToolFormat::get_tool_prompt(&model_type);
+        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
+        let mut tool_prompt = if let Some(template) = tool_prompt_template {
+            template
+        } else {
+            ToolFormat::get_tool_prompt(&model_type)
+        };
         if let Some(instruction) = tool_choice_instruction.as_ref() {
             tool_prompt = format!("{tool_prompt}\n\n{instruction}");
         }
