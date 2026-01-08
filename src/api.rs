@@ -187,8 +187,9 @@ impl Engine {
             )
         };
 
-        let results = GLOBAL_RT
-            .block_on(async { LLMEngine::collect_sync_results(receivers, tokenizer).await })?;
+        let results = GLOBAL_RT.block_on(async {
+            LLMEngine::collect_sync_results(receivers, tokenizer, None).await
+        })?;
 
         // Extract GenerationOutput
         for result in results {

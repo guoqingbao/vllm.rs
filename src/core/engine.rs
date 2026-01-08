@@ -822,7 +822,19 @@ impl LLMEngine {
                             } else {
                                 //completion request will be decoded at the final stage (at once)
                                 for token_id in token_ids {
-                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                    /*
+                                        Check if the receiver is still active.
+                                        If the client disconnected, collect_sync_results will be dropped,
+                                        dropping the receiver, causing try_send to fail.
+                                    */
+                                    if let Err(_) = sender.try_send(StreamItem::TokenID(token_id)) {
+                                        crate::log_error!(
+                                            "Error when sending token to client [seq_id {}]",
+                                            seq_id
+                                        );
+                                        self.cancelled_sequences.push(seq_id);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1049,6 +1061,7 @@ impl LLMEngine {
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
         tokenizer: Arc<Tokenizer>,
+        logger: Option<Arc<ChatCompletionLogger>>,
     ) -> Result<Vec<GenerationOutput>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
@@ -1059,7 +1072,7 @@ impl LLMEngine {
         let reporter = task::spawn(async move {
             let mut last_logged = 0;
             loop {
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_secs(5)).await;
                 let start_time = decode_start_time_clone.load(Ordering::SeqCst);
                 if start_time > 0 {
                     let count = decoded_tokens_clone.load(Ordering::Relaxed);
@@ -1077,7 +1090,7 @@ impl LLMEngine {
                     let elapsed = (now - start_time) as f32 / 1000.0;
 
                     let s = format!(
-                        "[Live Throughput] {} tokens in {:.2}s ({:.2} tokens/s)",
+                        "[Non-Streaming] {} tokens in {:.2}s ({:.2} tokens/s)",
                         count,
                         elapsed,
                         count as f32 / elapsed
@@ -1087,16 +1100,31 @@ impl LLMEngine {
             }
         });
 
-        // Spawn tasks for each receiver
+        // Create futures for each receiver (do NOT spawn detached tasks)
         let tasks = receivers
             .into_iter()
             .map(|(seq_id, prompt_length, mut rx)| {
                 let decoded_tokens = decoded_tokens.clone();
                 let decode_start_time_clone = decode_start_time.clone();
                 let tokenizer = Arc::clone(&tokenizer);
-                task::spawn(async move {
+                let logger = logger.clone();
+                async move {
                     let mut output: Option<GenerationOutput> = None;
                     let mut collected_token_ids: Vec<u32> = Vec::new();
+
+                    // Initialize decoder for incremental logging if needed
+                    let mut decoder = if logger.is_some() {
+                        let tokenizer_clone = tokenizer.as_ref().clone();
+                        let leaked: &'static _ = Box::leak(Box::new(tokenizer_clone));
+                        let decoder = leaked.decode_stream(true);
+                        let wrapped = super::StreamWithTokenizer {
+                            _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
+                            stream: decoder,
+                        };
+                        Some(Box::new(wrapped) as Box<dyn super::DecodeStreamTrait + Send + Sync>)
+                    } else {
+                        None
+                    };
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
@@ -1142,6 +1170,14 @@ impl LLMEngine {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
                                 collected_token_ids.push(id);
 
+                                if let Some(d) = decoder.as_mut() {
+                                    if let Some(text) = d.step(id) {
+                                        if let Some(l) = &logger {
+                                            l.log_stream_token(&text);
+                                        }
+                                    }
+                                }
+
                                 decode_start_time_clone
                                     .compare_exchange(
                                         0,
@@ -1167,7 +1203,7 @@ impl LLMEngine {
                     }
 
                     output
-                })
+                }
             });
 
         // Wait for all decoding tasks
@@ -1177,10 +1213,7 @@ impl LLMEngine {
         reporter.await.unwrap();
 
         // Collect successful outputs
-        let results: Vec<_> = outputs
-            .into_iter()
-            .filter_map(|r| r.ok().flatten())
-            .collect();
+        let results: Vec<_> = outputs.into_iter().filter_map(|r| r).collect();
 
         Ok(results)
     }
