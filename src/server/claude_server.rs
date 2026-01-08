@@ -1774,21 +1774,22 @@ pub async fn messages(
         if let Some(ref l) = logger {
             l.log_start_response();
         }
-        let results = match LLMEngine::collect_sync_results(receivers, tokenizer).await {
-            Ok(results) => results,
-            Err(err) => {
-                return ClaudeResponder::Error(
-                    ClaudeErrorResponse {
-                        response_type: "error",
-                        error: ClaudeErrorBody {
-                            error_type: "server_error".to_string(),
-                            message: format!("Failed to collect results: {err:?}"),
+        let results =
+            match LLMEngine::collect_sync_results(receivers, tokenizer, logger.clone()).await {
+                Ok(results) => results,
+                Err(err) => {
+                    return ClaudeResponder::Error(
+                        ClaudeErrorResponse {
+                            response_type: "error",
+                            error: ClaudeErrorBody {
+                                error_type: "server_error".to_string(),
+                                message: format!("Failed to collect results: {err:?}"),
+                            },
                         },
-                    },
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                );
-            }
-        };
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
+            };
 
         let output = match results.into_iter().next() {
             Some(output) => output,

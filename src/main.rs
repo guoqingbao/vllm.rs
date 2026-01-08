@@ -393,7 +393,7 @@ async fn main() -> Result<()> {
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer).await?;
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None).await?;
                 // GenerationOutput is returned directly
                 results
             }
