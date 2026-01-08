@@ -85,7 +85,7 @@ impl Engine {
                     )
                 };
 
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer)
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None)
                     .await
                     .map_err(|e| {
                         PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
