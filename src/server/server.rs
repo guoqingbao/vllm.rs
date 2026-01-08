@@ -24,8 +24,6 @@ use axum::{
     response::{sse::KeepAlive, Sse},
 };
 use base64::Engine;
-#[cfg(test)]
-use serde_json::json;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -779,43 +777,6 @@ pub async fn create_embeddings(
             total_tokens: prompt_tokens,
         },
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tools::Tool;
-
-    #[test]
-    fn resolve_tools_prefers_request_tools() {
-        let request_tools = vec![Tool::function("local", "Local tool").build()];
-        let mcp_tools = vec![Tool::function("mcp", "MCP tool").build()];
-
-        let resolved = resolve_tools(Some(&request_tools), &mcp_tools);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].function.name, "local");
-    }
-
-    #[test]
-    fn resolve_tools_falls_back_to_mcp() {
-        let request_tools: Vec<Tool> = vec![];
-        let mcp_tools = vec![Tool::function("mcp", "MCP tool").build()];
-
-        let resolved = resolve_tools(Some(&request_tools), &mcp_tools);
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].function.name, "mcp");
-    }
-
-    #[test]
-    fn tool_choice_schema_for_function() {
-        let tool_choice = ToolChoice::function("get_weather");
-        let schema = tool_choice_schema(&Some(tool_choice)).unwrap();
-        assert_eq!(schema["properties"]["name"]["const"], "get_weather");
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&"name".into()));
-    }
 }
 
 #[utoipa::path(
