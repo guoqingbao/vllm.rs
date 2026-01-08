@@ -1,6 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 pub mod claude_server;
+pub mod logger;
 pub mod parser;
 pub mod server;
 pub mod streaming;
@@ -28,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub model: Option<String>,
@@ -497,6 +498,9 @@ pub struct Args {
 
     #[arg(long, default_value = None)]
     pub seed: Option<u64>, //seed for reproduce the results
+
+    #[arg(long)]
+    pub tool_prompt: Option<String>,
 
     #[arg(long, default_value_t = false)]
     pub prefix_cache: bool,

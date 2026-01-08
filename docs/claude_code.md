@@ -51,3 +51,18 @@ curl http://127.0.0.1:8000/v1/messages \
 - Streaming uses server-sent events (SSE) on `/v1/messages` with `stream: true`.
 - Token counting is available at `POST /v1/messages/count_tokens`.
 - Embeddings are not part of the Anthropic API and are not exposed here.
+
+### Trouble shooting
+
+1. Use the chat logger to monitor detailed interactions between Claude Code and vLLM.rs.
+
+```shell
+# Log into files (in folder ./log)
+export VLLM_RS_CHAT_LOGGER=1
+```
+
+2. Use custom tool prompt (for example, to guide tool use)
+
+```shell
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache --tool-prompt ./examples/tool_prompt.json
+```

@@ -10,9 +10,9 @@ Goose -> vLLM.rs (OpenAI-compatible)
 
 ```bash
 # Rust
-./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --ui-server --prefix-cache
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
 # Python
-python3 -m vllm_rs.server --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --server --prefix-cache
 ```
 
 ## 2) Configure Goose
@@ -73,4 +73,19 @@ goose configure
 
 ```shell
 goose
+```
+
+### Trouble shooting
+
+1. Use the chat logger to monitor detailed interactions between Goose and vLLM.rs.
+
+```shell
+# Log into files (in folder ./log)
+export VLLM_RS_CHAT_LOGGER=1
+```
+
+2. Use custom tool prompt (for example, to guide tool use)
+
+```shell
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache --tool-prompt ./examples/tool_prompt.json
 ```

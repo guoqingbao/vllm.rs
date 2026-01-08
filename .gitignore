@@ -3,3 +3,5 @@
 .vscode/
 .idea/
 AGENTS.md
+/log
+*.log

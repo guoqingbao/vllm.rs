@@ -132,6 +132,7 @@ impl EngineBuilder {
             None,
             None,
             disable_flash_attn,
+            None,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);
@@ -181,7 +182,7 @@ impl Engine {
         let (receivers, tokenizer) = {
             let mut engine = self.engine.write();
             (
-                engine.generate_sync(&vec![params], &vec![messages], images, &tools)?,
+                engine.generate_sync(&vec![params], &vec![messages], images, &tools, &None)?,
                 Arc::new(engine.tokenizer.clone()),
             )
         };
@@ -208,7 +209,7 @@ impl Engine {
 
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
-            engine.generate_stream(&params, &messages, image_data, &tools)?
+            engine.generate_stream(&params, &messages, image_data, &tools, &None)?
         };
 
         Ok(EngineStream {
