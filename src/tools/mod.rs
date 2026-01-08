@@ -4,6 +4,7 @@
 //! This module provides OpenAI-compatible tool calling functionality,
 //! allowing LLMs to invoke external functions and tools.
 
+pub mod helpers;
 pub mod parser;
 pub mod schema;
 
@@ -253,7 +254,7 @@ impl ToolFormat {
             - Wrap function name and arguments with {start_tag} and {end_tag} tags\n\
             - Always use the exact {start_tag}{end_tag} format shown above\n\
             - Do NOT USE ANY code blocks\n\
-            - Tool-use must be placed **at the end** of your response, **top-level**, and not nested within other tags.\n\
+            - Tool-use must be placed **at the end** of your response (**AFTER REASONING**), **top-level**, and not nested within other tags.\n\
             - Always adhere to this format for the tool use to ensure proper parsing and execution.\n\
             - The \"name\" and \"arguments\" are necessary fields\n\
             - MUST FOLLOW the above instruction when using tool call!",

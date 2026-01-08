@@ -74,3 +74,12 @@ goose configure
 ```shell
 goose
 ```
+
+### Trouble shooting
+
+Use the chat logger to monitor detailed interactions between Goose and vLLM.rs.
+
+```shell
+# Log into files (in folder ./log)
+export VLLM_RS_CHAT_LOGGER=1
+```

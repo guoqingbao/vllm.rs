@@ -12,6 +12,7 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
+use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::ToolConfig;
 use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
@@ -912,6 +913,7 @@ impl LLMEngine {
         let mut total_decoded_length = 0;
         let mut total_decoded_time_costs = 0;
 
+        let mut seq_ids = Vec::new();
         for &idx in active_indices {
             if let Some(seq) = self.scheduler.get_running(idx) {
                 if let Some(length) = self.decode_length.get(&seq.id) {
@@ -920,14 +922,16 @@ impl LLMEngine {
                 if let Some(start_time) = self.decode_start_times.get(&seq.id) {
                     total_decoded_time_costs += cur_time - start_time;
                 }
+                seq_ids.push(seq.id);
             }
         }
 
         if total_decoded_length > 0 && total_decoded_time_costs / 1000 > 0 {
             let avg_throughput = total_decoded_length / (total_decoded_time_costs / 1000);
             crate::log_info!(
-                "Decoding: {} active request(s), avg. {} tokens/s per request (total: {} tokens/s)",
+                "Decoding: {} active request(s) [Seq: {:?}], avg. {} tokens/s per request (total: {} tokens/s)",
                 active_indices.len(),
+                seq_ids,
                 avg_throughput,
                 avg_throughput * active_indices.len()
             )
@@ -1021,6 +1025,7 @@ impl LLMEngine {
         message_list: &Vec<Vec<Message>>,
         images: Option<ImageData>,
         tools: &Vec<Tool>,
+        logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
         if params.len() != message_list.len() {
             candle_core::bail!("size of sampling parameters is not match with size of prompts!");
@@ -1028,6 +1033,9 @@ impl LLMEngine {
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
             let (prompt, image_idx) = self.apply_chat_template(param, messages, tools, false);
+            if let Some(ref l) = logger {
+                l.log_prompt(&prompt);
+            }
             if let Ok((seq_id, prompt_length, rx)) =
                 self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
             {
@@ -1189,8 +1197,12 @@ impl LLMEngine {
         messages: &Vec<Message>,
         images: Option<ImageData>, //collection of images of the full conversation
         tools: &Vec<Tool>,
+        logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
         let (prompt, image_idx) = self.apply_chat_template(params, messages, tools, false);
+        if let Some(ref l) = logger {
+            l.log_prompt(&prompt);
+        }
         match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {

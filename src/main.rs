@@ -286,7 +286,13 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, &chat_history, None, &Vec::new()) {
+                    match e.generate_stream(
+                        &request_params,
+                        &chat_history,
+                        None,
+                        &Vec::new(),
+                        &None,
+                    ) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -370,7 +376,7 @@ async fn main() -> Result<()> {
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
                     (
-                        e.generate_sync(&params, &message_list, None, &Vec::new())?,
+                        e.generate_sync(&params, &message_list, None, &Vec::new(), &None)?,
                         Arc::new(e.tokenizer.clone()),
                     )
                 };

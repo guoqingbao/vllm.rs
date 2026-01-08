@@ -3,9 +3,10 @@ use super::{
     ServerData,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
+use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
+use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
 use crate::tools::parser::ToolParser;
-use crate::tools::schema::validate_arguments;
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
@@ -32,14 +33,14 @@ use tokio::task;
 use tokio::time;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeContent {
     Text(String),
     Blocks(Vec<ClaudeContentBlock>),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ClaudeContentBlock {
     #[serde(rename = "text")]
@@ -61,7 +62,7 @@ pub enum ClaudeContentBlock {
     },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ClaudeImageSource {
     #[serde(rename = "base64")]
@@ -70,27 +71,27 @@ pub enum ClaudeImageSource {
     Url { url: String },
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeToolResultContent {
     Text(String),
     Blocks(Vec<ClaudeContentBlock>),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeMessage {
     pub role: String,
     pub content: ClaudeContent,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeSystem {
     Text(String),
     Blocks(Vec<ClaudeContentBlock>),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeTool {
     pub name: String,
     #[serde(default)]
@@ -99,7 +100,7 @@ pub struct ClaudeTool {
     pub input_schema: Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ClaudeToolChoice {
     #[serde(rename = "auto")]
@@ -112,7 +113,7 @@ pub enum ClaudeToolChoice {
     None,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeMessageRequest {
     pub model: String,
     pub messages: Vec<ClaudeMessage>,
@@ -140,14 +141,14 @@ pub struct ClaudeMessageRequest {
     pub extra: HashMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeThinking {
     Bool(bool),
     Config(ClaudeThinkingConfig),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClaudeThinkingConfig {
     #[serde(rename = "type")]
     pub mode: String,
@@ -427,64 +428,6 @@ fn claude_tools_to_tools(tools: &[ClaudeTool]) -> Vec<Tool> {
                 .build()
         })
         .collect()
-}
-
-fn build_tool_schema_map(tools: &[Tool]) -> HashMap<String, Value> {
-    tools
-        .iter()
-        .map(|tool| (tool.function.name.clone(), tool.function.parameters.clone()))
-        .collect()
-}
-
-fn validate_tool_calls(
-    tool_calls: &[ToolCall],
-    schemas: &HashMap<String, Value>,
-) -> (Vec<ToolCall>, Vec<ToolCall>) {
-    let mut valid = Vec::new();
-    let mut invalid = Vec::new();
-
-    for call in tool_calls {
-        let schema = match schemas.get(&call.function.name) {
-            Some(schema) => schema,
-            None => {
-                invalid.push(call.clone());
-                continue;
-            }
-        };
-
-        let mut parsed_args = match serde_json::from_str::<Value>(&call.function.arguments) {
-            Ok(value) => value,
-            Err(_) => {
-                invalid.push(call.clone());
-                continue;
-            }
-        };
-
-        if let Value::String(inner) = &parsed_args {
-            if let Ok(decoded) = serde_json::from_str::<Value>(inner) {
-                parsed_args = decoded;
-            }
-        }
-
-        if !parsed_args.is_object() {
-            invalid.push(call.clone());
-            continue;
-        }
-
-        if validate_arguments(schema, &parsed_args).is_ok() {
-            let normalized_args = serde_json::to_string(&parsed_args)
-                .unwrap_or_else(|_| call.function.arguments.clone());
-            valid.push(ToolCall::new(
-                call.id.clone(),
-                call.function.name.clone(),
-                normalized_args,
-            ));
-        } else {
-            invalid.push(call.clone());
-        }
-    }
-
-    (valid, invalid)
 }
 
 fn system_to_chat_message(system: &ClaudeSystem) -> Result<ChatMessage, String> {
@@ -1085,8 +1028,10 @@ pub async fn messages(
     State(data): State<Arc<ServerData>>,
     request: Json<ClaudeMessageRequest>,
 ) -> ClaudeResponder {
-    if request.tool_choice.is_some() {
-        crate::log_warn!("Anthropic tool_choice provided but ignored");
+    // Create logger for this request (None if VLLM_RS_CHAT_LOGGER not set to true)
+    let logger = ChatCompletionLogger::new_claude();
+    if let Some(ref l) = logger {
+        l.log_raw_request(&*request);
     }
 
     let mut chat_messages = match build_chat_messages(&request) {
@@ -1127,21 +1072,86 @@ pub async fn messages(
     }
 
     let request_tools = request.tools.as_deref().unwrap_or_default();
-    let has_request_tools = !request_tools.is_empty();
     let mcp_tools = data
         .mcp_manager
         .as_ref()
         .map(|manager| manager.cached_tools())
         .unwrap_or_default();
     let converted_tools = claude_tools_to_tools(request_tools);
-    let resolved_tools = if !converted_tools.is_empty() {
+    let mut resolved_tools = if !converted_tools.is_empty() {
         converted_tools
     } else {
         mcp_tools.clone()
     };
+    let mut tool_choice_instruction: Option<String> = None;
+    let mut forced_tool_name: Option<String> = None;
+    let mut tool_choice_required = false;
+
+    match request.tool_choice.as_ref() {
+        Some(ClaudeToolChoice::None) => {
+            resolved_tools.clear();
+        }
+        Some(ClaudeToolChoice::Tool { name }) => {
+            tool_choice_required = true;
+            forced_tool_name = Some(name.clone());
+        }
+        Some(ClaudeToolChoice::Any) => {
+            tool_choice_required = true;
+            tool_choice_instruction = Some(
+                "Tool choice enforced: you MUST call one of the provided tools. Do not answer with plain text. Return only a tool call."
+                    .to_string(),
+            );
+        }
+        Some(ClaudeToolChoice::Auto) | None => {}
+    }
+
+    if let Some(name) = forced_tool_name.clone() {
+        let selected = resolved_tools
+            .iter()
+            .find(|tool| tool.function.name == name)
+            .cloned();
+        match selected {
+            Some(tool) => {
+                resolved_tools = vec![tool];
+                tool_choice_instruction = Some(format!(
+                    "Tool choice enforced: you MUST call the `{}` tool. Do not answer with plain text. Return only a tool call.",
+                    name
+                ));
+            }
+            None => {
+                return ClaudeResponder::Error(
+                    ClaudeErrorResponse {
+                        response_type: "error",
+                        error: ClaudeErrorBody {
+                            error_type: "invalid_request_error".to_string(),
+                            message: format!(
+                                "tool_choice requires tool '{}' but it was not provided",
+                                name
+                            ),
+                        },
+                    },
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                );
+            }
+        }
+    }
+
+    if tool_choice_required && resolved_tools.is_empty() {
+        return ClaudeResponder::Error(
+            ClaudeErrorResponse {
+                response_type: "error",
+                error: ClaudeErrorBody {
+                    error_type: "invalid_request_error".to_string(),
+                    message: "tool_choice requires at least one tool but none were provided"
+                        .to_string(),
+                },
+            },
+            StatusCode::UNPROCESSABLE_ENTITY,
+        );
+    }
+
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
-    let mcp_injected_tools = !has_request_tools && !mcp_tools.is_empty();
-    params.mcp_mode = if mcp_injected_tools || has_request_tools {
+    params.mcp_mode = if !resolved_tools.is_empty() {
         Some(true)
     } else {
         None
@@ -1154,7 +1164,10 @@ pub async fn messages(
     };
 
     if !resolved_tools.is_empty() {
-        let tool_prompt = ToolFormat::get_tool_prompt(&model_type);
+        let mut tool_prompt = ToolFormat::get_tool_prompt(&model_type);
+        if let Some(instruction) = tool_choice_instruction.as_ref() {
+            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
+        }
         inject_tool_prompt(&mut chat_messages, &tool_prompt);
     }
 
@@ -1183,7 +1196,7 @@ pub async fn messages(
     if use_stream {
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
-            match e.generate_stream(&params, &messages, image_data, &resolved_tools) {
+            match e.generate_stream(&params, &messages, image_data, &resolved_tools, &logger) {
                 Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1211,6 +1224,11 @@ pub async fn messages(
         let stream_model_type = model_type.clone();
         let stream_tool_config = tool_config.clone();
         let stream_tool_schemas = tool_schemas.clone();
+        let forced_tool_name = forced_tool_name.clone();
+        if let Some(ref l) = logger {
+            l.log_start_response();
+        }
+        let stream_logger = logger.clone();
 
         task::spawn(async move {
             struct StreamGuard {
@@ -1358,6 +1376,9 @@ pub async fn messages(
                                     if text.is_empty() {
                                         continue;
                                     }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&text);
+                                    }
                                     if let Err(err) = send_text_with_start(
                                         &stream_ctx,
                                         &mut text_block_started,
@@ -1384,6 +1405,9 @@ pub async fn messages(
                                 StreamResult::FlushBuffer(text) => {
                                     if text.is_empty() {
                                         continue;
+                                    }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&text);
                                     }
                                     if let Err(err) = send_text_with_start(
                                         &stream_ctx,
@@ -1412,6 +1436,9 @@ pub async fn messages(
                                 }
                             }
                         } else if !token.is_empty() {
+                            if let Some(ref l) = stream_logger {
+                                l.log_stream_token(&token);
+                            }
                             if let Err(err) = send_text_with_start(
                                 &stream_ctx,
                                 &mut text_block_started,
@@ -1478,7 +1505,7 @@ pub async fn messages(
                         let (tool_calls, has_tool_calls) = if pending_tool_calls.is_empty() {
                             (Vec::new(), false)
                         } else {
-                            let (valid, invalid) = validate_tool_calls(
+                            let (valid, invalid) = filter_tool_calls(
                                 &pending_tool_calls,
                                 stream_tool_schemas.as_ref(),
                             );
@@ -1489,14 +1516,35 @@ pub async fn messages(
                                     invalid.len()
                                 );
                                 log_tool_calls("Invalid", seq_id, &invalid);
+                                if let Some(ref l) = stream_logger {
+                                    l.log_tool_calls("Invalid", &invalid);
+                                }
                             }
                             if valid.is_empty() {
                                 (Vec::new(), false)
                             } else {
                                 log_tool_calls("Valid", seq_id, &valid);
+                                if let Some(ref l) = stream_logger {
+                                    l.log_tool_calls("Valid", &valid);
+                                }
                                 (valid, true)
                             }
                         };
+
+                        if tool_choice_required && !has_tool_calls {
+                            if let Some(ref name) = forced_tool_name {
+                                crate::log_warn!(
+                                    "[Seq {}] Tool choice required '{}' but no tool calls were produced",
+                                    seq_id,
+                                    name
+                                );
+                            } else {
+                                crate::log_warn!(
+                                    "[Seq {}] Tool choice required but no tool calls were produced",
+                                    seq_id
+                                );
+                            }
+                        }
 
                         let stop_reason = stop_reason_from_decoding(
                             has_tool_calls,
@@ -1696,7 +1744,13 @@ pub async fn messages(
 
         let receivers = {
             let mut e = data.engine.write();
-            match e.generate_sync(&vec![params], &vec![messages], image_data, &resolved_tools) {
+            match e.generate_sync(
+                &vec![params],
+                &vec![messages],
+                image_data,
+                &resolved_tools,
+                &logger,
+            ) {
                 Ok(receivers) => receivers,
                 Err(err) => {
                     return ClaudeResponder::Error(
@@ -1712,7 +1766,9 @@ pub async fn messages(
                 }
             }
         };
-
+        if let Some(ref l) = logger {
+            l.log_start_response();
+        }
         let results = match LLMEngine::collect_sync_results(receivers, tokenizer).await {
             Ok(results) => results,
             Err(err) => {
@@ -1747,17 +1803,38 @@ pub async fn messages(
 
         let tool_parser = ToolParser::new();
         let parsed_calls = tool_parser.parse(&output.decode_output);
-        let (valid_calls, invalid_calls) =
-            validate_tool_calls(&parsed_calls, tool_schemas.as_ref());
+        let (valid_calls, invalid_calls) = filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
         if !invalid_calls.is_empty() {
             crate::log_warn!(
                 "Dropping {} invalid tool call(s) for Claude response",
                 invalid_calls.len()
             );
             log_tool_calls("Invalid", output.seq_id, &invalid_calls);
+            if let Some(ref l) = logger {
+                l.log_tool_calls("Invalid", &invalid_calls);
+            }
         }
-        log_tool_calls("Valid", output.seq_id, &valid_calls);
+        if !valid_calls.is_empty() {
+            log_tool_calls("Valid", output.seq_id, &valid_calls);
+            if let Some(ref l) = logger {
+                l.log_tool_calls("Valid", &valid_calls);
+            }
+        }
         let has_tool_calls = !valid_calls.is_empty();
+        if tool_choice_required && !has_tool_calls {
+            if let Some(ref name) = forced_tool_name {
+                crate::log_warn!(
+                    "[Seq {}] Tool choice required '{}' but no tool calls were produced",
+                    output.seq_id,
+                    name
+                );
+            } else {
+                crate::log_warn!(
+                    "[Seq {}] Tool choice required but no tool calls were produced",
+                    output.seq_id
+                );
+            }
+        }
         let content = if has_tool_calls {
             tool_calls_to_blocks(&valid_calls)
         } else {
@@ -1793,6 +1870,9 @@ pub async fn messages(
             output.decode_finish_time,
         );
 
+        if let Some(ref l) = logger {
+            l.log_raw_response(&response);
+        }
         ClaudeResponder::Message(response)
     }
 }
@@ -2018,7 +2098,7 @@ mod tests {
         let schemas = build_tool_schema_map(&tools);
         let valid_call = ToolCall::new("call_1", "list_files", r#"{"path": "."}"#);
         let invalid_call = ToolCall::new("call_2", "list_files", r#"{"dir": "."}"#);
-        let (valid, invalid) = validate_tool_calls(&[valid_call, invalid_call], &schemas);
+        let (valid, invalid) = filter_tool_calls(&[valid_call, invalid_call], &schemas);
 
         assert_eq!(valid.len(), 1);
         assert_eq!(invalid.len(), 1);
