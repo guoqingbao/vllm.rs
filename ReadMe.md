@@ -107,8 +107,6 @@ python3 -m pip install vllm_rs
 
 💡Prefix cache is automatic and does not require `session_id`.
 
- ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `prefix-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
-
   <details open>
     <summary>Single GPU + GGUF model</summary>
 
@@ -134,12 +132,20 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-serv
     <summary>Unquantized load as GGUF model (ISQ)</summary>
 
 ```bash
-# Load as Q4K format, enable maximum context length:
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
+# Load as Q4K format, other options (q2k, q3k, q5k, q6k, q8_0):
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --ui-server --prefix-cache
 ```
 
   </details>
 
+  <details open>
+    <summary>FP8 Model</summary>
+
+```bash
+python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+```
+
+  </details>
 
   <details open>
     <summary>Multimodal model (Qwen3 VL, with images)</summary>
@@ -194,7 +200,7 @@ cargo build --release --features metal
 
   ```bash
   # Replace "--ui-server" with "--server" will only start API server
-  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --prefix-cache
+  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
   ```
 
   </details>
@@ -203,8 +209,17 @@ cargo build --release --features metal
     <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --prefix-cache
+  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   ```
+
+  </details>
+
+  <details open>
+    <summary>FP8 Model</summary>
+
+```bash
+target/release/vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+```
 
   </details>
 
@@ -213,7 +228,7 @@ cargo build --release --features metal
 
   ```bash
   # CUDA: Disabled flash-context feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --fp8-kvcache
   # MacOS/Metal
   cargo run --release --features metal -- --ui-server --w /path/Qwen3-4B --isq q6k
   ```

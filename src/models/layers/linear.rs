@@ -2,6 +2,7 @@
 use super::wna16::WNA16;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
+use attention_rs::fp8_linear::fp8_matmul;
 use candle_core::quantized;
 use candle_core::quantized::GgmlDType;
 use candle_core::Module;
@@ -398,24 +399,30 @@ impl QLinear {
 }
 
 #[derive(Debug, Clone)]
-pub struct LinearX(pub Either<Linear, QLinear>);
+pub enum LinearX {
+    Linear(Linear),
+    QLinear(QLinear),
+    LnFp8(LnFp8),
+}
 
 impl Module for LinearX {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        match &self.0 {
-            Either::Left(ln) => ln.forward(x),
-            Either::Right(ln) => ln.forward(x),
+        match self {
+            Self::Linear(ln) => ln.forward(x),
+            Self::QLinear(ln) => ln.forward(x),
+            Self::LnFp8(ln) => ln.forward(x),
         }
     }
 }
 
 impl LinearX {
     pub fn indexed_moe_forward(&self, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
-        match &self.0 {
-            Either::Left(_) => {
+        match self {
+            Self::Linear(_) => {
                 panic!("No supported!")
             }
-            Either::Right(ln) => ln.indexed_moe_forward(x, ids),
+            Self::QLinear(ln) => ln.indexed_moe_forward(x, ids),
+            Self::LnFp8(_) => panic!("LnFp8 does not support indexed_moe_forward yet"),
         }
     }
 }
@@ -425,22 +432,23 @@ impl LinearX {
         let dtype = weight.dtype();
         let ln = Linear::new(weight, bias);
         if let Some(quantized_type) = quant {
-            Ok(LinearX(Either::Right(QLinear::from_linear_x(
+            Ok(Self::QLinear(QLinear::from_linear_x(
                 ln,
                 quantized_type.clone(),
                 dtype,
-            )?)))
+            )?))
         } else {
-            Ok(LinearX(Either::Left(ln)))
+            Ok(Self::Linear(ln))
         }
     }
 
     pub fn dequantize(&self) -> Result<Tensor> {
-        match &self.0 {
-            Either::Left(_) => {
+        match self {
+            Self::Linear(_) => {
                 panic!("Unquantized tensor unable to be dequantized!")
             }
-            Either::Right(ln) => ln.dequantize(),
+            Self::QLinear(ln) => ln.dequantize(),
+            Self::LnFp8(_) => panic!("LnFp8 unable to be dequantized"),
         }
     }
 }
@@ -456,7 +464,12 @@ pub fn linear_x(
 ) -> Result<LinearX> {
     match &vb.0 {
         Either::Left(vb) => {
-            if quant_cfg.is_some() {
+            if let Some(cfg) = quant_cfg {
+                if cfg.quant_method == "fp8" {
+                    let ln = LnFp8::new(in_dim, out_dim, vb.clone(), shards, cfg)?;
+                    return Ok(LinearX::LnFp8(ln));
+                }
+
                 let wna16 = WNA16::new(
                     in_dim,
                     out_dim,
@@ -473,27 +486,27 @@ pub fn linear_x(
                     bias: None,
                     dtype,
                 };
-                Ok(LinearX(Either::Right(ln)))
+                Ok(LinearX::QLinear(ln))
             } else {
                 let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
                 if let Some(quantized_type) = quant {
-                    Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                    Ok(LinearX::QLinear(QLinear::from_linear_x(
                         ln,
                         quantized_type.clone(),
                         dtype,
-                    )?)))
+                    )?))
                 } else {
-                    Ok(LinearX(Either::Left(ln)))
+                    Ok(LinearX::Linear(ln))
                 }
             }
         }
-        Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new(
+        Either::Right(vb) => Ok(LinearX::QLinear(QLinear::new(
             in_dim,
             out_dim,
             vb.clone(),
             shards,
             dtype,
-        )?))),
+        )?)),
     }
 }
 
@@ -508,7 +521,12 @@ pub fn linear_no_bias_x(
 ) -> Result<LinearX> {
     match &vb.0 {
         Either::Left(vb) => {
-            if quant_cfg.is_some() {
+            if let Some(cfg) = quant_cfg {
+                if cfg.quant_method == "fp8" {
+                    let ln = LnFp8::new(in_dim, out_dim, vb.clone(), shards, cfg)?;
+                    return Ok(LinearX::LnFp8(ln));
+                }
+
                 let wna16 = WNA16::new(
                     in_dim,
                     out_dim,
@@ -525,27 +543,27 @@ pub fn linear_no_bias_x(
                     bias: None,
                     dtype,
                 };
-                Ok(LinearX(Either::Right(ln)))
+                Ok(LinearX::QLinear(ln))
             } else {
                 let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
                 if let Some(quantized_type) = quant {
-                    Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                    Ok(LinearX::QLinear(QLinear::from_linear_x(
                         ln,
                         quantized_type.clone(),
                         dtype,
-                    )?)))
+                    )?))
                 } else {
-                    Ok(LinearX(Either::Left(ln)))
+                    Ok(LinearX::Linear(ln))
                 }
             }
         }
-        Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new(
+        Either::Right(vb) => Ok(LinearX::QLinear(QLinear::new(
             in_dim,
             out_dim,
             vb.clone(),
             shards,
             dtype,
-        )?))),
+        )?)),
     }
 }
 
@@ -564,23 +582,23 @@ pub fn linear_no_bias_merged_x(
             let ln =
                 linear_no_bias_merged(num_experts, in_dim, out_dim, vb.clone(), shards, dtype)?;
             if let Some(quantized_type) = quant {
-                Ok(LinearX(Either::Right(QLinear::from_linear_x(
+                Ok(LinearX::QLinear(QLinear::from_linear_x(
                     ln,
                     quantized_type.clone(),
                     dtype,
-                )?)))
+                )?))
             } else {
-                Ok(LinearX(Either::Left(ln)))
+                Ok(LinearX::Linear(ln))
             }
         }
-        Either::Right(vb) => Ok(LinearX(Either::Right(QLinear::new_fused(
+        Either::Right(vb) => Ok(LinearX::QLinear(QLinear::new_fused(
             num_experts,
             in_dim,
             out_dim,
             vb.clone(),
             shards,
             dtype,
-        )?))),
+        )?)),
     }
 }
 
@@ -598,5 +616,125 @@ pub fn linear_b_x(
         linear_x(in_dim, out_dim, vb, shard, quant_cfg, quant, dtype)
     } else {
         linear_no_bias_x(in_dim, out_dim, vb, shard, quant_cfg, quant, dtype)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LnFp8 {
+    pub weight: Tensor,
+    pub weight_scale: Tensor,
+    pub bias: Option<Tensor>,
+    pub weight_block_size: Vec<usize>,
+}
+
+impl LnFp8 {
+    pub fn new(
+        in_dim: usize,
+        out_dim: usize,
+        vb: VarBuilder,
+        shard: Shard,
+        quant_cfg: &QuantConfig,
+    ) -> Result<Self> {
+        // Expected format:
+        // weight: [out_dim, in_dim]
+        // weight_scale: [out_dim, in_dim // block_size[1]]  (assuming block_size_y = 1)
+        // Or weight_scale: [out_dim // block_size_y, in_dim // block_size_x]
+
+        let block_size = quant_cfg
+            .weight_block_size
+            .clone()
+            .unwrap_or(vec![128, 128]);
+        if block_size.len() != 2 {
+            candle_core::bail!("LnFp8: weight_block_size must have 2 elements");
+        }
+
+        let weight = vb.get_with_hints((out_dim, in_dim), "weight", shard)?;
+        let weight = if weight.dtype() != DType::U8 {
+            weight.to_dtype(DType::U8)?
+        } else {
+            weight
+        };
+
+        let by = block_size[0];
+        let bx = block_size[1];
+
+        let scale_dim0 = (out_dim + by - 1) / by;
+        let scale_dim1 = (in_dim + bx - 1) / bx;
+
+        let weight_scale = match vb.get_with_hints((scale_dim0, scale_dim1), "weight_scale", shard)
+        {
+            Ok(s) => s,
+            Err(_) => vb
+                .get_with_hints((scale_dim0, scale_dim1), "weight_scale_inv", shard)
+                .map_err(|_| {
+                    candle_core::Error::Msg(
+                        "LnFp8: Missing weight_scale or weight_scale_inv".into(),
+                    )
+                })?,
+        }
+        .to_dtype(DType::F32)?;
+
+        // Load bias if present
+        let bias = vb.get((out_dim,), "bias");
+        let bias = if bias.is_ok() {
+            let bs = bias.unwrap();
+            let bs = if shard.world_size > 1 {
+                let dim_size = bs.dim(0)?;
+                let start = shard.rank * (dim_size / shard.world_size);
+                bs.narrow(0, start, dim_size / shard.world_size)?
+                    .contiguous()?
+            } else {
+                bs
+            };
+            Some(bs)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            weight,
+            weight_scale,
+            bias,
+            weight_block_size: block_size,
+        })
+    }
+}
+
+impl Module for LnFp8 {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // x: [Batch, Seq, InDim] or [Batch, InDim]
+        // Flatten inputs to [M, K]
+        let (b_sz, seq_len, in_dim) = match x.dims() {
+            [b, s, d] => (*b, *s, *d),
+            [b, d] => (*b, 1, *d),
+            _ => candle_core::bail!("LnFp8: Input should be 2D or 3D"),
+        };
+
+        let m = b_sz * seq_len;
+        let k = in_dim;
+
+        let x_2d = x.reshape((m, k))?;
+
+        // Call FP8 matmul
+        let out = fp8_matmul(
+            &x_2d,
+            &self.weight,
+            &self.weight_scale,
+            &self.weight_block_size,
+        )?;
+
+        // Reshape output back
+        let (_, out_dim) = out.dims2()?;
+        let out = if seq_len > 1 {
+            out.reshape((b_sz, seq_len, out_dim))?
+        } else {
+            out
+        };
+
+        // Add bias
+        match &self.bias {
+            None => Ok(out),
+            Some(bias) => out.broadcast_add(bias),
+        }
     }
 }

@@ -104,8 +104,6 @@ python3 -m pip install vllm_rs
 
    💡前缀缓存为自动匹配公共前缀，无需 `session_id`。
 
-   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`prefix-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
-
   <details open>
     <summary>单卡 + GGUF模型</summary>
 
@@ -134,6 +132,16 @@ python3 -m pip install vllm_rs
    # 同时将权重量化为Q4K格式，启用最长上下文：
    python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
    ```
+  </details>
+
+
+  <details open>
+    <summary>FP8模型</summary>
+
+```bash
+python3 -m vllm_rs.server --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+```
+
   </details>
 
 <details open>
@@ -190,7 +198,15 @@ cargo build --release --features metal
     <summary>多卡未量化模型</summary>
 
    ```bash
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-num-seqs 2 --ui-server --port 8000
+   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+   ```
+  </details>
+
+  <details open>
+    <summary>FP8模型</summary>
+
+   ```bash
+   target/release/vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
    ```
   </details>
 

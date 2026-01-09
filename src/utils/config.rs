@@ -576,4 +576,6 @@ pub struct QuantConfig {
     pub sym: Option<bool>,
     pub desc_act: Option<bool>,
     pub checkpoint_format: Option<String>,
+    pub fmt: Option<String>,
+    pub weight_block_size: Option<Vec<usize>>,
 }
