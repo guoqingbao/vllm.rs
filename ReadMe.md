@@ -218,7 +218,10 @@ cargo build --release --features metal
     <summary>FP8 Model</summary>
 
 ```bash
+# CUDA (MoE, Dense)
 target/release/vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# MacOS/Metal (Dense)
+target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -423,6 +426,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
+* [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
 * [ ] Additional model support (LLaMa 4, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)

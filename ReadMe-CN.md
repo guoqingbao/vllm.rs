@@ -139,7 +139,10 @@ python3 -m pip install vllm_rs
     <summary>FP8模型</summary>
 
 ```bash
-python3 -m vllm_rs.server --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# CUDA (MoE, Dense)
+target/release/vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# MacOS/Metal (Dense)
+target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -398,6 +401,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
+* [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
 * [ ] 支持更多模型类型（LLaMa 4, Kimi K2 Thinking等）
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）

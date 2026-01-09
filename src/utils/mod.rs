@@ -602,10 +602,9 @@ pub fn init_config_tokenizer(
                 if qcfg.desc_act.unwrap_or(false) {
                     candle_core::bail!("desc_act==true not supported!");
                 }
+                #[cfg(not(feature = "cuda"))]
+                candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
             }
-
-            #[cfg(not(feature = "cuda"))]
-            candle_core::bail!("GPTQ/AWQ/FP8 models are only supported under CUDA platform!");
         }
         let architectures = config.architectures.as_ref().unwrap();
         if matches!(
