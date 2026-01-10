@@ -310,20 +310,20 @@ impl StreamToolParser {
 
         match self.state.clone() {
             ParserState::Normal => {
-                // Check for start trigger
-                if self.is_start_token(token_id, token_text) {
+                // Check for start trigger - which should be the only token on the line
+                if self.is_start_token(token_id, token_text)
+                    && (self.config.start_token_str.trim() != "<tool_call>" // ignore line check for other formats
+                        || token_text
+                            .lines()
+                            .any(|l| l.starts_with(self.config.start_token_str.trim())))
+                {
+                    let pos = token_text.find(&self.config.start_token_str).unwrap(); // infallible due to check above
                     self.state = ParserState::Buffering;
                     self.buffer.clear();
-
-                    if let Some(pos) = token_text.find(&self.config.start_token_str) {
-                        let before = &token_text[..pos];
-                        let after = &token_text[pos + self.config.start_token_str.len()..];
-                        if !after.is_empty() {
-                            self.buffer.push_str(after);
-                        }
-                        if !before.is_empty() {
-                            return StreamResult::Content(before.to_string());
-                        }
+                    let before = &token_text[..pos];
+                    let after = &token_text[pos + self.config.start_token_str.len()..];
+                    if !after.is_empty() {
+                        self.buffer.push_str(after);
                     }
 
                     crate::log_info!(
@@ -331,6 +331,10 @@ impl StreamToolParser {
                         token_text,
                         token_id
                     );
+                    if !before.is_empty() {
+                        return StreamResult::Content(before.to_string());
+                    }
+
                     return StreamResult::Buffering;
                 }
 
