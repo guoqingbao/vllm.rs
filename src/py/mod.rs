@@ -264,7 +264,7 @@ impl EngineConfig {
         generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
-        disable_flash_attn=None, tool_prompt_template=None))]
+        tool_prompt_template=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -290,7 +290,6 @@ impl EngineConfig {
         mcp_command: Option<String>,
         mcp_config: Option<String>,
         mcp_args: Option<String>,
-        disable_flash_attn: Option<bool>,
         tool_prompt_template: Option<String>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -341,7 +340,6 @@ impl EngineConfig {
             mcp_command,
             mcp_config,
             mcp_args,
-            disable_flash_attn,
             tool_prompt_template,
         }
     }

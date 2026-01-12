@@ -458,9 +458,6 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub log: bool,
 
-    #[arg(long, default_value_t = false)]
-    pub no_flash_attn: bool,
-
     #[arg(long, value_delimiter = '|')]
     pub prompts: Option<Vec<String>>,
 
