@@ -4,7 +4,9 @@ FROM docker.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS builder
 ARG DEBIAN_FRONTEND=noninteractive
 RUN <<HEREDOC
     apt-get update && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libnccl-dev=2.29.2-1+cuda12.9 \
+        libnccl2=2.29.2-1+cuda12.9 \
         curl \
         libssl-dev \
         pkg-config \
@@ -28,15 +30,15 @@ COPY . .
 
 # Rayon threads are limited to minimize memory requirements in CI, avoiding OOM
 # Rust threads are increased with a nightly feature for faster compilation (single-threaded by default)
-ARG CUDA_COMPUTE_CAP=70
+ARG CUDA_COMPUTE_CAP=120
 ARG RAYON_NUM_THREADS=64
 ARG RUST_NUM_THREADS=64
 ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
-ARG WITH_FEATURES="cuda,nccl,graph,python"
+ARG WITH_FEATURES="cuda,nccl,python,flash-attn"
 # Build both output types - server and CLI bins, avoid shell games: echo and sed
 RUN ./build.sh --release --features "${WITH_FEATURES}" && cargo build --release --features $(echo $WITH_FEATURES|sed 's|,python||')
 
-FROM docker.io/nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04 AS base
+FROM docker.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04 AS base
 ENV HUGGINGFACE_HUB_CACHE=/data \
     PORT=80
 
@@ -44,7 +46,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 
 RUN <<HEREDOC
     apt-get update && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libnccl2=2.29.2-1+cuda12.9 \
         libomp-dev \
         ca-certificates \
         libssl-dev \
