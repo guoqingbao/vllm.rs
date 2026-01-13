@@ -484,7 +484,80 @@ impl StreamToolParser {
             if let Some(call) = self.json_to_tool_call(&item) {
                 calls.push(call);
             }
-        } else if let Some(repaired) = self.repair_unbalanced_json(&clean_text) {
+        }
+        // Strategy 3: QwenCoder XML-style function tags
+        else if clean_text.starts_with("<function=") && clean_text.contains("</function>") {
+            // Extract function name from <function=...> tag
+            let func_start = "<function=".len();
+            let func_end = clean_text.find('>').unwrap_or(0);
+            if func_end > func_start {
+                let func_name = &clean_text[func_start..func_end];
+
+                // Find parameter section
+                let params_start = clean_text.find("<parameter=");
+                let params_end = clean_text.find("</function>");
+
+                let mut params = std::collections::HashMap::new();
+
+                if let (Some(start), Some(end)) = (params_start, params_end) {
+                    let param_content = &clean_text[start..end];
+
+                    // Parse all parameter tags
+                    let mut pos = 0;
+                    while pos < param_content.len() {
+                        let param_start_tag = param_content[pos..].find("<parameter=");
+                        if param_start_tag.is_none() {
+                            break;
+                        }
+                        let param_start_tag = param_start_tag.unwrap() + pos;
+
+                        let key_start = param_start_tag + "<parameter=".len();
+                        let key_end = param_content[key_start..].find(">").unwrap_or(0) + key_start;
+
+                        if key_end > key_start {
+                            let key = &param_content[key_start..key_end];
+
+                            let value_start = key_end + 1;
+                            let value_end = param_content[value_start..]
+                                .find("</parameter>")
+                                .unwrap_or(0)
+                                + value_start;
+
+                            if value_end > value_start {
+                                let value = &param_content[value_start..value_end];
+                                params.insert(key.to_string(), value.trim().to_string());
+                            }
+                        }
+
+                        // Move position past this parameter
+                        let next_pos = param_content[pos..].find("</parameter>").unwrap_or(0)
+                            + pos
+                            + "</parameter>".len();
+                        if next_pos <= pos {
+                            break;
+                        }
+                        pos = next_pos;
+                    }
+                }
+
+                if let Ok(args) = serde_json::to_string(&params) {
+                    let call = ToolCall {
+                        index: Some(self.tool_call_index),
+                        id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: func_name.to_string(),
+                            arguments: args,
+                        },
+                    };
+
+                    self.tool_call_index += 1;
+                    calls.push(call);
+                }
+            }
+        }
+        // Strategy 4: Repair unbalanced JSON and retry
+        else if let Some(repaired) = self.repair_unbalanced_json(&clean_text) {
             if repaired != clean_text {
                 crate::log_warn!("Tool call JSON missing closing braces; attempting repair");
             }
@@ -497,7 +570,6 @@ impl StreamToolParser {
 
         calls
     }
-
     fn split_partial_start(&self, text: &str) -> Option<(String, String)> {
         let tag = &self.config.start_token_str;
         let suffix_len = self.partial_suffix_len(text);
