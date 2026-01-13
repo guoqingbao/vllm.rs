@@ -95,7 +95,8 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
    💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
 
 ```shell
-# NCCL library is required for CUDA. (For single GPU usage, you may choose other prebuilt packages or Rust mode.)
+# Install NCCL (CUDA)
+apt-get install -y libnccl2 libnccl-dev
 python3 -m pip install vllm_rs
 ```
 
@@ -164,6 +165,47 @@ See [**More Python Examples →**](python/ReadMe.md)
 ## 📘 Usage (Rust)
 
 Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+
+### Prerequisites
+
+Install build dependencies:
+
+```sh
+apt-get update
+apt-get install -y build-essential libssl-dev pkg-config
+```
+
+Install the CUDA toolkit:
+
+1. **Option 1 (recommended):** Use an NVIDIA *devel* Docker image, e.g. `nvidia/cuda:12.6.0-devel-ubuntu22.04`
+
+2. **Option 2:** Install the CUDA toolkit manually:
+
+```sh
+# CUDA 12.6
+apt-get update
+apt-get install -y \
+  cuda-nvcc-12-6 \
+  cuda-nvrtc-dev-12-6 \
+  libcublas-dev-12-6 \
+  libcurand-dev-12-6
+
+# NCCL
+apt-get install -y libnccl2 libnccl-dev
+```
+
+Make the CUDA toolkit available in `PATH`:
+
+```sh
+export PATH="$PATH:/usr/local/cuda/bin"
+```
+
+(Optional) Persist the `PATH` change for future shells:
+
+```sh
+echo 'export PATH="$PATH:/usr/local/cuda/bin"' >> ~/.bashrc
+```
+---
 
 ### Build (CUDA 11+, 12+)
 ```shell

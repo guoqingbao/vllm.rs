@@ -94,6 +94,7 @@
 
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
+apt-get install -y libnccl2 libnccl-dev
 python3 -m pip install vllm_rs
 ```
 
@@ -160,6 +161,45 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
 使用 `--i` 启用交互模式 🤖，`--ui-server` 或 `--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
+### 前置条件
+
+安装构建依赖：
+
+```sh
+apt-get update
+apt-get install -y build-essential libssl-dev pkg-config
+```
+
+安装 CUDA Toolkit：
+
+1. **方案 1（推荐）：** 使用 NVIDIA 的 *devel* Docker 镜像，例如 `nvidia/cuda:12.6.0-devel-ubuntu22.04`
+
+2. **方案 2：** 手动安装 CUDA Toolkit：
+
+```sh
+# CUDA 12.6
+apt-get update
+apt-get install -y \
+  cuda-nvcc-12-6 \
+  cuda-nvrtc-dev-12-6 \
+  libcublas-dev-12-6 \
+  libcurand-dev-12-6
+
+# NCCL
+apt-get install -y libnccl2 libnccl-dev
+```
+
+将 CUDA Toolkit 加入系统 `PATH`：
+
+```sh
+export PATH="$PATH:/usr/local/cuda/bin"
+```
+
+（可选）将 `PATH` 变更写入配置文件，确保以后打开新的 shell 也生效：
+
+```sh
+echo 'export PATH="$PATH:/usr/local/cuda/bin"' >> ~/.bashrc
+```
 
 ### 编译 (CUDA)
 ```shell
