@@ -84,12 +84,6 @@ impl EngineBuilder {
     }
 
     pub fn build(self) -> Result<Engine> {
-        let disable_flash_attn = if let Some(enable_flash_attn) = self.flash_attn {
-            Some(!enable_flash_attn)
-        } else {
-            None
-        };
-
         let (model_id, weight_path, weight_file) = match self.repo {
             ModelRepo::ModelID((model_id, filename)) => (
                 Some(model_id.to_owned()),
@@ -131,7 +125,6 @@ impl EngineBuilder {
             None,
             None,
             None,
-            disable_flash_attn,
             None,
         );
 

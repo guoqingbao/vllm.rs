@@ -105,8 +105,6 @@ python3 -m pip install vllm_rs
 
    💡前缀缓存为自动匹配公共前缀，无需 `session_id`。
 
-   ⚠️ 过度量化可能会在推理模型中触发 **“思考过程被截断”** 问题。建议采用 BF16 或 Q6K/Q8_0；GPTQ 或 AWQ 也可用于缓解该问题，也可以关闭`prefix-cache`或 通过`thinking=False` / `enable_thinking=False`关闭推理过程。
-
   <details open>
     <summary>单卡 + GGUF模型</summary>
 
@@ -135,6 +133,19 @@ python3 -m pip install vllm_rs
    # 同时将权重量化为Q4K格式，启用最长上下文：
    python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
    ```
+  </details>
+
+
+  <details open>
+    <summary>FP8模型</summary>
+
+```bash
+# CUDA (MoE, Dense)
+target/release/vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# MacOS/Metal (Dense)
+target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+```
+
   </details>
 
 <details open>
@@ -230,7 +241,15 @@ cargo build --release --features metal
     <summary>多卡未量化模型</summary>
 
    ```bash
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --max-num-seqs 2 --ui-server --port 8000
+   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+   ```
+  </details>
+
+  <details open>
+    <summary>FP8模型</summary>
+
+   ```bash
+   target/release/vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
    ```
   </details>
 
@@ -422,6 +441,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
+* [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
 * [ ] 支持更多模型类型（LLaMa 4, Kimi K2 Thinking等）
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）

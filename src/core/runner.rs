@@ -84,6 +84,7 @@ pub struct ModelRunner {
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
+    model_type: ModelType,
 }
 
 impl ModelRunner {
@@ -201,6 +202,7 @@ impl ModelRunner {
             guidance_states: RwLock::new(HashMap::new()),
             transfer,
             is_first_rank: comm.rank() == 0,
+            model_type,
         })
     }
 
@@ -623,6 +625,11 @@ impl ModelRunner {
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
+        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3) {
+            Some(true)
+        } else {
+            None
+        };
         let input_metadata = InputMetadata {
             is_prefill: true,
             slot_mapping,
@@ -633,7 +640,7 @@ impl ModelRunner {
             max_seqlen_q,
             max_seqlen_k,
             max_context_len,
-            disable_flash_attn: self.config.disable_flash_attn,
+            disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
         };
 

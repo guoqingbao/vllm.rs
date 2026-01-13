@@ -94,7 +94,7 @@ macro_rules! log_error {
 }
 
 pub trait DecodeStreamTrait: Send + Sync {
-    fn step(&mut self, id: u32) -> Option<String>;
+    fn step(&mut self, id: u32) -> candle_core::Result<Option<String>>;
 }
 
 struct StreamWithTokenizer<M, N, PT, PP, D>
@@ -117,8 +117,8 @@ where
     PP: tokenizers::PostProcessor + Send + Sync + 'static,
     D: tokenizers::Decoder + Send + Sync + 'static,
 {
-    fn step(&mut self, id: u32) -> Option<String> {
-        self.stream.step(id).ok().flatten()
+    fn step(&mut self, id: u32) -> candle_core::Result<Option<String>> {
+        self.stream.step(id).map_err(candle_core::Error::wrap)
     }
 }
 

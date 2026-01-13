@@ -589,18 +589,22 @@ pub fn init_config_tokenizer(
 
         if let Some(qcfg) = &config.quantization_config {
             assert!(
-                qcfg.quant_method == "gptq" || qcfg.quant_method == "awq",
-                "Invalid w4a16 quantization format! Only `gptq` and `awq` supported"
+                qcfg.quant_method == "gptq"
+                    || qcfg.quant_method == "awq"
+                    || qcfg.quant_method == "fp8",
+                "Invalid quantization format! Only `gptq`, `awq` and `fp8` supported"
             );
-            assert!(
-                qcfg.bits == 4 || qcfg.bits == 8,
-                "Only 4-bit and 8-bit gptq or awq models supported!"
-            );
-            if qcfg.desc_act.unwrap_or(false) {
-                candle_core::bail!("desc_act==true not supported!");
+            if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
+                assert!(
+                    (qcfg.bits == 4 || qcfg.bits == 8),
+                    "Only 4-bit and 8-bit gptq or awq models supported!"
+                );
+                if qcfg.desc_act.unwrap_or(false) {
+                    candle_core::bail!("desc_act==true not supported!");
+                }
+                #[cfg(not(feature = "cuda"))]
+                candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
             }
-            #[cfg(not(feature = "cuda"))]
-            candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
         }
         let architectures = config.architectures.as_ref().unwrap();
         if matches!(

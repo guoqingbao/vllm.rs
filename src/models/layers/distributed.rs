@@ -357,13 +357,9 @@ impl MergedParallelColumnLinear {
                         } else {
                             quantized_type.clone()
                         };
-                        LinearX(Either::Right(QLinear::from_linear_x(
-                            ln,
-                            quantized_type,
-                            dtype,
-                        )?))
+                        LinearX::QLinear(QLinear::from_linear_x(ln, quantized_type, dtype)?)
                     } else {
-                        LinearX(Either::Left(ln))
+                        LinearX::Linear(ln)
                     };
                     let ln = TensorParallelColumnLinear { linear };
                     vec_linear.push(ln);

@@ -158,12 +158,6 @@ impl LLMEngine {
             vec![0]
         };
 
-        let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
-            || arch == "Gemma3ForCausalLM".to_string();
-        // Gemma3 must use conventional attention
-        if is_gemma {
-            econfig.disable_flash_attn = Some(true);
-        }
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
@@ -726,9 +720,10 @@ impl LLMEngine {
                                 //finish early, we need to send the last token
                                 if *request_type == RequestType::Stream {
                                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                        let tok = decoder.step(s.last_token).unwrap_or_default();
-                                        let _ =
-                                            sender.try_send(StreamItem::Token(tok, s.last_token));
+                                        if let Some(tok) = decoder.step(s.last_token)? {
+                                            let _ = sender
+                                                .try_send(StreamItem::Token(tok, s.last_token));
+                                        }
                                     }
                                 } else {
                                     let _ = sender.try_send(StreamItem::TokenID(s.last_token));
@@ -807,15 +802,16 @@ impl LLMEngine {
                             if *request_type == RequestType::Stream {
                                 if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                     for token_id in token_ids {
-                                        let tok = decoder.step(token_id).unwrap_or_default();
-                                        let result =
-                                            sender.try_send(StreamItem::Token(tok, token_id));
-                                        if result.is_err() {
-                                            crate::log_error!(
-                                                "Error when sending token to client [seq_id {}]",
-                                                seq_id
-                                            );
-                                            self.cancelled_sequences.push(seq_id);
+                                        if let Some(tok) = decoder.step(token_id)? {
+                                            let result =
+                                                sender.try_send(StreamItem::Token(tok, token_id));
+                                            if result.is_err() {
+                                                crate::log_error!(
+                                                    "Error when sending token to client [seq_id {}]",
+                                                    seq_id
+                                                );
+                                                self.cancelled_sequences.push(seq_id);
+                                            }
                                         }
                                     }
                                 }
@@ -1171,7 +1167,7 @@ impl LLMEngine {
                                 collected_token_ids.push(id);
 
                                 if let Some(d) = decoder.as_mut() {
-                                    if let Some(text) = d.step(id) {
+                                    if let Ok(Some(text)) = d.step(id) {
                                         if let Some(l) = &logger {
                                             l.log_stream_token(&text);
                                         }

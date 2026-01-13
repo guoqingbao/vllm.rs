@@ -4,7 +4,7 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX as Linear;
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::{FusedMoe, FusedMoeGGUF, FusedMoeISQ};
+use crate::models::layers::moe::{FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeISQ};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -24,6 +24,7 @@ enum MoeOrMlp {
     FusedMoe(FusedMoe),
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
+    FusedMoeFp8(FusedMoeFp8),
     Mlp(MLP),
 }
 
@@ -34,6 +35,7 @@ impl MoeOrMlp {
             Self::FusedMoe(m) => m.forward(xs, is_prefill),
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeFp8(m) => m.forward(xs, is_prefill),
         }
     }
 }
@@ -87,8 +89,18 @@ impl Qwen3DecoderLayer {
             if is_qvar_builder {
                 //experts weights packed
                 MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
-            } else if config.quantization_config.is_some() {
-                panic!("This feature is under developement (use unquantized, gguf or isq to gguf instead)!");
+            } else if let Some(quant_config) = &config.quantization_config {
+                if quant_config.quant_method == "fp8" {
+                    MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
+                        config,
+                        vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                        quant_config,
+                    )?)
+                } else {
+                    panic!("This feature is under developement (use unquantized, gguf or isq to gguf instead)!");
+                }
             } else if config.quant.is_some() {
                 MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
                     config,
