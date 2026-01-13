@@ -76,6 +76,7 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 ---
 ## 📚 Guides
 - [Get Started](docs/get_started.md)
+- [Docker Build](docs/docker.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
 - [Work with Claude Code](docs/claude_code.md)
 - [Work with Goose AI Agent](docs/goose.md)
