@@ -75,6 +75,7 @@
 ---
 ## 📚 文档
 - [快速开始](docs/get_started.md)
+- [Docker构建](docs/docker.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)
 - [Goose AI Agent使用vLLM.rs后端](docs/goose.md)

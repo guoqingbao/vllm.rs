@@ -30,13 +30,16 @@ COPY . .
 
 # Rayon threads are limited to minimize memory requirements in CI, avoiding OOM
 # Rust threads are increased with a nightly feature for faster compilation (single-threaded by default)
-ARG CUDA_COMPUTE_CAP=120
+ARG CUDA_COMPUTE_CAP=80
 ARG RAYON_NUM_THREADS=64
 ARG RUST_NUM_THREADS=64
 ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
-ARG WITH_FEATURES="cuda,nccl,python,flash-attn"
-# Build both output types - server and CLI bins, avoid shell games: echo and sed
-RUN ./build.sh --release --features "${WITH_FEATURES}" && cargo build --release --features $(echo $WITH_FEATURES|sed 's|,python||')
+ARG BUILD_FEATURES
+ARG WITH_FEATURES="cuda,nccl,graph,python,flash-attn,flash-context"
+# Build both output types - server and CLI bins.
+RUN FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}" && \
+    ./build.sh --release --features "$FEATURES" && \
+    cargo build --release --features "$(echo "$FEATURES" | sed 's|,python||')"
 
 FROM docker.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04 AS base
 ENV HUGGINGFACE_HUB_CACHE=/data \
@@ -77,4 +80,3 @@ RUN chmod +x /usr/local/bin/vllm-rs
 
 # Only the `devel` builder image provides symlinks, restore the `libnccl.so` symlink:
 RUN ln -s libnccl.so.2 /usr/lib/$(uname -m)-linux-gnu/libnccl.so
-

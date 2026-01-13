@@ -2,9 +2,9 @@
 
 This repository provides a Docker image for **vLLM-rs**, a high-performance inference engine for large language models (LLMs), built using Rust and optimized for NVIDIA GPUs.
 
-The image includes both:
+The image includes:
 - A **command-line interface (CLI)** tool (`vllm-rs`)
-- A **REST API server** (`vllm-rs-server`) OpenAI-compatible HTTP API server (shell wrapper around Python REST service fronting Rust runtime)
+- An **OpenAI-compatible REST API server** (`vllm-rs-server`), a shell wrapper around the Python service that fronts the Rust runtime
 
 ---
 
@@ -12,13 +12,48 @@ The image includes both:
 
 The image is built with the following features enabled by default:
 
-```bash
-cuda, nccl, graph, python
+```text
+cuda,nccl,graph,python,flash-attn,flash-context
 ```
 
-And includes:
-- `vllm-rs`: Command-line inference tool
-- `vllm-rs-server`: HTTP-based REST API server
+Graph capture is enabled by default; remove `graph` if you don't want it (or if your GPU does not support it).
+`flash-context` increases build time but improves long-context prefill/decoding performance.
+For V100, remove `flash-attn` and `flash-context`.
+For single-GPU machines, remove `nccl`.
+
+Default build args:
+- `WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context` (or `BUILD_FEATURES=...`)
+- `CUDA_COMPUTE_CAP=80`
+
+---
+
+## Example Usage (Docker Run)
+
+## Build From Dockerfile
+
+To build this Docker image locally, choose the feature list and compute capability:
+
+```bash
+docker build -t vllm-rs:latest \
+  --build-arg WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context \
+  --build-arg CUDA_COMPUTE_CAP=89 \
+  .
+```
+
+### Run with a Hugging Face Model
+
+```bash
+docker run --gpus all -p 80:80 \
+  vllm-rs:latest \
+  vllm-rs-server --m meta-llama/Llama-3.2-1B --host 0.0.0.0 --port 80
+```
+
+### Run CLI Inference
+
+```bash
+docker run --gpus all vllm-rs:latest \
+  vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 100
+```
 
 ---
 
@@ -85,33 +120,3 @@ curl http://localhost:80/v1/completions \
 | `--temperature <TEMP>` | Sampling temperature |
 
 See `vllm-rs-server --help` for full list of options.
-
----
-
-## Example Usage (Docker Run)
-
-### Run with a Hugging Face Model
-
-```bash
-docker run --gpus all -p 80:80 \
-  vllm-rs:latest \
-  vllm-rs-server --m meta-llama/Llama-3.2-1B --host 0.0.0.0 --port 80
-```
-
-### Run CLI Inference
-
-```bash
-docker run --gpus all vllm-rs:latest \
-  vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 100
-```
-
----
-
-## Build From Source
-
-To build this Docker image locally select features and CC version a la:
-
-```bash
-docker build -t vllm-rs:latest . --build-arg BUILD_FEATURES=cuda,cudnn,nccl,python,flash-attn --build-arg CUDA_COMPUTE_CAP=89
-```
-
