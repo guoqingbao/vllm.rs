@@ -47,26 +47,28 @@ impl FusedMoe {
             match &experts_vb.0 {
                 Either::Left(vb) => {
                     // Qwen3 VL MoE non-standard naming approach
-                    let gate_up_expert = vb.get_with_hints(
-                        (
-                            num_experts,
-                            cfg.hidden_size,
-                            moe_cfg.moe_intermediate_size * 2,
-                        ),
-                        "gate_up_proj",
-                        Default::default(),
-                    )?;
-                    let shard_size = moe_cfg.moe_intermediate_size / comm.world_size();
-
-                    let gate_expert = gate_up_expert
-                        .narrow(D::Minus1, comm.rank() * shard_size, shard_size)?
+                    let gate_expert = vb
+                        .get_with_hints(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
+                            "gate_up_proj",
+                            shard(2, comm.rank(), comm.world_size() * 2),
+                        )?
                         .t()?
                         .contiguous()?;
-                    let up_expert = gate_up_expert
-                        .narrow(
-                            D::Minus1,
-                            moe_cfg.moe_intermediate_size + comm.rank() * shard_size,
-                            shard_size,
+
+                    let up_expert = vb
+                        .get_with_hints(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
+                            "gate_up_proj",
+                            shard(2, comm.rank() + comm.world_size(), comm.world_size() * 2),
                         )?
                         .t()?
                         .contiguous()?;
@@ -556,27 +558,32 @@ impl FusedMoeISQ {
                 match &experts_vb.0 {
                     Either::Left(vb) => {
                         // Qwen3 VL MoE non-standard naming approach
-                        let gate_up_expert = vb.get_with_hints(
-                            (
-                                num_experts,
-                                cfg.hidden_size,
-                                moe_cfg.moe_intermediate_size * 2,
-                            ),
-                            "gate_up_proj",
-                            Default::default(),
-                        )?;
-                        let gate_expert = gate_up_expert
-                            .narrow(D::Minus1, 0, moe_cfg.moe_intermediate_size)?
-                            .t()?
-                            .contiguous()?;
-                        let up_expert = gate_up_expert
-                            .narrow(
-                                D::Minus1,
-                                moe_cfg.moe_intermediate_size,
-                                moe_cfg.moe_intermediate_size,
+                        let gate_expert = vb
+                            .get_with_hints(
+                                (
+                                    num_experts,
+                                    cfg.hidden_size,
+                                    moe_cfg.moe_intermediate_size * 2,
+                                ),
+                                "gate_up_proj",
+                                shard(2, 0, 2),
                             )?
                             .t()?
                             .contiguous()?;
+
+                        let up_expert = vb
+                            .get_with_hints(
+                                (
+                                    num_experts,
+                                    cfg.hidden_size,
+                                    moe_cfg.moe_intermediate_size * 2,
+                                ),
+                                "gate_up_proj",
+                                shard(2, 1, 2),
+                            )?
+                            .t()?
+                            .contiguous()?;
+
                         let down_expert = vb
                             .get_with_hints(
                                 (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
@@ -798,185 +805,248 @@ impl FusedMoeFp8 {
 
         let experts_vb = vb.pp("experts");
 
-        let mut gate_experts = Vec::with_capacity(num_experts);
-        let mut gate_experts_scale = Vec::with_capacity(num_experts);
-        let mut up_experts = Vec::with_capacity(num_experts);
-        let mut up_experts_scale = Vec::with_capacity(num_experts);
-        let mut down_experts = Vec::with_capacity(num_experts);
-        let mut down_experts_scale = Vec::with_capacity(num_experts);
-
-        if experts_vb.has_key("gate_up_proj") {
+        let (
+            gate_experts,
+            gate_experts_scale,
+            up_experts,
+            up_experts_scale,
+            down_experts,
+            down_experts_scale,
+        ) = if experts_vb.has_key("gate_up_proj") {
             // Qwen3 VL approach.
             match &experts_vb.0 {
                 Either::Left(vb) => {
-                    let gate_up_weight = vb.get_with_hints(
-                        (
-                            num_experts,
-                            cfg.hidden_size,
-                            moe_cfg.moe_intermediate_size * 2,
-                        ),
-                        "gate_up_proj",
-                        Default::default(),
-                    )?;
-                    let hidden = cfg.hidden_size;
-                    let inter2 = moe_cfg.moe_intermediate_size * 2;
-                    let scale_n = (hidden + by - 1) / by;
-                    let scale_k = (inter2 + bx - 1) / bx;
-
-                    let gate_up_scale = match vb.get_with_hints(
-                        (num_experts, scale_n, scale_k),
-                        "gate_up_proj.weight_scale",
-                        Default::default()
-                     ) {
-                        Ok(s) => s,
-                        Err(_) => vb.get_with_hints(
-                            (num_experts, scale_n, scale_k),
-                            "gate_up_proj.weight_scale_inv",
-                            Default::default()
-                        ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing gate_up_proj.weight_scale and .weight_scale_inv".into()))?
-                     };
-
-                    let gate_w_t = gate_up_weight.narrow(2, 0, moe_cfg.moe_intermediate_size)?;
-                    let up_w_t = gate_up_weight.narrow(
-                        2,
-                        moe_cfg.moe_intermediate_size,
-                        moe_cfg.moe_intermediate_size,
-                    )?;
-
-                    let inter = moe_cfg.moe_intermediate_size;
-                    let local_inter = inter / comm.world_size();
-                    let start = comm.rank() * local_inter;
-
-                    let gate_w_slice = gate_w_t.narrow(2, start, local_inter)?;
-                    let up_w_slice = up_w_t.narrow(2, start, local_inter)?;
-
-                    let gate_w = gate_w_slice.transpose(1, 2)?.contiguous()?; // [Experts, LocalInter, Hidden]
-                    let up_w = up_w_slice.transpose(1, 2)?.contiguous()?;
-
-                    let inter_blocks = inter / bx;
-                    let local_inter_blocks = inter_blocks / comm.world_size();
-                    let start_blocks = comm.rank() * local_inter_blocks;
-
-                    let gate_s_t = gate_up_scale.narrow(2, 0, inter_blocks)?;
-                    let up_s_t = gate_up_scale.narrow(2, inter_blocks, inter_blocks)?;
-
-                    let gate_s_slice = gate_s_t.narrow(2, start_blocks, local_inter_blocks)?;
-                    let up_s_slice = up_s_t.narrow(2, start_blocks, local_inter_blocks)?;
-
-                    let gate_s = gate_s_slice.transpose(1, 2)?.contiguous()?;
-                    let up_s = up_s_slice.transpose(1, 2)?.contiguous()?;
-
-                    gate_experts = vec![gate_w];
-                    gate_experts_scale = vec![gate_s];
-                    up_experts = vec![up_w];
-                    up_experts_scale = vec![up_s];
-
-                    let down_w = vb
-                        .get_with_hints(
-                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "down_proj",
-                            shard(1, comm.rank(), comm.world_size()),
+                    let gate_weight = vb
+                        .get_with_hints_dtype(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
+                            "gate_up_proj",
+                            shard(2, comm.rank(), comm.world_size() * 2),
+                            DType::U8,
                         )?
                         .t()?
                         .contiguous()?;
 
-                    let down_s = match vb.get_with_hints(
-                         (num_experts, (moe_cfg.moe_intermediate_size + by - 1)/by, (cfg.hidden_size + bx - 1)/bx),
-                         "down_proj.weight_scale",
-                         shard(1, comm.rank(), comm.world_size())
+                    let up_weight = vb
+                        .get_with_hints_dtype(
+                            (
+                                num_experts,
+                                cfg.hidden_size,
+                                moe_cfg.moe_intermediate_size * 2,
+                            ),
+                            "gate_up_proj",
+                            shard(2, comm.rank() + comm.world_size(), comm.world_size() * 2),
+                            DType::U8,
+                        )?
+                        .t()?
+                        .contiguous()?;
+
+                    let scale_n = (cfg.hidden_size + by - 1) / by;
+                    let scale_k = (moe_cfg.moe_intermediate_size * 2 + bx - 1) / bx;
+
+                    let gate_up_scale = match vb.get_with_hints_dtype(
+                        (num_experts, scale_n, scale_k),
+                        "gate_up_proj.weight_scale",
+                        Default::default(),
+                        DType::F32,
                      ) {
                         Ok(s) => s,
-                        Err(_) => vb.get_with_hints(
+                        Err(_) => vb.get_with_hints_dtype(
+                            (num_experts, scale_n, scale_k),
+                            "gate_up_proj.weight_scale_inv",
+                            Default::default(),
+                            DType::F32,
+                        ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing gate_up_proj.weight_scale and .weight_scale_inv".into()))?
+                     };
+
+                    let inter_blocks = moe_cfg.moe_intermediate_size / bx;
+                    let local_inter_blocks = inter_blocks / comm.world_size();
+                    let start_blocks = comm.rank() * local_inter_blocks;
+
+                    let gate_s_t = gate_up_scale.narrow(2, 0, inter_blocks)?.contiguous()?;
+                    let up_s_t = gate_up_scale
+                        .narrow(2, inter_blocks, inter_blocks)?
+                        .contiguous()?;
+
+                    let gate_s = gate_s_t
+                        .narrow(2, start_blocks, local_inter_blocks)?
+                        .t()?
+                        .contiguous()?;
+                    let up_s = up_s_t
+                        .narrow(2, start_blocks, local_inter_blocks)?
+                        .t()?
+                        .contiguous()?;
+
+                    let down_weight = vb
+                        .get_with_hints_dtype(
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "down_proj",
+                            shard(1, comm.rank(), comm.world_size()),
+                            DType::U8,
+                        )?
+                        .t()?
+                        .contiguous()?;
+
+                    let down_s = match vb.get_with_hints_dtype(
+                         (num_experts, (moe_cfg.moe_intermediate_size + by - 1)/by, (cfg.hidden_size + bx - 1)/bx),
+                         "down_proj.weight_scale",
+                         shard(1, comm.rank(), comm.world_size()),
+                         DType::F32,
+                     ) {
+                        Ok(s) => s,
+                        Err(_) => vb.get_with_hints_dtype(
                             (num_experts, (moe_cfg.moe_intermediate_size + by - 1)/by, (cfg.hidden_size + bx - 1)/bx),
                             "down_proj.weight_scale_inv",
-                            shard(1, comm.rank(), comm.world_size())
+                            shard(1, comm.rank(), comm.world_size()),
+                            DType::F32,
                         ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing down_proj.weight_scale and .weight_scale_inv".into()))?
                      }
                      .t()?.contiguous()?;
-
-                    down_experts = vec![down_w];
-                    down_experts_scale = vec![down_s];
+                    (gate_weight, gate_s, up_weight, up_s, down_weight, down_s)
                 }
                 _ => candle_core::bail!("FusedMoeFp8: Invalid varbuilder for packed loading"),
             }
         } else {
             // Per-expert loading
+            let mut gate_experts = Vec::with_capacity(num_experts);
+            let mut gate_experts_scale = Vec::with_capacity(num_experts);
+            let mut up_experts = Vec::with_capacity(num_experts);
+            let mut up_experts_scale = Vec::with_capacity(num_experts);
+            let mut down_experts = Vec::with_capacity(num_experts);
+            let mut down_experts_scale = Vec::with_capacity(num_experts);
             for i in 0..num_experts {
                 let expert_vb = experts_vb.pp(format!("{}", i).as_str());
-                let (gw, gs) = {
-                    let w = expert_vb.pp("gate_proj").get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                        shard(0, comm.rank(), comm.world_size()),
-                        DType::U8,
-                    )?;
-                    let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
-                    let sk = (cfg.hidden_size + bx - 1) / bx;
-                    let s = match expert_vb.pp("gate_proj").get_with_hints_dtype((sn, sk), "weight_scale", shard(0, comm.rank(), comm.world_size()), dtype) {
-                          Ok(s) => s,
-                          Err(_) => expert_vb.pp("gate_proj").get_with_hints_dtype((sn, sk), "weight_scale_inv", shard(0, comm.rank(), comm.world_size()), dtype)
-                                      .map_err(|_| candle_core::Error::Msg(format!("FusedMoeFp8: Missing weight_scale/inv for expert {} gate_proj", i).into()))?
-                      };
-                    (w, s)
-                };
-                let (uw, us) = {
-                    let w = expert_vb.pp("up_proj").get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                        shard(0, comm.rank(), comm.world_size()),
-                        DType::U8,
-                    )?;
-                    let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
-                    let sk = (cfg.hidden_size + bx - 1) / bx;
-                    let s = match expert_vb.pp("up_proj").get_with_hints_dtype((sn, sk), "weight_scale", shard(0, comm.rank(), comm.world_size()), dtype) {
-                          Ok(s) => s,
-                          Err(_) => expert_vb.pp("up_proj").get_with_hints_dtype((sn, sk), "weight_scale_inv", shard(0, comm.rank(), comm.world_size()), dtype)
-                                      .map_err(|_| candle_core::Error::Msg(format!("FusedMoeFp8: Missing weight_scale/inv for expert {} up_proj", i).into()))?
-                      };
-                    (w, s)
-                };
-                let (dw, ds) = {
-                    let w = expert_vb.pp("down_proj").get_with_hints_dtype(
-                        (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                        "weight",
-                        shard(1, comm.rank(), comm.world_size()),
-                        DType::U8,
-                    )?;
-                    let sn = (cfg.hidden_size + by - 1) / by;
-                    let sk = (moe_cfg.moe_intermediate_size + bx - 1) / bx;
-                    let s = match expert_vb.pp("down_proj").get_with_hints_dtype((sn, sk), "weight_scale", shard(1, comm.rank(), comm.world_size()), dtype) {
-                          Ok(s) => s,
-                          Err(_) => expert_vb.pp("down_proj").get_with_hints_dtype((sn, sk), "weight_scale_inv", shard(1, comm.rank(), comm.world_size()), dtype)
-                                      .map_err(|_| candle_core::Error::Msg(format!("FusedMoeFp8: Missing weight_scale/inv for expert {} down_proj", i).into()))?
-                      };
-                    (w, s)
+                let gate_weight = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                    "weight",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::U8,
+                )?;
+                let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
+                let sk = (cfg.hidden_size + bx - 1) / bx;
+                let gate_s = match expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    (sn, sk),
+                    "weight_scale",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => expert_vb
+                        .pp("gate_proj")
+                        .get_with_hints_dtype(
+                            (sn, sk),
+                            "weight_scale_inv",
+                            shard(0, comm.rank(), comm.world_size()),
+                            DType::F32,
+                        )
+                        .map_err(|_| {
+                            candle_core::Error::Msg(
+                                format!(
+                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} gate_proj",
+                                    i
+                                )
+                                .into(),
+                            )
+                        })?,
                 };
 
-                gate_experts.push(gw);
-                gate_experts_scale.push(gs);
-                up_experts.push(uw);
-                up_experts_scale.push(us);
-                down_experts.push(dw);
-                down_experts_scale.push(ds);
-            }
-        }
+                let up_weight = expert_vb.pp("up_proj").get_with_hints_dtype(
+                    (moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                    "weight",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::U8,
+                )?;
+                let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
+                let sk = (cfg.hidden_size + bx - 1) / bx;
+                let up_s = match expert_vb.pp("up_proj").get_with_hints_dtype(
+                    (sn, sk),
+                    "weight_scale",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => expert_vb
+                        .pp("up_proj")
+                        .get_with_hints_dtype(
+                            (sn, sk),
+                            "weight_scale_inv",
+                            shard(0, comm.rank(), comm.world_size()),
+                            DType::F32,
+                        )
+                        .map_err(|_| {
+                            candle_core::Error::Msg(
+                                format!(
+                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} up_proj",
+                                    i
+                                )
+                                .into(),
+                            )
+                        })?,
+                };
 
-        let ensure_stacked = |vec: Vec<Tensor>| -> Result<Tensor> {
-            if vec.len() == 1 && vec[0].dim(0)? == num_experts {
-                Ok(vec[0].clone())
-            } else {
-                Tensor::stack(&vec, 0)
+                let down_weight = expert_vb.pp("down_proj").get_with_hints_dtype(
+                    (cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                    "weight",
+                    shard(1, comm.rank(), comm.world_size()),
+                    DType::U8,
+                )?;
+                let sn = (cfg.hidden_size + by - 1) / by;
+                let sk = (moe_cfg.moe_intermediate_size + bx - 1) / bx;
+                let down_s = match expert_vb.pp("down_proj").get_with_hints_dtype(
+                    (sn, sk),
+                    "weight_scale",
+                    shard(1, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => expert_vb
+                        .pp("down_proj")
+                        .get_with_hints_dtype(
+                            (sn, sk),
+                            "weight_scale_inv",
+                            shard(1, comm.rank(), comm.world_size()),
+                            DType::F32,
+                        )
+                        .map_err(|_| {
+                            candle_core::Error::Msg(
+                                format!(
+                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} down_proj",
+                                    i
+                                )
+                                .into(),
+                            )
+                        })?,
+                };
+
+                gate_experts.push(gate_weight);
+                gate_experts_scale.push(gate_s);
+                up_experts.push(up_weight);
+                up_experts_scale.push(up_s);
+                down_experts.push(down_weight);
+                down_experts_scale.push(down_s);
             }
+
+            (
+                Tensor::stack(&gate_experts, 0)?,
+                Tensor::stack(&gate_experts_scale, 0)?,
+                Tensor::stack(&up_experts, 0)?,
+                Tensor::stack(&up_experts_scale, 0)?,
+                Tensor::stack(&down_experts, 0)?,
+                Tensor::stack(&down_experts_scale, 0)?,
+            )
         };
 
         Ok(Self {
             gate,
-            gate_experts: ensure_stacked(gate_experts)?,
-            gate_experts_scale: ensure_stacked(gate_experts_scale)?.to_dtype(DType::F32)?,
-            up_experts: ensure_stacked(up_experts)?,
-            up_experts_scale: ensure_stacked(up_experts_scale)?.to_dtype(DType::F32)?,
-            down_experts: ensure_stacked(down_experts)?,
-            down_experts_scale: ensure_stacked(down_experts_scale)?.to_dtype(DType::F32)?,
+            gate_experts,
+            gate_experts_scale,
+            up_experts,
+            up_experts_scale,
+            down_experts,
+            down_experts_scale,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
