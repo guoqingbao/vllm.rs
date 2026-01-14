@@ -1,82 +1,80 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu22.04 AS builder
+ARG CUDA_VERSION=12.9.0
+ARG UBUNTU_VERSION=22.04
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION}
+
 ARG DEBIAN_FRONTEND=noninteractive
-RUN <<HEREDOC
-    apt-get update && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libnccl-dev=2.29.2-1+cuda12.9 \
-        libnccl2=2.29.2-1+cuda12.9 \
-        curl \
-        libssl-dev \
-        pkg-config \
-        clang \
-        libclang-dev \
-        python3-pip && \
 
-    rm -rf /var/lib/apt/lists/*
-HEREDOC
+# Toggle for China mirror mode (0=off, 1=on)
+ARG CHINA_MIRROR=0
 
-RUN pip3 install maturin patchelf cffi
+RUN set -eux; \
+  apt-get update; \
+  apt-get install -y --no-install-recommends --allow-change-held-packages \
+    libnccl-dev libnccl2 \
+    curl ca-certificates \
+    libssl-dev pkg-config \
+    clang libclang-dev \
+    python3-pip; \
+  rm -rf /var/lib/apt/lists/*
 
-RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
+RUN pip3 install --no-cache-dir maturin patchelf cffi
+
+# Rust (stable) with optional China mirrors
+RUN set -eux; \
+  if [ "${CHINA_MIRROR}" = "1" ]; then \
+    export RUSTUP_UPDATE_ROOT="https://mirrors.ustc.edu.cn/rust-static/rustup"; \
+    export RUSTUP_DIST_SERVER="https://mirrors.tuna.tsinghua.edu.cn/rustup"; \
+  fi; \
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
+  if [ "${CHINA_MIRROR}" = "1" ]; then \
+    mkdir -p /root/.cargo; \
+    echo "RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup" >> /root/.cargo/env; \
+    printf '%s\n' \
+'[source.crates-io]' \
+'registry = "https://github.com/rust-lang/crates.io-index"' \
+'replace-with = "sjtu"' \
+'' \
+'[source.sjtu]' \
+'registry = "https://mirrors.sjtug.sjtu.edu.cn/git/crates.io-index/"' \
+> /root/.cargo/config.toml; \
+  fi
+
+
 ENV PATH="/root/.cargo/bin:${PATH}"
-RUN rustup update nightly
-RUN rustup default nightly
 
-WORKDIR /vllm.rs
-
-COPY . .
-
-# Rayon threads are limited to minimize memory requirements in CI, avoiding OOM
-# Rust threads are increased with a nightly feature for faster compilation (single-threaded by default)
 ARG CUDA_COMPUTE_CAP=80
-ARG RAYON_NUM_THREADS=64
-ARG RUST_NUM_THREADS=64
-ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
+ARG RAYON_NUM_THREADS=32
+ENV CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP}" \
+    RAYON_NUM_THREADS="${RAYON_NUM_THREADS}"
+
 ARG BUILD_FEATURES
 ARG WITH_FEATURES="cuda,nccl,graph,python,flash-attn,flash-context"
-# Build both output types - server and CLI bins.
-RUN FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}" && \
-    ./build.sh --release --features "$FEATURES" && \
-    cargo build --release --features "$(echo "$FEATURES" | sed 's|,python||')"
 
-FROM docker.io/nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04 AS base
-ENV HUGGINGFACE_HUB_CACHE=/data \
-    PORT=80
+WORKDIR /vllm.rs
+COPY . .
 
-ARG DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+  FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
+  ./build.sh --release --features "${FEATURES}"; \
+  cargo build --release --features "$(echo "${FEATURES}" | sed 's|,python||g')"
 
-RUN <<HEREDOC
-    apt-get update && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libnccl2=2.29.2-1+cuda12.9 \
-        libomp-dev \
-        ca-certificates \
-        libssl-dev \
-        curl \
-        pkg-config \
-        python3-pip && \
+RUN set -eux; \
+  pip3 install --no-cache-dir target/wheels/*; \
+  install -Dm755 target/release/libvllm_rs.so /usr/lib64/libvllm_rs.so; \
+  install -Dm755 target/release/runner /usr/local/bin/runner; \
+  install -Dm755 target/release/vllm-rs /usr/local/bin/vllm-rs; \
+  printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
+  chmod +x /usr/local/bin/vllm-rs-server
 
-    rm -rf /var/lib/apt/lists/*
-HEREDOC
+RUN set -eux; \
+  arch="$(uname -m)"; \
+  libdir="/usr/lib/${arch}-linux-gnu"; \
+  if [ ! -e "${libdir}/libnccl.so" ] && [ -e "${libdir}/libnccl.so.2" ]; then \
+    ln -s libnccl.so.2 "${libdir}/libnccl.so"; \
+  fi
 
-RUN pip3 install fastapi uvicorn cffi
-
-FROM base
-
-# Server components
-COPY --from=builder /vllm.rs/target/release/libvllm_rs.so /usr/lib64/libvllm_rs.so
-COPY --from=builder /vllm.rs/target/release/runner /usr/local/bin/runner
-RUN chmod +x /usr/local/bin/runner
-
-COPY --from=builder /vllm.rs/target/wheels wheels
-RUN pip3 install wheels/* && rm -rf wheels
-RUN echo -e '#!/bin/bash\npython3 -m vllm_rs.server  "$@"' > /usr/local/bin/vllm-rs-server && chmod +x /usr/local/bin/vllm-rs-server
-
-# CLI component
-COPY --from=builder /vllm.rs/target/release/vllm-rs /usr/local/bin/vllm-rs
-RUN chmod +x /usr/local/bin/vllm-rs
-
-# Only the `devel` builder image provides symlinks, restore the `libnccl.so` symlink:
-RUN ln -s libnccl.so.2 /usr/lib/$(uname -m)-linux-gnu/libnccl.so
+ENV HUGGINGFACE_HUB_CACHE=/data PORT=80
+EXPOSE 80
+CMD ["bash"]

@@ -33,8 +33,17 @@ Default build args:
 
 To build this Docker image locally, choose the feature list and compute capability:
 
+Build from script:
+
+```bash
+./build_docker.sh
+```
+
+Build from command line:
+
 ```bash
 docker build -t vllm-rs:latest \
+  #--build-arg CHINA_MIRROR=1 \ Use Rust crate mirror in Chinese mainland
   --build-arg WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context \
   --build-arg CUDA_COMPUTE_CAP=89 \
   .
