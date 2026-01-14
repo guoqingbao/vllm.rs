@@ -176,8 +176,9 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 > 方案 1：Docker编译：
 ```bash
 cd vllm.rs
-./build_docker.sh
-# ./build_docker.sh vllm-rs:latest 1  #传 1 启用Rust中国区镜像（适用于中国大陆）
+./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+# #传 1 启用Rust中国区镜像（适用于中国大陆）
+# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
 ```
 
 > 方案 2：手动编译：

@@ -176,8 +176,9 @@ See [**More Python Examples →**](python/ReadMe.md)
 > **Option 1 (Recommended):** Build with Docker
 ```bash
 cd vllm.rs
-./build_docker.sh
-# ./build_docker.sh vllm-rs:latest 1  #Pass 1 to enable rust crate mirror (Chinese Mainland)
+./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+# Pass 1 to enable rust crate mirror (Chinese Mainland)
+# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
 ```
 
 > **Option 2:** Manual Build

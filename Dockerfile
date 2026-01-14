@@ -30,14 +30,16 @@ RUN set -eux; \
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y; \
   if [ "${CHINA_MIRROR}" = "1" ]; then \
     mkdir -p /root/.cargo; \
-    echo "RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup" >> /root/.cargo/env; \
+    echo "RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static" >> /root/.cargo/env; \
     printf '%s\n' \
 '[source.crates-io]' \
-'registry = "https://github.com/rust-lang/crates.io-index"' \
-'replace-with = "sjtu"' \
+'replace-with = "ustc"' \
 '' \
-'[source.sjtu]' \
-'registry = "https://mirrors.sjtug.sjtu.edu.cn/git/crates.io-index/"' \
+'[source.ustc]' \
+'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' \
+'' \
+'[registries.ustc]' \
+'index = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' \
 > /root/.cargo/config.toml; \
   fi
 

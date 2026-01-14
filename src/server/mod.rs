@@ -944,7 +944,7 @@ pub async fn run_server(
         let lan_url = format!("http://{ip}:{port}/v1/");
 
         let api_server_url = format!(
-            "🧠 API server running at:\n   -  {} (Local Access) \n   -  {} (Remote Access)",
+            "🧠 API server running at (Press `Ctrl+P` then `Ctrl+Q` to exit under Docker):\n   -  {} (Local Access) \n   -  {} (Remote Access)",
             local_url, lan_url
         );
         println!("{}", api_server_url.cyan());
