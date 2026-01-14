@@ -171,60 +171,62 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
 ## 📘 使用方法（Rust）
 
-使用 `--i` 启用交互模式 🤖，`--ui-server` 或 `--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
+### 编译 (CUDA 11+, 12+, 13.0)
 
-### 前置条件
+> 方案 1：Docker编译：
+```bash
+cd vllm.rs
+./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+# #传 1 启用Rust中国区镜像（适用于中国大陆）
+# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
+```
+
+> 方案 2：手动编译：
+   <details>
+    <summary>展开详情</summary>
+
+安装 [Rust 工具链](https://www.rust-lang.org/tools/install)
 
 安装构建依赖：
-
 ```sh
-apt-get update
-apt-get install -y build-essential libssl-dev pkg-config
+sudo apt-get update
+sudo apt-get install -y build-essential libssl-dev pkg-config
 ```
 
 安装 CUDA Toolkit：
-
-1. **方案 1（推荐）：** 使用 NVIDIA 的 *devel* Docker 镜像，例如 `nvidia/cuda:12.6.0-devel-ubuntu22.04`
-
-2. **方案 2：** 手动安装 CUDA Toolkit：
-
 ```sh
-# CUDA 12.6
+# CUDA 12.9
 apt-get update
 apt-get install -y \
-  cuda-nvcc-12-6 \
-  cuda-nvrtc-dev-12-6 \
-  libcublas-dev-12-6 \
-  libcurand-dev-12-6
+  cuda-nvcc-12-9 \
+  cuda-nvrtc-dev-12-9 \
+  libcublas-dev-12-9 \
+  libcurand-dev-12-9
 
 # NCCL
 apt-get install -y libnccl2 libnccl-dev
 ```
-
-将 CUDA Toolkit 加入系统 `PATH`：
-
-```sh
-export PATH="$PATH:/usr/local/cuda/bin"
-```
-
-（可选）将 `PATH` 变更写入配置文件，确保以后打开新的 shell 也生效：
-
-```sh
-echo 'export PATH="$PATH:/usr/local/cuda/bin"' >> ~/.bashrc
-```
-
-### 编译 (CUDA)
+编译 vLLM.rs
 ```shell
 # 只有单卡的情况下去掉 `nccl`
 # V100及较老的机型去掉 `flash-attn,flash-context`
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
+  </details>
 
 ### 编译 (MacOS/Metal)
+
+安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
+
+使用`metal`特性编译
 ```shell
 cargo build --release --features metal
 ```
+
+### 运行方式
+
+使用 `--i` 启用交互模式 🤖，`--ui-server` 或 `--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
 > 单卡/多卡推理
   <details open>
@@ -338,9 +340,6 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
 > ⚠️ 启用 前缀缓存或多GPU推理时，需要同时编译`Runner`（使用`build.sh`编译 或 `run.sh`运行）
 
 ### 🛠️ 环境要求
-
-* 安装 [Rust 工具链](https://www.rust-lang.org/tools/install)
-* **macOS** 平台需安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
 * 构建 Python 接口需安装 [Maturin](https://github.com/PyO3/maturin)
 
 ### 编译步骤
@@ -453,6 +452,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **MCP集成与工具调用**
 * [x] **公共前缀缓存**
 * [x] **Claude/Anthropic API 兼容服务器**
+* [x] **支持CUDA 13**
 
 ## 📚 参考项目
 

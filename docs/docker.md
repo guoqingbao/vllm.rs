@@ -33,8 +33,17 @@ Default build args:
 
 To build this Docker image locally, choose the feature list and compute capability:
 
+Build from script:
+
 ```bash
-docker build -t vllm-rs:latest \
+./build_docker.sh
+```
+
+Build from command line:
+
+```bash
+docker build --network=host -t vllm-rs:latest \
+  #--build-arg CHINA_MIRROR=1 \ Use Rust crate mirror in Chinese mainland
   --build-arg WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context \
   --build-arg CUDA_COMPUTE_CAP=89 \
   .
@@ -43,9 +52,9 @@ docker build -t vllm-rs:latest \
 ### Run with a Hugging Face Model
 
 ```bash
-docker run --gpus all -p 80:80 \
+docker run --gpus all -v "$HOME":/workspace -p 8000:8000 -p 8001:8001 \
   vllm-rs:latest \
-  vllm-rs-server --m meta-llama/Llama-3.2-1B --host 0.0.0.0 --port 80
+  vllm-rs-server --m meta-llama/Llama-3.2-1B --host 0.0.0.0 --port 8000 --ui-server
 ```
 
 ### Run CLI Inference

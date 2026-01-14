@@ -171,60 +171,64 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 ## 📘 Usage (Rust)
 
-Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+### Build (CUDA 11+, 12+, 13.0)
 
-### Prerequisites
-
-Install build dependencies:
-
-```sh
-apt-get update
-apt-get install -y build-essential libssl-dev pkg-config
+> **Option 1 (Recommended):** Build with Docker
+```bash
+cd vllm.rs
+./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+# Pass 1 to enable rust crate mirror (Chinese Mainland)
+# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
 ```
 
-Install the CUDA toolkit:
+> **Option 2:** Manual Build
 
-1. **Option 1 (recommended):** Use an NVIDIA *devel* Docker image, e.g. `nvidia/cuda:12.6.0-devel-ubuntu22.04`
+   <details>
+    <summary>More Details</summary>
 
-2. **Option 2:** Install the CUDA toolkit manually:
+Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
+
+Install build dependencies
 
 ```sh
-# CUDA 12.6
-apt-get update
-apt-get install -y \
-  cuda-nvcc-12-6 \
-  cuda-nvrtc-dev-12-6 \
-  libcublas-dev-12-6 \
-  libcurand-dev-12-6
+sudo apt-get update
+sudo apt-get install -y build-essential libssl-dev pkg-config
+```
+
+Install CUDA toolkit (optional)
+
+```sh
+# CUDA 12.9
+sudo apt-get install -y \
+  cuda-nvcc-12-9 \
+  cuda-nvrtc-dev-12-9 \
+  libcublas-dev-12-9 \
+  libcurand-dev-12-9
 
 # NCCL
-apt-get install -y libnccl2 libnccl-dev
+sudo apt-get install -y libnccl2 libnccl-dev
 ```
 
-Make the CUDA toolkit available in `PATH`:
-
-```sh
-export PATH="$PATH:/usr/local/cuda/bin"
-```
-
-(Optional) Persist the `PATH` change for future shells:
-
-```sh
-echo 'export PATH="$PATH:/usr/local/cuda/bin"' >> ~/.bashrc
-```
----
-
-### Build (CUDA 11+, 12+)
+Build vLLM.rs
 ```shell
 # Remove `nccl` for single-gpu usage
 # Remove `flash-attn,flash-context` for V100 or older hardware
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
+  </details>
 
 ### Build (Metal)
+
+Install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
+
+Build with `metal` feature
 ```shell
 cargo build --release --features metal
 ```
+
+### Running
+Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+
 
 > API server + Web UI
 
@@ -363,9 +367,6 @@ Watch it in action 🎉
 
 
 ### 🛠️ Prerequisites
-
-* Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
-* On **macOS**, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
 * For Python bindings, install [Maturin](https://github.com/PyO3/maturin)
 
 ### Building steps
@@ -480,6 +481,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **MCP Integration & Tool Calling**
 * [x] **Prefix Caching**
 * [x] **Claude/Anthropic-compatible API Server**
+* [x] **Support CUDA 13**
 ---
 
 ## 📚 References
