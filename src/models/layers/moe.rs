@@ -847,16 +847,18 @@ impl FusedMoeFp8 {
                     let scale_n = (cfg.hidden_size + by - 1) / by;
                     let scale_k = (moe_cfg.moe_intermediate_size * 2 + bx - 1) / bx;
 
-                    let gate_up_scale = match vb.get_with_hints(
+                    let gate_up_scale = match vb.get_with_hints_dtype(
                         (num_experts, scale_n, scale_k),
                         "gate_up_proj.weight_scale",
-                        Default::default()
+                        Default::default(),
+                        DType::F32,
                      ) {
                         Ok(s) => s,
-                        Err(_) => vb.get_with_hints(
+                        Err(_) => vb.get_with_hints_dtype(
                             (num_experts, scale_n, scale_k),
                             "gate_up_proj.weight_scale_inv",
-                            Default::default()
+                            Default::default(),
+                            DType::F32,
                         ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing gate_up_proj.weight_scale and .weight_scale_inv".into()))?
                      };
 
@@ -864,8 +866,10 @@ impl FusedMoeFp8 {
                     let local_inter_blocks = inter_blocks / comm.world_size();
                     let start_blocks = comm.rank() * local_inter_blocks;
 
-                    let gate_s_t = gate_up_scale.narrow(2, 0, inter_blocks)?;
-                    let up_s_t = gate_up_scale.narrow(2, inter_blocks, inter_blocks)?;
+                    let gate_s_t = gate_up_scale.narrow(2, 0, inter_blocks)?.contiguous()?;
+                    let up_s_t = gate_up_scale
+                        .narrow(2, inter_blocks, inter_blocks)?
+                        .contiguous()?;
 
                     let gate_s = gate_s_t
                         .narrow(2, start_blocks, local_inter_blocks)?
