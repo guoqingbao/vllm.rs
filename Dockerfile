@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-ARG CUDA_VERSION=12.9.0
+ARG CUDA_VERSION=12.9.0-cudnn
 ARG UBUNTU_VERSION=22.04
-FROM docker.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION}
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
