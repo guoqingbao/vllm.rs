@@ -23,10 +23,11 @@ use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::load_toktrie_from_path;
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
+use crate::utils::kvcache_allocator::KVCacheAllocator;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
-use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner, update_kvcache_config};
+use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
 use colored::Colorize;
@@ -112,13 +113,8 @@ impl LLMEngine {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
-        let (mut econfig, use_runner) = prepare_engine_config(
-            econfig,
-            &config,
-            dtype,
-            &config_tokenizer,
-            &mut generation_cfg,
-        );
+        let (mut econfig, use_runner) =
+            prepare_engine_config(econfig, &config, &config_tokenizer, &mut generation_cfg);
         config.fp8_kvcache = econfig.fp8_kvcache;
 
         // In case config file missing bos and eos configuratioin
@@ -153,8 +149,10 @@ impl LLMEngine {
         log_info!("{:?}\n", config);
 
         let device_ids = if let Some(ids) = &econfig.device_ids {
+            log_info!("Using device IDs: {:?}", ids);
             ids.clone()
         } else {
+            log_info!("Using default device ID: [0]");
             vec![0]
         };
 
@@ -297,13 +295,15 @@ impl LLMEngine {
                     }
 
                     // Build init message
+                    let mut econfig_rank = econfig.clone();
+                    econfig_rank.device_ids = Some(vec![*dev_id]);
                     let init_msg = MessageType::Init(RunnerInitRequest {
                         rank,
                         dev_id: *dev_id,
                         num_shards: econfig.num_shards.unwrap_or(1),
                         model_type,
                         config: config.clone(),
-                        econfig: econfig.clone(),
+                        econfig: econfig_rank,
                         model_pathes: model_pathes.clone(),
                         is_gguf,
                         dtype: dtype.into(),
@@ -314,20 +314,30 @@ impl LLMEngine {
 
                     send_and_expect_ack(&mut stream, &init_msg, "initialize", rank)?;
 
-                    if econfig.max_model_len.is_none() {
-                        let ecfg = engine_config.get_or_init(|| {
-                            let mut econfig = econfig.clone();
-                            update_kvcache_config(&mut econfig, &config.clone(), dtype);
-                            econfig
-                        });
+                    // Always validate/plan allocation after model loading for accurate memory readings
+                    let ecfg = engine_config.get_or_init(|| {
+                        let mut econfig = econfig.clone();
+                        // Use new KVCacheAllocator for multi-rank negotiation
+                        let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+                        let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+                        match allocator.plan(&device_ids, &mut econfig) {
+                            Ok(_) => {
+                                crate::log_info!("KVCache allocation successfully planned!");
+                            }
+                            Err(e) => {
+                                crate::log_error!("Failed to allocate KVCache: {:?}", e);
+                                panic!("Failed to allocate KVCache: {:?}", e);
+                            }
+                        }
+                        econfig
+                    });
 
-                        send_and_expect_ack(
-                            &mut stream,
-                            &MessageType::UsableMemoryLeft(ecfg.clone()),
-                            "init kvcache",
-                            rank,
-                        )?;
-                    }
+                    send_and_expect_ack(
+                        &mut stream,
+                        &MessageType::UsableMemoryLeft(ecfg.clone()),
+                        "init kvcache",
+                        rank,
+                    )?;
 
                     crate::log_info!("Runner {} started!", rank);
                     Ok(stream)
@@ -339,8 +349,6 @@ impl LLMEngine {
             }
             if let Some(cfg) = engine_config.get() {
                 econfig = cfg.clone();
-            } else if econfig.max_model_len.is_none() {
-                candle_core::bail!("Unable to update EngineConfig!");
             }
             RunnerType::Process(runner_streams?)
         };
@@ -377,7 +385,7 @@ impl LLMEngine {
             econfig.max_num_batched_tokens,
             econfig.num_blocks,
             econfig.block_size,
-            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5f32)) as usize
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.2f32)) as usize
         );
         log_warn!("Model loaded.\n");
 

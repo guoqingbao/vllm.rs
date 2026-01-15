@@ -132,11 +132,7 @@ fn main() -> anyhow::Result<()> {
                 init_req.dtype.into(),
                 &device,
             )?;
-            let stream_kv = if init_req.econfig.max_model_len.is_none() {
-                Some(stream.try_clone()?)
-            } else {
-                None
-            };
+            let stream_kv = Some(stream.try_clone()?);
             let mut econfig = init_req.econfig.clone();
             let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
                 .map(Arc::new);
