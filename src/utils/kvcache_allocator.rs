@@ -153,7 +153,7 @@ impl KVCacheAllocator {
                 kv_fraction
             },
             fp8_kvcache,
-            cpu_mem_fold: econfig.cpu_mem_fold.unwrap_or(0.5),
+            cpu_mem_fold: econfig.cpu_mem_fold.unwrap_or(0.2),
             dtype_size,
         }
     }

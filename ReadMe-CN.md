@@ -402,7 +402,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |
 | `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |
-| `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.5，取值0.1 - 10.0)              |
+| `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.2，取值0.1 - 10.0)              |
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|
 | `--pd-url`       |  使用PD分离模式时，PD服务器实例如指定pd-url，则通过TCP/IP通信（适用于PD服务器与客户端在不同服务器） |

@@ -172,8 +172,11 @@ impl ModelRunner {
 
         let allocation = crate::utils::kvcache_allocator::KVCacheAllocation {
             num_gpu_blocks: econfig.num_blocks,
-            num_cpu_blocks: (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5))
+            #[cfg(feature = "cuda")]
+            num_cpu_blocks: (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.2))
                 as usize,
+            #[cfg(not(feature = "cuda"))]
+            num_cpu_blocks: 1, // dummy for non-CUDA platform
             max_num_seqs: econfig.max_num_seqs,
             max_model_len: econfig.max_model_len.unwrap_or(32768),
             kvcache_memory_bytes: econfig.kvcache_memory_bytes,
