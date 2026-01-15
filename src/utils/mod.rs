@@ -85,21 +85,24 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
 }
 
 pub fn get_kvcache_blocks(
-    max_num_seqs: usize,
-    max_model_len: usize,
-    block_size: usize,
+    econfig: &config::EngineConfig,
     config: &config::Config,
     num_shards: usize,
     dtype: DType,
 ) -> (usize, usize) {
     const SIZE_IN_MB: usize = 1024 * 1024;
 
+    let max_num_seqs = econfig.max_num_seqs;
+    let block_size = econfig.block_size;
+    let max_model_len = econfig.max_model_len.unwrap_or(32768);
+
     let dsize = dtype.size_in_bytes();
     let head_dim = config
         .head_dim
         .unwrap_or(config.hidden_size / config.num_attention_heads);
 
-    let num_gpu_blocks = max_num_seqs * max_model_len / block_size;
+    let blocks_per_seq = (max_model_len + block_size - 1) / block_size;
+    let num_gpu_blocks = max_num_seqs * blocks_per_seq;
 
     let total_memory_bytes = num_gpu_blocks
         * block_size
@@ -108,8 +111,24 @@ pub fn get_kvcache_blocks(
         * dsize
         * 2
         * config.num_hidden_layers;
+
+    let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+    let gpu_memory_left = match crate::utils::max_usable_memory(&device_ids, 1.0f64) {
+        Ok(v) => v,
+        _ => 0,
+    };
+
+    // Reserve at least 512MB
+    if total_memory_bytes > (gpu_memory_left - 512 * SIZE_IN_MB as u64) as usize {
+        crate::log_error!(
+            "Try allocating {:2} MB KvCache but available GPU memory {:2} MB (512 MB reserved)",
+            total_memory_bytes as f32 / SIZE_IN_MB as f32,
+            gpu_memory_left as f32 / SIZE_IN_MB as f32
+        );
+    }
+
     crate::log_warn!(
-        "Allocating {} KV blocks ({:2} MB) for [{} seqs x {} tokens]",
+        "Try allocating {} KV blocks ({:2} MB) for [{} seqs x {} tokens]",
         num_gpu_blocks,
         total_memory_bytes as f32 / SIZE_IN_MB as f32,
         max_num_seqs,
@@ -1081,19 +1100,19 @@ pub fn prepare_engine_config(
 ) -> (EngineConfig, bool) {
     let mut econfig = econfig.clone();
 
-    let config_model_len =
-        config
-            .max_model_len
-            .unwrap_or(if let Some(l) = config_tokenizer.model_max_length {
-                if l < 10000000.0 {
-                    // Sometime this value is invalid
-                    l as usize
-                } else {
-                    config.max_position_embeddings
-                }
+    let config_model_len = std::cmp::min(
+        config.max_position_embeddings,
+        if let Some(l) = config_tokenizer.model_max_length {
+            if l < 10000000.0 {
+                // Sometime this value is invalid
+                l as usize
             } else {
-                config.max_position_embeddings
-            });
+                262144
+            }
+        } else {
+            262144
+        },
+    );
 
     econfig.config_model_len = Some(config_model_len);
 
@@ -1140,9 +1159,7 @@ pub fn prepare_engine_config(
     econfig.device_ids = Some(device_ids);
 
     let (num_blocks, kvcache_memory_bytes) = get_kvcache_blocks(
-        econfig.max_num_seqs,
-        econfig.max_model_len.unwrap_or(32768),
-        econfig.block_size,
+        &econfig,
         &config,
         num_shards,
         if econfig.fp8_kvcache.unwrap_or(false) {
