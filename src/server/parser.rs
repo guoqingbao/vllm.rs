@@ -278,6 +278,17 @@ impl StreamToolParser {
         // Always accumulate
         self.accumulated_output.push_str(token_text);
 
+        // Measure code block start/end markers in the buffer
+        let mut code_block_count = 0;
+        for line in  self.accumulated_output.clone().lines() {
+            // account for labled code block starts
+            if line.trim().starts_with("```") {
+                code_block_count += 1;
+            }
+        }
+        // Even number indicates blocks are closed, odd
+        self.in_code_block = code_block_count % 2 == 1;
+
         // Track reasoning blocks
         if self.active_reasoning_end.is_none() {
             for &(start, end) in REASONING_MARKERS {
@@ -290,11 +301,6 @@ impl StreamToolParser {
             if token_text.contains(end_marker) || self.accumulated_output.ends_with(end_marker) {
                 self.active_reasoning_end = None;
             }
-        }
-
-        // Track code blocks
-        if token_text.contains("```") || self.accumulated_output.ends_with("```") {
-            self.in_code_block = !self.in_code_block;
         }
 
         // Don't detect tool calls inside reasoning or code blocks
@@ -390,7 +396,10 @@ impl StreamToolParser {
                     let tool_calls = self.parse_buffer();
                     let result = if tool_calls.is_empty() {
                         // Parse failed - return buffered content
-                        crate::log_error!("Unable to parse tool call buffer: {}", self.buffer);
+                        crate::log_error!(
+                            "Unable to parse tool call buffer: {}\n of accumulated buffer: {}",
+                            self.buffer, self.accumulated_output
+                        );
                         StreamResult::FlushBuffer(self.buffer.clone())
                     } else {
                         StreamResult::ToolCalls(tool_calls)
