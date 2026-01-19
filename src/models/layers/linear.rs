@@ -653,8 +653,6 @@ impl LnFp8 {
         } else {
             weight
         };
-        #[cfg(not(feature = "cutlass"))]
-        let weight = weight.t()?.contiguous()?;
 
         let by = block_size[0];
         let bx = block_size[1];
@@ -720,15 +718,20 @@ impl Module for LnFp8 {
         let x_2d = x.reshape((m, k))?;
 
         // Call FP8 matmul
+        #[cfg(feature = "cutlass")]
+        let out = attention_rs::fp8_linear::fp8_matmul_cutlass(
+            &x_2d,
+            &self.weight.t()?,
+            &self.weight_scale,
+            &self.weight_block_size,
+        )?;
+        
+        #[cfg(not(feature = "cutlass"))]
         let out = attention_rs::fp8_linear::fp8_matmul(
             &x_2d,
-            #[cfg(feature = "cutlass")]
-            &self.weight.t()?,
-            #[cfg(not(feature = "cutlass"))]
             &self.weight,
             &self.weight_scale,
             &self.weight_block_size,
-            true,
         )?;
 
         // Reshape output back
