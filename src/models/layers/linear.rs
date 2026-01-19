@@ -653,9 +653,8 @@ impl LnFp8 {
         } else {
             weight
         };
-
-        #[cfg(feature = "cutlass")]
-        let weight = weight.t()?.contiguous()?; // cutlass requires [K, N] format
+        #[cfg(not(feature = "cutlass"))]
+        let weight = weight.t()?.contiguous()?;
 
         let by = block_size[0];
         let bx = block_size[1];
@@ -677,7 +676,7 @@ impl LnFp8 {
         .to_dtype(DType::F32)?;
 
         #[cfg(feature = "cutlass")]
-        let weight_scale = attention_rs::fp8_linear::pack_fp8_weight_scale_sfb(&weight_scale, out_dim, in_dim, &block_size)?;
+        let weight_scale = weight_scale.t()?.contiguous()?;
 
         // Load bias if present
         let bias = vb.get((out_dim,), "bias");
@@ -720,22 +719,16 @@ impl Module for LnFp8 {
 
         let x_2d = x.reshape((m, k))?;
 
-        #[cfg(feature = "cutlass")]
-        let out = attention_rs::fp8_linear::fp8_matmul_with_layout(
+        // Call FP8 matmul
+        let out = attention_rs::fp8_linear::fp8_matmul(
             &x_2d,
+            #[cfg(feature = "cutlass")]
+            &self.weight.t()?,
+            #[cfg(not(feature = "cutlass"))]
             &self.weight,
             &self.weight_scale,
             &self.weight_block_size,
             true,
-        )?;
-
-        // Call FP8 matmul
-        #[cfg(not(feature = "cutlass"))]
-        let out = attention_rs::fp8_linear::fp8_matmul(
-            &x_2d,
-            &self.weight,
-            &self.weight_scale,
-            &self.weight_block_size,
         )?;
 
         // Reshape output back
