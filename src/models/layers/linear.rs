@@ -725,7 +725,7 @@ impl Module for LnFp8 {
             &self.weight_scale,
             &self.weight_block_size,
         )?;
-        
+
         #[cfg(not(feature = "cutlass"))]
         let out = attention_rs::fp8_linear::fp8_matmul(
             &x_2d,
