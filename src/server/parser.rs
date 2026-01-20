@@ -280,7 +280,7 @@ impl StreamToolParser {
 
         // Measure code block start/end markers in the buffer
         let mut code_block_count = 0;
-        for line in  self.accumulated_output.clone().lines() {
+        for line in self.accumulated_output.clone().lines() {
             // account for labled code block starts
             if line.trim().starts_with("```") {
                 code_block_count += 1;
@@ -398,7 +398,8 @@ impl StreamToolParser {
                         // Parse failed - return buffered content
                         crate::log_error!(
                             "Unable to parse tool call buffer: {}\n of accumulated buffer: {}",
-                            self.buffer, self.accumulated_output
+                            self.buffer,
+                            self.accumulated_output
                         );
                         StreamResult::FlushBuffer(self.buffer.clone())
                     } else {
