@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax = devthefuture/dockerfile-x
 
 ARG CUDA_VERSION=12.9.0
 ARG UBUNTU_VERSION=22.04
@@ -7,7 +7,7 @@ ARG UBUNTU_VERSION=22.04
 # - else: cudnn-devel
 ARG CUDA_FLAVOR=cudnn-devel
 
-FROM docker.io/nvidia/cuda:${CUDA_VERSION}-${CUDA_FLAVOR}-ubuntu${UBUNTU_VERSION}
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-${CUDA_FLAVOR}-ubuntu${UBUNTU_VERSION} AS base
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -74,6 +74,7 @@ RUN set -eux; \
   install -Dm755 target/release/vllm-rs /usr/local/bin/vllm-rs; \
   printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
   chmod +x /usr/local/bin/vllm-rs-server; \
+  cp -r target/wheels/ /opt/wheels; \
   cargo clean
 
 RUN set -eux; \

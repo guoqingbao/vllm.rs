@@ -1,12 +1,63 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Positional args:
+# Flags:
+#   --prod / -p    Use Dockerfile.prod (default: Dockerfile)
+#   --help / -h    Show usage
+#
+# Positional args (unchanged):
 #   1: WITH_FEATURES   (default: cuda,nccl,graph,python,flash-attn,flash-context)
 #   2: SM_ARG          (default: sm_80)  accepts sm_XX, XX, or comma list sm_80,sm_86
 #   3: CUDA_VERSION    (default: 12.9.0) accepts X.Y.Z, X.Y, or shorthand like 129/124
 #   4: CHINA_MIRROR    (default: 0)      0=off, 1=on
 #   5: IMAGE_TAG       (default: vllm-rs:latest)
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./build_docker.sh [--prod|-p] [WITH_FEATURES] [SM_ARG] [CUDA_VERSION] [CHINA_MIRROR] [IMAGE_TAG]
+
+Examples:
+  ./build_docker.sh
+  ./build_docker.sh --prod
+  ./build_docker.sh --prod "cuda,nccl,python" sm_90 12.4 0 vllm-rs:prod
+EOF
+}
+
+DOCKERFILE="Dockerfile"
+
+# Parse flags first (do not break positional args)
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --prod|-p)
+      DOCKERFILE="Dockerfile.prod"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      # Remainder are positional
+      while [[ $# -gt 0 ]]; do
+        POSITIONAL+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "ERROR: Unknown flag: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
 
 WITH_FEATURES="${1:-cuda,nccl,graph,python,flash-attn,flash-context}"
 SM_ARG="${2:-sm_80}"
@@ -75,7 +126,6 @@ cuda_major() {
 
 # IMPORTANT:
 # Dockerfile cannot do shell evaluation inside FROM. We precompute a flavor string and pass it as a build arg.
-# Your original intent:
 #   - CUDA major >= 13 => "devel"
 #   - else             => "cudnn-devel"
 cuda_flavor_for_version() {
@@ -93,6 +143,7 @@ CUDA_COMPUTE_CAP="$(normalize_sm_list "$SM_ARG")"
 CUDA_VERSION="$(normalize_cuda_version "$CUDA_VERSION_ARG")"
 CUDA_FLAVOR="$(cuda_flavor_for_version "$CUDA_VERSION")"
 
+echo "[build] DOCKERFILE=${DOCKERFILE}"
 echo "[build] IMAGE_TAG=${IMAGE_TAG}"
 echo "[build] WITH_FEATURES=${WITH_FEATURES}"
 echo "[build] CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP} (input: ${SM_ARG})"
@@ -101,7 +152,7 @@ echo "[build] CUDA_FLAVOR=${CUDA_FLAVOR}"
 echo "[build] UBUNTU_VERSION=${UBUNTU_VERSION}"
 echo "[build] CHINA_MIRROR=${CHINA_MIRROR}"
 
-docker build --network=host -t "${IMAGE_TAG}" \
+docker build --network=host -f "${DOCKERFILE}" -t "${IMAGE_TAG}" \
   --build-arg CUDA_VERSION="${CUDA_VERSION}" \
   --build-arg UBUNTU_VERSION="${UBUNTU_VERSION}" \
   --build-arg CUDA_FLAVOR="${CUDA_FLAVOR}" \
@@ -114,6 +165,8 @@ cat <<EOF
 
 ============================================================
 Build finished: ${IMAGE_TAG}
+
+Dockerfile: ${DOCKERFILE}
 
 WITH_FEATURES: ${WITH_FEATURES}
 CUDA_COMPUTE_CAP: ${CUDA_COMPUTE_CAP}   (input: ${SM_ARG})
@@ -134,8 +187,11 @@ Commands:
    docker run --rm --gpus all -p 80:80 ${IMAGE_TAG} vllm-rs-server --help
 
 3) Serving model (manual):
-   docker run --rm -it --gpus all -v /home:/home -p 8000:8000 -p 8001:8001 ${IMAGE_TAG} bash
-   vllm-rs-server --m Qwen/Qwen3-0.6B --ui-server --port 8000
+   # Start the docker
+   docker run --rm -it --gpus all -v /home:/home -v /data:/data -p 8000:8000 -p 8001:8001 ${IMAGE_TAG} bash
+   # Run model serving (choose local access, API server at: http://host_ip:8000/v1)
+   a) vllm-rs-server --m Qwen/Qwen3-0.6B --port 8000
+   b) vllm-rs-server --w /home/path/Qwen3-Coder-30B-A3B-Instruct-FP8 --port 8000
 
 4) Run interactively:
    docker run --rm -it --gpus all ${IMAGE_TAG} bash

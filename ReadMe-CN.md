@@ -177,14 +177,19 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 > 方案 1：Docker编译：
 ```bash
 cd vllm.rs
+# 使用以下构建方式之一
+
 # 将 `sm_80` 更改至你当前的硬件特性，如 sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
 ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
 
 # 添加 `cutlass` 特性以支持fp8模型 (Qwen3系列, sm90+)，使用CUDA 13 镜像
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 
 # #传 1 启用Rust中国区镜像（适用于中国大陆）
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
+
+# 传入 `--prod` 以构建生产镜像（使用 `Dockerfile.prod`）
+./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
 
 > 方案 2：手动编译：

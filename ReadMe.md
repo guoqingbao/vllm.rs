@@ -177,14 +177,19 @@ See [**More Python Examples →**](python/ReadMe.md)
 > **Option 1 (Recommended):** Build with Docker
 ```bash
 cd vllm.rs
+# Use one of the following build methods
+
 # change `sm_80` to your hardware spec, e.g., sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
 ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
 
 # +cutlass feature for optimized fp8 models (Qwen3 series, sm90+) with CUDA 13
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 
 # Pass 1 to enable rust crate mirror (Chinese Mainland)
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
+
+# Pass `--prod` to build the production image (uses `Dockerfile.prod`)
+./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
 
 > **Option 2:** Manual Build

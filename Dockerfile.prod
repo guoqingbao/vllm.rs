@@ -1,0 +1,50 @@
+# syntax = devthefuture/dockerfile-x
+
+INCLUDE Dockerfile
+
+# Thin runtime container for production use
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Pip installation is buggy
+RUN <<HEREDOC
+    NCCLVER="$(apt-cache madison libnccl2 | \
+      grep $(dpkg -l cuda-libraries* |awk '/cuda-lib/{print$3}'|cut -d'.' -f 1,2)|head -1|awk '{print$3}')"
+    apt-get update && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libnccl2=$NCCLVER \
+        libomp-dev \
+        ca-certificates \
+        libssl-dev \
+        curl \
+        pkg-config && \ 
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        python3-pip && \
+
+    rm -rf /var/lib/apt/lists/* && apt clean
+HEREDOC
+
+RUN pip3 install fastapi uvicorn cffi
+
+FROM runtime
+
+# Server components
+COPY --from=base /usr/lib64/libvllm_rs.so /usr/lib64/libvllm_rs.so
+COPY --from=base /usr/local/bin/runner /usr/local/bin/runner
+RUN chmod +x /usr/local/bin/runner
+
+COPY --from=base /opt/wheels wheels
+RUN pip3 install wheels/* && rm -rf wheels
+RUN echo -e '#!/bin/bash\npython3 -m vllm_rs.server  "$@"' > /usr/local/bin/vllm-rs-server && chmod +x /usr/local/bin/vllm-rs-server
+
+# CLI component
+COPY --from=base /usr/local/bin/vllm-rs /usr/local/bin/vllm-rs
+RUN chmod +x /usr/local/bin/vllm-rs
+
+# Only the `devel` builder image provides symlinks, restore the `libnccl.so` symlink:
+RUN ln -s libnccl.so.2 /usr/lib/$(uname -m)-linux-gnu/libnccl.so
+
+ENV HUGGINGFACE_HUB_CACHE=/data PORT=80
+EXPOSE 80
+CMD ["bash"]
+
