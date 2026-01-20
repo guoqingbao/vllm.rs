@@ -2,7 +2,6 @@
 use super::wna16::WNA16;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
-use attention_rs::fp8_linear::fp8_matmul;
 use candle_core::quantized;
 use candle_core::quantized::GgmlDType;
 use candle_core::Module;
@@ -674,6 +673,9 @@ impl LnFp8 {
         }
         .to_dtype(DType::F32)?;
 
+        #[cfg(feature = "cutlass")]
+        let weight_scale = weight_scale.t()?.contiguous()?;
+
         // Load bias if present
         let bias = vb.get((out_dim,), "bias");
         let bias = if bias.is_ok() {
@@ -716,7 +718,16 @@ impl Module for LnFp8 {
         let x_2d = x.reshape((m, k))?;
 
         // Call FP8 matmul
-        let out = fp8_matmul(
+        #[cfg(feature = "cutlass")]
+        let out = attention_rs::fp8_linear::fp8_matmul_cutlass(
+            &x_2d,
+            &self.weight.t()?,
+            &self.weight_scale,
+            &self.weight_block_size,
+        )?;
+
+        #[cfg(not(feature = "cutlass"))]
+        let out = attention_rs::fp8_linear::fp8_matmul(
             &x_2d,
             &self.weight,
             &self.weight_scale,

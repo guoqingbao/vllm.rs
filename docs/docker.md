@@ -45,7 +45,7 @@ Build from command line:
 docker build --network=host -t vllm-rs:latest \
   #--build-arg CHINA_MIRROR=1 \ Use Rust crate mirror in Chinese mainland
   --build-arg WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context \
-  --build-arg CUDA_COMPUTE_CAP=89 \
+  --build-arg CUDA_COMPUTE_CAP=sm_80 \
   .
 ```
 

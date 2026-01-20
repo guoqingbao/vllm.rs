@@ -58,9 +58,8 @@
 ## 🧠 支持的模型架构
 
 * ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
-* ✅ Qwen 系列（Qwen2、Qwen3）
-* ✅ Qwen2 Moe 系列（使用Qwen3 MoE流程+共享专家层）
-* ✅ Qwen3 MoE 系列
+* ✅ Qwen 系列（Qwen2、Qwen3）（支持硬件FP8加速，SM90+）
+* ✅ Qwen2/Qwen3 Moe 系列（支持硬件FP8加速，SM90+）
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
@@ -71,6 +70,8 @@
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
 支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
+
+所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flash-context`特性）。
 
 ---
 ## 📚 文档
@@ -141,7 +142,7 @@ python3 -m pip install vllm_rs
     <summary>FP8模型</summary>
 
 ```bash
-# CUDA (MoE, Dense)
+# CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
 target/release/vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
 target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
@@ -176,9 +177,14 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 > 方案 1：Docker编译：
 ```bash
 cd vllm.rs
-./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+# 将 `sm_80` 更改至你当前的硬件特性，如 sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
+
+# 添加 `cutlass` 特性以支持fp8模型 (Qwen3系列, sm90+)，使用CUDA 13 镜像
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+
 # #传 1 启用Rust中国区镜像（适用于中国大陆）
-# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
 ```
 
 > 方案 2：手动编译：
@@ -211,6 +217,7 @@ apt-get install -y libnccl2 libnccl-dev
 # 只有单卡的情况下去掉 `nccl`
 # V100及较老的机型去掉 `flash-attn,flash-context`
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
+# 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>

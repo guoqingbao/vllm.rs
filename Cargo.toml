@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.7.16"
+version = "0.8.0"
 edition = "2021"
 default-run = "vllm-rs"
 
@@ -38,7 +38,7 @@ ahash = "0.8.11"
 reedline = "0.40.0"
 pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py38"], optional = true }
 parking_lot = "0.12.4"
-attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.2.2", rev = "66ba9a4" }
+attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.3.0", rev = "ad0b6bb" }
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
@@ -70,6 +70,7 @@ crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda"]
 nccl = ["candle-core/nccl"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
+cutlass = ["attention-rs/cutlass"]
 flash-attn = ["attention-rs/flash-attn"]
 flash-context = ["attention-rs/flash-attn", "attention-rs/flash-decoding", "attention-rs/flash-context", "attention-rs/no-fp8-kvcache"]
 metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal", "dep:metal"]
