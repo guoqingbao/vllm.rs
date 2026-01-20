@@ -59,9 +59,8 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 ## 🧠 Supported Architectures
 
 * ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
-* ✅ Qwen (Qwen2, Qwen3)
-* ✅ Qwen2 Moe
-* ✅ Qwen3 Moe
+* ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8 support，SM90+)
+* ✅ Qwen2/Qwen3 Moe (+Hardware FP8 support，SM90+)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -73,6 +72,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
+All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flash-context`).
 ---
 ## 📚 Guides
 - [Get Started](docs/get_started.md)
@@ -176,13 +176,14 @@ See [**More Python Examples →**](python/ReadMe.md)
 > **Option 1 (Recommended):** Build with Docker
 ```bash
 cd vllm.rs
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python"
+# change `sm_80` to your hardware spec, e.g., sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
 
-# +cutlass feature for optimized fp8 models (Qwen3 series, sm90+)
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python"
+# +cutlass feature for optimized fp8 models (Qwen3 series, sm90+) with CUDA 13
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 
 # Pass 1 to enable rust crate mirror (Chinese Mainland)
-# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" 1
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
 ```
 
 > **Option 2:** Manual Build

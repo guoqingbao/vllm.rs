@@ -2,7 +2,12 @@
 
 ARG CUDA_VERSION=12.9.0
 ARG UBUNTU_VERSION=22.04
-FROM docker.io/nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu${UBUNTU_VERSION}
+# NEW: must be passed by build script (or defaults here)
+# - CUDA major >= 13: devel
+# - else: cudnn-devel
+ARG CUDA_FLAVOR=cudnn-devel
+
+FROM docker.io/nvidia/cuda:${CUDA_VERSION}-${CUDA_FLAVOR}-ubuntu${UBUNTU_VERSION}
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -68,7 +73,8 @@ RUN set -eux; \
   install -Dm755 target/release/runner /usr/local/bin/runner; \
   install -Dm755 target/release/vllm-rs /usr/local/bin/vllm-rs; \
   printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
-  chmod +x /usr/local/bin/vllm-rs-server
+  chmod +x /usr/local/bin/vllm-rs-server; \
+  cargo clean
 
 RUN set -eux; \
   arch="$(uname -m)"; \
