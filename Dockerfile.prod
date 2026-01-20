@@ -1,6 +1,6 @@
 # syntax = devthefuture/dockerfile-x
 
-INCLUDE builder.Dockerfile
+INCLUDE Dockerfile
 
 # Thin runtime container for production use
 FROM docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS runtime
