@@ -74,6 +74,7 @@ RUN set -eux; \
   install -Dm755 target/release/vllm-rs /usr/local/bin/vllm-rs; \
   printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
   chmod +x /usr/local/bin/vllm-rs-server; \
+  cp -r target/wheels/ /opt/wheels; \
   cargo clean
 
 RUN set -eux; \

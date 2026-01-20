@@ -29,16 +29,16 @@ RUN pip3 install fastapi uvicorn cffi
 FROM runtime
 
 # Server components
-COPY --from=base /vllm.rs/target/release/libvllm_rs.so /usr/lib64/libvllm_rs.so
-COPY --from=base /vllm.rs/target/release/runner /usr/local/bin/runner
+COPY --from=base /usr/lib64/libvllm_rs.so /usr/lib64/libvllm_rs.so
+COPY --from=base /usr/local/bin/runner /usr/local/bin/runner
 RUN chmod +x /usr/local/bin/runner
 
-COPY --from=base /vllm.rs/target/wheels wheels
+COPY --from=base /opt/wheels wheels
 RUN pip3 install wheels/* && rm -rf wheels
 RUN echo -e '#!/bin/bash\npython3 -m vllm_rs.server  "$@"' > /usr/local/bin/vllm-rs-server && chmod +x /usr/local/bin/vllm-rs-server
 
 # CLI component
-COPY --from=base /vllm.rs/target/release/vllm-rs /usr/local/bin/vllm-rs
+COPY --from=base /usr/local/bin/vllm-rs /usr/local/bin/vllm-rs
 RUN chmod +x /usr/local/bin/vllm-rs
 
 # Only the `devel` builder image provides symlinks, restore the `libnccl.so` symlink:
