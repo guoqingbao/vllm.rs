@@ -73,6 +73,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
 All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flash-context`).
+
 ---
 ## 📚 Guides
 - [Get Started](docs/get_started.md)
