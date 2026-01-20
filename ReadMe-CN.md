@@ -143,9 +143,9 @@ python3 -m pip install vllm_rs
 
 ```bash
 # CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
-target/release/vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
-target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -172,9 +172,9 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
 ## 📘 使用方法（Rust）
 
-### 编译 (CUDA 11+, 12+, 13.0)
+### CUDA平台安装 (CUDA 11+, 12+, 13.0)
 
-> 方案 1：Docker编译：
+> 方案 1：安装进Docker：
 ```bash
 cd vllm.rs
 # 使用以下构建方式之一
@@ -192,7 +192,7 @@ cd vllm.rs
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
 
-> 方案 2：手动编译：
+> 方案 2：手动安装：
    <details>
     <summary>展开详情</summary>
 
@@ -217,23 +217,24 @@ apt-get install -y \
 # NCCL
 apt-get install -y libnccl2 libnccl-dev
 ```
-编译 vLLM.rs
+安装 vLLM.rs
 ```shell
 # 只有单卡的情况下去掉 `nccl`
 # V100及较老的机型去掉 `flash-attn,flash-context`
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
 # 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
-./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+# 默认安装进/usr/local/bin，使用`--dst`更改安装目录
+sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>
 
-### 编译 (MacOS/Metal)
+### MacOS/Metal平台安装
 
 安装 [Xcode 命令行工具](https://mac.install.guide/commandlinetools/)
 
-使用`metal`特性编译
+使用`metal`特性安装
 ```shell
-cargo build --release --features metal
+cargo install --features metal
 ```
 
 ### 运行方式
@@ -246,9 +247,9 @@ cargo build --release --features metal
 
    ```bash
    # CUDA （将 `--i`替换成 `--ui-server`则启用网页版本）
-   target/release/vllm-rs --d 0,1 -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.8
+   vllm-rs --d 0,1 -- --i --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.8
    # Metal/MacOS (MacOS Tahoe之前的系统可能会存在生成过慢问题，使用更小的`--max-model-len` 或 `--kv-fraction`减少显存占用)
-   target/release/vllm-rs --d 0,1 -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
+   vllm-rs --d 0,1 -- --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
    ```
   </details>
 
@@ -256,7 +257,7 @@ cargo build --release --features metal
     <summary>多卡未量化模型</summary>
 
    ```bash
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+   vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
    ```
   </details>
 
@@ -264,7 +265,7 @@ cargo build --release --features metal
     <summary>FP8模型</summary>
 
    ```bash
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
+   vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
    ```
   </details>
 
@@ -272,7 +273,7 @@ cargo build --release --features metal
     <summary>多卡量化模型</summary>
 
    ```bash
-   target/release/vllm-rs --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --prefix-cache
+   vllm-rs --ui-server --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --prefix-cache
    ```
   </details>
 
@@ -281,7 +282,7 @@ cargo build --release --features metal
 
    ```bash
    # 编译时去除`flash-context`以使用fp8 kvcache
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --server --port 8000 --fp8-kvcache
+   vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --server --port 8000 --fp8-kvcache
    ```
   </details>
 
@@ -306,7 +307,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
    无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
    # PD服务器使用`flash-context`加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
-   target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --pd-server
+   vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --pd-server
    ```
 
    PD服务器还可使用预编译Python包启动 (依赖：pip install vllm_rs)
@@ -319,7 +320,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
     <summary>启动PD客户端</summary>
 
    ```bash
-   target/release/vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
+   vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
    ```
 
   PD客户端还可使用预编译Python包启动 (依赖：pip install vllm_rs)

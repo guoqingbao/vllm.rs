@@ -172,9 +172,9 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 ## 📘 Usage (Rust)
 
-### Build (CUDA 11+, 12+, 13.0)
+### Install on CUDA (CUDA 11+, 12+, 13.0)
 
-> **Option 1 (Recommended):** Build with Docker
+> **Option 1:** Install into Docker
 ```bash
 cd vllm.rs
 # Use one of the following build methods
@@ -192,7 +192,7 @@ cd vllm.rs
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
 
-> **Option 2:** Manual Build
+> **Option 2:** Manual Installation
 
    <details>
     <summary>More Details</summary>
@@ -220,22 +220,23 @@ sudo apt-get install -y \
 sudo apt-get install -y libnccl2 libnccl-dev
 ```
 
-Build vLLM.rs
+Install vLLM.rs
 ```shell
 # Remove `nccl` for single-gpu usage
 # Remove `flash-attn,flash-context` for V100 or older hardware
 # Add `cutlass` for sm90+ (fp8 models)
-./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+# Use `--dst` to change installation folder
+sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>
 
-### Build (Metal)
+### Install on MacOS/Metal
 
 Install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
 
-Build with `metal` feature
+Install with `metal` feature
 ```shell
-cargo build --release --features metal
+cargo install --features metal
 ```
 
 ### Running
@@ -249,9 +250,9 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 
   ```bash
   # CUDA
-  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS
-  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```
   
   <details open>
@@ -259,7 +260,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 
   ```bash
   # Replace "--ui-server" with "--server" will only start API server
-  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
   ```
 
   </details>
@@ -268,7 +269,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
     <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   ```
 
   </details>
@@ -278,9 +279,9 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 
 ```bash
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
-target/release/vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
-target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -292,7 +293,7 @@ target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-
   # CUDA: Disabled flash-context feature to use fp8-kvcache
   ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --fp8-kvcache
   # MacOS/Metal
-  cargo run --release --features metal -- --ui-server --w /path/Qwen3-4B --isq q6k
+  vllm-rs --ui-server --w /path/Qwen3-4B --isq q6k
   ```
 
   </details>
@@ -324,7 +325,7 @@ See [**MCP Documentation →**](docs/mcp_tool_calling.md)
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
+  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
@@ -339,7 +340,7 @@ See [**MCP Documentation →**](docs/mcp_tool_calling.md)
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  target/release/vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
+  vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   Or, start with prebuild Python package:
