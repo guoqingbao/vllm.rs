@@ -176,9 +176,13 @@ See [**More Python Examples →**](python/ReadMe.md)
 > **Option 1 (Recommended):** Build with Docker
 ```bash
 cd vllm.rs
-./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python"
+
+# +cutlass feature for optimized fp8 models (Qwen3 series, sm90+)
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python"
+
 # Pass 1 to enable rust crate mirror (Chinese Mainland)
-# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" 1
 ```
 
 > **Option 2:** Manual Build
@@ -213,6 +217,7 @@ Build vLLM.rs
 ```shell
 # Remove `nccl` for single-gpu usage
 # Remove `flash-attn,flash-context` for V100 or older hardware
+# Add `cutlass` for sm90+ (fp8 models)
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>
@@ -265,7 +270,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
     <summary>FP8 Model</summary>
 
 ```bash
-# CUDA (MoE, Dense)
+# CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
 target/release/vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
 target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
@@ -394,8 +399,8 @@ maturin build --release --features cuda,python
 # CUDA (+Flash Attention, only used in prefill stage) 
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (+Flash Attention for decoding, +high prefill throughput, long time to build) 
-./build.sh --release --features cuda,nccl,flash-context,python
+# CUDA (+cutlass (sm90+), +Flash Attention for decoding, +high prefill throughput, long time to build) 
+./build.sh --release --features cuda,nccl,flash-attn,flash-context,cutlass,python
 
 # macOS (Metal, single GPU only, with prefix-cache and FP8 kvcache)
 maturin build --release --features metal,python

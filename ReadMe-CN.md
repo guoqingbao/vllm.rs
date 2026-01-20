@@ -141,7 +141,7 @@ python3 -m pip install vllm_rs
     <summary>FP8模型</summary>
 
 ```bash
-# CUDA (MoE, Dense)
+# CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
 target/release/vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
 target/release/vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
@@ -176,9 +176,13 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 > 方案 1：Docker编译：
 ```bash
 cd vllm.rs
-./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context"
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python"
+
+# 添加 `cutlass` 特性以支持fp8模型 (Qwen3系列, sm90+)
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python"
+
 # #传 1 启用Rust中国区镜像（适用于中国大陆）
-# ./build_docker.sh "cuda,nccl,graph,python,flash-attn,flash-context" 1
+# ./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" 1
 ```
 
 > 方案 2：手动编译：
@@ -211,6 +215,7 @@ apt-get install -y libnccl2 libnccl-dev
 # 只有单卡的情况下去掉 `nccl`
 # V100及较老的机型去掉 `flash-attn,flash-context`
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
+# 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>
