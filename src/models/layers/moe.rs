@@ -847,20 +847,12 @@ impl FusedMoeFp8 {
                     let scale_n = (cfg.hidden_size + by - 1) / by;
                     let scale_k = (moe_cfg.moe_intermediate_size * 2 + bx - 1) / bx;
 
-                    let gate_up_scale = match vb.get_with_hints_dtype(
+                    let gate_up_scale = vb.get_with_hints_dtype(
                         (num_experts, scale_n, scale_k),
-                        "gate_up_proj.weight_scale",
+                        "gate_up_proj_scale_inv",
                         Default::default(),
                         DType::F32,
-                     ) {
-                        Ok(s) => s,
-                        Err(_) => vb.get_with_hints_dtype(
-                            (num_experts, scale_n, scale_k),
-                            "gate_up_proj.weight_scale_inv",
-                            Default::default(),
-                            DType::F32,
-                        ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing gate_up_proj.weight_scale and .weight_scale_inv".into()))?
-                     };
+                    )?;
 
                     let inter_blocks = moe_cfg.moe_intermediate_size / bx;
                     let local_inter_blocks = inter_blocks / comm.world_size();
@@ -890,21 +882,15 @@ impl FusedMoeFp8 {
                         .t()?
                         .contiguous()?;
 
-                    let down_s = match vb.get_with_hints_dtype(
-                         (num_experts, (moe_cfg.moe_intermediate_size + by - 1)/by, (cfg.hidden_size + bx - 1)/bx),
-                         "down_proj.weight_scale",
-                         shard(1, comm.rank(), comm.world_size()),
-                         DType::F32,
-                     ) {
-                        Ok(s) => s,
-                        Err(_) => vb.get_with_hints_dtype(
-                            (num_experts, (moe_cfg.moe_intermediate_size + by - 1)/by, (cfg.hidden_size + bx - 1)/bx),
-                            "down_proj.weight_scale_inv",
+                    let down_s = vb
+                        .get_with_hints_dtype(
+                            (num_experts, scale_k / 2, scale_n),
+                            "down_proj_scale_inv",
                             shard(1, comm.rank(), comm.world_size()),
                             DType::F32,
-                        ).map_err(|_| candle_core::Error::Msg("FusedMoeFp8: Missing down_proj.weight_scale and .weight_scale_inv".into()))?
-                     }
-                     .t()?.contiguous()?;
+                        )?
+                        .t()?
+                        .contiguous()?;
                     (gate_weight, gate_s, up_weight, up_s, down_weight, down_s)
                 }
                 _ => candle_core::bail!("FusedMoeFp8: Invalid varbuilder for packed loading"),

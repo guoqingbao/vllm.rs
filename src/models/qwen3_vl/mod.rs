@@ -64,11 +64,17 @@ impl Qwen3VLForConditionalGeneration {
             .unwrap_or(vec!["Qwen3VLForConditionalGeneration".to_string()]);
         let arch = arch[0].as_str();
         crate::log_info!("Loading language model...");
+
+        let mut config_text = config.clone();
+        if cfg.quantization_config.is_some() {
+            config_text.quantization_config = cfg.quantization_config.clone();
+        }
+
         let text_model = if matches!(arch, "Qwen3VLMoeForConditionalGeneration") {
             Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
                 &vb,
                 comm.clone(),
-                config,
+                &config_text,
                 dtype,
                 is_rope_i,
                 device,
@@ -79,7 +85,7 @@ impl Qwen3VLForConditionalGeneration {
             Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
                 &vb,
                 comm.clone(),
-                config,
+                &config_text,
                 dtype,
                 is_rope_i,
                 device,
