@@ -97,7 +97,10 @@
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
 apt-get install -y libnccl2 libnccl-dev
+# Metal平台 或 CUDA 12+/SM80+
 python3 -m pip install vllm_rs
+# 针对CUDA 13+/SM90+, 可从release assets下载安装
+https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
 ```
 
 ### 🌐✨ API Server + ChatGPT风格内置网页

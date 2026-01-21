@@ -99,7 +99,10 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ```shell
 # Install NCCL (CUDA)
 apt-get install -y libnccl2 libnccl-dev
+# For Metal or CUDA 12+/SM80+
 python3 -m pip install vllm_rs
+# For CUDA 13+/SM90+, download from release assets
+https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
 ```
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
