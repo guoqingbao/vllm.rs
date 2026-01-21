@@ -192,6 +192,8 @@ cd vllm.rs
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
 
+参考 [**如何通过Docker运行 vLLM.rs 服务 →**](docs/docker.md)
+
 > 方案 2：手动安装：
    <details>
     <summary>展开详情</summary>

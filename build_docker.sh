@@ -180,21 +180,17 @@ China mirror mode: ${CHINA_MIRROR}
 
 Commands:
 
-1) vLLM.rs CLI:
-   docker run --rm --gpus all ${IMAGE_TAG} vllm-rs --help
+1) vLLM.rs Help:
+   docker run --rm -it --gpus all --network host ${IMAGE_TAG} vllm-rs --help
 
-2) Server shortcut:
-   docker run --rm --gpus all -p 80:80 ${IMAGE_TAG} vllm-rs-server --help
+2) Run API server (make sure `--network host`):
+   docker run --rm -it --gpus all --network host ${IMAGE_TAG} vllm-rs --m Qwen/Qwen3-0.6B --server
 
-3) Serving model (manual):
-   # Start the docker
-   docker run --rm -it --gpus all -v /home:/home -v /data:/data -p 8000:8000 -p 8001:8001 ${IMAGE_TAG} bash
-   # Run model serving (choose local access, API server at: http://host_ip:8000/v1)
-   a) vllm-rs-server --m Qwen/Qwen3-0.6B --port 8000
-   b) vllm-rs-server --w /home/path/Qwen3-Coder-30B-A3B-Instruct-FP8 --port 8000
-
-4) Run interactively:
-   docker run --rm -it --gpus all ${IMAGE_TAG} bash
+3) Run UI + API Server:
+    a) Run interactively:
+      docker run --rm -it --gpus all --network host -v /home:/home -v /data:/data ${IMAGE_TAG} bash
+    b) Start the UI + API server
+      vllm-rs-server --w /home/path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server
 ============================================================
 
 EOF

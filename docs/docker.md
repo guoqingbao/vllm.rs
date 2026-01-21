@@ -2,10 +2,6 @@
 
 This repository provides a Docker image for **vLLM-rs**, a high-performance inference engine for large language models (LLMs), built using Rust and optimized for NVIDIA GPUs.
 
-The image includes:
-- A **command-line interface (CLI)** tool (`vllm-rs`)
-- An **OpenAI-compatible REST API server** (`vllm-rs-server`), a shell wrapper around the Python service that fronts the Rust runtime
-
 ---
 
 ## Build Options
@@ -18,114 +14,60 @@ cuda,nccl,graph,python,flash-attn,flash-context
 
 Graph capture is enabled by default; remove `graph` if you don't want it (or if your GPU does not support it).
 `flash-context` increases build time but improves long-context prefill/decoding performance.
-For V100, remove `flash-attn` and `flash-context`.
-For single-GPU machines, remove `nccl`.
 
-Default build args:
-- `WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context` (or `BUILD_FEATURES=...`)
-- `CUDA_COMPUTE_CAP=80`
+For V100, remove `flash-attn` and `flash-context`.
+
+For single-GPU machines, you may remove `nccl`.
+
+For SM90+ GPUs, add feature `cutlass` will enable hardware FP8 acceleration.
 
 ---
 
-## Example Usage (Docker Run)
+## Docker Build
 
 ## Build From Dockerfile
 
-To build this Docker image locally, choose the feature list and compute capability:
+To build this Docker image locally, choose the feature list, compute capability and CUDA version:
 
 Build from script:
 
 ```bash
-./build_docker.sh
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0
 ```
 
 Build from command line:
 
 ```bash
-docker build --network=host -t vllm-rs:latest \
-  #--build-arg CHINA_MIRROR=1 \ Use Rust crate mirror in Chinese mainland
-  --build-arg WITH_FEATURES=cuda,nccl,graph,python,flash-attn,flash-context \
-  --build-arg CUDA_COMPUTE_CAP=sm_80 \
+docker build --network=host -f "Dockerfile" -t "vllm-rs:latest" \
+  --build-arg CUDA_VERSION="12.9.0" \
+  --build-arg UBUNTU_VERSION="22.04" \
+  --build-arg CUDA_FLAVOR="cudnn-devel" \
+  --build-arg WITH_FEATURES="cuda,nccl,graph,python,flash-attn,flash-context" \
+  --build-arg CUDA_COMPUTE_CAP="sm_80" \
+  # --build-arg CHINA_MIRROR="0" \ Use Rust crate mirror in Chinese mainland
   .
 ```
 
-### Run with a Hugging Face Model
+## Run vLLM.rs docker service
+
+### vLLM.rs Help:
+```bash
+docker run --rm -it --gpus all --network host vllm-rs:latest vllm-rs --help
+```
+### Run API server (make sure `--network host`):
 
 ```bash
-docker run --gpus all -v "$HOME":/workspace -p 8000:8000 -p 8001:8001 \
-  vllm-rs:latest \
-  vllm-rs-server --m meta-llama/Llama-3.2-1B --host 0.0.0.0 --port 8000 --ui-server
+docker run --rm -it --gpus all --network host vllm-rs:latest vllm-rs --m Qwen/Qwen3-0.6B --server
 ```
 
-### Run CLI Inference
-
+### Run UI + API Server:
+Run interactively:
 ```bash
-docker run --gpus all vllm-rs:latest \
-  vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 100
+docker run --rm -it --gpus all --network host -v /home:/home -v /data:/data vllm-rs:latest bash
 ```
-
----
-
-## Available Tools
-
-### 1. `vllm-rs` – Rust CLI/REST API Inference Tool
-
+Start the UI + API server
 ```bash
-vllm-rs [OPTIONS] [HF_TOKEN] [HF_TOKEN_PATH]
+vllm-rs --w /home/path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server
 ```
 
-**Usage Example:**
-
-```bash
-vllm-rs --m meta-llama/Llama-3.2-1B --max-tokens 512 --temperature 0.7 --server --port 8000
-```
-
-**Common Options:**
-| Option | Description |
-|--------|-------------|
-| `--m <MODEL_ID>` | Hugging Face model ID |
-| `--w <WEIGHT_PATH>` | Path to safetensor weights |
-| `--f <WEIGHT_FILE>` | GGUF file path or name |
-| `--max-tokens <MAX_TOKENS>` | Max tokens per request (default: 4096) |
-| `--temperature <TEMP>` | Sampling temperature |
-| `--top-p <TOP_P>` | Top-p sampling |
-| `--cpu` | Run on CPU instead of GPU |
-| `--d <DEVICE_IDS>` | GPU device IDs to use |
-| `--context-cache` | Enable context caching for better performance |
-| `--server` | Enable serving native Rust chat API instead of interactive mode |
-| `--port` | Port on which to bind 0.0.0.0 serving the HTTP API |
-
-See `vllm-rs --help` for full list of options.
-
----
-
-### 2. `vllm-rs-server` – Python REST API Server
-
-```bash
-vllm-rs-server --host 0.0.0.0 --port 80 --m meta-llama/Llama-3.2-1B
-```
-
-**Endpoint:**  
-`POST /v1/completions`
-
-**Example Request:**
-```bash
-curl http://localhost:80/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{"prompt":"Hello, how are you?", "max_tokens": 100}'
-```
-
-**Common Options:**
-| Option | Description |
-|--------|-------------|
-| `--host <HOST>` | Host to bind server to |
-| `--port <PORT>` | Port to listen on |
-| `--m <MODEL_ID>` | Hugging Face model ID |
-| `--w <WEIGHT_PATH>` | Path to safetensor weights |
-| `--f <WEIGHT_FILE>` | GGUF file path or name |
-| `--dtype <DTYPE>` | Data type (f16, bf16, f32) |
-| `--max-num-seqs <MAX_SEQS>` | Max concurrent sequences |
-| `--context-cache` | Enable context caching |
-| `--temperature <TEMP>` | Sampling temperature |
-
-See `vllm-rs-server --help` for full list of options.
+**Note:** if `Ctrl+C` not working in docker, you need `Ctrl+P` then `Ctrl+Q` to stop the server.

@@ -944,7 +944,7 @@ pub async fn run_server(
         let lan_url = format!("http://{ip}:{port}/v1/");
 
         let api_server_url = format!(
-            "🧠 API server running at (Press `Ctrl+C` or `Ctrl+P` then `Ctrl+Q`):\n   -  {} (Local Access) \n   -  {} (Remote Access, IP may not correct under Docker)",
+            "🧠 API server running at:\n   -  {} (Local Access) \n   -  {} (Remote Access, IP may not correct under Docker)",
             local_url, lan_url
         );
         println!("{}", api_server_url.cyan());
@@ -964,6 +964,8 @@ pub async fn run_server(
         println!("{}", format!("   - GET  /v1/usage").yellow());
         println!("{}", format!("   - POST /tokenize").yellow());
         println!("{}", format!("   - POST /detokenize").yellow());
+        println!("");
+        println!("🛑 {}", format!("(EXIT: Press `Ctrl+C` or `Ctrl+P` then `Ctrl+Q`)").bold().red());
         println!("");
         format!("0.0.0.0:{}", port)
     };
