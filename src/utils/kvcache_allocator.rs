@@ -160,7 +160,7 @@ impl KVCacheAllocator {
 
     pub fn plan(&self, device_ids: &[usize], econfig: &mut EngineConfig) -> Result<()> {
         match self.get_available_memory(&device_ids) {
-            Ok(min_available) => match self.plan_allocation(min_available) {
+            Ok(min_available) => match self.plan_allocation(min_available, device_ids.len()) {
                 Ok(allocation) => {
                     self.apply_to_config(&allocation, econfig);
                     Ok(())
@@ -329,6 +329,7 @@ impl KVCacheAllocator {
     pub fn plan_allocation(
         &self,
         min_available_memory: u64,
+        num_shards: usize,
     ) -> std::result::Result<KVCacheAllocation, KVCacheError> {
         let per_block = self.per_block_bytes();
         let mut available_memory_for_kvcache = min_available_memory;
@@ -391,10 +392,12 @@ impl KVCacheAllocator {
         };
 
         crate::log_warn!(
-            "KVCache Allocation: {} GPU blocks ({:.2} GB), max usable kvcache tokens {}, scheduling limits [{} seqs x {} tokens]",
+            "KVCache Allocation: {} GPU blocks ({:.2} GB x {}), max usable kvcache tokens {} ({}k bytes per token), scheduling limits [{} seqs x {} tokens]",
             num_gpu_blocks,
             kvcache_memory_bytes as f64 / SIZE_IN_GB,
+            num_shards,
             max_num_batched_tokens,
+            per_block / 1024 / self.block_size,
             max_num_seqs,
             max_model_len
         );
