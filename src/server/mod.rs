@@ -965,7 +965,12 @@ pub async fn run_server(
         println!("{}", format!("   - POST /tokenize").yellow());
         println!("{}", format!("   - POST /detokenize").yellow());
         println!("");
-        println!("🛑 {}", format!("(EXIT: Press `Ctrl+C` or `Ctrl+P` then `Ctrl+Q`)").bold().red());
+        println!(
+            "🛑 {}",
+            format!("EXIT: Ctrl+C to quit. If unresponsive: Ctrl+P → Ctrl+Q (last resort).")
+                .bold()
+                .red()
+        );
         println!("");
         format!("0.0.0.0:{}", port)
     };
