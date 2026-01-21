@@ -312,7 +312,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
-            norm_topk_prob: expert_weights_norm.unwrap_or(false),
+            norm_topk_prob: expert_weights_norm.unwrap_or(true),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
                 as usize,
             first_k_dense_replace: leading_dense_block_count,
