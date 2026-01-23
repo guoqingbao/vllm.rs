@@ -245,6 +245,7 @@ impl EngineStream {
 #[pymethods]
 impl Message {
     #[new]
+    #[pyo3(signature = (role, content, num_images=0))]
     pub fn new(role: String, content: String, num_images: usize) -> Self {
         Message {
             role,

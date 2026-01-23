@@ -178,6 +178,8 @@ See [**More Python Examples →**](python/ReadMe.md)
 ### Install on CUDA (CUDA 11+, 12+, 13.0)
 
 > **Option 1:** Install into Docker
+   <details>
+   
 ```bash
 cd vllm.rs
 # Use one of the following build methods
@@ -194,15 +196,18 @@ cd vllm.rs
 # Pass `--prod` to build the production image (uses `Dockerfile.prod`)
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
+  </details>
 
-See [**Run vLLM.rs docker service →**](docs/docker.md)
+See [**Run vLLM.rs in docker →**](docs/docker.md)
 
 > **Option 2:** Manual Installation
 
-   <details>
-    <summary>More Details</summary>
+   <details open>
 
-Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
+Install the Rust toolchain
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 Install build dependencies
 

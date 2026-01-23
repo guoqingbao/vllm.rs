@@ -689,6 +689,116 @@ pub fn spawn_runner(
         kwargs
             .set_item("text", true)
             .map_err(candle_core::Error::wrap)?;
+        let libs_dir = Path::new(runner_path)
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("vllm_rs.libs"));
+        if let Some(libs_dir) = libs_dir {
+            if libs_dir.exists() {
+                let abs_libs_dir = libs_dir.canonicalize().unwrap_or(libs_dir);
+                crate::log_warn!(
+                    "Runner rpath not set; preparing LD_LIBRARY_PATH for {}",
+                    abs_libs_dir.display()
+                );
+                let env_result: std::result::Result<(), String> = (|| {
+                    let os = py.import("os").map_err(|e| e.to_string())?;
+                    let env_any = os
+                        .getattr("environ")
+                        .map_err(|e| e.to_string())?
+                        .call_method0("copy")
+                        .map_err(|e| e.to_string())?;
+                    let env = env_any.downcast::<PyDict>().map_err(|e| e.to_string())?;
+                    let mut ld_paths: Vec<String> = Vec::new();
+                    #[cfg(target_os = "linux")]
+                    {
+                        let tmp_dir = std::env::temp_dir().join("vllm_rs.libs");
+                        if std::fs::create_dir_all(&tmp_dir).is_ok() {
+                            if let Ok(entries) = std::fs::read_dir(&abs_libs_dir) {
+                                for entry in entries {
+                                    let entry = match entry {
+                                        Ok(entry) => entry,
+                                        Err(err) => {
+                                            crate::log_warn!(
+                                                "Skipping bundled lib entry: {}",
+                                                err
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let path = entry.path();
+                                    if !path.is_file() {
+                                        continue;
+                                    }
+                                    let name = match path.file_name().and_then(|s| s.to_str()) {
+                                        Some(name) => name,
+                                        None => continue,
+                                    };
+                                    if !name.starts_with("lib") {
+                                        continue;
+                                    }
+                                    let so_idx = match name.rfind(".so.") {
+                                        Some(idx) => idx,
+                                        None => continue,
+                                    };
+                                    let base = &name[..so_idx];
+                                    let dash_idx = match base.rfind('-') {
+                                        Some(idx) => idx,
+                                        None => continue,
+                                    };
+                                    let unsuffixed = format!("{}{}", &base[..dash_idx], &name[so_idx..]);
+                                    let link_path = tmp_dir.join(&unsuffixed);
+                                    if let Ok(existing) = std::fs::read_link(&link_path) {
+                                        if existing == path {
+                                            continue;
+                                        }
+                                        let _ = std::fs::remove_file(&link_path);
+                                    }
+                                    if let Err(err) =
+                                        std::os::unix::fs::symlink(&path, &link_path)
+                                    {
+                                        crate::log_warn!(
+                                            "Failed to create symlink {}: {}",
+                                            link_path.display(),
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                            ld_paths.push(tmp_dir.to_string_lossy().to_string());
+                            crate::log_warn!(
+                                "Runner using symlink dir for bundled libs: {}",
+                                tmp_dir.display()
+                            );
+                        } else {
+                            crate::log_warn!(
+                                "Failed to create temp symlink dir for bundled libs"
+                            );
+                        }
+                    }
+                    ld_paths.push(abs_libs_dir.to_string_lossy().to_string());
+                    let ld_prefix = ld_paths.join(":");
+                    let new_ld = match env.get_item("LD_LIBRARY_PATH").map_err(|e| e.to_string())?
+                    {
+                        Some(val) => {
+                            let existing: String = val.extract().map_err(|e| e.to_string())?;
+                            if existing.is_empty() {
+                                ld_prefix
+                            } else {
+                                format!("{}:{}", ld_prefix, existing)
+                            }
+                        }
+                        None => ld_prefix,
+                    };
+                    env.set_item("LD_LIBRARY_PATH", new_ld)
+                        .map_err(|e| e.to_string())?;
+                    kwargs.set_item("env", env).map_err(|e| e.to_string())?;
+                    Ok(())
+                })();
+                if let Err(err) = env_result {
+                    crate::log_warn!("Failed to set LD_LIBRARY_PATH fallback: {}", err);
+                }
+            }
+        }
 
         let result = subprocess
             .call_method("Popen", (args,), Some(&kwargs))

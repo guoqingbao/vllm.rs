@@ -160,6 +160,12 @@ else
   RUNNER_BINARY="target/$PROFILE/$RUNNER_BIN"
   cp "$RUNNER_BINARY" "$DEST_DIR/runner"
   chmod 755 "$DEST_DIR/runner"
+  if command -v patchelf >/dev/null 2>&1; then
+    echo "Patching runner rpath for bundled libs..."
+    patchelf --set-rpath '$ORIGIN:$ORIGIN/../vllm_rs.libs' "$DEST_DIR/runner"
+  else
+    echo "Warning: patchelf not found; runner may need LD_LIBRARY_PATH to find bundled libs."
+  fi
   echo "✅ Done. Runner binary copied to $DEST_DIR/"
 fi
 

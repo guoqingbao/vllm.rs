@@ -178,6 +178,8 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 ### CUDA平台安装 (CUDA 11+, 12+, 13.0)
 
 > 方案 1：安装进Docker：
+   <details>
+
 ```bash
 cd vllm.rs
 # 使用以下构建方式之一
@@ -194,14 +196,18 @@ cd vllm.rs
 # 传入 `--prod` 以构建生产镜像（使用 `Dockerfile.prod`）
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 ```
+   </details>
 
 参考 [**如何通过Docker运行 vLLM.rs 服务 →**](docs/docker.md)
 
 > 方案 2：手动安装：
-   <details>
-    <summary>展开详情</summary>
 
-安装 [Rust 工具链](https://www.rust-lang.org/tools/install)
+   <details open>
+
+安装 Rust 工具链
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 安装构建依赖：
 ```sh
@@ -222,14 +228,14 @@ apt-get install -y \
 # NCCL
 apt-get install -y libnccl2 libnccl-dev
 ```
-安装 vLLM.rs
+编译 vLLM.rs
 ```shell
 # 只有单卡的情况下去掉 `nccl`
 # V100及较老的机型去掉 `flash-attn,flash-context`
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
 # 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
 # 默认安装进/usr/local/bin，使用`--dst`更改安装目录
-sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
+./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
 ```
   </details>
 
