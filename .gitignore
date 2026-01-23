@@ -5,3 +5,4 @@
 AGENTS.md
 /log
 *.log
+*.code-workspace
