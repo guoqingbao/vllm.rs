@@ -99,9 +99,9 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ```shell
 # Install NCCL (CUDA)
 apt-get install -y libnccl2 libnccl-dev
-# For Metal or CUDA 12+/SM80+
+# For Metal or CUDA Ampere/Ada SM80+ Hardware
 python3 -m pip install vllm_rs
-# For CUDA 13+/SM90+, download from release assets
+# Hopper (SM90+) and Backwell (SM120+) GPUs, download package from release assets
 https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
 ```
 
@@ -179,7 +179,7 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 > **Option 1:** Install into Docker
    <details>
-   
+
 ```bash
 cd vllm.rs
 # Use one of the following build methods

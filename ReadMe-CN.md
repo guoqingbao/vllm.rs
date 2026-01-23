@@ -97,9 +97,9 @@
 ```shell
 # CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
 apt-get install -y libnccl2 libnccl-dev
-# Metal平台 或 CUDA 12+/SM80+
+# Metal平台 或 Ampere/Ada GPU (SM80+)
 python3 -m pip install vllm_rs
-# 针对CUDA 13+/SM90+, 可从release assets下载安装
+# 针对Hopper (SM90+) and Backwell (SM120+) GPUs, 可从release assets下载并解压安装
 https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
 ```
 
