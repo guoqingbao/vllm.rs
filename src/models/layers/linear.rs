@@ -682,7 +682,11 @@ impl LnFp8 {
         let sm_version = 0;
 
         #[cfg(feature = "cutlass")]
-        let weight_scale = if sm_version == 90 {
+        let weight_scale = if sm_version >= 100 {
+            // column-major view: stride(0) == 1
+            weight_scale.t()?
+        } else if sm_version >= 90 {
+            // row-major contiguous: stride(1) == 1
             weight_scale.t()?.contiguous()?
         } else {
             weight_scale
@@ -732,7 +736,7 @@ impl Module for LnFp8 {
 
         // Call FP8 matmul
         #[cfg(feature = "cutlass")]
-        let out = if self.sm_version == 90 {
+        let out = if self.sm_version >= 90 {
             attention_rs::fp8_linear::fp8_matmul_cutlass(
                 &x_2d,
                 &self.weight.t()?,
