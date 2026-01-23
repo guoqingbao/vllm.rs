@@ -624,6 +624,7 @@ pub struct LnFp8 {
     pub weight_scale: Tensor,
     pub bias: Option<Tensor>,
     pub weight_block_size: Vec<usize>,
+    pub sm_version: usize,
 }
 
 impl LnFp8 {
@@ -673,8 +674,19 @@ impl LnFp8 {
         }
         .to_dtype(DType::F32)?;
 
+        #[cfg(feature = "cuda")]
+        let sm_version = attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?)
+            .unwrap_or(0) as usize;
+
+        #[cfg(not(feature = "cuda"))]
+        let sm_version = 0;
+
         #[cfg(feature = "cutlass")]
-        let weight_scale = weight_scale.t()?.contiguous()?;
+        let weight_scale = if sm_version == 90 {
+            weight_scale.t()?.contiguous()?
+        } else {
+            weight_scale
+        };
 
         // Load bias if present
         let bias = vb.get((out_dim,), "bias");
@@ -698,6 +710,7 @@ impl LnFp8 {
             weight_scale,
             bias,
             weight_block_size: block_size,
+            sm_version,
         })
     }
 }
@@ -719,12 +732,22 @@ impl Module for LnFp8 {
 
         // Call FP8 matmul
         #[cfg(feature = "cutlass")]
-        let out = attention_rs::fp8_linear::fp8_matmul_cutlass(
-            &x_2d,
-            &self.weight.t()?,
-            &self.weight_scale,
-            &self.weight_block_size,
-        )?;
+        let out = if self.sm_version == 90 {
+            attention_rs::fp8_linear::fp8_matmul_cutlass(
+                &x_2d,
+                &self.weight.t()?,
+                &self.weight_scale,
+                &self.weight_block_size,
+            )?
+        } else {
+            // slower path
+            attention_rs::fp8_linear::fp8_matmul(
+                &x_2d,
+                &self.weight,
+                &self.weight_scale,
+                &self.weight_block_size,
+            )?
+        };
 
         #[cfg(not(feature = "cutlass"))]
         let out = attention_rs::fp8_linear::fp8_matmul(
