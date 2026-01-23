@@ -583,15 +583,29 @@ impl StreamToolParser {
 
         calls
     }
+
     fn split_partial_start(&self, text: &str) -> Option<(String, String)> {
         let tag = &self.config.start_token_str;
         let suffix_len = self.partial_suffix_len(text);
-        if suffix_len > 0 && suffix_len < tag.len() {
-            let prefix = text[..text.len() - suffix_len].to_string();
-            let partial = text[text.len() - suffix_len..].to_string();
-            return Some((prefix, partial));
+
+        // If no valid partial match (not less than full length), skip.
+        if suffix_len == 0 || suffix_len >= tag.len() {
+            return None;
         }
-        None
+
+        let prefix = text[..text.len() - suffix_len].to_string();
+        let partial = text[text.len() - suffix_len..].to_string();
+
+        // For "<tool_call>" tool call tags only: enforce that the partial match starts on a new line.
+        if self.config.start_token_str == "<tool_call>" {
+            if prefix.len() == 0 || prefix.ends_with("\n") || prefix.ends_with("\r\n") {
+                return Some((prefix, partial));
+            } else {
+                return None;
+            }
+        }
+
+        Some((prefix, partial))
     }
 
     fn partial_suffix_len(&self, text: &str) -> usize {
