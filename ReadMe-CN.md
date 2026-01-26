@@ -212,7 +212,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 安装构建依赖：
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev pkg-config
+sudo apt-get install -y git build-essential libssl-dev pkg-config
 ```
 
 安装 CUDA Toolkit：

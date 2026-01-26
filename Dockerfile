@@ -18,7 +18,7 @@ RUN set -eux; \
   apt-get update; \
   apt-get install -y --no-install-recommends --allow-change-held-packages \
     libnccl-dev libnccl2 \
-    curl ca-certificates \
+    curl git ca-certificates \
     libssl-dev pkg-config \
     clang libclang-dev \
     python3-pip; \

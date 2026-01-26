@@ -213,7 +213,7 @@ Install build dependencies
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential libssl-dev pkg-config
+sudo apt-get install -y git build-essential libssl-dev pkg-config
 ```
 
 Install CUDA toolkit (optional)
