@@ -89,19 +89,29 @@
 
 
 ## 📘 使用方法（Python）
-### 📦 从pip安装
-   💡 1. CUDA compute capability < 8.0 GPU设备（例如V100，不支持flash-attn特性）上需要手动编译安装（或直接使用Rust方式）
-   
-   💡 2. 预编译包启用了`flash-context`特性，如需FP8 KvCache，请重新编译并去除`flash-context`特性
+### 📦 使用 pip 安装
+- 💡 **CUDA 计算能力 < 8.0**（例如 V100）需要**手动编译** （不支持 `flash-attn`；或可使用 **Rust 模式**）。
+- 💡 **预编译包** 默认启用了`flash-context` 特性，若使用 **FP8 KV Cache**，须移除 `flash-context`后手动编译。
+
+> 🍎 Metal（macOS）
+```shell
+python3 -m pip install vllm_rs
+````
+
+> 🟩 CUDA（Linux）
+
+#### Ampere / Ada（SM80+）
 
 ```shell
-# CUDA平台需安装NCCL库（单卡使用Rust模式可不必安装NCCL）
+#（可选）安装 NCCL
 apt-get install -y libnccl2 libnccl-dev
-# Metal平台 或 Ampere/Ada GPU (SM80+)
 python3 -m pip install vllm_rs
-# 针对Hopper (SM90+) and Backwell (SM120+) GPUs, 可从release assets下载并解压安装
-https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
 ```
+
+#### Hopper（SM90+）/ Blackwell（SM120+）
+
+从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.7) 下载 wheel，解压后安装 `.whl` 包。
+
 
 ### 🌐✨ API Server + ChatGPT风格内置网页
    💡使用`--ui-server`会同时启动ChatGPT风格网页, 此时无需其它客户端。

@@ -92,18 +92,29 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ## 📘 Usage in Python
 
 ### 📦 Install with pip
-   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support) (or use Rust mode)
+- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**  
+  (no `flash-attn` support; alternatively use **Rust mode**).
+- 💡 The **prebuilt wheel** is built with the `flash-context` feature enabled.  
+  To use **FP8 KV Cache**, you must **build manually** (remove the `flash-context` build flag).
 
-   💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
 
+> 🍎 Metal (macOS)
 ```shell
-# Install NCCL (CUDA)
-apt-get install -y libnccl2 libnccl-dev
-# For Metal or CUDA Ampere/Ada SM80+ Hardware
 python3 -m pip install vllm_rs
-# Hopper (SM90+) and Backwell (SM120+) GPUs, download package from release assets
-https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.3
+````
+
+> 🟩 CUDA (Linux)
+
+#### Ampere / Ada (SM80+)
+```shell
+#(Optional) Install NCCL
+apt-get install -y libnccl2 libnccl-dev
+python3 -m pip install vllm_rs
 ```
+
+#### Hopper (SM90+) / Blackwell (SM120+)
+
+Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.7), unzip it, then install the `.whl`
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
