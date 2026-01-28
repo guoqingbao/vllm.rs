@@ -57,7 +57,11 @@ def run_server(args):
     pd_config = None
     if args.pd_server or args.pd_client:
         pd_role = PdRole.Server if args.pd_server else PdRole.Client
-        pd_method = PdMethod.RemoteTcp if args.pd_url != None else PdMethod.LocalIpc
+        # RemoteTcp for http:// or tcp:// URLs, LocalIpc for file:// or None
+        if args.pd_url and (args.pd_url.startswith("tcp:") or args.pd_url.startswith("http:")):
+            pd_method = PdMethod.RemoteTcp
+        else:
+            pd_method = PdMethod.LocalIpc
         pd_config = PdConfig(role=pd_role, method=pd_method, url=args.pd_url)
 
     cfg = EngineConfig(
