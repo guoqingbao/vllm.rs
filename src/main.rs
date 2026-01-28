@@ -133,10 +133,10 @@ async fn main() -> Result<()> {
         } else {
             PdRole::Client
         };
-        let pd_method = if args.pd_url.is_some() && &args.pd_url.clone().unwrap()[0..4] == "tcp:" {
-            PdMethod::RemoteTcp
-        } else {
-            PdMethod::LocalIpc
+        // RemoteTcp for http:// or tcp:// URLs, LocalIpc for file:// or None
+        let pd_method = match &args.pd_url {
+            Some(url) if url.starts_with("tcp:") || url.starts_with("http:") => PdMethod::RemoteTcp,
+            _ => PdMethod::LocalIpc,
         };
         Some(PdConfig {
             role: pd_role,

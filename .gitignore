@@ -3,3 +3,4 @@
 .vscode/
 .idea/
 AGENTS.md
+*.code-workspace

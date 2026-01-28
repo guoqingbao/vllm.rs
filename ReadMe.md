@@ -237,12 +237,21 @@ See [**MCP Documentation →**](docs/mcp_tool_calling.md)
 
 ## 🔀 Prefill-Decode Separation (PD Disaggregation)
 
+PD Disaggregation separates prefill (prompt processing) and decode (token generation) into separate instances. This helps avoid decoding stalls during long-context prefilling.
+
+### Connection Modes
+
+| Mode | URL Format | Use Case |
+|------|------------|----------|
+| LocalIPC (default) | No `--pd-url` | Same machine, CUDA only |
+| File-based IPC | `file:///path/to/sock` | Containers with shared volume |
+| Remote TCP | `tcp://host:port` or `http://host:port` | Different machines |
+
   <details>
     <summary>Start PD server</summary>
-  Metal/MacOS Platform or PD Server/PD Client not within same OS, `--pd-url` is required for both server and client（e.g., 0.0.0.0:8100）
 
   No need to specify `port`, since the server does not directly handle user requests.
-  The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`。
+  The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`.
 
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
@@ -273,13 +282,39 @@ See [**MCP Documentation →**](docs/mcp_tool_calling.md)
   </details>
 
   <details>
-    <summary>Multi-container / Multi-machine setup</summary>
+    <summary>Multi-container setup with shared filesystem (file:// mode)</summary>
+
+  When running PD server and client in different Docker containers on the same machine, use a shared volume for socket communication:
+
+  ```bash
+  # Create shared directory
+  mkdir -p /tmp/pd-sockets
+
+  # Start PD server container with shared volume
+  docker run --gpus '"device=0,1"' -v /tmp/pd-sockets:/sockets ...
+  target/release/vllm-rs --d 0,1 --m Qwen/... --pd-server --pd-url file:///sockets
+
+  # Start PD client container with same shared volume
+  docker run --gpus '"device=2,3"' -v /tmp/pd-sockets:/sockets ...
+  target/release/vllm-rs --d 0,1 --w /path/... --pd-client --pd-url file:///sockets --ui-server --port 8000
+  ```
+
+  </details>
+
+  <details>
+    <summary>Multi-machine setup (tcp:// or http:// mode)</summary>
 
   The PD server and client must use the same model and rank count (GPU count). They may use different *formats* of the same model (e.g., server uses unquantized Safetensor, client uses GGUF).
-  If `--pd-url` is specified (e.g., server: 0.0.0.0:8100, client: server_ip:8100), the PD server/client will bind or connect to that address.
-  The client will attempt to connect to the server using the given URL (Metal platform does not support LocalIPC, so pd-url is required).
-  In this case, the server and client may run on different machines.
-  For single machine multi-GPU, when PD server and client run in different Docker containers, Docker must be started with `--ipc=host`.
+
+  ```bash
+  # On server machine (e.g., 192.168.1.100)
+  target/release/vllm-rs --d 0,1 --m Qwen/... --pd-server --pd-url tcp://0.0.0.0:8100
+
+  # On client machine
+  target/release/vllm-rs --d 0,1 --w /path/... --pd-client --pd-url tcp://192.168.1.100:8100 --ui-server --port 8000
+  ```
+
+  > **Note**: Metal/macOS does not support LocalIPC, so `--pd-url` is required for PD disaggregation on macOS.
 
   </details>
 
@@ -371,7 +406,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.5, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
-| `--pd-url`          | When using PD Disaggregation, if specified `pd-url`, communication will occur via TCP/IP of sockets in a common file-path(used when the PD server and client are on different machines) |    |
+| `--pd-url`          | PD communication URL: `tcp://host:port` or `http://host:port` for remote TCP, `file:///path` for filesystem socket (containers), or omit for local IPC |
 | `--ui-server`       |  server mode: start the API server and also start the ChatGPT-like web server |
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
