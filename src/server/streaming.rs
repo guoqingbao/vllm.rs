@@ -6,6 +6,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use tokio::sync::watch;
 
 #[derive(PartialEq)]
 pub enum StreamingStatus {
@@ -25,6 +26,17 @@ pub enum ChatResponse {
 pub struct Streamer {
     pub rx: Receiver<ChatResponse>,
     pub status: StreamingStatus,
+    pub disconnect_tx: Option<watch::Sender<bool>>,
+}
+
+impl Drop for Streamer {
+    fn drop(&mut self) {
+        if self.status != StreamingStatus::Stopped {
+            if let Some(tx) = self.disconnect_tx.as_ref() {
+                let _ = tx.send(true);
+            }
+        }
+    }
 }
 
 impl Stream for Streamer {

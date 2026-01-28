@@ -27,6 +27,7 @@ use base64::Engine;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio::task;
 use uuid::Uuid;
 
@@ -250,6 +251,7 @@ pub async fn chat_completion(
 
         let stream = stream;
         let (response_tx, client_rx) = flume::unbounded();
+        let (disconnect_tx, mut disconnect_rx) = watch::channel(false);
 
         // Clone data needed for the async task
         let engine_clone = data.engine.clone();
@@ -283,7 +285,31 @@ pub async fn chat_completion(
             let mut current_stream = stream;
             let current_seq_id = seq_id;
 
-            while let Some(item) = current_stream.recv().await {
+            loop {
+                let item = tokio::select! {
+                    item = current_stream.recv() => item,
+                    res = disconnect_rx.changed() => {
+                        if res.is_err() {
+                            break;
+                        }
+                        if *disconnect_rx.borrow() {
+                            crate::log_warn!(
+                                "[Seq {}] Stream client disconnected during prefill/stream",
+                                current_seq_id
+                            );
+                            let mut e = engine_clone.write();
+                            e.cancel(current_seq_id);
+                            break;
+                        }
+                        continue;
+                    }
+                };
+
+                let item = match item {
+                    Some(item) => item,
+                    None => break,
+                };
+
                 match item {
                     StreamItem::Token(token, token_id) => {
                         if decode_start_time == 0 {
@@ -557,6 +583,7 @@ pub async fn chat_completion(
             Sse::new(Streamer {
                 rx: client_rx,
                 status: StreamingStatus::Uninitialized,
+                disconnect_tx: Some(disconnect_tx),
             })
             .keep_alive(
                 KeepAlive::new()

@@ -516,9 +516,23 @@ impl Scheduler {
         for i in 0..self.running.len() {
             let seq = &mut self.running[i];
             if seq.id == seq_id {
+                crate::log_warn!("Seq {} - cancel requested (status {})", seq.id, seq.status);
                 seq.status = SequenceStatus::Finished;
                 self.block_manager.deallocate(seq);
                 break;
+            }
+        }
+        if let Some(pos) = self.waiting.iter().position(|seq| seq.id == seq_id) {
+            let seq = &self.waiting[pos];
+            if seq.num_cached_tokens > 0 && seq.num_cached_tokens < seq.len() {
+                crate::log_warn!(
+                    "Seq {} - cancel requested mid-prefill (cached {} / {} tokens)",
+                    seq.id,
+                    seq.num_cached_tokens,
+                    seq.len()
+                );
+            } else {
+                crate::log_warn!("Seq {} - cancel requested (status {})", seq.id, seq.status);
             }
         }
         self.release_cache(seq_id);

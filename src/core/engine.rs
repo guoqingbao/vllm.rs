@@ -677,6 +677,7 @@ impl LLMEngine {
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
                 if indices.is_empty() {
                     //chunked prefill, no finished
+                    self.check_canceled(None);
                     return Ok(0);
                 } else {
                     let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
