@@ -59,9 +59,8 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 ## 🧠 Supported Architectures
 
 * ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
-* ✅ Qwen (Qwen2, Qwen3)
-* ✅ Qwen2 Moe
-* ✅ Qwen3 Moe
+* ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8 support，SM90+)
+* ✅ Qwen2/Qwen3 Moe (+Hardware FP8 support，SM90+)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -73,9 +72,12 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
 
+All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flash-context`).
+
 ---
 ## 📚 Guides
 - [Get Started](docs/get_started.md)
+- [Docker Build](docs/docker.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
 - [Work with Claude Code](docs/claude_code.md)
 - [Work with Goose AI Agent](docs/goose.md)
@@ -90,14 +92,29 @@ Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** forma
 ## 📘 Usage in Python
 
 ### 📦 Install with pip
-   💡 1. Manual build required for CUDA compute capability < 8.0 (e.g., V100, no flash-attn support) (or use Rust mode)
+- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**  
+  (no `flash-attn` support; alternatively use **Rust mode**).
+- 💡 The **prebuilt wheel** is built with the `flash-context` feature enabled.  
+  To use **FP8 KV Cache**, you must **build manually** (remove the `flash-context` build flag).
 
-   💡 2. Prebuilt package built with `flash-context` feature, manual build required to use FP8 KvCache (remove `flash-context` build flag).
 
+> 🍎 Metal (macOS)
 ```shell
-# NCCL library is required for CUDA. (For single GPU usage, you may choose other prebuilt packages or Rust mode.)
+python3 -m pip install vllm_rs
+````
+
+> 🟩 CUDA (Linux)
+
+#### Ampere / Ada (SM80+)
+```shell
+#(Optional) Install NCCL
+apt-get install -y libnccl2 libnccl-dev
 python3 -m pip install vllm_rs
 ```
+
+#### Hopper (SM90+) / Blackwell (SM120+)
+
+Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.7), unzip it, then install the `.whl`
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
@@ -106,8 +123,6 @@ python3 -m pip install vllm_rs
 💡Use the Rust PD Server (see **PD Disaggregation**) if decoding stalls during prefilling of long-context requests.
 
 💡Prefix cache is automatic and does not require `session_id`.
-
- ⚠️Low quantization may cause **"Thinking Process Truncated"** for reasoning models, use BF16, Q6K/Q8_0, GPTQ/AWQ can mitigate the problem, or disable `prefix-cache` or disable reasoning through `thinking=False` / `enable_thinking=False` might also help.
 
   <details open>
     <summary>Single GPU + GGUF model</summary>
@@ -134,12 +149,20 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-serv
     <summary>Unquantized load as GGUF model (ISQ)</summary>
 
 ```bash
-# Load as Q4K format, enable maximum context length:
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
+# Load as Q4K format, other options (q2k, q3k, q5k, q6k, q8_0):
+python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --ui-server --prefix-cache
 ```
 
   </details>
 
+  <details open>
+    <summary>FP8 Model</summary>
+
+```bash
+python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+```
+
+  </details>
 
   <details open>
     <summary>Multimodal model (Qwen3 VL, with images)</summary>
@@ -163,19 +186,83 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 ## 📘 Usage (Rust)
 
-Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+### Install on CUDA (CUDA 11+, 12+, 13.0)
 
-### Build (CUDA 11+, 12+)
+> **Option 1:** Install into Docker
+   <details>
+
+```bash
+cd vllm.rs
+# Use one of the following build methods
+
+# change `sm_80` to your hardware spec, e.g., sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
+
+# +cutlass feature for optimized fp8 models (Qwen3 series, sm90+) with CUDA 13
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+
+# Pass 1 to enable rust crate mirror (Chinese Mainland)
+./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
+
+# Pass `--prod` to build the production image (uses `Dockerfile.prod`)
+./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+```
+  </details>
+
+See [**Run vLLM.rs in docker →**](docs/docker.md)
+
+> **Option 2:** Manual Installation
+
+   <details open>
+
+Install the Rust toolchain
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Install build dependencies
+
+```sh
+sudo apt-get update
+sudo apt-get install -y git build-essential libssl-dev pkg-config
+```
+
+Install CUDA toolkit (optional)
+
+```sh
+# CUDA 12.9
+sudo apt-get install -y \
+  cuda-nvcc-12-9 \
+  cuda-nvrtc-dev-12-9 \
+  libcublas-dev-12-9 \
+  libcurand-dev-12-9
+
+# NCCL
+sudo apt-get install -y libnccl2 libnccl-dev
+```
+
+Install vLLM.rs
 ```shell
 # Remove `nccl` for single-gpu usage
 # Remove `flash-attn,flash-context` for V100 or older hardware
-./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+# Add `cutlass` for sm90+ (fp8 models)
+# Use `--dst` to change installation folder
+sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
+```
+  </details>
+
+### Install on MacOS/Metal
+
+Install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
+
+Install with `metal` feature
+```shell
+cargo install --features metal
 ```
 
-### Build (Metal)
-```shell
-cargo build --release --features metal
-```
+### Running
+Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+
 
 > API server + Web UI
 
@@ -184,9 +271,9 @@ cargo build --release --features metal
 
   ```bash
   # CUDA
-  target/release/vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS
-  target/release/vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```
   
   <details open>
@@ -194,7 +281,7 @@ cargo build --release --features metal
 
   ```bash
   # Replace "--ui-server" with "--server" will only start API server
-  target/release/vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --max-model-len 128000 --max-num-seqs 2 --port 8000 --prefix-cache
+  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
   ```
 
   </details>
@@ -203,8 +290,20 @@ cargo build --release --features metal
     <summary>Multi-GPU + GGUF Model</summary>
 
   ```bash
-  target/release/vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --max-model-len 262144 --prefix-cache
+  vllm-rs --d 0,1 --f /path/Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
   ```
+
+  </details>
+
+  <details open>
+    <summary>FP8 Model</summary>
+
+```bash
+# CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
+vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# MacOS/Metal (Dense)
+vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+```
 
   </details>
 
@@ -213,9 +312,9 @@ cargo build --release --features metal
 
   ```bash
   # CUDA: Disabled flash-context feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --max-model-len 100000 --max-num-seqs 4 --ui-server --port 8000 --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --fp8-kvcache
   # MacOS/Metal
-  cargo run --release --features metal -- --ui-server --w /path/Qwen3-4B --isq q6k
+  vllm-rs --ui-server --w /path/Qwen3-4B --isq q6k
   ```
 
   </details>
@@ -256,7 +355,7 @@ PD Disaggregation separates prefill (prompt processing) and decode (token genera
   ```bash
   # Build with `flash-context` for maximum speed in long-context prefill
   # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
-  target/release/vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
+  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
   Or, use prebuilt Python package as PD server:
@@ -271,7 +370,7 @@ PD Disaggregation separates prefill (prompt processing) and decode (token genera
   ```bash
   # Client can use different format of the same model
   # Use Q4K to obtain higher decoding speed for small batches
-  target/release/vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
+  vllm-rs --d 2,3 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --ui-server --port 8000 --pd-client
   ```
 
   Or, start with prebuild Python package:
@@ -337,9 +436,6 @@ Watch it in action 🎉
 
 
 ### 🛠️ Prerequisites
-
-* Install the [Rust toolchain](https://www.rust-lang.org/tools/install)
-* On **macOS**, install [Xcode command line tools](https://mac.install.guide/commandlinetools/)
 * For Python bindings, install [Maturin](https://github.com/PyO3/maturin)
 
 ### Building steps
@@ -367,8 +463,8 @@ maturin build --release --features cuda,python
 # CUDA (+Flash Attention, only used in prefill stage) 
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (+Flash Attention for decoding, +high prefill throughput, long time to build) 
-./build.sh --release --features cuda,nccl,flash-context,python
+# CUDA (+cutlass (sm90+), +Flash Attention for decoding, +high prefill throughput, long time to build) 
+./build.sh --release --features cuda,nccl,flash-attn,flash-context,cutlass,python
 
 # macOS (Metal, single GPU only, with prefix-cache and FP8 kvcache)
 maturin build --release --features metal,python
@@ -403,7 +499,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |
-| `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.5, range from 0.1 to 10.0)              |
+| `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.2, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
 | `--pd-url`          | PD communication URL: `tcp://host:port` or `http://host:port` for remote TCP, `file:///path` for filesystem socket (containers), or omit for local IPC |
@@ -443,6 +539,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn)
+* [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
 * [ ] Additional model support (LLaMa 4, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
@@ -453,6 +550,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **MCP Integration & Tool Calling**
 * [x] **Prefix Caching**
 * [x] **Claude/Anthropic-compatible API Server**
+* [x] **Support CUDA 13**
 ---
 
 ## 📚 References

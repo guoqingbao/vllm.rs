@@ -84,12 +84,6 @@ impl EngineBuilder {
     }
 
     pub fn build(self) -> Result<Engine> {
-        let disable_flash_attn = if let Some(enable_flash_attn) = self.flash_attn {
-            Some(!enable_flash_attn)
-        } else {
-            None
-        };
-
         let (model_id, weight_path, weight_file) = match self.repo {
             ModelRepo::ModelID((model_id, filename)) => (
                 Some(model_id.to_owned()),
@@ -131,7 +125,7 @@ impl EngineBuilder {
             None,
             None,
             None,
-            disable_flash_attn,
+            None,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);
@@ -181,13 +175,14 @@ impl Engine {
         let (receivers, tokenizer) = {
             let mut engine = self.engine.write();
             (
-                engine.generate_sync(&vec![params], &vec![messages], images, &tools)?,
+                engine.generate_sync(&vec![params], &vec![messages], images, &tools, &None)?,
                 Arc::new(engine.tokenizer.clone()),
             )
         };
 
-        let results = GLOBAL_RT
-            .block_on(async { LLMEngine::collect_sync_results(receivers, tokenizer).await })?;
+        let results = GLOBAL_RT.block_on(async {
+            LLMEngine::collect_sync_results(receivers, tokenizer, None).await
+        })?;
 
         // Extract GenerationOutput
         for result in results {
@@ -208,7 +203,7 @@ impl Engine {
 
         let (seq_id, prompt_length, stream) = {
             let mut engine = self.engine.write();
-            engine.generate_stream(&params, &messages, image_data, &tools)?
+            engine.generate_stream(&params, &messages, image_data, &tools, &None)?
         };
 
         Ok(EngineStream {

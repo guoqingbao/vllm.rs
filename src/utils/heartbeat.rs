@@ -45,14 +45,20 @@ pub fn heartbeat_worker(
             crate::log_info!("enter heartbeat processing loop ({:?})", manager);
             while !flag_clone.load(Ordering::Relaxed) {
                 let alive_result = manager.heartbeat(is_daemon);
-                if alive_result.is_err() {
+                if let Err(e) = alive_result {
                     if !flag_clone.load(Ordering::Relaxed) {
-                        crate::log_warn!("{:?}", alive_result);
+                        crate::log_warn!("{:?}", e);
+                    }
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof
+                        || e.kind() == std::io::ErrorKind::BrokenPipe
+                    {
+                        crate::log_info!("Parent process disconnected, exiting...");
+                        process::exit(0);
                     }
                     if heartbeat_error_count > 5 {
                         crate::log_error!(
                             "heartbeat detection failed, exit the current process because of {:?}",
-                            alive_result
+                            e
                         );
                         process::abort();
                     }

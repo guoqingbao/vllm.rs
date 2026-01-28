@@ -12,6 +12,7 @@ use crate::models::layers::VarBuilderX;
 use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
+use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::ToolConfig;
 use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
@@ -22,10 +23,11 @@ use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::load_toktrie_from_path;
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
+use crate::utils::kvcache_allocator::KVCacheAllocator;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
-use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner, update_kvcache_config};
+use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use crate::{log_info, log_warn};
 use candle_core::{DType, Result};
 use colored::Colorize;
@@ -80,7 +82,7 @@ pub struct LLMEngine {
     pub runners: Arc<RwLock<RunnerType>>,
     pub scheduler: Scheduler,
     pub tokenizer: Tokenizer,
-    econfig: EngineConfig,
+    pub econfig: EngineConfig,
     default_chat_template: String,
     template: ChatTemplate,
     stream_decoders: HashMap<usize, super::DecodeStreamType>,
@@ -111,13 +113,8 @@ impl LLMEngine {
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
-        let (mut econfig, use_runner) = prepare_engine_config(
-            econfig,
-            &config,
-            dtype,
-            &config_tokenizer,
-            &mut generation_cfg,
-        );
+        let (mut econfig, use_runner) =
+            prepare_engine_config(econfig, &config, &config_tokenizer, &mut generation_cfg);
         config.fp8_kvcache = econfig.fp8_kvcache;
 
         // In case config file missing bos and eos configuratioin
@@ -152,17 +149,13 @@ impl LLMEngine {
         log_info!("{:?}\n", config);
 
         let device_ids = if let Some(ids) = &econfig.device_ids {
+            log_info!("Using device IDs: {:?}", ids);
             ids.clone()
         } else {
+            log_info!("Using default device ID: [0]");
             vec![0]
         };
 
-        let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
-            || arch == "Gemma3ForCausalLM".to_string();
-        // Gemma3 must use conventional attention
-        if is_gemma {
-            econfig.disable_flash_attn = Some(true);
-        }
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;
             log_info!("Loading model...");
@@ -302,13 +295,15 @@ impl LLMEngine {
                     }
 
                     // Build init message
+                    let mut econfig_rank = econfig.clone();
+                    econfig_rank.device_ids = Some(vec![*dev_id]);
                     let init_msg = MessageType::Init(RunnerInitRequest {
                         rank,
                         dev_id: *dev_id,
                         num_shards: econfig.num_shards.unwrap_or(1),
                         model_type,
                         config: config.clone(),
-                        econfig: econfig.clone(),
+                        econfig: econfig_rank,
                         model_pathes: model_pathes.clone(),
                         is_gguf,
                         dtype: dtype.into(),
@@ -319,20 +314,30 @@ impl LLMEngine {
 
                     send_and_expect_ack(&mut stream, &init_msg, "initialize", rank)?;
 
-                    if econfig.max_model_len.is_none() {
-                        let ecfg = engine_config.get_or_init(|| {
-                            let mut econfig = econfig.clone();
-                            update_kvcache_config(&mut econfig, &config.clone(), dtype);
-                            econfig
-                        });
+                    // Always validate/plan allocation after model loading for accurate memory readings
+                    let ecfg = engine_config.get_or_init(|| {
+                        let mut econfig = econfig.clone();
+                        // Use new KVCacheAllocator for multi-rank negotiation
+                        let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+                        let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+                        match allocator.plan(&device_ids, &mut econfig) {
+                            Ok(_) => {
+                                crate::log_info!("KVCache allocation successfully planned!");
+                            }
+                            Err(e) => {
+                                crate::log_error!("Failed to allocate KVCache: {:?}", e);
+                                panic!("Failed to allocate KVCache: {:?}", e);
+                            }
+                        }
+                        econfig
+                    });
 
-                        send_and_expect_ack(
-                            &mut stream,
-                            &MessageType::UsableMemoryLeft(ecfg.clone()),
-                            "init kvcache",
-                            rank,
-                        )?;
-                    }
+                    send_and_expect_ack(
+                        &mut stream,
+                        &MessageType::UsableMemoryLeft(ecfg.clone()),
+                        "init kvcache",
+                        rank,
+                    )?;
 
                     crate::log_info!("Runner {} started!", rank);
                     Ok(stream)
@@ -344,8 +349,6 @@ impl LLMEngine {
             }
             if let Some(cfg) = engine_config.get() {
                 econfig = cfg.clone();
-            } else if econfig.max_model_len.is_none() {
-                candle_core::bail!("Unable to update EngineConfig!");
             }
             RunnerType::Process(runner_streams?)
         };
@@ -382,7 +385,7 @@ impl LLMEngine {
             econfig.max_num_batched_tokens,
             econfig.num_blocks,
             econfig.block_size,
-            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5f32)) as usize
+            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.2f32)) as usize
         );
         log_warn!("Model loaded.\n");
 
@@ -725,9 +728,10 @@ impl LLMEngine {
                                 //finish early, we need to send the last token
                                 if *request_type == RequestType::Stream {
                                     if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
-                                        let tok = decoder.step(s.last_token).unwrap_or_default();
-                                        let _ =
-                                            sender.try_send(StreamItem::Token(tok, s.last_token));
+                                        if let Some(tok) = decoder.step(s.last_token)? {
+                                            let _ = sender
+                                                .try_send(StreamItem::Token(tok, s.last_token));
+                                        }
                                     }
                                 } else {
                                     let _ = sender.try_send(StreamItem::TokenID(s.last_token));
@@ -806,22 +810,35 @@ impl LLMEngine {
                             if *request_type == RequestType::Stream {
                                 if let Some(decoder) = self.stream_decoders.get_mut(&seq_id) {
                                     for token_id in token_ids {
-                                        let tok = decoder.step(token_id).unwrap_or_default();
-                                        let result =
-                                            sender.try_send(StreamItem::Token(tok, token_id));
-                                        if result.is_err() {
-                                            crate::log_error!(
-                                                "Error when sending token to client [seq_id {}]",
-                                                seq_id
-                                            );
-                                            self.cancelled_sequences.push(seq_id);
+                                        if let Some(tok) = decoder.step(token_id)? {
+                                            let result =
+                                                sender.try_send(StreamItem::Token(tok, token_id));
+                                            if result.is_err() {
+                                                crate::log_error!(
+                                                    "Error when sending token to client [seq_id {}]",
+                                                    seq_id
+                                                );
+                                                self.cancelled_sequences.push(seq_id);
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 //completion request will be decoded at the final stage (at once)
                                 for token_id in token_ids {
-                                    let _ = sender.try_send(StreamItem::TokenID(token_id));
+                                    /*
+                                        Check if the receiver is still active.
+                                        If the client disconnected, collect_sync_results will be dropped,
+                                        dropping the receiver, causing try_send to fail.
+                                    */
+                                    if let Err(_) = sender.try_send(StreamItem::TokenID(token_id)) {
+                                        crate::log_error!(
+                                            "Error when sending token to client [seq_id {}]",
+                                            seq_id
+                                        );
+                                        self.cancelled_sequences.push(seq_id);
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -912,6 +929,7 @@ impl LLMEngine {
         let mut total_decoded_length = 0;
         let mut total_decoded_time_costs = 0;
 
+        let mut seq_ids = Vec::new();
         for &idx in active_indices {
             if let Some(seq) = self.scheduler.get_running(idx) {
                 if let Some(length) = self.decode_length.get(&seq.id) {
@@ -920,14 +938,16 @@ impl LLMEngine {
                 if let Some(start_time) = self.decode_start_times.get(&seq.id) {
                     total_decoded_time_costs += cur_time - start_time;
                 }
+                seq_ids.push(seq.id);
             }
         }
 
         if total_decoded_length > 0 && total_decoded_time_costs / 1000 > 0 {
             let avg_throughput = total_decoded_length / (total_decoded_time_costs / 1000);
             crate::log_info!(
-                "Decoding: {} active request(s), avg. {} tokens/s per request (total: {} tokens/s)",
+                "Decoding: {} active request(s) [Seq: {:?}], avg. {} tokens/s per request (total: {} tokens/s)",
                 active_indices.len(),
+                seq_ids,
                 avg_throughput,
                 avg_throughput * active_indices.len()
             )
@@ -1021,6 +1041,7 @@ impl LLMEngine {
         message_list: &Vec<Vec<Message>>,
         images: Option<ImageData>,
         tools: &Vec<Tool>,
+        logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<Vec<(usize, usize, mpsc::Receiver<StreamItem>)>> {
         if params.len() != message_list.len() {
             candle_core::bail!("size of sampling parameters is not match with size of prompts!");
@@ -1028,6 +1049,9 @@ impl LLMEngine {
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
             let (prompt, image_idx) = self.apply_chat_template(param, messages, tools, false);
+            if let Some(ref l) = logger {
+                l.log_prompt(&prompt);
+            }
             if let Ok((seq_id, prompt_length, rx)) =
                 self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
             {
@@ -1041,6 +1065,7 @@ impl LLMEngine {
     pub async fn collect_sync_results(
         receivers: Vec<(usize, usize, mpsc::Receiver<StreamItem>)>,
         tokenizer: Arc<Tokenizer>,
+        logger: Option<Arc<ChatCompletionLogger>>,
     ) -> Result<Vec<GenerationOutput>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
@@ -1051,7 +1076,7 @@ impl LLMEngine {
         let reporter = task::spawn(async move {
             let mut last_logged = 0;
             loop {
-                sleep(Duration::from_secs(1)).await;
+                sleep(Duration::from_secs(5)).await;
                 let start_time = decode_start_time_clone.load(Ordering::SeqCst);
                 if start_time > 0 {
                     let count = decoded_tokens_clone.load(Ordering::Relaxed);
@@ -1069,7 +1094,7 @@ impl LLMEngine {
                     let elapsed = (now - start_time) as f32 / 1000.0;
 
                     let s = format!(
-                        "[Live Throughput] {} tokens in {:.2}s ({:.2} tokens/s)",
+                        "[Non-Streaming] {} tokens in {:.2}s ({:.2} tokens/s)",
                         count,
                         elapsed,
                         count as f32 / elapsed
@@ -1079,16 +1104,31 @@ impl LLMEngine {
             }
         });
 
-        // Spawn tasks for each receiver
+        // Create futures for each receiver (do NOT spawn detached tasks)
         let tasks = receivers
             .into_iter()
             .map(|(seq_id, prompt_length, mut rx)| {
                 let decoded_tokens = decoded_tokens.clone();
                 let decode_start_time_clone = decode_start_time.clone();
                 let tokenizer = Arc::clone(&tokenizer);
-                task::spawn(async move {
+                let logger = logger.clone();
+                async move {
                     let mut output: Option<GenerationOutput> = None;
                     let mut collected_token_ids: Vec<u32> = Vec::new();
+
+                    // Initialize decoder for incremental logging if needed
+                    let mut decoder = if logger.is_some() {
+                        let tokenizer_clone = tokenizer.as_ref().clone();
+                        let leaked: &'static _ = Box::leak(Box::new(tokenizer_clone));
+                        let decoder = leaked.decode_stream(true);
+                        let wrapped = super::StreamWithTokenizer {
+                            _tokenizer: unsafe { Box::from_raw(leaked as *const _ as *mut _) },
+                            stream: decoder,
+                        };
+                        Some(Box::new(wrapped) as Box<dyn super::DecodeStreamTrait + Send + Sync>)
+                    } else {
+                        None
+                    };
 
                     while let Some(msg) = rx.recv().await {
                         match msg {
@@ -1134,6 +1174,14 @@ impl LLMEngine {
                                 decoded_tokens.fetch_add(1, Ordering::Relaxed);
                                 collected_token_ids.push(id);
 
+                                if let Some(d) = decoder.as_mut() {
+                                    if let Ok(Some(text)) = d.step(id) {
+                                        if let Some(l) = &logger {
+                                            l.log_stream_token(&text);
+                                        }
+                                    }
+                                }
+
                                 decode_start_time_clone
                                     .compare_exchange(
                                         0,
@@ -1159,7 +1207,7 @@ impl LLMEngine {
                     }
 
                     output
-                })
+                }
             });
 
         // Wait for all decoding tasks
@@ -1169,10 +1217,7 @@ impl LLMEngine {
         reporter.await.unwrap();
 
         // Collect successful outputs
-        let results: Vec<_> = outputs
-            .into_iter()
-            .filter_map(|r| r.ok().flatten())
-            .collect();
+        let results: Vec<_> = outputs.into_iter().filter_map(|r| r).collect();
 
         Ok(results)
     }
@@ -1189,8 +1234,12 @@ impl LLMEngine {
         messages: &Vec<Message>,
         images: Option<ImageData>, //collection of images of the full conversation
         tools: &Vec<Tool>,
+        logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
         let (prompt, image_idx) = self.apply_chat_template(params, messages, tools, false);
+        if let Some(ref l) = logger {
+            l.log_prompt(&prompt);
+        }
         match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
             Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
             Err(e) => {

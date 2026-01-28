@@ -10,6 +10,7 @@ pub mod graph;
 pub mod guidance;
 pub mod heartbeat;
 pub mod image;
+pub mod kvcache_allocator;
 pub mod logits_processor;
 pub mod progress;
 use crate::core::GenerationOutput;
@@ -21,7 +22,6 @@ use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use colored::Colorize;
 use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -82,133 +82,6 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
         }
         Ok(Device::Cpu)
     }
-}
-
-pub fn get_kvcache_blocks(
-    max_num_seqs: usize,
-    max_model_len: usize,
-    block_size: usize,
-    config: &config::Config,
-    num_shards: usize,
-    dtype: DType,
-) -> (usize, usize) {
-    const SIZE_IN_MB: usize = 1024 * 1024;
-
-    let dsize = dtype.size_in_bytes();
-    let head_dim = config
-        .head_dim
-        .unwrap_or(config.hidden_size / config.num_attention_heads);
-
-    let num_gpu_blocks = max_num_seqs * max_model_len / block_size;
-
-    let total_memory_bytes = num_gpu_blocks
-        * block_size
-        * (config.num_key_value_heads / num_shards)
-        * head_dim
-        * dsize
-        * 2
-        * config.num_hidden_layers;
-    crate::log_warn!(
-        "Allocating {} KV blocks ({:2} MB) for [{} seqs x {} tokens]",
-        num_gpu_blocks,
-        total_memory_bytes as f32 / SIZE_IN_MB as f32,
-        max_num_seqs,
-        max_model_len,
-    );
-
-    (num_gpu_blocks, total_memory_bytes)
-}
-
-pub fn update_kvcache_config(econfig: &mut EngineConfig, config: &config::Config, dtype: DType) {
-    const SIZE_IN_MB: f32 = (1024 * 1024) as f32;
-    let kv_fraction = econfig
-        .kv_fraction
-        .unwrap_or(if cfg!(feature = "flash-attn") {
-            0.7
-        } else {
-            0.5
-        }) as f64;
-    let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
-    let gpu_memory_left = match crate::utils::max_usable_memory(&device_ids, kv_fraction) {
-        Ok(v) => v,
-        _ => 0,
-    };
-    let mut gpu_memory_left =
-        ((gpu_memory_left.div_ceil(128 * 1024 * 1024) - 1) * 128 * 1024 * 1024) as usize; // Aligned to 128 MB
-
-    let config_model_len = econfig
-        .config_model_len
-        .unwrap_or(econfig.max_model_len.unwrap_or(32768));
-    let block_size = econfig.block_size;
-    let num_shards = econfig.num_shards.unwrap_or(1);
-
-    let dsize = dtype.size_in_bytes();
-    let head_dim = config
-        .head_dim
-        .unwrap_or(config.hidden_size / config.num_attention_heads);
-
-    let per_block = block_size
-        * (config.num_key_value_heads / num_shards)
-        * head_dim
-        * dsize
-        * 2
-        * config.num_hidden_layers;
-
-    let mut num_blocks = gpu_memory_left / per_block;
-    let mut total_capacity = num_blocks * block_size;
-
-    // descending possible model lengths
-    let candidates = [
-        config_model_len,
-        config_model_len / 2,
-        config_model_len / 4,
-        config_model_len / 8,
-        16 * 1024,
-        8 * 1024,
-        4 * 1024,
-        1024,
-    ];
-
-    let (mut max_num_seqs, max_model_len) = candidates
-        .iter()
-        .find_map(|&len| (total_capacity > len).then(|| ((total_capacity.div_ceil(len)), len)))
-        .unwrap_or((0, 1024)); // fallback
-
-    if num_blocks == 0 || max_num_seqs == 0 {
-        println!("{}", format!("Insufficient GPU memory (left {:.02} MB) for allocating KvCache, please free GPU resouces and retry!", gpu_memory_left / 1024 / 1024).red().bold());
-        assert!(num_blocks > 0 && max_num_seqs > 0);
-    }
-
-    // Avoid use too much GPU memory for small models
-    if max_num_seqs > 8 {
-        max_num_seqs = 8;
-        total_capacity = max_num_seqs * max_model_len;
-        num_blocks = total_capacity as usize / block_size;
-        gpu_memory_left = num_blocks * per_block;
-    }
-
-    if econfig.max_model_len.is_none() {
-        println!(
-            "\n{} is not given, auto decided to {}, Max usable kvcache tokens {}.\n",
-            format!("Warn: max_model_len").yellow().bold(),
-            format!("{}", max_model_len).red().bold(),
-            format!("{}", total_capacity).red().bold(),
-        );
-    }
-
-    crate::log_warn!(
-        "Allocating {} KV blocks ({:.2} MB) for [{} x {} tokens]",
-        num_blocks,
-        gpu_memory_left as f32 / SIZE_IN_MB,
-        max_num_seqs,
-        max_model_len,
-    );
-
-    econfig.num_blocks = num_blocks;
-    econfig.max_num_seqs = max_num_seqs;
-    econfig.max_model_len = Some(max_model_len);
-    econfig.kvcache_memory_bytes = gpu_memory_left as usize;
-    econfig.max_num_batched_tokens = total_capacity;
 }
 
 pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
@@ -439,7 +312,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
             mlp_only_layers: Some(vec![]),
             decoder_sparse_step: Some(1),
-            norm_topk_prob: expert_weights_norm.unwrap_or(false),
+            norm_topk_prob: expert_weights_norm.unwrap_or(true),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
                 as usize,
             first_k_dense_replace: leading_dense_block_count,
@@ -589,18 +462,22 @@ pub fn init_config_tokenizer(
 
         if let Some(qcfg) = &config.quantization_config {
             assert!(
-                qcfg.quant_method == "gptq" || qcfg.quant_method == "awq",
-                "Invalid w4a16 quantization format! Only `gptq` and `awq` supported"
+                qcfg.quant_method == "gptq"
+                    || qcfg.quant_method == "awq"
+                    || qcfg.quant_method == "fp8",
+                "Invalid quantization format! Only `gptq`, `awq` and `fp8` supported"
             );
-            assert!(
-                qcfg.bits == 4 || qcfg.bits == 8,
-                "Only 4-bit and 8-bit gptq or awq models supported!"
-            );
-            if qcfg.desc_act.unwrap_or(false) {
-                candle_core::bail!("desc_act==true not supported!");
+            if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
+                assert!(
+                    (qcfg.bits == 4 || qcfg.bits == 8),
+                    "Only 4-bit and 8-bit gptq or awq models supported!"
+                );
+                if qcfg.desc_act.unwrap_or(false) {
+                    candle_core::bail!("desc_act==true not supported!");
+                }
+                #[cfg(not(feature = "cuda"))]
+                candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
             }
-            #[cfg(not(feature = "cuda"))]
-            candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
         }
         let architectures = config.architectures.as_ref().unwrap();
         if matches!(
@@ -812,6 +689,116 @@ pub fn spawn_runner(
         kwargs
             .set_item("text", true)
             .map_err(candle_core::Error::wrap)?;
+        let libs_dir = Path::new(runner_path)
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("vllm_rs.libs"));
+        if let Some(libs_dir) = libs_dir {
+            if libs_dir.exists() {
+                let abs_libs_dir = libs_dir.canonicalize().unwrap_or(libs_dir);
+                crate::log_warn!(
+                    "Runner rpath not set; preparing LD_LIBRARY_PATH for {}",
+                    abs_libs_dir.display()
+                );
+                let env_result: std::result::Result<(), String> = (|| {
+                    let os = py.import("os").map_err(|e| e.to_string())?;
+                    let env_any = os
+                        .getattr("environ")
+                        .map_err(|e| e.to_string())?
+                        .call_method0("copy")
+                        .map_err(|e| e.to_string())?;
+                    let env = env_any.downcast::<PyDict>().map_err(|e| e.to_string())?;
+                    let mut ld_paths: Vec<String> = Vec::new();
+                    #[cfg(target_os = "linux")]
+                    {
+                        let tmp_dir = std::env::temp_dir().join("vllm_rs.libs");
+                        if std::fs::create_dir_all(&tmp_dir).is_ok() {
+                            if let Ok(entries) = std::fs::read_dir(&abs_libs_dir) {
+                                for entry in entries {
+                                    let entry = match entry {
+                                        Ok(entry) => entry,
+                                        Err(err) => {
+                                            crate::log_warn!(
+                                                "Skipping bundled lib entry: {}",
+                                                err
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    let path = entry.path();
+                                    if !path.is_file() {
+                                        continue;
+                                    }
+                                    let name = match path.file_name().and_then(|s| s.to_str()) {
+                                        Some(name) => name,
+                                        None => continue,
+                                    };
+                                    if !name.starts_with("lib") {
+                                        continue;
+                                    }
+                                    let so_idx = match name.rfind(".so.") {
+                                        Some(idx) => idx,
+                                        None => continue,
+                                    };
+                                    let base = &name[..so_idx];
+                                    let dash_idx = match base.rfind('-') {
+                                        Some(idx) => idx,
+                                        None => continue,
+                                    };
+                                    let unsuffixed = format!("{}{}", &base[..dash_idx], &name[so_idx..]);
+                                    let link_path = tmp_dir.join(&unsuffixed);
+                                    if let Ok(existing) = std::fs::read_link(&link_path) {
+                                        if existing == path {
+                                            continue;
+                                        }
+                                        let _ = std::fs::remove_file(&link_path);
+                                    }
+                                    if let Err(err) =
+                                        std::os::unix::fs::symlink(&path, &link_path)
+                                    {
+                                        crate::log_warn!(
+                                            "Failed to create symlink {}: {}",
+                                            link_path.display(),
+                                            err
+                                        );
+                                    }
+                                }
+                            }
+                            ld_paths.push(tmp_dir.to_string_lossy().to_string());
+                            crate::log_warn!(
+                                "Runner using symlink dir for bundled libs: {}",
+                                tmp_dir.display()
+                            );
+                        } else {
+                            crate::log_warn!(
+                                "Failed to create temp symlink dir for bundled libs"
+                            );
+                        }
+                    }
+                    ld_paths.push(abs_libs_dir.to_string_lossy().to_string());
+                    let ld_prefix = ld_paths.join(":");
+                    let new_ld = match env.get_item("LD_LIBRARY_PATH").map_err(|e| e.to_string())?
+                    {
+                        Some(val) => {
+                            let existing: String = val.extract().map_err(|e| e.to_string())?;
+                            if existing.is_empty() {
+                                ld_prefix
+                            } else {
+                                format!("{}:{}", ld_prefix, existing)
+                            }
+                        }
+                        None => ld_prefix,
+                    };
+                    env.set_item("LD_LIBRARY_PATH", new_ld)
+                        .map_err(|e| e.to_string())?;
+                    kwargs.set_item("env", env).map_err(|e| e.to_string())?;
+                    Ok(())
+                })();
+                if let Err(err) = env_result {
+                    crate::log_warn!("Failed to set LD_LIBRARY_PATH fallback: {}", err);
+                }
+            }
+        }
 
         let result = subprocess
             .call_method("Popen", (args,), Some(&kwargs))
@@ -999,97 +986,27 @@ pub fn get_dtype(dtype: Option<String>) -> DType {
     dtype
 }
 
-#[cfg(feature = "cuda")]
-pub fn max_usable_memory(gpu_ids: &[usize], kv_fraction: f64) -> Result<u64> {
-    let mut usable_values = Vec::new();
-    use candle_core::backend::BackendDevice;
-    use candle_core::cuda_backend::cudarc::driver::sys;
-    use candle_core::cuda_backend::CudaDevice;
-    const IN_GB: f64 = 1024f64 * 1024f64 * 1024f64;
-    for &id in gpu_ids {
-        // Create a CUDA context for that device
-        let _ = CudaDevice::new(id)?;
-
-        unsafe {
-            let mut free: usize = 0;
-            let mut total: usize = 0;
-
-            sys::lib()
-                .cuMemGetInfo_v2(&mut free as *mut usize, &mut total as *mut usize)
-                .result()
-                .map_err(|e| candle_core::Error::Msg(format!("cuMemGetInfo_v2 failed: {e:?}")))?; // convert CUDA error to Rust error
-            let usable = (free as f64 * kv_fraction) as u64;
-            crate::log_warn!(
-                "GPU {}: total memory {:.02} GB, free {:.02} GB, allocate {:.02} GB for KvCache!",
-                id,
-                total as f64 / IN_GB,
-                free as f64 / IN_GB,
-                usable as f64 / IN_GB
-            );
-            usable_values.push(usable);
-        }
-    }
-
-    usable_values
-        .into_iter()
-        .min()
-        .ok_or_else(|| candle_core::Error::msg("No GPUs provided"))
-}
-
-#[cfg(not(feature = "cuda"))]
-pub fn max_usable_memory(
-    _: &[usize],
-    usage_fraction: f64, // e.g., 0.9 → 90%
-) -> Result<u64> {
-    use sysinfo::System;
-    let mut sys = System::new_all();
-    sys.refresh_all();
-    #[cfg(feature = "metal")]
-    let avail_mem = {
-        let device = metal::Device::system_default().expect("No Metal device found");
-        let max_mem = device.recommended_max_working_set_size();
-        let alloc_mem = device.current_allocated_size();
-        std::cmp::max(max_mem.saturating_sub(alloc_mem), sys.available_memory())
-    };
-    #[cfg(not(feature = "metal"))]
-    let avail_mem = sys.available_memory();
-    let usable_in_mb = avail_mem / 1024 / 1024;
-    assert!(
-        usable_in_mb > 0,
-        "Insufficient GPU memory (left {:.02} MB)",
-        usable_in_mb
-    );
-    crate::log_warn!(
-        "max_usable_memory {} MB, usable for KvCache {:.02} (user `kv-fraction` setting {})",
-        usable_in_mb,
-        usable_in_mb as f64 * usage_fraction,
-        usage_fraction
-    );
-    Ok((avail_mem as f64 * usage_fraction) as u64)
-}
-
 pub fn prepare_engine_config(
     econfig: &EngineConfig,
     config: &Config,
-    dtype: DType,
     config_tokenizer: &TokenizerConfig,
     generation_cfg: &mut Option<GenerationConfig>,
 ) -> (EngineConfig, bool) {
     let mut econfig = econfig.clone();
 
-    let config_model_len =
-        config
-            .max_model_len
-            .unwrap_or(if let Some(l) = config_tokenizer.model_max_length {
-                if l < 10000000.0 {
-                    // Sometime this value is invalid
-                    l as usize
-                } else {
-                    config.max_position_embeddings
-                }
+    let config_model_len = std::cmp::min(
+        config.max_position_embeddings,
+        if let Some(l) = config_tokenizer.model_max_length {
+            if l < 10000000.0 {
+                // Sometime this value is invalid
+                l as usize
             } else {
-                config.max_position_embeddings
-            });
+                262144
+            }
+        } else {
+            262144
+        },
+    );
 
     econfig.config_model_len = Some(config_model_len);
 
@@ -1134,23 +1051,6 @@ pub fn prepare_engine_config(
     }
     let num_shards = device_ids.len();
     econfig.device_ids = Some(device_ids);
-
-    let (num_blocks, kvcache_memory_bytes) = get_kvcache_blocks(
-        econfig.max_num_seqs,
-        econfig.max_model_len.unwrap_or(32768),
-        econfig.block_size,
-        &config,
-        num_shards,
-        if econfig.fp8_kvcache.unwrap_or(false) {
-            DType::U8
-        } else {
-            dtype
-        },
-    );
-
-    econfig.num_blocks = num_blocks;
-    econfig.kvcache_memory_bytes = kvcache_memory_bytes;
-    econfig.max_num_batched_tokens = num_blocks * econfig.block_size;
     econfig.num_shards = Some(num_shards);
 
     #[cfg(not(feature = "nccl"))]
@@ -1160,19 +1060,7 @@ pub fn prepare_engine_config(
     );
 
     #[cfg(feature = "nccl")]
-    let use_runner = if num_shards > 1 {
-        // if !econfig.flash_context.unwrap_or(false) {
-        //     crate::log_warn!("Prefix cache is forced to be enabled under multi-rank inference if prefix-cache or flash-context feature built-in!");
-        //     econfig.flash_context = Some(true);
-        // }
-        true
-    } else {
-        if cfg!(feature = "flash-context") || cfg!(feature = "python") {
-            econfig.prefix_cache.unwrap_or(false)
-        } else {
-            false
-        }
-    };
+    let use_runner = true;
 
     #[cfg(not(feature = "nccl"))]
     assert!(

@@ -11,7 +11,7 @@ pub mod wna16;
 use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_varbuilder::VarBuilder as QVarBuilder;
 use candle_core::DType;
-use candle_core::{Device, Result};
+use candle_core::{Device, Result, Tensor};
 use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use either::Either;
 
@@ -74,6 +74,26 @@ impl VarBuilderX<'_> {
         match &self.0 {
             Either::Left(vb) => vb.contains_tensor(name),
             Either::Right(vb) => vb.contains_key(name),
+        }
+    }
+
+    pub fn get_with_hints_dtype<S: Into<candle_core::Shape>>(
+        &self,
+        s: S,
+        name: &str,
+        shard: candle_nn::var_builder::Shard,
+        dtype: DType,
+    ) -> Result<Tensor> {
+        match &self.0 {
+            Either::Left(vb) => vb.get_with_hints_dtype(s, name, shard, dtype),
+            Either::Right(vb) => vb.get(s, name).and_then(|x| x.dequantize(vb.device())),
+        }
+    }
+
+    pub fn get<S: Into<candle_core::Shape>>(&self, s: S, name: &str) -> Result<Tensor> {
+        match &self.0 {
+            Either::Left(vb) => vb.get(s, name),
+            Either::Right(vb) => vb.get(s, name).and_then(|x| x.dequantize(vb.device())),
         }
     }
 }

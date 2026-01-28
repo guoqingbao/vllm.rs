@@ -249,7 +249,7 @@ pub struct EngineConfig {
     pub mcp_command: Option<String>,
     pub mcp_config: Option<String>,
     pub mcp_args: Option<Vec<String>>,
-    pub disable_flash_attn: Option<bool>,
+    pub tool_prompt_template: Option<String>,
 }
 
 #[cfg(feature = "python")]
@@ -311,7 +311,8 @@ pub struct EngineConfig {
     pub mcp_config: Option<String>,
     #[pyo3(get, set)]
     pub mcp_args: Option<Vec<String>>,
-    pub disable_flash_attn: Option<bool>,
+    #[pyo3(get, set)]
+    pub tool_prompt_template: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -341,7 +342,7 @@ impl EngineConfig {
         mcp_command: Option<String>,
         mcp_config: Option<String>,
         mcp_args: Option<Vec<String>>,
-        disable_flash_attn: Option<bool>,
+        tool_prompt_template: Option<String>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -384,7 +385,7 @@ impl EngineConfig {
             mcp_command,
             mcp_config,
             mcp_args,
-            disable_flash_attn,
+            tool_prompt_template,
         }
     }
 }
@@ -571,4 +572,6 @@ pub struct QuantConfig {
     pub sym: Option<bool>,
     pub desc_act: Option<bool>,
     pub checkpoint_format: Option<String>,
+    pub fmt: Option<String>,
+    pub weight_block_size: Option<Vec<usize>>,
 }

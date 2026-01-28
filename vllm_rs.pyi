@@ -90,6 +90,7 @@ class SamplingParams:
 class Message:
     role: str
     content: str
+    num_images: int = 0
 
 @dataclass
 class StepOutput(Enum):

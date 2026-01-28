@@ -2,6 +2,7 @@ use candle_core::Result;
 use clap::Parser;
 use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
+use serde_json;
 use std::sync::Arc;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
@@ -153,6 +154,17 @@ async fn main() -> Result<()> {
         // force to use prefix cache in chat mode
         prefix_cache = true;
     }
+    let tool_prompt_template = if let Some(ref path) = args.tool_prompt {
+        let content = std::fs::read_to_string(path).map_err(candle_core::Error::wrap)?;
+        let json: serde_json::Value =
+            serde_json::from_str(&content).map_err(candle_core::Error::wrap)?;
+        json.get("tool_prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+
     let econfig = EngineConfig::new(
         args.model_id,
         args.weight_path,
@@ -178,7 +190,7 @@ async fn main() -> Result<()> {
         args.mcp_command.clone(),
         args.mcp_config.clone(),
         args.mcp_args.clone(),
-        Some(args.no_flash_attn),
+        tool_prompt_template,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
@@ -286,7 +298,13 @@ async fn main() -> Result<()> {
             if interactive {
                 let (seq_id, prompt_length, stream) = {
                     let mut e = engine.write();
-                    match e.generate_stream(&request_params, &chat_history, None, &Vec::new()) {
+                    match e.generate_stream(
+                        &request_params,
+                        &chat_history,
+                        None,
+                        &Vec::new(),
+                        &None,
+                    ) {
                         Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
@@ -370,11 +388,11 @@ async fn main() -> Result<()> {
                 let (receivers, tokenizer) = {
                     let mut e = engine.write();
                     (
-                        e.generate_sync(&params, &message_list, None, &Vec::new())?,
+                        e.generate_sync(&params, &message_list, None, &Vec::new(), &None)?,
                         Arc::new(e.tokenizer.clone()),
                     )
                 };
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer).await?;
+                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None).await?;
                 // GenerationOutput is returned directly
                 results
             }

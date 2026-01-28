@@ -173,13 +173,13 @@ def main():
                 seq_id, prompt_length, stream = engine.generate_stream(params, chat_history)
                 for item in stream:
                     if item.datatype == "TOKEN":
-                        print(item.data, end="", flush=True)
-                        output_text += item.data
+                        print(item.data[0], end="", flush=True)
+                        output_text += item.data[0]
                         if decoded_length == 0:
                             decode_start_time = current_millis()
                         decoded_length += 1
                     elif item.datatype == "ERROR":
-                        raise Exception(item.data)
+                        raise Exception(item.data[0])
                     elif item.datatype == "DONE":
                         done_item = item.data
 

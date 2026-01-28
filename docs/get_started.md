@@ -88,3 +88,9 @@ Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA
 - Use `--log` to view loading/progress; watch for “swap” messages (KV pressure).
 - If OOM on Metal, lower `--max-model-len` and batch; on CUDA, reduce `--kv-fraction` or `--max-num-seqs`.
 - For GGUF/ISQ, keep `--max-num-seqs` moderate to avoid bandwidth bottlenecks; consider `--fp8-kvcache` only on Ampere+.
+- Use the chat logger to monitor detailed interactions between client and vLLM.rs.
+
+```shell
+# Log into files (in folder ./log)
+export VLLM_RS_CHAT_LOGGER=1
+```

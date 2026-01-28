@@ -1,6 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 pub mod claude_server;
+pub mod logger;
 pub mod parser;
 pub mod server;
 pub mod streaming;
@@ -28,7 +29,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub model: Option<String>,
@@ -457,9 +458,6 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub log: bool,
 
-    #[arg(long, default_value_t = false)]
-    pub no_flash_attn: bool,
-
     #[arg(long, value_delimiter = '|')]
     pub prompts: Option<Vec<String>>,
 
@@ -497,6 +495,9 @@ pub struct Args {
 
     #[arg(long, default_value = None)]
     pub seed: Option<u64>, //seed for reproduce the results
+
+    #[arg(long)]
+    pub tool_prompt: Option<String>,
 
     #[arg(long, default_value_t = false)]
     pub prefix_cache: bool,
@@ -943,7 +944,7 @@ pub async fn run_server(
         let lan_url = format!("http://{ip}:{port}/v1/");
 
         let api_server_url = format!(
-            "🧠 API server running at:\n   -  {} (Local Access) \n   -  {} (Remote Access)",
+            "🧠 API server running at:\n   -  {} (Local Access) \n   -  {} (Remote Access, IP may not correct under Docker)",
             local_url, lan_url
         );
         println!("{}", api_server_url.cyan());
@@ -963,6 +964,13 @@ pub async fn run_server(
         println!("{}", format!("   - GET  /v1/usage").yellow());
         println!("{}", format!("   - POST /tokenize").yellow());
         println!("{}", format!("   - POST /detokenize").yellow());
+        println!("");
+        println!(
+            "🛑 {}",
+            format!("EXIT: Ctrl+C to quit. If unresponsive: Ctrl+P → Ctrl+Q (last resort).")
+                .bold()
+                .red()
+        );
         println!("");
         format!("0.0.0.0:{}", port)
     };

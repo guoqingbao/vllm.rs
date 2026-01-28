@@ -21,6 +21,7 @@ use crate::{
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
     utils::config::{Config, EngineConfig, ModelType},
+    utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
 use attention_rs::InputMetadata;
@@ -84,6 +85,7 @@ pub struct ModelRunner {
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
+    model_type: ModelType,
 }
 
 impl ModelRunner {
@@ -141,7 +143,7 @@ impl ModelRunner {
             }
         );
 
-        let (gpu_kv_cache, cpu_kv_cache) = if let Some(s) = stream {
+        let allocator = if let Some(s) = stream {
             use crate::runner::{receive_local, send_local, MessageType};
             use interprocess::TryClone;
             send_local(
@@ -152,19 +154,36 @@ impl ModelRunner {
             let msg = receive_local(&mut s.try_clone()?, true)?;
             if let MessageType::UsableMemoryLeft(ecfg) = msg {
                 *econfig = ecfg.clone(); // Update Engine config
-                let (gpu_kv_cache, cpu_kv_cache) =
-                    Self::init_kv_cache(&econfig, config, dtype, &device)?;
-                (gpu_kv_cache, cpu_kv_cache)
-            } else {
-                Self::init_kv_cache(&econfig, config, dtype, &device)?
             }
+            KVCacheAllocator::new(econfig, config, dtype)
         } else {
-            if econfig.max_model_len.is_none() {
-                use crate::utils::update_kvcache_config;
-                update_kvcache_config(econfig, &config.clone(), dtype);
+            let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
+            match allocator.plan(&device_ids, econfig) {
+                Ok(_) => {
+                    crate::log_info!("KVCache allocation successfully planned!");
+                }
+                Err(e) => {
+                    candle_core::bail!("KVCache allocation failed: {}", e);
+                }
             }
-            Self::init_kv_cache(&econfig, config, dtype, &device)?
+            allocator
         };
+
+        let allocation = crate::utils::kvcache_allocator::KVCacheAllocation {
+            num_gpu_blocks: econfig.num_blocks,
+            #[cfg(feature = "cuda")]
+            num_cpu_blocks: (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.2))
+                as usize,
+            #[cfg(not(feature = "cuda"))]
+            num_cpu_blocks: 1, // dummy for non-CUDA platform
+            max_num_seqs: econfig.max_num_seqs,
+            max_model_len: econfig.max_model_len.unwrap_or(32768),
+            kvcache_memory_bytes: econfig.kvcache_memory_bytes,
+            max_num_batched_tokens: econfig.max_num_batched_tokens,
+        };
+        let (gpu_kv_cache, cpu_kv_cache) =
+            allocator.init_kv_cache(&allocation, dtype, &device, econfig.pd_config.as_ref())?;
 
         let (temperature, top_k, top_p) = if econfig.generation_cfg.is_some() {
             (
@@ -201,171 +220,8 @@ impl ModelRunner {
             guidance_states: RwLock::new(HashMap::new()),
             transfer,
             is_first_rank: comm.rank() == 0,
+            model_type,
         })
-    }
-
-    //[num_blocks, block_size, num_kv_heads, head_size]
-    fn calculate_flash_key_value_block_shape(
-        cfg: &Config,
-        block_size: usize,
-        num_shards: usize,
-    ) -> (usize, usize, usize) {
-        let head_dim = cfg
-            .head_dim
-            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
-
-        (block_size, cfg.num_key_value_heads / num_shards, head_dim)
-    }
-
-    fn calculate_key_block_shape(
-        cfg: &Config,
-        dtype: DType,
-        block_size: usize,
-        num_shards: usize,
-    ) -> (usize, usize, usize, usize) {
-        let element_size = dtype.size_in_bytes();
-        let head_dim = cfg
-            .head_dim
-            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
-
-        let x = 16 / element_size;
-        (
-            cfg.num_key_value_heads / num_shards,
-            head_dim / x,
-            block_size,
-            x,
-        )
-    }
-
-    fn calculate_value_block_shape(
-        cfg: &Config,
-        block_size: usize,
-        num_shards: usize,
-    ) -> (usize, usize, usize) {
-        let head_dim = cfg
-            .head_dim
-            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
-
-        (cfg.num_key_value_heads / num_shards, head_dim, block_size)
-    }
-
-    fn init_kv_cache(
-        econfig: &EngineConfig,
-        config: &Config,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<(Vec<(Tensor, Tensor)>, Vec<(Tensor, Tensor)>)> {
-        let num_gpu_blocks = econfig.num_blocks;
-        #[cfg(feature = "cuda")]
-        let num_cpu_blocks =
-            (econfig.num_blocks as f32 * econfig.cpu_mem_fold.unwrap_or(0.5f32)) as usize;
-        #[cfg(not(feature = "cuda"))]
-        let num_cpu_blocks = 1;
-
-        #[cfg(not(feature = "cuda"))]
-        let sync_alloc = true;
-
-        #[allow(unused)]
-        #[cfg(feature = "cuda")]
-        let sync_alloc = if let Some(p_cfg) = &econfig.pd_config {
-            matches!(p_cfg.role, crate::transfer::PdRole::Server)
-        } else {
-            false
-        };
-
-        if cfg!(feature = "flash-context") {
-            assert!(
-                !econfig.fp8_kvcache.unwrap_or(false),
-                "fp8 kvcache is not compatible with flash-context feature!"
-            );
-            let kv_shape = Self::calculate_flash_key_value_block_shape(
-                config,
-                econfig.block_size,
-                econfig.num_shards.unwrap_or(1),
-            );
-
-            let mut gpu_cache = Vec::new();
-            let mut cpu_cache = Vec::new();
-            for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::empty(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                let value_blocks = Tensor::empty(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                gpu_cache.push((key_blocks, value_blocks));
-            }
-            for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::zeros(
-                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
-                    &Device::Cpu,
-                )?;
-                let value_blocks = Tensor::zeros(
-                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
-                    &Device::Cpu,
-                )?;
-                cpu_cache.push((key_blocks, value_blocks));
-            }
-            Ok((gpu_cache, cpu_cache))
-        } else {
-            let fp8_kvcache = econfig.fp8_kvcache.unwrap_or(false);
-            let cache_dtype = if fp8_kvcache { DType::U8 } else { dtype };
-            crate::log_warn!(
-                "Using FP8 KV Cache? {}, cache dtype {:?}",
-                fp8_kvcache,
-                cache_dtype
-            );
-            let kshape = Self::calculate_key_block_shape(
-                config,
-                cache_dtype,
-                econfig.block_size,
-                econfig.num_shards.unwrap_or(1),
-            );
-            let vshape = Self::calculate_value_block_shape(
-                config,
-                econfig.block_size,
-                econfig.num_shards.unwrap_or(1),
-            );
-            let mut gpu_cache = Vec::new();
-            let mut cpu_cache = Vec::new();
-            for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::empty(
-                    (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                let value_blocks = Tensor::empty(
-                    (num_gpu_blocks, vshape.0, vshape.1, vshape.2),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                gpu_cache.push((key_blocks, value_blocks));
-            }
-            for _ in 0..config.num_hidden_layers {
-                let key_blocks = Tensor::zeros(
-                    (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                let value_blocks = Tensor::zeros(
-                    (num_cpu_blocks, vshape.0, vshape.1, vshape.2),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                cpu_cache.push((key_blocks, value_blocks));
-            }
-            Ok((gpu_cache, cpu_cache))
-        }
     }
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
@@ -623,6 +479,11 @@ impl ModelRunner {
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
+        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3) {
+            Some(true)
+        } else {
+            None
+        };
         let input_metadata = InputMetadata {
             is_prefill: true,
             slot_mapping,
@@ -633,7 +494,7 @@ impl ModelRunner {
             max_seqlen_q,
             max_seqlen_k,
             max_context_len,
-            disable_flash_attn: self.config.disable_flash_attn,
+            disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
         };
 
