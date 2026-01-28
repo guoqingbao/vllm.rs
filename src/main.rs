@@ -123,6 +123,10 @@ async fn main() -> Result<()> {
         candle_core::bail!("This program can only be served as PD server or PD client, not both!");
     }
 
+    if args.pd_server && args.ui_server {
+        candle_core::bail!("PD Server cannot run with UI Server enabled!");
+    }
+
     #[cfg(not(feature = "cuda"))]
     if (args.pd_server || args.pd_client) && args.pd_url.is_none() {
         candle_core::bail!("Non-CUDA platform does not support LocalIPC, please provide pd-url (e.g., 0.0.0.0:8100)!");
@@ -191,11 +195,16 @@ async fn main() -> Result<()> {
         args.mcp_config.clone(),
         args.mcp_args.clone(),
         tool_prompt_template,
+        None, // pd_server_prefix_cache_ratio
+        None, // pd_client_prefix_cache_ratio
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;
     if args.server || args.ui_server || args.pd_server {
-        run_server(engine.clone(), econfig.clone(), args.port, args.ui_server).await?;
+        let port = args
+            .port
+            .unwrap_or(if args.pd_server { 7000 } else { 8000 });
+        run_server(engine.clone(), econfig.clone(), port, args.ui_server).await?;
         return Ok(());
     }
 

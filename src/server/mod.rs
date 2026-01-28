@@ -509,8 +509,8 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub server: bool, //server mode
 
-    #[arg(long, default_value_t = 8000)]
-    pub port: usize,
+    #[arg(long)]
+    pub port: Option<usize>,
 
     #[arg(long, default_value_t = false)]
     pub fp8_kvcache: bool, //kv cache and attention with quantization

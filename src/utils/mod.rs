@@ -718,10 +718,7 @@ pub fn spawn_runner(
                                     let entry = match entry {
                                         Ok(entry) => entry,
                                         Err(err) => {
-                                            crate::log_warn!(
-                                                "Skipping bundled lib entry: {}",
-                                                err
-                                            );
+                                            crate::log_warn!("Skipping bundled lib entry: {}", err);
                                             continue;
                                         }
                                     };
@@ -745,7 +742,8 @@ pub fn spawn_runner(
                                         Some(idx) => idx,
                                         None => continue,
                                     };
-                                    let unsuffixed = format!("{}{}", &base[..dash_idx], &name[so_idx..]);
+                                    let unsuffixed =
+                                        format!("{}{}", &base[..dash_idx], &name[so_idx..]);
                                     let link_path = tmp_dir.join(&unsuffixed);
                                     if let Ok(existing) = std::fs::read_link(&link_path) {
                                         if existing == path {
@@ -753,8 +751,7 @@ pub fn spawn_runner(
                                         }
                                         let _ = std::fs::remove_file(&link_path);
                                     }
-                                    if let Err(err) =
-                                        std::os::unix::fs::symlink(&path, &link_path)
+                                    if let Err(err) = std::os::unix::fs::symlink(&path, &link_path)
                                     {
                                         crate::log_warn!(
                                             "Failed to create symlink {}: {}",
@@ -770,15 +767,12 @@ pub fn spawn_runner(
                                 tmp_dir.display()
                             );
                         } else {
-                            crate::log_warn!(
-                                "Failed to create temp symlink dir for bundled libs"
-                            );
+                            crate::log_warn!("Failed to create temp symlink dir for bundled libs");
                         }
                     }
                     ld_paths.push(abs_libs_dir.to_string_lossy().to_string());
                     let ld_prefix = ld_paths.join(":");
-                    let new_ld = match env.get_item("LD_LIBRARY_PATH").map_err(|e| e.to_string())?
-                    {
+                    let new_ld = match env.get_item("LD_LIBRARY_PATH").map_err(|e| e.to_string())? {
                         Some(val) => {
                             let existing: String = val.extract().map_err(|e| e.to_string())?;
                             if existing.is_empty() {

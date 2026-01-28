@@ -9,7 +9,7 @@ from vllm_rs import Engine, EngineConfig, GenerationConfig, PdConfig, PdMethod, 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run Chat Server")
     parser.add_argument("--host", type=str, default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--m", help="huggingface model id", type=str, default=None)
     parser.add_argument("--w", help="safetensor weight path", type=str, default=None)
     parser.add_argument("--f", help="gguf file path or gguf file name when model_id is given", type=str, default=None)
@@ -37,8 +37,13 @@ def parse_args():
     parser.add_argument("--mcp_config", type=str, default=None)
     parser.add_argument("--mcp_command", type=str, default=None)
     parser.add_argument("--mcp_args", type=str, default=None)
+    parser.add_argument("--pd-server-prefix-cache-ratio", type=float, default=None)
+    parser.add_argument("--pd-client-prefix-cache-ratio", type=float, default=None)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.pd_server and args.ui_server:
+        raise ValueError("PD Server cannot run with UI Server enabled!")
+    return args
 
 def run_server(args):
     # Build and run the engine in a child process so the parent can handle Ctrl+C.
@@ -84,6 +89,8 @@ def run_server(args):
         mcp_config=args.mcp_config,
         mcp_command=args.mcp_command,
         mcp_args=args.mcp_args,
+        pd_server_prefix_cache_ratio=args.pd_server_prefix_cache_ratio,
+        pd_client_prefix_cache_ratio=args.pd_client_prefix_cache_ratio,
     )
 
     engine = Engine(cfg, args.dtype)
@@ -91,7 +98,9 @@ def run_server(args):
     # max_kvcache_tokens = max_model_len * max_num_seqs
     # if args.max_model_len is None:
     #     warnings.warn(f"Warning: max_model_len is not given, default to {max_model_len}, max kvcache tokens {max_kvcache_tokens}.")
-    engine.start_server(args.port, args.ui_server) # this will block
+    
+    port = args.port if args.port is not None else (7000 if args.pd_server else 8000)
+    engine.start_server(port, args.ui_server) # this will block
 
 
 def main():

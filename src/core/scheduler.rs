@@ -39,8 +39,10 @@ const MIN_NUM_SCHEDULED_REQS: usize = 5;
 pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
-pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 500; // check prefill status on PD server every 1 second
+pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 50; // check prefill status every 50ms (data is pushed immediately)
 pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
+/// When prefix cache hit is high, prefer local prefill if new tokens < this threshold
+pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -54,7 +56,26 @@ fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let mut max_cached_blocks = if let Some(max_tokens) = econfig.prefix_cache_max_tokens {
         max_tokens / econfig.block_size
     } else {
-        ((econfig.num_blocks as f32) * 0.25f32) as usize
+        let is_pd_server = if let Some(p_cfg) = &econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Server)
+        } else {
+            false
+        };
+        let is_pd_client = if let Some(p_cfg) = &econfig.pd_config {
+            matches!(p_cfg.role, PdRole::Client)
+        } else {
+            false
+        };
+
+        let ratio = if is_pd_server {
+            econfig.pd_server_prefix_cache_ratio.unwrap_or(0.5)
+        } else if is_pd_client {
+            econfig.pd_client_prefix_cache_ratio.unwrap_or(0.15)
+        } else {
+            0.25f32
+        };
+
+        ((econfig.num_blocks as f32) * ratio) as usize
     };
 
     if max_cached_blocks > econfig.num_blocks {
@@ -266,8 +287,9 @@ impl Scheduler {
             if is_pd_server && seq.status == SequenceStatus::Cached {
                 if let Ok(success) = self.block_manager.try_check_kvcache_release(seq.id) {
                     if success {
-                        // Client successfully received kvcache and we need to release it on the server
-                        crate::log_warn!("PD Server: release prefilled kvcache for Seq {}", seq.id);
+                        // Client received kvcache - release blocks but keep prefix cache entries
+                        // Prefix cache entries will be evicted via LRU when memory is needed
+                        crate::log_warn!("PD Server: release prefilled kvcache for Seq {} (prefix cache retained)", seq.id);
                         seq.status = SequenceStatus::Finished;
                         self.block_manager.deallocate(seq);
                     }
@@ -358,8 +380,10 @@ impl Scheduler {
                         );
                         let seq = &mut self.running[idx];
                         if success {
-                            // if successed, we need to mantain the resources
-                            // until the client ask explicitly to release or cache not sufficient
+                            // Insert into prefix cache so future requests can benefit
+                            // LRU eviction will handle memory pressure automatically
+                            self.block_manager.cache_sequence(seq);
+                            // Maintain resources until client asks to release or cache eviction
                             seq.status = SequenceStatus::Cached;
                             let cur_time = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -738,16 +762,29 @@ impl Scheduler {
         }
     }
 
-    pub fn is_suitable_for_transfer(&self, seq: &Sequence) -> bool {
+    pub fn is_suitable_for_transfer(&mut self, seq: &Sequence) -> bool {
         if seq.status == SequenceStatus::Swapped // swapped out sequence
             || seq.status == SequenceStatus::FinishSwapped // swapped out and finished sequence
             || seq.len() < PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD
         // prefill length < 128
         {
-            false
-        } else {
-            true
+            return false;
         }
+
+        // Check prefix cache: if most tokens are already cached, do local prefill
+        let cached_tokens = self.block_manager.get_prefix_cache_match_tokens(seq);
+        let new_tokens = seq.len().saturating_sub(cached_tokens);
+        if cached_tokens > 0 && new_tokens < PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD {
+            crate::log_info!(
+                "Seq {} has {} cached tokens, {} new tokens - doing local prefill",
+                seq.id,
+                cached_tokens,
+                new_tokens
+            );
+            return false;
+        }
+
+        true
     }
 
     /// Client: Check for finished prefills and move them to the running queue.

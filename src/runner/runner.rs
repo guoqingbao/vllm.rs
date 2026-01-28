@@ -56,7 +56,7 @@ fn main() -> anyhow::Result<()> {
 
     ctrlc::set_handler(move || {
         if model_loaded_ctrlc.load(Ordering::SeqCst) {
-            vllm_rs::log_info!("Runner start new session!");
+            vllm_rs::log_info!("Runner break session!");
         } else {
             vllm_rs::log_warn!("Runner break model loading (Ctrl+C detected)!");
             std::process::exit(0);

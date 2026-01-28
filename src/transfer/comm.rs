@@ -297,6 +297,10 @@ impl Communicator {
                 }
             }
             PdRole::Server => {
+                // Ensure the socket file is removed before binding
+                if std::path::Path::new(sock_name).exists() {
+                    let _ = std::fs::remove_file(sock_name);
+                }
                 let listener = ListenerOptions::new().name(fs_name).create_sync()?;
                 let stream = listener.accept()?;
                 if self.rank == 0 {

@@ -250,6 +250,8 @@ pub struct EngineConfig {
     pub mcp_config: Option<String>,
     pub mcp_args: Option<Vec<String>>,
     pub tool_prompt_template: Option<String>,
+    pub pd_server_prefix_cache_ratio: Option<f32>,
+    pub pd_client_prefix_cache_ratio: Option<f32>,
 }
 
 #[cfg(feature = "python")]
@@ -313,6 +315,10 @@ pub struct EngineConfig {
     pub mcp_args: Option<Vec<String>>,
     #[pyo3(get, set)]
     pub tool_prompt_template: Option<String>,
+    #[pyo3(get, set)]
+    pub pd_server_prefix_cache_ratio: Option<f32>,
+    #[pyo3(get, set)]
+    pub pd_client_prefix_cache_ratio: Option<f32>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -343,6 +349,8 @@ impl EngineConfig {
         mcp_config: Option<String>,
         mcp_args: Option<Vec<String>>,
         tool_prompt_template: Option<String>,
+        pd_server_prefix_cache_ratio: Option<f32>,
+        pd_client_prefix_cache_ratio: Option<f32>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -386,6 +394,8 @@ impl EngineConfig {
             mcp_config,
             mcp_args,
             tool_prompt_template,
+            pd_server_prefix_cache_ratio,
+            pd_client_prefix_cache_ratio,
         }
     }
 }

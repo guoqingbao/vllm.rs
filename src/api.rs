@@ -31,6 +31,8 @@ pub struct EngineBuilder {
     fp8_kvcache: Option<bool>,
     prefix_cache: Option<bool>,
     prefix_cache_max_tokens: Option<usize>,
+    pd_server_prefix_cache_ratio: Option<f32>,
+    pd_client_prefix_cache_ratio: Option<f32>,
     device_ids: Option<Vec<usize>>,
 }
 
@@ -44,6 +46,8 @@ impl EngineBuilder {
             fp8_kvcache: None,
             prefix_cache: None,
             prefix_cache_max_tokens: None,
+            pd_server_prefix_cache_ratio: None,
+            pd_client_prefix_cache_ratio: None,
             device_ids: None,
         }
     }
@@ -75,6 +79,16 @@ impl EngineBuilder {
 
     pub fn with_prefix_cache_max_tokens(mut self, max_tokens: usize) -> Self {
         self.prefix_cache_max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_pd_server_prefix_cache_ratio(mut self, ratio: f32) -> Self {
+        self.pd_server_prefix_cache_ratio = Some(ratio);
+        self
+    }
+
+    pub fn with_pd_client_prefix_cache_ratio(mut self, ratio: f32) -> Self {
+        self.pd_client_prefix_cache_ratio = Some(ratio);
         self
     }
 
@@ -126,6 +140,8 @@ impl EngineBuilder {
             None,
             None,
             None,
+            self.pd_server_prefix_cache_ratio,
+            self.pd_client_prefix_cache_ratio,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

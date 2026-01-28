@@ -355,6 +355,22 @@ impl BlockManager {
             .map_or(0, |cache| cache.cached_blocks())
     }
 
+    /// Returns how many tokens of `seq` are already cached in the prefix cache.
+    /// Used to decide whether to do local prefill vs transfer to PD server.
+    pub fn get_prefix_cache_match_tokens(&mut self, seq: &Sequence) -> usize {
+        let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+            return 0;
+        };
+        if !prefix_cache.enabled() {
+            return 0;
+        }
+        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+        let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
+        let matched_blocks =
+            self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
+        matched_blocks * self.block_size
+    }
+
     pub fn clear_prefix_cache(&mut self) {
         let Some(prefix_cache) = self.prefix_cache.as_mut() else {
             return;

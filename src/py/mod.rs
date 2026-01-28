@@ -265,7 +265,8 @@ impl EngineConfig {
         generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
-        tool_prompt_template=None))]
+        tool_prompt_template=None,
+        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -292,6 +293,8 @@ impl EngineConfig {
         mcp_config: Option<String>,
         mcp_args: Option<String>,
         tool_prompt_template: Option<String>,
+        pd_server_prefix_cache_ratio: Option<f32>,
+        pd_client_prefix_cache_ratio: Option<f32>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -342,6 +345,8 @@ impl EngineConfig {
             mcp_config,
             mcp_args,
             tool_prompt_template,
+            pd_server_prefix_cache_ratio,
+            pd_client_prefix_cache_ratio,
         }
     }
 }
