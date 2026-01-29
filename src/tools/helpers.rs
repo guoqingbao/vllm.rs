@@ -12,10 +12,10 @@ use std::collections::HashMap;
 pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool> {
     if let Some(tools) = request_tools {
         if !tools.is_empty() {
-            return sanitize_tools_for_llguidance(tools);
+            return tools.to_vec();
         }
     }
-    sanitize_tools_for_llguidance(mcp_tools)
+    mcp_tools.to_vec()
 }
 
 pub fn sanitize_tools_for_llguidance(tools: &[Tool]) -> Vec<Tool> {

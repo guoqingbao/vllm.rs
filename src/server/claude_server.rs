@@ -9,11 +9,8 @@ use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, sanitize_tools_for_llguidance,
 };
 use crate::tools::parser::ToolParser;
-use crate::tools::schema::{
-    build_function_tag_lark_grammar, build_tool_call_lark_grammar, build_tool_call_schema,
-};
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
-use crate::utils::config::{Constraint, SamplingParams};
+use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -1088,7 +1085,9 @@ pub async fn messages(
     } else {
         mcp_tools.clone()
     };
-    resolved_tools = sanitize_tools_for_llguidance(&resolved_tools);
+    if params.constraint.is_some() {
+        resolved_tools = sanitize_tools_for_llguidance(&resolved_tools);
+    }
     let mut tool_choice_instruction: Option<String> = None;
     let mut forced_tool_name: Option<String> = None;
     let mut tool_choice_required = false;
@@ -1174,57 +1173,6 @@ pub async fn messages(
     };
 
     if !resolved_tools.is_empty() {
-        // Apply llguidance constraints for tool calls
-        let tool_call_schema = build_tool_call_schema(&resolved_tools);
-        let (wrapper_start, wrapper_end, wrapper_start_special, wrapper_end_special) =
-            match model_type {
-                crate::utils::config::ModelType::Mistral
-                | crate::utils::config::ModelType::Mistral3VL => {
-                    ("[TOOL_CALLS][", "]", false, false)
-                }
-                _ => (
-                    tool_config.start_token_str.as_str(),
-                    tool_config.end_token_str.as_str(),
-                    tool_config.start_is_special,
-                    tool_config.end_is_special,
-                ),
-            };
-
-        let constraint = match model_type {
-            crate::utils::config::ModelType::Qwen3
-            | crate::utils::config::ModelType::Qwen3MoE
-            | crate::utils::config::ModelType::Qwen3VL => {
-                if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
-                    let grammar = build_function_tag_lark_grammar(
-                        &resolved_tools,
-                        wrapper_start,
-                        wrapper_end,
-                        wrapper_start_special,
-                        wrapper_end_special,
-                    );
-                    Constraint::Lark(grammar)
-                } else {
-                    Constraint::JsonSchema(tool_call_schema)
-                }
-            }
-            _ => {
-                if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
-                    let grammar = build_tool_call_lark_grammar(
-                        &tool_call_schema,
-                        wrapper_start,
-                        wrapper_end,
-                        wrapper_start_special,
-                        wrapper_end_special,
-                    );
-                    Constraint::Lark(grammar)
-                } else {
-                    Constraint::JsonSchema(tool_call_schema)
-                }
-            }
-        };
-
-        params.constraint = Some(constraint);
-
         let mut tool_prompt: Option<String> = None;
         if !template_supports_tools {
             let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();

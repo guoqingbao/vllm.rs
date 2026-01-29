@@ -7,9 +7,10 @@ use super::{
     EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
 };
 use super::{
-    ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
-    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    constraint_from_response_format, constraint_from_structured_outputs, ChatChoice,
+    ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+    ChatMessage, ChatResponseMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
+    ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
@@ -17,11 +18,8 @@ use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
 use crate::tools::parser::ToolParser;
-use crate::tools::schema::{
-    build_function_tag_lark_grammar, build_tool_call_lark_grammar, build_tool_call_schema,
-};
 use crate::tools::{ToolChoice, ToolFormat};
-use crate::utils::config::{Constraint, ModelType, SamplingParams};
+use crate::utils::config::{Constraint, SamplingParams};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -114,6 +112,11 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
+    if let Some(stop_sequences) = &request.stop {
+        if !stop_sequences.is_empty() {
+            params.stop_sequences = Some(stop_sequences.clone());
+        }
+    }
     let (img_cfg, model_type, tool_config, template_supports_tools) = {
         let e = data.engine.read();
         (
@@ -123,6 +126,33 @@ pub async fn chat_completion(
             e.template_supports_tools(),
         )
     };
+
+    let mut structured_constraint: Option<Constraint> = None;
+    if let Some(response_format) = request.response_format.as_ref() {
+        match constraint_from_response_format(response_format) {
+            Ok(constraint) => structured_constraint = constraint,
+            Err(err) => return ChatResponder::ValidationError(format!("{:?}", err)),
+        }
+    }
+    if let Some(extra_body) = request.extra_body.as_ref() {
+        if let Some(structured) = extra_body.structured_outputs.as_ref() {
+            let constraint = match constraint_from_structured_outputs(structured) {
+                Ok(constraint) => constraint,
+                Err(err) => return ChatResponder::ValidationError(format!("{:?}", err)),
+            };
+            if constraint.is_some() {
+                if structured_constraint.is_some() {
+                    return ChatResponder::ValidationError(
+                        "Cannot combine response_format with structured_outputs".to_string(),
+                    );
+                }
+                structured_constraint = constraint;
+            }
+        }
+    }
+    if let Some(constraint) = structured_constraint {
+        params.constraint = Some(constraint);
+    }
 
     let mcp_tools = data
         .mcp_manager
@@ -176,52 +206,6 @@ pub async fn chat_completion(
 
     if params.mcp_mode.is_some() {
         crate::log_warn!("Tools enabled for request");
-
-        // Apply llguidance constraints using tool call schema
-        let tool_call_schema = build_tool_call_schema(&resolved_tools);
-        let (wrapper_start, wrapper_end, wrapper_start_special, wrapper_end_special) =
-            match model_type {
-                ModelType::Mistral | ModelType::Mistral3VL => ("[TOOL_CALLS][", "]", false, false),
-                _ => (
-                    tool_config.start_token_str.as_str(),
-                    tool_config.end_token_str.as_str(),
-                    tool_config.start_is_special,
-                    tool_config.end_is_special,
-                ),
-            };
-
-        let constraint = match model_type {
-            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
-                if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
-                    let grammar = build_function_tag_lark_grammar(
-                        &resolved_tools,
-                        wrapper_start,
-                        wrapper_end,
-                        wrapper_start_special,
-                        wrapper_end_special,
-                    );
-                    Constraint::Lark(grammar)
-                } else {
-                    Constraint::JsonSchema(tool_call_schema)
-                }
-            }
-            _ => {
-                if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
-                    let grammar = build_tool_call_lark_grammar(
-                        &tool_call_schema,
-                        wrapper_start,
-                        wrapper_end,
-                        wrapper_start_special,
-                        wrapper_end_special,
-                    );
-                    Constraint::Lark(grammar)
-                } else {
-                    Constraint::JsonSchema(tool_call_schema)
-                }
-            }
-        };
-
-        params.constraint = Some(constraint);
     }
 
     let mut chat_messages = request.messages.clone();

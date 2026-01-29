@@ -3,9 +3,9 @@
 //!
 //! Provides helpers for working with JSON Schema in tool definitions.
 
+use crate::tools::Tool;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use crate::tools::Tool;
 /// Remove JSON Schema features that llguidance doesn't support.
 /// Currently strips all "format" fields recursively.
 pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
