@@ -7,13 +7,14 @@ use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokenizers::Tokenizer;
 use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
 use vllm_rs::transfer::PdRole;
 use vllm_rs::transfer::Transfer;
-use vllm_rs::utils::guidance::load_toktrie_from_path;
+use vllm_rs::utils::guidance::build_llg_factory;
 use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
 use vllm_rs::utils::progress::{ProgressLike, ProgressReporter, RemoteProgressReporter};
@@ -134,8 +135,15 @@ fn main() -> anyhow::Result<()> {
             )?;
             let stream_kv = Some(stream.try_clone()?);
             let mut econfig = init_req.econfig.clone();
-            let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
-                .map(Arc::new);
+            let tokenizer = Tokenizer::from_file(init_req.model_pathes.get_tokenizer_filename())
+                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+            let llg_factory = match build_llg_factory(tokenizer) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    vllm_rs::log_warn!("Failed to build llguidance factory: {}", e);
+                    None
+                }
+            };
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
@@ -148,7 +156,7 @@ fn main() -> anyhow::Result<()> {
                 device,
                 progress_reporter,
                 transfer,
-                toktrie,
+                llg_factory,
                 stream_kv,
             )?;
 

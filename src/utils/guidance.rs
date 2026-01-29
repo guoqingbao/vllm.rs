@@ -1,54 +1,77 @@
 // src/utils/guidance.rs
-//! Guided decoding support via llguidance.
-//!
-//! NOTE: This module is currently stubbed out due to API changes in llguidance >= 0.6.
-//! The TopLevelGrammar::from_json_schema method is no longer available.
-//! Guided decoding features are temporarily disabled.
-
-use serde_json::Value;
-use std::path::Path;
+use anyhow::Result;
+use llguidance::{api::TopLevelGrammar, Matcher, ParserFactory as LlgParserFactory};
 use std::sync::Arc;
+use tokenizers::Tokenizer;
+use toktrie::{SimpleVob, TokTrie};
+use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
-// Import toktrie from the crate root (it's re-exported by llguidance)
-pub use toktrie::TokTrie;
+use crate::utils::config::Constraint;
 
 pub struct GuidanceState {
-    // Placeholder for future implementation
-    _phantom: std::marker::PhantomData<()>,
+    matcher: Matcher,
 }
 
 impl GuidanceState {
-    pub fn new(_toktrie: Arc<TokTrie>, _schema: Value) -> anyhow::Result<Self> {
-        // Stubbed out - guided decoding temporarily disabled
-        anyhow::bail!("Guided decoding is temporarily disabled due to llguidance API changes. \
-                       The TopLevelGrammar::from_json_schema method is no longer available in llguidance >= 0.6")
+    pub fn new(factory: Arc<ParserFactory>, constraint: &Constraint) -> Result<Self> {
+        let grammar = llg_grammar_from_constraint(constraint)?;
+        let grammar = match grammar {
+            Some(g) => g,
+            None => {
+                // If None, we probably shouldn't be creating a GuidanceState, or we create a dummy one
+                // But generally the caller guards this.
+                // For now, let's error if called with None, or we can handle it.
+                // Actually, let's support it if needed, but for now strict.
+                anyhow::bail!("Cannot create GuidanceState from Constraint::None");
+            }
+        };
+
+        let parser = factory.create_parser(grammar)?;
+        let matcher = Matcher::new(Ok(parser));
+        Ok(Self { matcher })
     }
 
-    pub fn compute_allowed_tokens(&mut self) -> anyhow::Result<AllowedTokens> {
-        anyhow::bail!("Guided decoding is temporarily disabled")
+    pub fn compute_mask(&mut self) -> Result<Option<SimpleVob>> {
+        if self.matcher.is_stopped() {
+            return Ok(None);
+        }
+        // compute_mask returns a standard bitmask or list of tokens
+        self.matcher.compute_mask().map(Some).map_err(Into::into)
     }
 
-    pub fn commit_token(&mut self, _token: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Guided decoding is temporarily disabled")
+    pub fn commit_token(&mut self, token: u32) -> Result<()> {
+        if !self.matcher.is_stopped() {
+            self.matcher.consume_token(token)?;
+        }
+        Ok(())
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.matcher.is_stopped()
     }
 }
 
-pub struct AllowedTokens {
-    pub tokens: Vec<u32>,
-    pub is_stopped: bool,
+pub type ParserFactory = LlgParserFactory;
+
+pub fn build_llg_factory(tokenizer: Tokenizer) -> Result<Arc<ParserFactory>> {
+    let env = ByteTokenizer::from_tokenizer(tokenizer)?.into_tok_env(None)?;
+    let factory = ParserFactory::new_simple(&env)?;
+    Ok(Arc::new(factory))
 }
 
-pub fn build_toktrie_from_tokenizer_bytes(bytes: &[u8]) -> anyhow::Result<TokTrie> {
-    // Try to build TokTrie from bytes
-    // The new API uses TokTrie::from() with TokRxInfo and words
-    // For now, return an error as the exact migration path needs investigation
-    anyhow::bail!("TokTrie construction from tokenizer bytes is temporarily disabled. \
-                   The TokTrie::from_huggingface_bytes method is no longer available in toktrie >= 1.0. \
-                   Input bytes length: {}", bytes.len())
+pub fn load_toktrie_from_path(path: impl AsRef<std::path::Path>) -> Result<TokTrie> {
+    let tokenizer = ByteTokenizer::from_file(path)?;
+    let env = ByteTokenizerEnv::new(tokenizer, None)?;
+    Ok(env.tok_trie)
 }
 
-pub fn load_toktrie_from_path(_: &Path) -> Option<TokTrie> {
-    // Temporarily disabled - returns None
-    // crate::log_warn!("load_toktrie_from_path is disabled: {:?}", path);
-    None
+pub fn llg_grammar_from_constraint(constraint: &Constraint) -> Result<Option<TopLevelGrammar>> {
+    let grm = match constraint {
+        Constraint::Regex(regex) => TopLevelGrammar::from_regex(regex),
+        Constraint::Lark(lark) => TopLevelGrammar::from_lark(lark.clone()),
+        Constraint::JsonSchema(value) => TopLevelGrammar::from_json_schema(value.clone()),
+        Constraint::Llguidance(value) => value.clone(),
+        Constraint::None => return Ok(None),
+    };
+    Ok(Some(grm))
 }
