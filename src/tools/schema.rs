@@ -3,10 +3,29 @@
 //!
 //! Provides helpers for working with JSON Schema in tool definitions.
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-use super::Tool;
+/// Remove JSON Schema features that llguidance doesn't support.
+/// Currently strips all "format" fields recursively.
+pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (key, value) in map {
+                if key == "format" {
+                    continue;
+                }
+                out.insert(key.clone(), sanitize_schema_for_llguidance(value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(sanitize_schema_for_llguidance).collect())
+        }
+        _ => schema.clone(),
+    }
+}
 
 /// Builder for creating JSON Schema objects
 #[derive(Debug, Clone, Default)]
@@ -671,5 +690,21 @@ mod tests {
 
         assert!(validate_arguments(&schema, &valid).is_ok());
         assert!(validate_arguments(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_schema_strips_format() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "format": "uri"},
+                "nested": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}
+            }
+        });
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+        assert!(sanitized["properties"]["url"].get("format").is_none());
+        assert!(sanitized["properties"]["nested"]["properties"]["id"]
+            .get("format")
+            .is_none());
     }
 }

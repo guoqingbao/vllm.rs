@@ -5,7 +5,9 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
-use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
+use crate::tools::helpers::{
+    build_tool_schema_map, filter_tool_calls, sanitize_tools_for_llguidance,
+};
 use crate::tools::parser::ToolParser;
 use crate::tools::schema::{
     build_function_tag_lark_grammar, build_tool_call_lark_grammar, build_tool_call_schema,
@@ -1086,6 +1088,7 @@ pub async fn messages(
     } else {
         mcp_tools.clone()
     };
+    resolved_tools = sanitize_tools_for_llguidance(&resolved_tools);
     let mut tool_choice_instruction: Option<String> = None;
     let mut forced_tool_name: Option<String> = None;
     let mut tool_choice_required = false;
