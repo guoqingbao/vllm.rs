@@ -137,7 +137,7 @@ fn main() -> anyhow::Result<()> {
             let mut econfig = init_req.econfig.clone();
             let tokenizer = Tokenizer::from_file(init_req.model_pathes.get_tokenizer_filename())
                 .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-            let llg_factory = match build_llg_factory(tokenizer) {
+            let llg_factory = match build_llg_factory(tokenizer, init_req.config.vocab_size) {
                 Ok(f) => Some(f),
                 Err(e) => {
                     vllm_rs::log_warn!("Failed to build llguidance factory: {}", e);

@@ -40,6 +40,8 @@ pub struct ToolConfig {
     pub end_token_ids: HashSet<u32>,
     pub start_token_str: String,
     pub end_token_str: String,
+    pub start_is_special: bool,
+    pub end_is_special: bool,
 }
 
 impl ToolConfig {
@@ -58,6 +60,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<|python_tag|>".to_string(),
                     end_token_str: "<|eom_id|>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
@@ -69,6 +73,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<tool_call>".to_string(),
                     end_token_str: "</tool_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Mistral | ModelType::Mistral3VL => {
@@ -79,6 +85,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "[TOOL_CALLS]".to_string(),
                     end_token_str: "]".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Gemma | ModelType::Gemma3 => {
@@ -88,6 +96,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<start_function_call>".to_string(),
                     end_token_str: "<end_function_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             // Phi, GLM, Yi, StableLM, DeepSeek - use Qwen format (text-only)
@@ -102,6 +112,8 @@ impl ToolConfig {
                 end_token_ids: HashSet::new(),
                 start_token_str: "<tool_call>".to_string(),
                 end_token_str: "</tool_call>".to_string(),
+                start_is_special: false,
+                end_is_special: false,
             },
         }
     }
@@ -142,6 +154,9 @@ impl ToolConfig {
             );
             self.end_token_ids.clear();
         }
+
+        self.start_is_special = Self::is_special_token(tokenizer, &self.start_token_str);
+        self.end_is_special = Self::is_special_token(tokenizer, &self.end_token_str);
     }
 
     /// Resolve tool call end token IDs using tokenizer and the validated config.
@@ -191,6 +206,30 @@ impl ToolConfig {
             }
             Err(_) => false,
         }
+    }
+
+    fn is_special_token(tokenizer: &Tokenizer, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let encoded = match tokenizer.encode(text, false) {
+            Ok(encoded) => encoded,
+            Err(_) => return false,
+        };
+        let ids = encoded.get_ids();
+        if ids.len() != 1 {
+            return false;
+        }
+        let id = ids[0];
+        let added = tokenizer.get_added_tokens_decoder();
+        if let Some(info) = added.get(&id) {
+            if info.content == text
+                && (info.special || (info.content.starts_with('<') && info.content.ends_with('>')))
+            {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -486,6 +525,19 @@ mod tests {
                 assert_eq!(calls.len(), 2);
                 assert_eq!(calls[0].function.name, "a");
                 assert_eq!(calls[1].function.name, "b");
+            }
+            _ => panic!("Expected ToolCalls"),
+        }
+    }
+
+    #[test]
+    fn test_parser_function_tag_tool_call() {
+        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
+        let payload = r#"<tool_call><function=my_tool><parameter=foo>{"bar":1}</parameter></function></tool_call>"#;
+        match parser.process_token(0, payload) {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "my_tool");
             }
             _ => panic!("Expected ToolCalls"),
         }

@@ -441,7 +441,7 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
-    #[serde(skip)]
+    #[serde(default)]
     pub constraint: Option<Constraint>,
 }
 
@@ -477,7 +477,7 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
-    #[serde(skip)]
+    #[serde(default)]
     pub constraint: Option<Constraint>,
 }
 

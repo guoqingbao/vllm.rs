@@ -113,7 +113,7 @@ impl LLMEngine {
                 None
             }
         };
-        let llg_factory = match build_llg_factory(tokenizer.clone()) {
+        let llg_factory = match build_llg_factory(tokenizer.clone(), config.vocab_size) {
             Ok(f) => Some(f),
             Err(e) => {
                 crate::log_warn!("Failed to build llguidance factory: {}", e);

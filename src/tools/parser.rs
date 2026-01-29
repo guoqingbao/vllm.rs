@@ -419,10 +419,16 @@ pub fn parse_tool_calls_from_text(text: &str, call_id: &mut usize) -> Vec<ToolCa
         if let Ok(re) = Regex::new(r"(?s)<tool_call>\s*(.*?)\s*</tool_call>") {
             for cap in re.captures_iter(text) {
                 if let Some(inner) = cap.get(1) {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(inner.as_str().trim()) {
+                    let inner = inner.as_str().trim();
+                    if let Ok(parsed) = serde_json::from_str::<Value>(inner) {
                         if let Some(call) = json_value_to_tool_call(&parsed, call_id) {
                             calls.push(call);
                         }
+                        continue;
+                    }
+
+                    if let Some(call) = parse_function_tag_tool_call(inner, call_id) {
+                        calls.push(call);
                     }
                 }
             }
@@ -477,8 +483,22 @@ pub fn prefix_could_be_tool(prefix: &str) -> (bool, bool) {
     if prefix.trim().is_empty() {
         return (false, false);
     }
-    let prefix = process_model_specific_message(prefix);
-    let prefix = fix_broken_json(&prefix);
+
+    // If we already have a full <tool_call>...</tool_call>, attempt to parse directly.
+    if prefix.contains("</tool_call>") {
+        let mut call_id = 0;
+        if !parse_tool_calls_from_text(prefix, &mut call_id).is_empty() {
+            return (false, true);
+        }
+    }
+
+    // If we see a start tag, it's at least a potential tool call.
+    if prefix.contains("<tool_call>") {
+        return (true, false);
+    }
+
+    let processed = process_model_specific_message(prefix);
+    let processed = fix_broken_json(&processed);
 
     let checks = [
         could_be_json::<CalledFunctionParameters>,
@@ -486,13 +506,16 @@ pub fn prefix_could_be_tool(prefix: &str) -> (bool, bool) {
     ];
 
     for check in checks {
-        let (could_be, complete) = check(&prefix);
+        let (could_be, complete) = check(&processed);
         if could_be || complete {
             return (could_be, complete);
         }
     }
 
-    (contains_tool_call_prefix(&prefix), false)
+    (
+        contains_tool_call_prefix(prefix) || contains_tool_call_prefix(&processed),
+        false,
+    )
 }
 
 fn could_be_json<T>(text_prefix: &str) -> (bool, bool)
@@ -507,6 +530,59 @@ where
         Err(e) if e.is_eof() => (true, false),
         _ => (false, false),
     }
+}
+
+fn parse_function_tag_tool_call(inner: &str, call_id: &mut usize) -> Option<ToolCall> {
+    let func_tag = "<function=";
+    let func_start = inner.find(func_tag)?;
+    let name_start = func_start + func_tag.len();
+    let name_end = inner[name_start..].find('>')? + name_start;
+    if name_end <= name_start {
+        return None;
+    }
+    let func_name = inner[name_start..name_end].trim();
+    if func_name.is_empty() {
+        return None;
+    }
+
+    let mut params = Map::new();
+    let mut pos = name_end + 1;
+    while let Some(param_tag_pos) = inner[pos..].find("<parameter=") {
+        let param_tag_pos = pos + param_tag_pos;
+        let key_start = param_tag_pos + "<parameter=".len();
+        let key_end = inner[key_start..].find('>')? + key_start;
+        if key_end <= key_start {
+            break;
+        }
+        let key = inner[key_start..key_end].trim();
+        let value_start = key_end + 1;
+        let value_end = inner[value_start..]
+            .find("</parameter>")
+            .map(|v| v + value_start)?;
+        if value_end <= value_start {
+            break;
+        }
+        let value_raw = inner[value_start..value_end].trim();
+        let value = serde_json::from_str::<Value>(value_raw)
+            .unwrap_or_else(|_| Value::String(value_raw.to_string()));
+        params.insert(key.to_string(), value);
+        pos = value_end + "</parameter>".len();
+    }
+
+    let args = Value::Object(params);
+    let args_str = serde_json::to_string(&args).ok()?;
+
+    let call = ToolCall {
+        index: Some(*call_id),
+        id: format!("call_{}", uuid::Uuid::new_v4().simple()),
+        call_type: "function".to_string(),
+        function: super::FunctionCall {
+            name: func_name.to_string(),
+            arguments: args_str,
+        },
+    };
+    *call_id += 1;
+    Some(call)
 }
 
 #[cfg(test)]
@@ -572,5 +648,26 @@ mod tests {
         assert!(parser.has_tool_calls("<tool_call>{}</tool_call>"));
         assert!(parser.has_tool_calls(r#"{"name": "foo", "arguments": {}}"#));
         assert!(!parser.has_tool_calls("Just a normal response"));
+    }
+
+    #[test]
+    fn test_parse_function_tag_format() {
+        let parser = ToolParser::new();
+        let text = r#"<tool_call>
+<function=my_tool>
+<parameter=foo>
+{"bar": 1}
+</parameter>
+<parameter=baz>
+qux
+</parameter>
+</function>
+</tool_call>"#;
+
+        let calls = parser.parse(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "my_tool");
+        assert!(calls[0].function.arguments.contains("\"foo\""));
+        assert!(calls[0].function.arguments.contains("\"baz\""));
     }
 }
