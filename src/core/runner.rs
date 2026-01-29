@@ -6,7 +6,7 @@ use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::guidance::GuidanceState;
+use crate::utils::guidance::{GuidanceState, ParserFactory};
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -31,7 +31,6 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use toktrie::TokTrie;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -82,6 +81,7 @@ pub struct ModelRunner {
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
+    llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
@@ -101,7 +101,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
-        toktrie: Option<Arc<TokTrie>>,
+        llg_factory: Option<Arc<ParserFactory>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -218,6 +218,7 @@ impl ModelRunner {
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             guidance_states: RwLock::new(HashMap::new()),
+            llg_factory,
             transfer,
             is_first_rank: comm.rank() == 0,
             model_type,
@@ -700,6 +701,62 @@ impl ModelRunner {
             logits.to_owned()
         };
 
+        let logits = if let Some(factory) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            let mut modified = false;
+            let vocab_size = logits.dim(1)?;
+            // We only materialize logits on CPU if at least one constraint mask applies.
+
+            // We'll collect masks first to minimize holding locks or complex logic inside the loop
+            let mut masks = Vec::new(); // (seq_index, mask)
+
+            for (i, id) in seq_ids.iter().enumerate() {
+                let seq_constraint = match &seqs {
+                    Seqs::SeqRefs(refs) => &refs[i].sampling_params.constraint,
+                    Seqs::DecodeVec(vec) => &vec[i].sampling_params.constraint,
+                };
+
+                if let Some(constraint) = seq_constraint {
+                    let state = guidance_states.entry(*id).or_insert_with(|| {
+                        // Create new state. Handle errors gracefully?
+                        // For now panicking on creation failure is unsafe, strict error handling is better but difficult in closure
+                        // We'll use a dummy wrapper or expect valid content
+                        GuidanceState::new(factory.clone(), constraint)
+                            .expect("Failed to create guidance state")
+                    });
+
+                    if let Ok(Some(mask)) = state.compute_mask() {
+                        masks.push((i, mask));
+                        modified = true;
+                    }
+                }
+            }
+
+            if modified {
+                // Now we must convert to Vec, modify, and update logits
+                let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+
+                for (seq_idx, mask) in masks {
+                    let start = seq_idx * vocab_size;
+                    let end = start + vocab_size;
+                    let row = &mut logits_vec[start..end];
+
+                    // Apply mask: set disallowed to -inf
+                    // This iterates entire vocab, but check is fast
+                    for tok in 0..vocab_size {
+                        if !mask.is_allowed(tok as u32) {
+                            row[tok] = f32::NEG_INFINITY;
+                        }
+                    }
+                }
+                Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+            } else {
+                logits
+            }
+        } else {
+            logits
+        };
+
         let tokens = self
             .logit_processor
             .sample_with_strategy(&logits, &cached_params.sampling)?;
@@ -715,6 +772,18 @@ impl ModelRunner {
                         .push(tokens[i]);
                 } else {
                     seq_tokens.insert(seq_ids[i], vec![tokens[i]].into());
+                }
+            }
+        }
+
+        // Commit tokens to guidance states
+        if let Some(_) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            for (i, id) in seq_ids.iter().enumerate() {
+                if let Some(state) = guidance_states.get_mut(id) {
+                    if !state.is_finished() {
+                        let _ = state.commit_token(tokens[i]);
+                    }
                 }
             }
         }

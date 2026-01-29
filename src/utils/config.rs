@@ -1,10 +1,20 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
+use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Constraint {
+    Regex(String),
+    Lark(String),
+    JsonSchema(serde_json::Value),
+    Llguidance(TopLevelGrammar),
+    None,
+}
 use std::collections::HashMap;
 use std::fmt;
 
@@ -431,6 +441,8 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
+    #[serde(skip)]
+    pub constraint: Option<Constraint>,
 }
 
 #[cfg(feature = "python")]
@@ -465,6 +477,8 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    #[serde(skip)]
+    pub constraint: Option<Constraint>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -492,6 +506,7 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            constraint: None,
             thinking,
         }
     }
@@ -509,6 +524,7 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            constraint: None,
             thinking: None,
         }
     }
@@ -528,6 +544,7 @@ impl Default for SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            constraint: None,
             thinking: None,
         }
     }

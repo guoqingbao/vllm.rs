@@ -18,7 +18,7 @@ use crate::tools::helpers::{
 };
 use crate::tools::parser::ToolParser;
 use crate::tools::{ToolChoice, ToolFormat};
-use crate::utils::config::SamplingParams;
+use crate::utils::config::{Constraint, SamplingParams};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -111,7 +111,7 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type, tool_config) = {
+    let (img_cfg, model_type, mut tool_config) = {
         let e = data.engine.read();
         (
             e.img_cfg.clone(),
@@ -172,6 +172,16 @@ pub async fn chat_completion(
 
     if params.mcp_mode.is_some() {
         crate::log_warn!("Tools enabled for request");
+
+        // Apply constraints
+        let schema_map = build_tool_schema_map(&resolved_tools);
+        if let Ok(schema_value) = serde_json::to_value(&schema_map) {
+            params.constraint = Some(Constraint::JsonSchema(schema_value));
+            // Forcing JSON schema means we expect raw JSON output
+            // Clear specific start tokens so parser relies on implicit JSON detection
+            tool_config.start_token_ids.clear();
+            tool_config.start_token_str.clear();
+        }
     }
 
     let mut chat_messages = request.messages.clone();

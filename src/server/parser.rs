@@ -5,6 +5,7 @@
 use crate::server::{ChatChoiceChunk, ChatCompletionChunk, Delta};
 use crate::tools::{FunctionCall, ToolCall};
 use crate::utils::config::ModelType;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::HashSet;
 use tokenizers::Tokenizer;
@@ -349,6 +350,16 @@ impl StreamToolParser {
                 }
 
                 // Normal content
+                // Implicit JSON check for guided decoding (or models that output raw JSON)
+                if self.parse_strategy == "json" && token_text.trim_start().starts_with('{') {
+                    // Potential start of raw JSON tool call
+                    self.state = ParserState::Buffering;
+                    self.buffer.clear();
+                    self.buffer.push_str(token_text);
+                    crate::log_info!("Implicit JSON start detected, buffering: {}", token_text);
+                    return StreamResult::Buffering;
+                }
+
                 StreamResult::Content(token_text.to_string())
             }
             ParserState::MaybeStart => {
@@ -410,6 +421,23 @@ impl StreamToolParser {
                     return result;
                 }
 
+                // Validation: Check if buffer is still valid JSON (if strategy is JSON)
+                if self.parse_strategy == "json" && !end_reached && !self.buffer.trim().is_empty() {
+                    let (partial, complete) = could_be_json::<Value>(&self.buffer);
+                    if !partial && !complete {
+                        // Buffer is invalid JSON and not partial -> Garbage
+                        // Flush it to avoid hanging on invalid output
+                        crate::log_warn!(
+                            "Invalid tool call JSON detected while buffering, flushing: {}",
+                            self.buffer
+                        );
+                        let flushed = self.buffer.clone();
+                        self.buffer.clear();
+                        self.state = ParserState::Normal;
+                        return StreamResult::FlushBuffer(flushed);
+                    }
+                }
+
                 StreamResult::Buffering
             }
         }
@@ -451,6 +479,9 @@ impl StreamToolParser {
         // Token ID match (if available)
         if self.config.has_start_tokens() {
             return self.config.start_token_ids.contains(&id);
+        }
+        if self.config.start_token_str.is_empty() {
+            return false;
         }
         // Text match
         text.contains(&self.config.start_token_str)
@@ -760,6 +791,21 @@ impl StreamToolParser {
             }],
             usage: None,
         }
+    }
+}
+
+/// Checks if the given text could be a partial JSON of type T (returns (is_partial, is_complete))
+fn could_be_json<T>(text: &str) -> (bool, bool)
+where
+    T: DeserializeOwned,
+{
+    if text.trim().is_empty() {
+        return (true, false);
+    }
+    match serde_json::from_str::<T>(text) {
+        Ok(_) => (false, true),
+        Err(e) if e.is_eof() => (true, false),
+        _ => (false, false),
     }
 }
 
