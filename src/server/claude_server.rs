@@ -7,8 +7,9 @@ use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
 use crate::tools::parser::ToolParser;
+use crate::tools::schema::{build_tool_call_lark_grammar, build_tool_call_schema};
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
-use crate::utils::config::SamplingParams;
+use crate::utils::config::{Constraint, SamplingParams};
 use axum::{
     extract::{Json, State},
     http::StatusCode,
@@ -1158,22 +1159,59 @@ pub async fn messages(
     };
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
-    let (model_type, tool_config) = {
+    let (model_type, tool_config, template_supports_tools) = {
         let e = data.engine.read();
-        (e.model_type.clone(), e.tool_config.clone())
+        (
+            e.model_type.clone(),
+            e.tool_config.clone(),
+            e.template_supports_tools(),
+        )
     };
 
     if !resolved_tools.is_empty() {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
+        // Apply llguidance constraints for tool calls
+        let tool_call_schema = build_tool_call_schema(&resolved_tools);
+        let (wrapper_start, wrapper_end) = match model_type {
+            crate::utils::config::ModelType::Mistral
+            | crate::utils::config::ModelType::Mistral3VL => ("[TOOL_CALLS][", "]"),
+            _ => (
+                tool_config.start_token_str.as_str(),
+                tool_config.end_token_str.as_str(),
+            ),
         };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
+
+        if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
+            let grammar =
+                build_tool_call_lark_grammar(&tool_call_schema, wrapper_start, wrapper_end);
+            params.constraint = Some(Constraint::Lark(grammar));
+        } else {
+            params.constraint = Some(Constraint::JsonSchema(tool_call_schema));
         }
-        inject_tool_prompt(&mut chat_messages, &tool_prompt);
+
+        let mut tool_prompt: Option<String> = None;
+        if !template_supports_tools {
+            let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
+            let mut prompt = if let Some(template) = tool_prompt_template {
+                template
+            } else {
+                ToolFormat::get_tool_prompt(&model_type)
+            };
+            if let Some(instruction) = tool_choice_instruction.as_ref() {
+                prompt = format!("{prompt}\n\n{instruction}");
+            }
+            tool_prompt = Some(prompt);
+        }
+
+        let instruction_only = tool_prompt.is_none() && tool_choice_instruction.is_some();
+        let system_injection = if instruction_only {
+            tool_choice_instruction.clone()
+        } else {
+            tool_prompt
+        };
+
+        if let Some(system_text) = system_injection {
+            inject_tool_prompt(&mut chat_messages, &system_text);
+        }
     }
 
     let img_cfg = {

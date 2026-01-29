@@ -6,6 +6,8 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+use super::Tool;
+
 /// Builder for creating JSON Schema objects
 #[derive(Debug, Clone, Default)]
 pub struct SchemaBuilder {
@@ -238,6 +240,77 @@ pub fn validate_arguments(schema: &Value, arguments: &Value) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+/// Build a JSON Schema for tool calls.
+/// Supports a single tool call object or an array of tool call objects.
+pub fn build_tool_call_schema(tools: &[Tool]) -> Value {
+    let mut variants = Vec::new();
+
+    for tool in tools {
+        let name = tool.function.name.clone();
+        let mut args_schema = tool.function.parameters.clone();
+
+        // If strict mode is requested and schema is object-like, disallow extra properties.
+        if tool.function.strict.unwrap_or(false) {
+            if args_schema.get("type") == Some(&Value::String("object".to_string()))
+                && args_schema.get("additionalProperties").is_none()
+            {
+                args_schema["additionalProperties"] = Value::Bool(false);
+            }
+        }
+
+        let variant = json!({
+            "type": "object",
+            "properties": {
+                "name": { "const": name },
+                "arguments": args_schema
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": false
+        });
+        variants.push(variant);
+    }
+
+    let tool_call_schema = if variants.len() == 1 {
+        variants.into_iter().next().unwrap_or_else(|| json!({}))
+    } else {
+        json!({ "oneOf": variants })
+    };
+
+    json!({
+        "oneOf": [
+            tool_call_schema,
+            {
+                "type": "array",
+                "items": tool_call_schema,
+                "minItems": 1
+            }
+        ]
+    })
+}
+
+fn lark_quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+/// Build a Lark grammar that wraps a tool call JSON schema between start/end markers.
+pub fn build_tool_call_lark_grammar(schema: &Value, start: &str, end: &str) -> String {
+    let schema_json = serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_string());
+
+    if start.is_empty() || end.is_empty() {
+        return format!("start: tool\ntool: %json {schema_json}\n");
+    }
+
+    let start_lit = lark_quote(start);
+    let end_lit = lark_quote(end);
+
+    format!(
+        "start: {start_lit} _WS? tool _WS? {end_lit}\n\
+         tool: %json {schema_json}\n\
+         _WS: /[ \\t\\r\\n]+/\n"
+    )
 }
 
 fn validate_type(schema: &Value, value: &Value, field_name: &str) -> Result<(), String> {

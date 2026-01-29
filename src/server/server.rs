@@ -17,8 +17,9 @@ use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
 use crate::tools::parser::ToolParser;
+use crate::tools::schema::{build_tool_call_lark_grammar, build_tool_call_schema};
 use crate::tools::{ToolChoice, ToolFormat};
-use crate::utils::config::{Constraint, SamplingParams};
+use crate::utils::config::{Constraint, ModelType, SamplingParams};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -111,12 +112,13 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type, mut tool_config) = {
+    let (img_cfg, model_type, tool_config, template_supports_tools) = {
         let e = data.engine.read();
         (
             e.img_cfg.clone(),
             e.model_type.clone(),
             e.tool_config.clone(),
+            e.template_supports_tools(),
         )
     };
 
@@ -173,57 +175,75 @@ pub async fn chat_completion(
     if params.mcp_mode.is_some() {
         crate::log_warn!("Tools enabled for request");
 
-        // Apply constraints
-        let schema_map = build_tool_schema_map(&resolved_tools);
-        if let Ok(schema_value) = serde_json::to_value(&schema_map) {
-            params.constraint = Some(Constraint::JsonSchema(schema_value));
-            // Forcing JSON schema means we expect raw JSON output
-            // Clear specific start tokens so parser relies on implicit JSON detection
-            tool_config.start_token_ids.clear();
-            tool_config.start_token_str.clear();
+        // Apply llguidance constraints using tool call schema
+        let tool_call_schema = build_tool_call_schema(&resolved_tools);
+        let (wrapper_start, wrapper_end) = match model_type {
+            ModelType::Mistral | ModelType::Mistral3VL => ("[TOOL_CALLS][", "]"),
+            _ => (
+                tool_config.start_token_str.as_str(),
+                tool_config.end_token_str.as_str(),
+            ),
+        };
+
+        if !wrapper_start.is_empty() && !wrapper_end.is_empty() {
+            let grammar =
+                build_tool_call_lark_grammar(&tool_call_schema, wrapper_start, wrapper_end);
+            params.constraint = Some(Constraint::Lark(grammar));
+        } else {
+            params.constraint = Some(Constraint::JsonSchema(tool_call_schema));
         }
     }
 
     let mut chat_messages = request.messages.clone();
     if has_tools {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
-        };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
+        let mut tool_prompt: Option<String> = None;
+        if !template_supports_tools {
+            let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
+            let mut prompt = if let Some(template) = tool_prompt_template {
+                template
+            } else {
+                ToolFormat::get_tool_prompt(&model_type)
+            };
+            if let Some(instruction) = tool_choice_instruction.as_ref() {
+                prompt = format!("{prompt}\n\n{instruction}");
+            }
+            tool_prompt = Some(prompt);
         }
 
-        // Merge with existing system prompt if present, otherwise insert new one
-        if !chat_messages.is_empty() && chat_messages[0].role == "system" {
-            // Merge: tool prompt + newline + existing system content
-            if let Some(ref content) = chat_messages[0].content {
-                let existing_content = match content {
-                    super::MessageContentType::PureText(text) => text.clone(),
-                    super::MessageContentType::Single(item) => match item {
-                        super::MessageContent::Text { text } => text.clone(),
-                        _ => String::new(),
-                    },
-                    super::MessageContentType::Multi(items) => items
-                        .iter()
-                        .filter_map(|item| match item {
-                            super::MessageContent::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                let merged = format!("{}\n\n{}", existing_content, tool_prompt);
-                chat_messages[0] = ChatMessage::text("system", merged);
-            } else {
-                // System message exists but has no content, just use tool prompt
-                chat_messages[0] = ChatMessage::text("system", tool_prompt);
-            }
+        let instruction_only = tool_prompt.is_none() && tool_choice_instruction.is_some();
+        let system_injection = if instruction_only {
+            tool_choice_instruction.clone()
         } else {
-            // No existing system prompt, insert tool prompt as first message
-            chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+            tool_prompt
+        };
+
+        if let Some(system_text) = system_injection {
+            // Merge with existing system prompt if present, otherwise insert new one
+            if !chat_messages.is_empty() && chat_messages[0].role == "system" {
+                if let Some(ref content) = chat_messages[0].content {
+                    let existing_content = match content {
+                        super::MessageContentType::PureText(text) => text.clone(),
+                        super::MessageContentType::Single(item) => match item {
+                            super::MessageContent::Text { text } => text.clone(),
+                            _ => String::new(),
+                        },
+                        super::MessageContentType::Multi(items) => items
+                            .iter()
+                            .filter_map(|item| match item {
+                                super::MessageContent::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    };
+                    let merged = format!("{}\n\n{}", existing_content, system_text);
+                    chat_messages[0] = ChatMessage::text("system", merged);
+                } else {
+                    chat_messages[0] = ChatMessage::text("system", system_text);
+                }
+            } else {
+                chat_messages.insert(0, ChatMessage::text("system", system_text));
+            }
         }
     }
 

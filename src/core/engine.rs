@@ -1521,4 +1521,8 @@ impl LLMEngine {
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
     }
+
+    pub fn template_supports_tools(&self) -> bool {
+        self.template.supports_tools()
+    }
 }
