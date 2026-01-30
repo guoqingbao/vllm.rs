@@ -3,9 +3,9 @@
 //! Handles model-specific tool call tokens and formats.
 
 use crate::server::{ChatChoiceChunk, ChatCompletionChunk, Delta};
-use crate::tools::{FunctionCall, ToolCall};
+use crate::tools::parser::{parse_tool_calls_from_text, prefix_could_be_tool};
+use crate::tools::ToolCall;
 use crate::utils::config::ModelType;
-use serde_json::Value;
 use std::collections::HashSet;
 use tokenizers::Tokenizer;
 
@@ -40,6 +40,8 @@ pub struct ToolConfig {
     pub end_token_ids: HashSet<u32>,
     pub start_token_str: String,
     pub end_token_str: String,
+    pub start_is_special: bool,
+    pub end_is_special: bool,
 }
 
 impl ToolConfig {
@@ -58,6 +60,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<|python_tag|>".to_string(),
                     end_token_str: "<|eom_id|>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
@@ -69,6 +73,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<tool_call>".to_string(),
                     end_token_str: "</tool_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Mistral | ModelType::Mistral3VL => {
@@ -79,6 +85,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "[TOOL_CALLS]".to_string(),
                     end_token_str: "]".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Gemma | ModelType::Gemma3 => {
@@ -88,6 +96,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<start_function_call>".to_string(),
                     end_token_str: "<end_function_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             // Phi, GLM, Yi, StableLM, DeepSeek - use Qwen format (text-only)
@@ -102,6 +112,8 @@ impl ToolConfig {
                 end_token_ids: HashSet::new(),
                 start_token_str: "<tool_call>".to_string(),
                 end_token_str: "</tool_call>".to_string(),
+                start_is_special: false,
+                end_is_special: false,
             },
         }
     }
@@ -142,6 +154,9 @@ impl ToolConfig {
             );
             self.end_token_ids.clear();
         }
+
+        self.start_is_special = Self::is_special_token(tokenizer, &self.start_token_str);
+        self.end_is_special = Self::is_special_token(tokenizer, &self.end_token_str);
     }
 
     /// Resolve tool call end token IDs using tokenizer and the validated config.
@@ -192,15 +207,39 @@ impl ToolConfig {
             Err(_) => false,
         }
     }
+
+    fn is_special_token(tokenizer: &Tokenizer, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let encoded = match tokenizer.encode(text, false) {
+            Ok(encoded) => encoded,
+            Err(_) => return false,
+        };
+        let ids = encoded.get_ids();
+        if ids.len() != 1 {
+            return false;
+        }
+        let id = ids[0];
+        let added = tokenizer.get_added_tokens_decoder();
+        if let Some(info) = added.get(&id) {
+            if info.content == text
+                && (info.special || (info.content.starts_with('<') && info.content.ends_with('>')))
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// Streaming tool parser that handles tool call detection and buffering
 pub struct StreamToolParser {
+    #[allow(dead_code)]
     config: ToolConfig,
     state: ParserState,
     buffer: String,
     model_id: String,
-    parse_strategy: String,
     // Accumulated output for final parsing
     accumulated_output: String,
     // Reasoning block tracking
@@ -227,19 +266,12 @@ impl StreamToolParser {
     }
 
     /// Create a new parser with a pre-validated tool config
-    pub fn new_with_config(model_type: &ModelType, model_id: String, config: ToolConfig) -> Self {
-        let parse_strategy = match model_type {
-            ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
-            _ => "json",
-        }
-        .to_string();
-
+    pub fn new_with_config(_model_type: &ModelType, model_id: String, config: ToolConfig) -> Self {
         Self {
             config,
             state: ParserState::Normal,
             buffer: String::new(),
             model_id,
-            parse_strategy,
             accumulated_output: String::new(),
             active_reasoning_end: None,
             in_code_block: false,
@@ -274,7 +306,7 @@ impl StreamToolParser {
 
     /// Process a single incoming token.
     /// Returns StreamResult indicating what action to take.
-    pub fn process_token(&mut self, token_id: u32, token_text: &str) -> StreamResult {
+    pub fn process_token(&mut self, _token_id: u32, token_text: &str) -> StreamResult {
         // Always accumulate
         self.accumulated_output.push_str(token_text);
 
@@ -305,114 +337,42 @@ impl StreamToolParser {
 
         // Don't detect tool calls inside reasoning or code blocks
         if self.in_reasoning() || self.in_code_block {
+            if !self.buffer.is_empty() {
+                let flushed = self.take_buffer();
+                return StreamResult::FlushBuffer(format!("{}{}", flushed, token_text));
+            }
             return StreamResult::Content(token_text.to_string());
         }
 
-        match self.state.clone() {
-            ParserState::Normal => {
-                // Check for start trigger
-                if self.is_start_token(token_id, token_text) {
-                    self.state = ParserState::Buffering;
-                    self.buffer.clear();
+        self.buffer.push_str(token_text);
 
-                    if let Some(pos) = token_text.find(&self.config.start_token_str) {
-                        let before = &token_text[..pos];
-                        let after = &token_text[pos + self.config.start_token_str.len()..];
-                        if !after.is_empty() {
-                            self.buffer.push_str(after);
-                        }
-                        if !before.is_empty() {
-                            return StreamResult::Content(before.to_string());
-                        }
-                    }
-
-                    crate::log_info!(
-                        "Tool call {} ({}) found, start buffering!",
-                        token_text,
-                        token_id
+        let (could_be_tool, tool_complete) = prefix_could_be_tool(&self.buffer);
+        if could_be_tool || tool_complete {
+            self.state = ParserState::Buffering;
+            if tool_complete {
+                let mut tool_calls =
+                    parse_tool_calls_from_text(&self.buffer, &mut self.tool_call_index);
+                let result = if tool_calls.is_empty() {
+                    crate::log_error!(
+                        "Unable to parse tool call buffer: {}\n of accumulated buffer: {}",
+                        self.buffer,
+                        self.accumulated_output
                     );
-                    return StreamResult::Buffering;
-                }
-
-                // Check for partial tag match at end of current token
-                if !self.config.has_start_tokens() {
-                    if let Some((prefix, partial)) = self.split_partial_start(token_text) {
-                        self.state = ParserState::MaybeStart;
-                        self.buffer.clear();
-                        self.buffer.push_str(&partial);
-                        return if prefix.is_empty() {
-                            StreamResult::Buffering
-                        } else {
-                            StreamResult::Content(prefix)
-                        };
-                    }
-                }
-
-                // Normal content
-                StreamResult::Content(token_text.to_string())
-            }
-            ParserState::MaybeStart => {
-                self.buffer.push_str(token_text);
-
-                if let Some(tag_pos) = self.buffer.find(&self.config.start_token_str) {
-                    let before = self.buffer[..tag_pos].to_string();
-                    let after =
-                        self.buffer[tag_pos + self.config.start_token_str.len()..].to_string();
-                    self.buffer.clear();
-                    if !after.is_empty() {
-                        self.buffer.push_str(&after);
-                    }
-                    self.state = ParserState::Buffering;
-                    return if before.is_empty() {
-                        StreamResult::Buffering
-                    } else {
-                        StreamResult::Content(before)
-                    };
-                }
-
-                if self.partial_suffix_len(&self.buffer) > 0 {
-                    return StreamResult::Buffering;
-                }
-
-                // False alarm - not a tool call tag
-                self.state = ParserState::Normal;
-                let flushed = self.buffer.clone();
+                    StreamResult::FlushBuffer(self.buffer.clone())
+                } else {
+                    StreamResult::ToolCalls(std::mem::take(&mut tool_calls))
+                };
                 self.buffer.clear();
-                StreamResult::FlushBuffer(flushed)
+                self.state = ParserState::Normal;
+                return result;
             }
-            ParserState::Buffering => {
-                self.buffer.push_str(token_text);
-
-                let end_reached = self.is_end_token(token_id, token_text)
-                    || self.buffer_has_end_tag()
-                    || self.maybe_complete_mistral_list();
-                if end_reached {
-                    crate::log_info!(
-                        "Tool call buffering end, reached {} ({})",
-                        token_text,
-                        token_id
-                    );
-
-                    let tool_calls = self.parse_buffer();
-                    let result = if tool_calls.is_empty() {
-                        // Parse failed - return buffered content
-                        crate::log_error!(
-                            "Unable to parse tool call buffer: {}\n of accumulated buffer: {}",
-                            self.buffer,
-                            self.accumulated_output
-                        );
-                        StreamResult::FlushBuffer(self.buffer.clone())
-                    } else {
-                        StreamResult::ToolCalls(tool_calls)
-                    };
-                    self.buffer.clear();
-                    self.state = ParserState::Normal;
-                    return result;
-                }
-
-                StreamResult::Buffering
-            }
+            return StreamResult::Buffering;
         }
+
+        // Not a tool call - flush buffered content
+        self.state = ParserState::Normal;
+        let flushed = std::mem::take(&mut self.buffer);
+        StreamResult::Content(flushed)
     }
 
     /// Finalize parsing when stream ends
@@ -423,11 +383,12 @@ impl StreamToolParser {
                     self.state = ParserState::Normal;
                     return None;
                 }
-                let tool_calls = self.parse_buffer();
+                let mut tool_calls =
+                    parse_tool_calls_from_text(&self.buffer, &mut self.tool_call_index);
                 if !tool_calls.is_empty() {
                     self.buffer.clear();
                     self.state = ParserState::Normal;
-                    return Some(tool_calls);
+                    return Some(std::mem::take(&mut tool_calls));
                 }
                 // Leave buffer intact so caller can flush it.
                 self.state = ParserState::Normal;
@@ -446,273 +407,7 @@ impl StreamToolParser {
         std::mem::take(&mut self.buffer)
     }
 
-    /// Check if token/text matches start trigger
-    fn is_start_token(&self, id: u32, text: &str) -> bool {
-        // Token ID match (if available)
-        if self.config.has_start_tokens() {
-            return self.config.start_token_ids.contains(&id);
-        }
-        // Text match
-        text.contains(&self.config.start_token_str)
-    }
-
-    /// Check if token/text matches end trigger
-    fn is_end_token(&self, id: u32, text: &str) -> bool {
-        // Token ID match (if available)
-        if self.config.has_end_tokens() {
-            return self.config.end_token_ids.contains(&id);
-        }
-        if self.parse_strategy == "mistral_list" && self.config.end_token_str == "]" {
-            return false;
-        }
-        // Text match
-        text.contains(&self.config.end_token_str)
-    }
-
-    /// Parse buffered content into tool calls
-    fn parse_buffer(&mut self) -> Vec<ToolCall> {
-        let mut clean_text = self.buffer.trim().to_string();
-        if self.should_strip_end_tag() {
-            if let Some(pos) = clean_text.rfind(&self.config.end_token_str) {
-                clean_text.truncate(pos);
-            }
-        }
-        let mut calls = Vec::new();
-
-        // Strategy 1: Mistral List [ {...}, {...} ]
-        if self.parse_strategy == "mistral_list" && clean_text.starts_with('[') {
-            if let Ok(list) = serde_json::from_str::<Vec<Value>>(&clean_text) {
-                for item in list.iter() {
-                    if let Some(call) = self.json_to_tool_call(item) {
-                        calls.push(call);
-                    }
-                }
-            }
-        }
-        // Strategy 2: Single JSON Object (Qwen, Llama, Phi)
-        else if let Ok(item) = serde_json::from_str::<Value>(&clean_text) {
-            if let Some(call) = self.json_to_tool_call(&item) {
-                calls.push(call);
-            }
-        }
-        // Strategy 3: QwenCoder XML-style function tags
-        else if clean_text.starts_with("<function=") && clean_text.contains("</function>") {
-            // Extract function name from <function=...> tag
-            let func_start = "<function=".len();
-            let func_end = clean_text.find('>').unwrap_or(0);
-            if func_end > func_start {
-                let func_name = &clean_text[func_start..func_end];
-
-                // Find parameter section
-                let params_start = clean_text.find("<parameter=");
-                let params_end = clean_text.find("</function>");
-
-                let mut params = std::collections::HashMap::new();
-
-                if let (Some(start), Some(end)) = (params_start, params_end) {
-                    let param_content = &clean_text[start..end];
-
-                    // Parse all parameter tags
-                    let mut pos = 0;
-                    while pos < param_content.len() {
-                        let param_start_tag = param_content[pos..].find("<parameter=");
-                        if param_start_tag.is_none() {
-                            break;
-                        }
-                        let param_start_tag = param_start_tag.unwrap() + pos;
-
-                        let key_start = param_start_tag + "<parameter=".len();
-                        let key_end = param_content[key_start..].find(">").unwrap_or(0) + key_start;
-
-                        if key_end > key_start {
-                            let key = &param_content[key_start..key_end];
-
-                            let value_start = key_end + 1;
-                            let value_end = param_content[value_start..]
-                                .find("</parameter>")
-                                .unwrap_or(0)
-                                + value_start;
-
-                            if value_end > value_start {
-                                let value = &param_content[value_start..value_end];
-                                params.insert(key.to_string(), value.trim().to_string());
-                            }
-                        }
-
-                        // Move position past this parameter
-                        let next_pos = param_content[pos..].find("</parameter>").unwrap_or(0)
-                            + pos
-                            + "</parameter>".len();
-                        if next_pos <= pos {
-                            break;
-                        }
-                        pos = next_pos;
-                    }
-                }
-
-                if let Ok(args) = serde_json::to_string(&params) {
-                    let call = ToolCall {
-                        index: Some(self.tool_call_index),
-                        id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                        call_type: "function".to_string(),
-                        function: FunctionCall {
-                            name: func_name.to_string(),
-                            arguments: args,
-                        },
-                    };
-
-                    self.tool_call_index += 1;
-                    calls.push(call);
-                }
-            }
-        }
-        // Strategy 4: Repair unbalanced JSON and retry
-        else if let Some(repaired) = self.repair_unbalanced_json(&clean_text) {
-            if repaired != clean_text {
-                crate::log_warn!("Tool call JSON missing closing braces; attempting repair");
-            }
-            if let Ok(item) = serde_json::from_str::<Value>(&repaired) {
-                if let Some(call) = self.json_to_tool_call(&item) {
-                    calls.push(call);
-                }
-            }
-        }
-
-        calls
-    }
-    fn split_partial_start(&self, text: &str) -> Option<(String, String)> {
-        let tag = &self.config.start_token_str;
-        let suffix_len = self.partial_suffix_len(text);
-        if suffix_len > 0 && suffix_len < tag.len() {
-            let prefix = text[..text.len() - suffix_len].to_string();
-            let partial = text[text.len() - suffix_len..].to_string();
-            return Some((prefix, partial));
-        }
-        None
-    }
-
-    fn partial_suffix_len(&self, text: &str) -> usize {
-        let tag = &self.config.start_token_str;
-        let max = std::cmp::min(tag.len(), text.len());
-        for i in (1..=max).rev() {
-            if text.ends_with(&tag[..i]) {
-                return i;
-            }
-        }
-        0
-    }
-
-    fn buffer_has_end_tag(&self) -> bool {
-        if self.config.end_token_str.is_empty() {
-            return false;
-        }
-        if self.config.has_end_tokens() {
-            return false;
-        }
-        if self.parse_strategy == "mistral_list" && self.config.end_token_str == "]" {
-            return false;
-        }
-        self.buffer.contains(&self.config.end_token_str)
-    }
-
-    fn maybe_complete_mistral_list(&self) -> bool {
-        if self.parse_strategy != "mistral_list" {
-            return false;
-        }
-        let trimmed = self.buffer.trim();
-        if !trimmed.ends_with(']') {
-            return false;
-        }
-        serde_json::from_str::<Vec<Value>>(trimmed).is_ok()
-    }
-
-    fn should_strip_end_tag(&self) -> bool {
-        let end_tag = self.config.end_token_str.as_str();
-        if end_tag.is_empty() {
-            return false;
-        }
-        if self.parse_strategy == "mistral_list" && end_tag == "]" {
-            return false;
-        }
-        end_tag.starts_with('<')
-    }
-
-    fn repair_unbalanced_json(&self, text: &str) -> Option<String> {
-        let trimmed = text.trim();
-        if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-            return None;
-        }
-
-        let mut in_string = false;
-        let mut escape = false;
-        let mut open_braces = 0usize;
-        let mut close_braces = 0usize;
-        let mut open_brackets = 0usize;
-        let mut close_brackets = 0usize;
-
-        for ch in trimmed.chars() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' if in_string => {
-                    escape = true;
-                }
-                '"' => {
-                    in_string = !in_string;
-                }
-                '{' if !in_string => open_braces += 1,
-                '}' if !in_string => close_braces += 1,
-                '[' if !in_string => open_brackets += 1,
-                ']' if !in_string => close_brackets += 1,
-                _ => {}
-            }
-        }
-
-        if in_string {
-            return None;
-        }
-        if close_braces > open_braces || close_brackets > open_brackets {
-            return None;
-        }
-
-        if open_braces == close_braces && open_brackets == close_brackets {
-            return None;
-        }
-
-        let mut fixed = trimmed.to_string();
-        if open_brackets > close_brackets {
-            fixed.push_str(&"]".repeat(open_brackets - close_brackets));
-        }
-        if open_braces > close_braces {
-            fixed.push_str(&"}".repeat(open_braces - close_braces));
-        }
-        Some(fixed)
-    }
-
-    /// Convert JSON value to ToolCall
-    fn json_to_tool_call(&mut self, item: &Value) -> Option<ToolCall> {
-        let name = item["name"].as_str()?.to_string();
-        let arguments = if let Some(args) = item.get("arguments") {
-            if args.is_string() {
-                args.as_str().unwrap_or("{}").to_string()
-            } else {
-                args.to_string()
-            }
-        } else {
-            "{}".to_string()
-        };
-
-        let call = ToolCall {
-            index: Some(self.tool_call_index),
-            id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-            call_type: "function".to_string(),
-            function: FunctionCall { name, arguments },
-        };
-        self.tool_call_index += 1;
-        Some(call)
-    }
+    // legacy parsing helpers removed in favor of mistral-style JSON prefix checks
 
     // --- Chunk creation helpers (for use by server.rs) ---
 
@@ -763,6 +458,8 @@ impl StreamToolParser {
     }
 }
 
+// legacy partial JSON checks moved to tools::parser::prefix_could_be_tool
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -797,7 +494,7 @@ mod tests {
         let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
 
         // Start tag triggers buffering
-        match parser.process_token(151657, "<tool_call>") {
+        match parser.process_token(0, "<tool_call>") {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering on start tag"),
         }
@@ -809,32 +506,6 @@ mod tests {
         }
 
         // End tag triggers parsing
-        match parser.process_token(151658, "</tool_call>") {
-            StreamResult::ToolCalls(calls) => {
-                assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].function.name, "test");
-            }
-            _ => panic!("Expected ToolCalls"),
-        }
-    }
-
-    #[test]
-    fn test_parser_partial_start_text_mode() {
-        let mut parser = StreamToolParser::new(ModelType::Phi, "phi".to_string());
-
-        // Partial start tag splits across tokens
-        match parser.process_token(0, "<tool_") {
-            StreamResult::Buffering => {}
-            _ => panic!("Expected Buffering on partial start"),
-        }
-        match parser.process_token(0, "call>") {
-            StreamResult::Buffering => {}
-            _ => panic!("Expected Buffering on completed start"),
-        }
-        match parser.process_token(0, r#"{"name": "test", "arguments": {}}"#) {
-            StreamResult::Buffering => {}
-            _ => panic!("Expected Buffering"),
-        }
         match parser.process_token(0, "</tool_call>") {
             StreamResult::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1);
@@ -845,12 +516,39 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_token_id_strict_match() {
-        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
+    fn test_parser_tool_call_array() {
+        let mut parser = StreamToolParser::new(ModelType::Mistral, "mistral".to_string());
+        let payload =
+            "[TOOL_CALLS][{\"name\":\"a\",\"arguments\":{}},{\"name\":\"b\",\"arguments\":{}}]";
+        match parser.process_token(0, payload) {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].function.name, "a");
+                assert_eq!(calls[1].function.name, "b");
+            }
+            _ => panic!("Expected ToolCalls"),
+        }
+    }
 
-        // Text match should not trigger when token IDs are available
-        match parser.process_token(0, "<tool_call>") {
-            StreamResult::Content(text) => assert_eq!(text, "<tool_call>"),
+    #[test]
+    fn test_parser_function_tag_tool_call() {
+        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
+        let payload = r#"<tool_call><function=my_tool><parameter=foo>{"bar":1}</parameter></function></tool_call>"#;
+        match parser.process_token(0, payload) {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "my_tool");
+            }
+            _ => panic!("Expected ToolCalls"),
+        }
+    }
+
+    #[test]
+    fn test_parser_non_tool_content_flushes() {
+        let mut parser = StreamToolParser::new(ModelType::Phi, "phi".to_string());
+
+        match parser.process_token(0, "Hello ") {
+            StreamResult::Content(text) => assert_eq!(text, "Hello "),
             _ => panic!("Expected Content without token ID match"),
         }
     }

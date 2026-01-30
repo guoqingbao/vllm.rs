@@ -5,7 +5,9 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
-use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
+use crate::tools::helpers::{
+    build_tool_schema_map, filter_tool_calls, sanitize_tools_for_llguidance,
+};
 use crate::tools::parser::ToolParser;
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -1083,6 +1085,9 @@ pub async fn messages(
     } else {
         mcp_tools.clone()
     };
+    if params.constraint.is_some() {
+        resolved_tools = sanitize_tools_for_llguidance(&resolved_tools);
+    }
     let mut tool_choice_instruction: Option<String> = None;
     let mut forced_tool_name: Option<String> = None;
     let mut tool_choice_required = false;
@@ -1158,22 +1163,40 @@ pub async fn messages(
     };
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
-    let (model_type, tool_config) = {
+    let (model_type, tool_config, template_supports_tools) = {
         let e = data.engine.read();
-        (e.model_type.clone(), e.tool_config.clone())
+        (
+            e.model_type.clone(),
+            e.tool_config.clone(),
+            e.template_supports_tools(),
+        )
     };
 
     if !resolved_tools.is_empty() {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
-        };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
+        let mut tool_prompt: Option<String> = None;
+        if !template_supports_tools {
+            let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
+            let mut prompt = if let Some(template) = tool_prompt_template {
+                template
+            } else {
+                ToolFormat::get_tool_prompt(&model_type)
+            };
+            if let Some(instruction) = tool_choice_instruction.as_ref() {
+                prompt = format!("{prompt}\n\n{instruction}");
+            }
+            tool_prompt = Some(prompt);
         }
-        inject_tool_prompt(&mut chat_messages, &tool_prompt);
+
+        let instruction_only = tool_prompt.is_none() && tool_choice_instruction.is_some();
+        let system_injection = if instruction_only {
+            tool_choice_instruction.clone()
+        } else {
+            tool_prompt
+        };
+
+        if let Some(system_text) = system_injection {
+            inject_tool_prompt(&mut chat_messages, &system_text);
+        }
     }
 
     let img_cfg = {
@@ -1483,6 +1506,43 @@ pub async fn messages(
                                     } else {
                                         let buffer = tool_parser.take_buffer();
                                         if !buffer.is_empty() {
+                                            let (could_be_tool, complete) =
+                                                crate::tools::parser::prefix_could_be_tool(&buffer);
+                                            if could_be_tool && !complete {
+                                                let snippet: String =
+                                                    buffer.chars().take(120).collect();
+                                                crate::log_warn!(
+                                                    "[Seq {}] Incomplete tool call at stream end, dropping {} chars: {}",
+                                                    seq_id,
+                                                    buffer.len(),
+                                                    snippet
+                                                );
+                                            } else {
+                                                let _ = send_text_with_start(
+                                                    &stream_ctx,
+                                                    &mut text_block_started,
+                                                    text_block_index,
+                                                    &buffer,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                ParserState::MaybeStart => {
+                                    let buffer = tool_parser.take_buffer();
+                                    if !buffer.is_empty() {
+                                        let (could_be_tool, complete) =
+                                            crate::tools::parser::prefix_could_be_tool(&buffer);
+                                        if could_be_tool && !complete {
+                                            let snippet: String =
+                                                buffer.chars().take(120).collect();
+                                            crate::log_warn!(
+                                                "[Seq {}] Incomplete tool call prefix at stream end, dropping {} chars: {}",
+                                                seq_id,
+                                                buffer.len(),
+                                                snippet
+                                            );
+                                        } else {
                                             let _ = send_text_with_start(
                                                 &stream_ctx,
                                                 &mut text_block_started,
@@ -1490,17 +1550,6 @@ pub async fn messages(
                                                 &buffer,
                                             );
                                         }
-                                    }
-                                }
-                                ParserState::MaybeStart => {
-                                    let buffer = tool_parser.take_buffer();
-                                    if !buffer.is_empty() {
-                                        let _ = send_text_with_start(
-                                            &stream_ctx,
-                                            &mut text_block_started,
-                                            text_block_index,
-                                            &buffer,
-                                        );
                                     }
                                 }
                                 ParserState::Normal => {}

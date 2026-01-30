@@ -3,7 +3,7 @@
 //!
 //! These functions handle tool resolution, schema mapping, and tool call validation.
 
-use super::schema::validate_arguments;
+use super::schema::{sanitize_schema_for_llguidance, validate_arguments};
 use super::{FunctionCall, Tool, ToolCall};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -16,6 +16,16 @@ pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<
         }
     }
     mcp_tools.to_vec()
+}
+
+pub fn sanitize_tools_for_llguidance(tools: &[Tool]) -> Vec<Tool> {
+    tools.iter().map(sanitize_tool_schema).collect()
+}
+
+fn sanitize_tool_schema(tool: &Tool) -> Tool {
+    let mut tool = tool.clone();
+    tool.function.parameters = sanitize_schema_for_llguidance(&tool.function.parameters);
+    tool
 }
 
 /// Build a map of tool names to their parameter schemas

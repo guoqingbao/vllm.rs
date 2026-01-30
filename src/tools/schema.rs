@@ -3,8 +3,29 @@
 //!
 //! Provides helpers for working with JSON Schema in tool definitions.
 
-use serde_json::{json, Value};
+use crate::tools::Tool;
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+/// Remove JSON Schema features that llguidance doesn't support.
+/// Currently strips all "format" fields recursively.
+pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => {
+            let mut out = Map::new();
+            for (key, value) in map {
+                if key == "format" {
+                    continue;
+                }
+                out.insert(key.clone(), sanitize_schema_for_llguidance(value));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(sanitize_schema_for_llguidance).collect())
+        }
+        _ => schema.clone(),
+    }
+}
 
 /// Builder for creating JSON Schema objects
 #[derive(Debug, Clone, Default)]
@@ -240,6 +261,203 @@ pub fn validate_arguments(schema: &Value, arguments: &Value) -> Result<(), Strin
     Ok(())
 }
 
+/// Build a JSON Schema for tool calls.
+/// Supports a single tool call object or an array of tool call objects.
+pub fn build_tool_call_schema(tools: &[Tool]) -> Value {
+    let mut variants = Vec::new();
+
+    for tool in tools {
+        let name = tool.function.name.clone();
+        let mut args_schema = tool.function.parameters.clone();
+
+        // If strict mode is requested and schema is object-like, disallow extra properties.
+        if tool.function.strict.unwrap_or(false) {
+            if args_schema.get("type") == Some(&Value::String("object".to_string()))
+                && args_schema.get("additionalProperties").is_none()
+            {
+                args_schema["additionalProperties"] = Value::Bool(false);
+            }
+        }
+
+        let variant = json!({
+            "type": "object",
+            "properties": {
+                "name": { "const": name },
+                "arguments": args_schema
+            },
+            "required": ["name", "arguments"],
+            "additionalProperties": false
+        });
+        variants.push(variant);
+    }
+
+    let tool_call_schema = if variants.len() == 1 {
+        variants.into_iter().next().unwrap_or_else(|| json!({}))
+    } else {
+        json!({ "oneOf": variants })
+    };
+
+    json!({
+        "oneOf": [
+            tool_call_schema,
+            {
+                "type": "array",
+                "items": tool_call_schema,
+                "minItems": 1
+            }
+        ]
+    })
+}
+
+fn lark_quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+fn lark_literal(value: &str, is_special: bool) -> String {
+    if is_special && value.starts_with('<') && value.ends_with('>') {
+        value.to_string()
+    } else {
+        lark_quote(value)
+    }
+}
+
+/// Build a Lark grammar that wraps a tool call JSON schema between start/end markers.
+pub fn build_tool_call_lark_grammar(
+    schema: &Value,
+    start: &str,
+    end: &str,
+    start_is_special: bool,
+    end_is_special: bool,
+) -> String {
+    let schema_json = serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_string());
+
+    if start.is_empty() || end.is_empty() {
+        return format!("start: tool\ntool: %json {schema_json}\n");
+    }
+
+    let start_lit = lark_literal(start, start_is_special);
+    let end_lit = lark_literal(end, end_is_special);
+
+    format!(
+        "start: {start_lit} _WS? tool _WS? {end_lit}\n\
+         tool: %json {schema_json}\n\
+         _WS: /[ \\t\\r\\n]+/\n"
+    )
+}
+
+/// Build a Lark grammar for QwenCoder-style function/parameter tags with JSON values.
+pub fn build_function_tag_lark_grammar(
+    tools: &[Tool],
+    start: &str,
+    end: &str,
+    start_is_special: bool,
+    end_is_special: bool,
+) -> String {
+    let mut rules: Vec<String> = Vec::new();
+    let start_tag = if start.is_empty() {
+        None
+    } else {
+        Some(lark_literal(start, start_is_special))
+    };
+    let end_tag = if end.is_empty() {
+        None
+    } else {
+        Some(lark_literal(end, end_is_special))
+    };
+
+    let tool_rule_names: Vec<String> = (0..tools.len()).map(|i| format!("tool_{i}")).collect();
+    let toolcall_rule = if tool_rule_names.is_empty() {
+        "toolcall:".to_string()
+    } else {
+        format!("toolcall: {}", tool_rule_names.join(" | "))
+    };
+
+    if let (Some(start_lit), Some(end_lit)) = (start_tag.as_ref(), end_tag.as_ref()) {
+        rules.push(format!("start: {start_lit} _WS? toolcall _WS? {end_lit}"));
+    } else {
+        rules.push("start: toolcall".to_string());
+    }
+
+    rules.push(toolcall_rule);
+
+    for (tool_idx, tool) in tools.iter().enumerate() {
+        let func_start = lark_quote(&format!("<function={}>", tool.function.name));
+        let func_end = lark_quote("</function>");
+
+        let params_schema = &tool.function.parameters;
+        let props = params_schema.get("properties").and_then(|p| p.as_object());
+        let defs = params_schema.get("$defs").cloned();
+        let definitions = params_schema.get("definitions").cloned();
+
+        let mut param_rule_names = Vec::new();
+
+        if let Some(props) = props {
+            for (param_idx, (param_name, schema)) in props.iter().enumerate() {
+                let param_tag = lark_quote(&format!("<parameter={}>", param_name));
+                let param_end = lark_quote("</parameter>");
+                let value_rule = format!("value_{tool_idx}_{param_idx}");
+                let param_rule = format!("param_{tool_idx}_{param_idx}");
+                let schema_with_defs = if defs.is_some() || definitions.is_some() {
+                    if let Some(obj) = schema.as_object() {
+                        let mut merged = obj.clone();
+                        // Preserve existing $defs/definitions in param schema if present.
+                        if let Some(ref defs_val) = defs {
+                            merged
+                                .entry("$defs".to_string())
+                                .or_insert_with(|| defs_val.clone());
+                        }
+                        if let Some(ref defs_val) = definitions {
+                            merged
+                                .entry("definitions".to_string())
+                                .or_insert_with(|| defs_val.clone());
+                        }
+                        serde_json::Value::Object(merged)
+                    } else {
+                        let mut merged = serde_json::Map::new();
+                        merged.insert("allOf".to_string(), json!([schema.clone()]));
+                        if let Some(ref defs_val) = defs {
+                            merged.insert("$defs".to_string(), defs_val.clone());
+                        }
+                        if let Some(ref defs_val) = definitions {
+                            merged.insert("definitions".to_string(), defs_val.clone());
+                        }
+                        serde_json::Value::Object(merged)
+                    }
+                } else {
+                    schema.clone()
+                };
+
+                let schema_json =
+                    serde_json::to_string(&schema_with_defs).unwrap_or_else(|_| "{}".to_string());
+
+                rules.push(format!("{value_rule}: %json {schema_json}"));
+                rules.push(format!(
+                    "{param_rule}: {param_tag} {value_rule} {param_end}"
+                ));
+                param_rule_names.push(param_rule);
+            }
+        }
+
+        let params_expr = if param_rule_names.is_empty() {
+            String::new()
+        } else {
+            format!("({})*", param_rule_names.join(" | "))
+        };
+
+        if params_expr.is_empty() {
+            rules.push(format!("tool_{tool_idx}: {func_start} _WS? {func_end}"));
+        } else {
+            rules.push(format!(
+                "tool_{tool_idx}: {func_start} _WS? {params_expr} _WS? {func_end}"
+            ));
+        }
+    }
+
+    rules.push("_WS: /[ \\t\\r\\n]+/".to_string());
+    rules.join("\n")
+}
+
 fn validate_type(schema: &Value, value: &Value, field_name: &str) -> Result<(), String> {
     if let Some(enum_values) = schema.get("enum").and_then(|v| v.as_array()) {
         if !enum_values.iter().any(|v| v == value) {
@@ -472,5 +690,21 @@ mod tests {
 
         assert!(validate_arguments(&schema, &valid).is_ok());
         assert!(validate_arguments(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn test_sanitize_schema_strips_format() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "format": "uri"},
+                "nested": {"type": "object", "properties": {"id": {"type": "string", "format": "uuid"}}}
+            }
+        });
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+        assert!(sanitized["properties"]["url"].get("format").is_none());
+        assert!(sanitized["properties"]["nested"]["properties"]["id"]
+            .get("format")
+            .is_none());
     }
 }

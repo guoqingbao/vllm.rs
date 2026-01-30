@@ -103,6 +103,19 @@ impl ChatTemplate {
         self.enable_thinking = enable;
     }
 
+    pub fn supports_tools(&self) -> bool {
+        let Some(template) = &self.chat_template else {
+            return false;
+        };
+        let lower = template.to_lowercase();
+        lower.contains("tools")
+            || lower.contains("tool_calls")
+            || lower.contains("[available_tools]")
+            || lower.contains("<tools")
+            || lower.contains("[tool_calls]")
+            || lower.contains("<tool_call>")
+    }
+
     #[allow(dead_code)]
     fn clear_message(&mut self) {
         self.messages.clear()

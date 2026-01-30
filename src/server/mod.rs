@@ -7,9 +7,10 @@ pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
+use crate::tools::schema::{build_tool_call_lark_grammar, sanitize_schema_for_llguidance};
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
-use crate::utils::config::EngineConfig;
+use crate::utils::config::{Constraint, EngineConfig};
 use crate::utils::image::{
     compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
     ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
@@ -24,10 +25,47 @@ use colored::*;
 use local_ip_address::local_ip;
 use parking_lot::RwLock;
 use rustchatui::start_ui_server;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct StructuredOutputs {
+    #[serde(default)]
+    pub choice: Option<Vec<String>>,
+    #[serde(default)]
+    pub regex: Option<String>,
+    #[serde(default)]
+    pub json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub grammar: Option<String>,
+    #[serde(default)]
+    pub structural_tag: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ExtraBody {
+    #[serde(default)]
+    pub structured_outputs: Option<StructuredOutputs>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ResponseFormatJsonSchema {
+    #[serde(default)]
+    pub name: Option<String>,
+    pub schema: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ResponseFormat {
+    #[serde(rename = "type")]
+    pub format_type: String,
+    #[serde(default)]
+    pub json_schema: Option<ResponseFormatJsonSchema>,
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
@@ -41,6 +79,8 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    #[serde(default, alias = "stop_sequences")]
+    pub stop: Option<Vec<String>>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
     /// Tools available for the model to call
@@ -49,6 +89,203 @@ pub struct ChatCompletionRequest {
     /// How the model should choose which tool to call
     #[serde(default)]
     pub tool_choice: Option<crate::tools::ToolChoice>,
+    /// OpenAI-style response format for structured outputs
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+    /// Extra body for OpenAI-compatible clients (e.g. structured_outputs)
+    #[serde(default)]
+    pub extra_body: Option<ExtraBody>,
+}
+
+fn lark_quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{}\"", escaped)
+}
+
+fn build_choice_lark_grammar(choices: &[String]) -> Result<String> {
+    if choices.is_empty() {
+        candle_core::bail!(
+            "{}",
+            "structured_outputs.choice must include at least one option".to_string()
+        );
+    }
+
+    let mut parts = Vec::with_capacity(choices.len());
+    for choice in choices {
+        if choice.is_empty() {
+            candle_core::bail!(
+                "{}",
+                "structured_outputs.choice cannot contain empty strings".to_string()
+            );
+        }
+        parts.push(lark_quote(choice));
+    }
+
+    Ok(format!("start: {}\n", parts.join(" | ")))
+}
+
+fn normalize_tag_pair(tag: &str) -> Result<(String, String)> {
+    let trimmed = tag.trim();
+    if trimmed.is_empty() {
+        candle_core::bail!(
+            "{}",
+            "structured_outputs.structural_tag.tag cannot be empty".to_string()
+        );
+    }
+
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        let inner = trimmed
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .trim_start_matches('/');
+        if inner.is_empty() {
+            candle_core::bail!(
+                "{}",
+                "structured_outputs.structural_tag.tag is invalid".to_string()
+            );
+        }
+        let start = if trimmed.starts_with("</") {
+            format!("<{}>", inner)
+        } else {
+            trimmed.to_string()
+        };
+        let end = format!("</{}>", inner);
+        Ok((start, end))
+    } else {
+        Ok((format!("<{}>", trimmed), format!("</{}>", trimmed)))
+    }
+}
+
+fn parse_structural_tag(value: &Value) -> Result<(String, String, Value)> {
+    let obj = value.as_object().ok_or_else(|| {
+        candle_core::Error::Msg("structured_outputs.structural_tag must be an object".to_string())
+    })?;
+
+    let schema = obj.get("schema").cloned().ok_or_else(|| {
+        candle_core::Error::Msg("structured_outputs.structural_tag.schema is required".to_string())
+    })?;
+
+    let start = obj
+        .get("start_tag")
+        .or_else(|| obj.get("start"))
+        .or_else(|| obj.get("tag"));
+    let end = obj.get("end_tag").or_else(|| obj.get("end"));
+
+    let (start_tag, end_tag) = match (start, end) {
+        (Some(start), Some(end)) => {
+            let start = start.as_str().ok_or_else(|| {
+                candle_core::Error::Msg(
+                    "structured_outputs.structural_tag.start_tag must be a string".to_string(),
+                )
+            })?;
+            let end = end.as_str().ok_or_else(|| {
+                candle_core::Error::Msg(
+                    "structured_outputs.structural_tag.end_tag must be a string".to_string(),
+                )
+            })?;
+            (start.to_string(), end.to_string())
+        }
+        (Some(tag), None) if obj.contains_key("tag") => {
+            let tag = tag.as_str().ok_or_else(|| {
+                candle_core::Error::Msg(
+                    "structured_outputs.structural_tag.tag must be a string".to_string(),
+                )
+            })?;
+            normalize_tag_pair(tag)?
+        }
+        (Some(_), None) => {
+            candle_core::bail!(
+                "{}",
+                "structured_outputs.structural_tag.end_tag is required when start_tag is provided"
+                    .to_string(),
+            );
+        }
+        _ => {
+            candle_core::bail!(
+                "{}",
+                "structured_outputs.structural_tag requires tag or start_tag/end_tag".to_string(),
+            );
+        }
+    };
+
+    Ok((start_tag, end_tag, schema))
+}
+
+fn sanitize_json_schema(schema: &Value, context: &str) -> Result<Value> {
+    if !schema.is_object() {
+        candle_core::bail!("{} must be a JSON Schema object", context);
+    }
+    Ok(sanitize_schema_for_llguidance(schema))
+}
+
+pub(crate) fn constraint_from_structured_outputs(
+    structured: &StructuredOutputs,
+) -> Result<Option<Constraint>> {
+    let mut selected: Option<Constraint> = None;
+
+    let mut set_constraint = |constraint: Constraint| -> Result<()> {
+        if selected.is_some() {
+            candle_core::bail!("{}", 
+                "structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"
+                    .to_string(),
+            );
+        }
+        selected = Some(constraint);
+        Ok(())
+    };
+
+    if let Some(choice) = &structured.choice {
+        let grammar = build_choice_lark_grammar(choice)?;
+        set_constraint(Constraint::Lark(grammar))?;
+    }
+
+    if let Some(regex) = &structured.regex {
+        set_constraint(Constraint::Regex(regex.clone()))?;
+    }
+
+    if let Some(schema) = &structured.json {
+        let schema = sanitize_json_schema(schema, "structured_outputs.json")?;
+        set_constraint(Constraint::JsonSchema(schema))?;
+    }
+
+    if let Some(grammar) = &structured.grammar {
+        set_constraint(Constraint::Lark(grammar.clone()))?;
+    }
+
+    if let Some(tag) = &structured.structural_tag {
+        let (start, end, schema) = parse_structural_tag(tag)?;
+        let schema = sanitize_json_schema(&schema, "structured_outputs.structural_tag.schema")?;
+        let grammar = build_tool_call_lark_grammar(&schema, &start, &end, false, false);
+        set_constraint(Constraint::Lark(grammar))?;
+    }
+
+    if selected.is_none() {
+        candle_core::bail!("{}", 
+            "structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"
+                .to_string(),
+        );
+    }
+
+    Ok(selected)
+}
+
+pub(crate) fn constraint_from_response_format(
+    response_format: &ResponseFormat,
+) -> Result<Option<Constraint>> {
+    match response_format.format_type.as_str() {
+        "json_schema" => {
+            let Some(schema) = response_format.json_schema.as_ref() else {
+                candle_core::bail!("{}", "response_format.json_schema is required".to_string());
+            };
+            let schema =
+                sanitize_json_schema(&schema.schema, "response_format.json_schema.schema")?;
+            Ok(Some(Constraint::JsonSchema(schema)))
+        }
+        other => candle_core::bail!(
+            "Unsupported response_format type '{}'; only 'json_schema' is supported",
+            other
+        ),
+    }
 }
 
 #[derive(Deserialize)]

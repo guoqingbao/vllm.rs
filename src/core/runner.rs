@@ -6,7 +6,7 @@ use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
-use crate::utils::guidance::GuidanceState;
+use crate::utils::guidance::{GuidanceState, ParserFactory};
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -28,10 +28,9 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use toktrie::TokTrie;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -82,6 +81,9 @@ pub struct ModelRunner {
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
+    guidance_failed: RwLock<HashSet<usize>>,
+    guidance_mismatch: RwLock<HashSet<usize>>,
+    llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
@@ -101,7 +103,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
-        toktrie: Option<Arc<TokTrie>>,
+        llg_factory: Option<Arc<ParserFactory>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -200,6 +202,30 @@ impl ModelRunner {
         } else {
             econfig.seed.unwrap()
         };
+        let model_vocab_size = match &model {
+            Model::Qwen3(model) => model.get_vocab_size(),
+            Model::Qwen3MoE(model) => model.get_vocab_size(),
+            Model::LLaMa(model) => model.get_vocab_size(),
+            Model::Phi4(model) => model.get_vocab_size(),
+            Model::GLM4(model) => model.get_vocab_size(),
+            Model::GLM4MoE(model) => model.get_vocab_size(),
+            Model::Mistral3VL(model) => model.get_vocab_size(),
+            Model::Gemma3(model) => model.get_vocab_size(),
+            Model::Qwen3VL(model) => model.get_vocab_size(),
+        };
+
+        if let Some(factory) = &llg_factory {
+            let llg_vocab_size = factory.tok_env().tok_trie().vocab_size();
+            if llg_vocab_size != model_vocab_size {
+                crate::log_warn!(
+                    "llguidance vocab size {} does not match model vocab size {} for {:?}.",
+                    llg_vocab_size,
+                    model_vocab_size,
+                    model_type
+                );
+            }
+        }
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -218,6 +244,9 @@ impl ModelRunner {
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             guidance_states: RwLock::new(HashMap::new()),
+            guidance_failed: RwLock::new(HashSet::new()),
+            guidance_mismatch: RwLock::new(HashSet::new()),
+            llg_factory,
             transfer,
             is_first_rank: comm.rank() == 0,
             model_type,
@@ -700,6 +729,104 @@ impl ModelRunner {
             logits.to_owned()
         };
 
+        let logits = if let Some(factory) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            let mut guidance_failed = self.guidance_failed.write();
+            let mut guidance_mismatch = self.guidance_mismatch.write();
+            let mut modified = false;
+            let vocab_size = logits.dim(1)?;
+            // We only materialize logits on CPU if at least one constraint mask applies.
+
+            // We'll collect masks first to minimize holding locks or complex logic inside the loop
+            let mut masks = Vec::new(); // (seq_index, seq_id, mask)
+
+            for (i, id) in seq_ids.iter().enumerate() {
+                let seq_constraint = match &seqs {
+                    Seqs::SeqRefs(refs) => &refs[i].sampling_params.constraint,
+                    Seqs::DecodeVec(vec) => &vec[i].sampling_params.constraint,
+                };
+
+                if guidance_failed.contains(id) {
+                    continue;
+                }
+
+                if let Some(constraint) = seq_constraint {
+                    let state = match guidance_states.entry(*id) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            match GuidanceState::new(factory.clone(), constraint) {
+                                Ok(state) => entry.insert(state),
+                                Err(err) => {
+                                    guidance_failed.insert(*id);
+                                    crate::log_warn!(
+                                    "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                                    id,
+                                    err
+                                );
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    if let Ok(Some(mask)) = state.compute_mask() {
+                        masks.push((i, *id, mask));
+                        modified = true;
+                    }
+                }
+            }
+
+            if modified {
+                // Now we must convert to Vec, modify, and update logits
+                let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+
+                for (seq_idx, seq_id, mask) in masks {
+                    let start = seq_idx * vocab_size;
+                    let end = start + vocab_size;
+                    let row = &mut logits_vec[start..end];
+                    let mask_len = mask.len();
+
+                    // Apply mask: set disallowed to -inf
+                    // This iterates entire vocab, but check is fast
+                    if mask_len == 0 {
+                        if guidance_failed.insert(seq_id) {
+                            crate::log_warn!(
+                                "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                                seq_id
+                            );
+                        }
+                        continue;
+                    }
+
+                    if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
+                        crate::log_warn!(
+                            "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                            seq_id,
+                            mask_len,
+                            vocab_size
+                        );
+                    }
+
+                    let apply_len = std::cmp::min(vocab_size, mask_len);
+                    for tok in 0..apply_len {
+                        if !mask.is_allowed(tok as u32) {
+                            row[tok] = f32::NEG_INFINITY;
+                        }
+                    }
+                    if mask_len < vocab_size {
+                        for tok in mask_len..vocab_size {
+                            row[tok] = f32::NEG_INFINITY;
+                        }
+                    }
+                }
+                Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+            } else {
+                logits
+            }
+        } else {
+            logits
+        };
+
         let tokens = self
             .logit_processor
             .sample_with_strategy(&logits, &cached_params.sampling)?;
@@ -718,6 +845,18 @@ impl ModelRunner {
                 }
             }
         }
+
+        // Commit tokens to guidance states
+        if let Some(_) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            for (i, id) in seq_ids.iter().enumerate() {
+                if let Some(state) = guidance_states.get_mut(id) {
+                    if !state.is_finished() {
+                        let _ = state.commit_token(tokens[i]);
+                    }
+                }
+            }
+        }
         Ok(tokens)
     }
 
@@ -726,6 +865,10 @@ impl ModelRunner {
         let _ = seq_tokens.remove(&id);
         let mut guidance_states = self.guidance_states.write();
         let _ = guidance_states.remove(&id);
+        let mut guidance_failed = self.guidance_failed.write();
+        let _ = guidance_failed.remove(&id);
+        let mut guidance_mismatch = self.guidance_mismatch.write();
+        let _ = guidance_mismatch.remove(&id);
     }
 
     pub fn get_model_vocab_size(&self) -> usize {

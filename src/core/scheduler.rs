@@ -5,11 +5,11 @@ use super::{
     prefix_cache::PrefixCacheConfig,
     sequence::{Sequence, SequenceStatus},
 };
+use crate::tools::parser::prefix_could_be_tool;
 use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
-use regex::Regex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,12 +24,10 @@ pub struct Scheduler {
     eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
-    /// Token ID for } character (used for JSON tool call detection)
-    json_end_token_id: Option<u32>,
-    /// Tokenizer for decoding output to check JSON tool call patterns
+    /// Token IDs for JSON end characters (e.g., '}' and ']')
+    json_end_token_ids: Vec<u32>,
+    /// Tokenizer for decoding output to check JSON tool call completion
     tokenizer: Option<Arc<Tokenizer>>,
-    /// Regex for detecting JSON tool calls
-    tool_call_regex: Regex,
     cfg: EngineConfig,
     pd_config: Option<PdConfig>,
     is_last_prefill: bool,
@@ -125,11 +123,8 @@ impl Scheduler {
             },
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
-            json_end_token_id: None,
+            json_end_token_ids: Vec::new(),
             tokenizer: None,
-            // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
-            // We use (?s) to allow dot matching newlines
-            tool_call_regex: Regex::new(r#"(?s)\{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$"#).unwrap(),
             cfg: econfig.clone(),
             pd_config: econfig.pd_config.clone(),
             is_last_prefill: false,
@@ -143,12 +138,20 @@ impl Scheduler {
 
     /// Set tokenizer for JSON tool call detection (called by engine after initialization)
     pub fn set_tokenizer(&mut self, tokenizer: Arc<Tokenizer>) {
-        // Get the token ID for "}" character
-        if let Ok(tokens) = tokenizer.encode("}", false) {
-            if let Some(&token_id) = tokens.get_ids().last() {
-                self.json_end_token_id = Some(token_id);
-                crate::log_info!("JSON end token ID (}}) set to: {}", token_id);
+        self.json_end_token_ids.clear();
+
+        for ch in ["}", "]"] {
+            if let Ok(tokens) = tokenizer.encode(ch, false) {
+                if let Some(&token_id) = tokens.get_ids().last() {
+                    if !self.json_end_token_ids.contains(&token_id) {
+                        self.json_end_token_ids.push(token_id);
+                    }
+                }
             }
+        }
+
+        if !self.json_end_token_ids.is_empty() {
+            crate::log_info!("JSON end token IDs set to: {:?}", self.json_end_token_ids);
         }
         self.tokenizer = Some(tokenizer);
     }
@@ -1007,19 +1010,24 @@ impl Scheduler {
             return true;
         }
 
-        // 2. Check for JSON style tool call using Regex
-        // This handles models like Qwen3 that output raw JSON without XML tags
-        if self.json_end_token_id == Some(token) {
+        // 2. Check for JSON style tool call by attempting to parse complete JSON
+        if self.json_end_token_ids.contains(&token) {
             if let Some(tokenizer) = &self.tokenizer {
                 // Temporarily add the token to get complete output for decoding
                 let mut temp_output = self.running[idx].output_ids.to_vec();
                 temp_output.push(token);
 
                 if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
-                    // Check for JSON tool call pattern using Regex
-                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
-                    if self.tool_call_regex.is_match(&decoded) {
-                        return true;
+                    let trimmed = decoded.trim();
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if val.is_object() || val.is_array() {
+                            return true;
+                        }
+                    } else {
+                        let (_could_be, is_complete) = prefix_could_be_tool(trimmed);
+                        if is_complete {
+                            return true;
+                        }
                     }
                 }
             }

@@ -7,9 +7,10 @@ use super::{
     EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
 };
 use super::{
-    ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
-    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    constraint_from_response_format, constraint_from_structured_outputs, ChatChoice,
+    ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse,
+    ChatMessage, ChatResponseMessage, Delta, EmbeddingData, EmbeddingOutput, EmbeddingUsage,
+    ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
@@ -18,7 +19,7 @@ use crate::tools::helpers::{
 };
 use crate::tools::parser::ToolParser;
 use crate::tools::{ToolChoice, ToolFormat};
-use crate::utils::config::SamplingParams;
+use crate::utils::config::{Constraint, SamplingParams};
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -111,14 +112,47 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type, tool_config) = {
+    if let Some(stop_sequences) = &request.stop {
+        if !stop_sequences.is_empty() {
+            params.stop_sequences = Some(stop_sequences.clone());
+        }
+    }
+    let (img_cfg, model_type, tool_config, template_supports_tools) = {
         let e = data.engine.read();
         (
             e.img_cfg.clone(),
             e.model_type.clone(),
             e.tool_config.clone(),
+            e.template_supports_tools(),
         )
     };
+
+    let mut structured_constraint: Option<Constraint> = None;
+    if let Some(response_format) = request.response_format.as_ref() {
+        match constraint_from_response_format(response_format) {
+            Ok(constraint) => structured_constraint = constraint,
+            Err(err) => return ChatResponder::ValidationError(format!("{:?}", err)),
+        }
+    }
+    if let Some(extra_body) = request.extra_body.as_ref() {
+        if let Some(structured) = extra_body.structured_outputs.as_ref() {
+            let constraint = match constraint_from_structured_outputs(structured) {
+                Ok(constraint) => constraint,
+                Err(err) => return ChatResponder::ValidationError(format!("{:?}", err)),
+            };
+            if constraint.is_some() {
+                if structured_constraint.is_some() {
+                    return ChatResponder::ValidationError(
+                        "Cannot combine response_format with structured_outputs".to_string(),
+                    );
+                }
+                structured_constraint = constraint;
+            }
+        }
+    }
+    if let Some(constraint) = structured_constraint {
+        params.constraint = Some(constraint);
+    }
 
     let mcp_tools = data
         .mcp_manager
@@ -176,44 +210,54 @@ pub async fn chat_completion(
 
     let mut chat_messages = request.messages.clone();
     if has_tools {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
-        };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
+        let mut tool_prompt: Option<String> = None;
+        if !template_supports_tools {
+            let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
+            let mut prompt = if let Some(template) = tool_prompt_template {
+                template
+            } else {
+                ToolFormat::get_tool_prompt(&model_type)
+            };
+            if let Some(instruction) = tool_choice_instruction.as_ref() {
+                prompt = format!("{prompt}\n\n{instruction}");
+            }
+            tool_prompt = Some(prompt);
         }
 
-        // Merge with existing system prompt if present, otherwise insert new one
-        if !chat_messages.is_empty() && chat_messages[0].role == "system" {
-            // Merge: tool prompt + newline + existing system content
-            if let Some(ref content) = chat_messages[0].content {
-                let existing_content = match content {
-                    super::MessageContentType::PureText(text) => text.clone(),
-                    super::MessageContentType::Single(item) => match item {
-                        super::MessageContent::Text { text } => text.clone(),
-                        _ => String::new(),
-                    },
-                    super::MessageContentType::Multi(items) => items
-                        .iter()
-                        .filter_map(|item| match item {
-                            super::MessageContent::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                let merged = format!("{}\n\n{}", existing_content, tool_prompt);
-                chat_messages[0] = ChatMessage::text("system", merged);
-            } else {
-                // System message exists but has no content, just use tool prompt
-                chat_messages[0] = ChatMessage::text("system", tool_prompt);
-            }
+        let instruction_only = tool_prompt.is_none() && tool_choice_instruction.is_some();
+        let system_injection = if instruction_only {
+            tool_choice_instruction.clone()
         } else {
-            // No existing system prompt, insert tool prompt as first message
-            chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
+            tool_prompt
+        };
+
+        if let Some(system_text) = system_injection {
+            // Merge with existing system prompt if present, otherwise insert new one
+            if !chat_messages.is_empty() && chat_messages[0].role == "system" {
+                if let Some(ref content) = chat_messages[0].content {
+                    let existing_content = match content {
+                        super::MessageContentType::PureText(text) => text.clone(),
+                        super::MessageContentType::Single(item) => match item {
+                            super::MessageContent::Text { text } => text.clone(),
+                            _ => String::new(),
+                        },
+                        super::MessageContentType::Multi(items) => items
+                            .iter()
+                            .filter_map(|item| match item {
+                                super::MessageContent::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    };
+                    let merged = format!("{}\n\n{}", existing_content, system_text);
+                    chat_messages[0] = ChatMessage::text("system", merged);
+                } else {
+                    chat_messages[0] = ChatMessage::text("system", system_text);
+                }
+            } else {
+                chat_messages.insert(0, ChatMessage::text("system", system_text));
+            }
         }
     }
 
@@ -408,27 +452,53 @@ pub async fn chat_completion(
                                         }
                                         pending_tool_calls.append(&mut parsed);
                                     } else {
-                                        // Parse failed - flush any remaining buffer as text
+                                        // Parse failed - decide whether to flush or drop incomplete tool call
                                         let buffer = tool_parser.take_buffer();
                                         if !buffer.is_empty() {
-                                            crate::log_warn!(
-                                                "[Seq {}] Tool parse failed, flushing {} chars",
-                                                current_seq_id,
-                                                buffer.len()
-                                            );
-                                            stream_ctx.send_token(&buffer);
+                                            let (could_be_tool, complete) =
+                                                crate::tools::parser::prefix_could_be_tool(&buffer);
+                                            if could_be_tool && !complete {
+                                                let snippet: String =
+                                                    buffer.chars().take(120).collect();
+                                                crate::log_warn!(
+                                                    "[Seq {}] Incomplete tool call at stream end, dropping {} chars: {}",
+                                                    current_seq_id,
+                                                    buffer.len(),
+                                                    snippet
+                                                );
+                                            } else {
+                                                crate::log_warn!(
+                                                    "[Seq {}] Tool parse failed, flushing {} chars",
+                                                    current_seq_id,
+                                                    buffer.len()
+                                                );
+                                                stream_ctx.send_token(&buffer);
+                                            }
                                         }
                                     }
                                 }
                                 ParserState::MaybeStart => {
                                     let buffer = tool_parser.take_buffer();
                                     if !buffer.is_empty() {
-                                        crate::log_warn!(
-                                            "[Seq {}] Tool parse partial, flushing {} chars",
-                                            current_seq_id,
-                                            buffer.len()
-                                        );
-                                        stream_ctx.send_token(&buffer);
+                                        let (could_be_tool, complete) =
+                                            crate::tools::parser::prefix_could_be_tool(&buffer);
+                                        if could_be_tool && !complete {
+                                            let snippet: String =
+                                                buffer.chars().take(120).collect();
+                                            crate::log_warn!(
+                                                "[Seq {}] Incomplete tool call prefix at stream end, dropping {} chars: {}",
+                                                current_seq_id,
+                                                buffer.len(),
+                                                snippet
+                                            );
+                                        } else {
+                                            crate::log_warn!(
+                                                "[Seq {}] Tool parse partial, flushing {} chars",
+                                                current_seq_id,
+                                                buffer.len()
+                                            );
+                                            stream_ctx.send_token(&buffer);
+                                        }
                                     }
                                 }
                                 ParserState::Normal => {}

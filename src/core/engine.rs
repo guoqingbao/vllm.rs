@@ -20,7 +20,7 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
-use crate::utils::guidance::load_toktrie_from_path;
+use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::kvcache_allocator::KVCacheAllocator;
@@ -106,9 +106,23 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename()).map(Arc::new);
+        let toktrie = match load_toktrie_from_path(&model_pathes.get_tokenizer_filename()) {
+            Ok(trie) => Some(Arc::new(trie)),
+            Err(e) => {
+                crate::log_warn!("Failed to load tokenizer trie: {}", e);
+                None
+            }
+        };
+        let llg_factory = match build_llg_factory(tokenizer.clone(), config.vocab_size) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                crate::log_warn!("Failed to build llguidance factory: {}", e);
+                None
+            }
+        };
+
         if toktrie.is_none() {
-            crate::log_warn!("Guided decoding disabled: tokenizer trie unavailable.");
+            crate::log_warn!("Guided decoding (legacy) disabled: tokenizer trie unavailable.");
         }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -196,7 +210,7 @@ impl LLMEngine {
                 device.clone(),
                 reporter,
                 transfer,
-                toktrie.clone(),
+                llg_factory.clone(),
                 None,
             )?;
 
@@ -1506,5 +1520,9 @@ impl LLMEngine {
     /// Get a clone of the chat template for external use (e.g., tokenization without generation)
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
+    }
+
+    pub fn template_supports_tools(&self) -> bool {
+        self.template.supports_tools()
     }
 }
