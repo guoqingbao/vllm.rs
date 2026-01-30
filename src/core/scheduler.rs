@@ -566,7 +566,7 @@ impl Scheduler {
                     let mut seq = seq.clone();
                     seq.num_cached_tokens += CHUNK_SIZE; //current prefilled CHUNK_SIZE
                     seq.status = SequenceStatus::Waiting;
-                    crate::log_warn!(
+                    crate::log_info!(
                         "Seq {} - chunk prefilled {} (remain {} tokens)",
                         seq.id,
                         seq.num_cached_tokens,

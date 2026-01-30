@@ -4,6 +4,7 @@ use colored::Colorize;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 use serde_json;
 use std::sync::Arc;
+use tool_parser::ParserFactory;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
@@ -25,6 +26,17 @@ async fn main() -> Result<()> {
 
     if args.model_id.is_none() && args.weight_path.is_none() && args.weight_file.is_none() {
         candle_core::bail!("Must provide model_id or weight_path or weight_file!");
+    }
+
+    if let Some(ref enforced) = args.enforce_parser {
+        let parsers = ParserFactory::new().list_parsers();
+        if !parsers.contains(enforced) {
+            candle_core::bail!(
+                "Invalid enforce-parser '{}'. Valid parsers: {}",
+                enforced,
+                parsers.join(", ")
+            );
+        }
     }
 
     let dtype = get_dtype(args.dtype);
@@ -175,6 +187,7 @@ async fn main() -> Result<()> {
         args.weight_file,
         args.hf_token,
         args.hf_token_path,
+        args.enforce_parser.clone(),
         Some(std::cmp::max(max_num_seqs, prompts.len())),
         None,
         max_model_len,

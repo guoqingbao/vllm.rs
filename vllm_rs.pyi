@@ -52,6 +52,7 @@ class EngineConfig:
     weight_file: Optional[str]
     hf_token: Optional[str]
     hf_token_path: Optional[str]
+    enforce_parser: Optional[str]
     tokenizer: Optional[str]
     tokenizer_config: Optional[str]
     num_blocks: Optional[int]

@@ -392,9 +392,9 @@ fn map_mcp_tools(
             );
             Tool {
                 tool_type: "function".to_string(),
-                function: crate::tools::FunctionDefinition {
+                function: crate::tools::Function {
                     name: prefixed_name,
-                    description: tool.description.unwrap_or_default(),
+                    description: tool.description,
                     parameters: tool.input_schema,
                     strict: None,
                 },

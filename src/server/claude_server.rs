@@ -6,7 +6,6 @@ use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
-use crate::tools::parser::ToolParser;
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
@@ -423,7 +422,7 @@ fn claude_tools_to_tools(tools: &[ClaudeTool]) -> Vec<Tool> {
         .iter()
         .map(|tool| {
             let description = tool.description.clone().unwrap_or_default();
-            Tool::function(&tool.name, description)
+            crate::tools::function_tool(&tool.name, description)
                 .parameters_schema(tool.input_schema.clone())
                 .build()
         })
@@ -605,7 +604,11 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         }
                         flush_content_message(&mut out, role, &mut content_items);
                         let args = serde_json::to_string(input).map_err(|err| err.to_string())?;
-                        tool_calls.push(ToolCall::new(id.clone(), name.clone(), args));
+                        tool_calls.push(crate::tools::new_tool_call(
+                            id.clone(),
+                            name.clone(),
+                            args,
+                        ));
                     }
                     ClaudeContentBlock::ToolResult {
                         tool_use_id,
@@ -694,7 +697,8 @@ fn tool_calls_to_blocks(tool_calls: &[ToolCall]) -> Vec<ClaudeContentBlockOut> {
     tool_calls
         .iter()
         .map(|call| {
-            let input = serde_json::from_str(&call.function.arguments).unwrap_or_else(|_| {
+            let args_str = call.function.arguments.as_deref().unwrap_or("{}");
+            let input = serde_json::from_str(args_str).unwrap_or_else(|_| {
                 crate::log_warn!(
                     "Failed to parse tool arguments for '{}'",
                     call.function.name
@@ -762,7 +766,7 @@ fn send_tool_use_block(
     });
     stream_ctx.send_json_event("content_block_start", &start_payload)?;
 
-    let input_json = call.function.arguments.clone();
+    let input_json = call.function.arguments.clone().unwrap_or_default();
 
     let delta = ClaudeContentBlockDeltaEvent {
         event_type: "content_block_delta",
@@ -946,7 +950,12 @@ fn log_tool_calls(label: &str, seq_id: usize, tool_calls: &[ToolCall]) {
     let summary = tool_calls
         .iter()
         .map(|call| {
-            let args = call.function.arguments.replace('\n', " ");
+            let args = call
+                .function
+                .arguments
+                .as_deref()
+                .unwrap_or("")
+                .replace('\n', " ");
             let truncated = if args.len() > 160 {
                 let snippet: String = args.chars().take(160).collect();
                 format!("{}...", snippet)
@@ -1158,10 +1167,17 @@ pub async fn messages(
     };
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
-    let (model_type, tool_config) = {
+    let (model_type, tool_config, engine_config) = {
         let e = data.engine.read();
-        (e.model_type.clone(), e.tool_config.clone())
+        (
+            e.model_type.clone(),
+            e.tool_config.clone(),
+            e.econfig.clone(),
+        )
     };
+    let parser_model_id =
+        super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
+    let enforce_parser = engine_config.enforce_parser.clone();
 
     if !resolved_tools.is_empty() {
         let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
@@ -1226,10 +1242,12 @@ pub async fn messages(
         let engine_clone = data.engine.clone();
         let params_clone = params.clone();
         let stream_model_id = model_id.clone();
+        let stream_parser_model_id = parser_model_id.clone();
         let stream_model_type = model_type.clone();
         let stream_tool_config = tool_config.clone();
         let stream_tool_schemas = tool_schemas.clone();
         let forced_tool_name = forced_tool_name.clone();
+        let stream_tools = resolved_tools.clone();
         if let Some(ref l) = logger {
             l.log_start_response();
         }
@@ -1337,8 +1355,10 @@ pub async fn messages(
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
             let mut tool_parser = StreamToolParser::new_with_config(
                 &stream_model_type,
-                stream_model_id.clone(),
+                stream_parser_model_id.clone(),
                 stream_tool_config,
+                stream_tools.clone(),
+                enforce_parser.clone(),
             );
             let should_parse_tools = params_clone.mcp_mode.is_some();
 
@@ -1376,7 +1396,7 @@ pub async fn messages(
                         total_decoded_tokens += 1;
 
                         if should_parse_tools {
-                            match tool_parser.process_token(token_id, &token) {
+                            match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
                                     if text.is_empty() {
                                         continue;
@@ -1476,34 +1496,16 @@ pub async fn messages(
                         total_decoded_tokens = final_decoded_length;
 
                         if should_parse_tools {
-                            match tool_parser.state() {
-                                ParserState::Buffering => {
-                                    if let Some(mut parsed) = tool_parser.finalize() {
-                                        pending_tool_calls.append(&mut parsed);
-                                    } else {
-                                        let buffer = tool_parser.take_buffer();
-                                        if !buffer.is_empty() {
-                                            let _ = send_text_with_start(
-                                                &stream_ctx,
-                                                &mut text_block_started,
-                                                text_block_index,
-                                                &buffer,
-                                            );
-                                        }
-                                    }
+                            if matches!(tool_parser.state(), ParserState::Buffering) {
+                                let buffer = tool_parser.take_buffer();
+                                if !buffer.is_empty() {
+                                    let _ = send_text_with_start(
+                                        &stream_ctx,
+                                        &mut text_block_started,
+                                        text_block_index,
+                                        &buffer,
+                                    );
                                 }
-                                ParserState::MaybeStart => {
-                                    let buffer = tool_parser.take_buffer();
-                                    if !buffer.is_empty() {
-                                        let _ = send_text_with_start(
-                                            &stream_ctx,
-                                            &mut text_block_started,
-                                            text_block_index,
-                                            &buffer,
-                                        );
-                                    }
-                                }
-                                ParserState::Normal => {}
                             }
                         }
 
@@ -1807,8 +1809,16 @@ pub async fn messages(
             }
         };
 
-        let tool_parser = ToolParser::new();
-        let parsed_calls = tool_parser.parse(&output.decode_output);
+        let tool_parser = StreamToolParser::new_with_config(
+            &model_type,
+            parser_model_id.clone(),
+            tool_config.clone(),
+            resolved_tools.clone(),
+            enforce_parser.clone(),
+        );
+        let parsed_calls = tool_parser
+            .parse_complete_with_fallback(&output.decode_output)
+            .await;
         let (valid_calls, invalid_calls) = filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
         if !invalid_calls.is_empty() {
             crate::log_warn!(
@@ -2098,12 +2108,12 @@ mod tests {
         let schema = SchemaBuilder::object()
             .string_prop("path", "Path to list", true)
             .build();
-        let tools = vec![Tool::function("list_files", "List files")
+        let tools = vec![crate::tools::function_tool("list_files", "List files")
             .parameters_schema(schema)
             .build()];
         let schemas = build_tool_schema_map(&tools);
-        let valid_call = ToolCall::new("call_1", "list_files", r#"{"path": "."}"#);
-        let invalid_call = ToolCall::new("call_2", "list_files", r#"{"dir": "."}"#);
+        let valid_call = crate::tools::new_tool_call("call_1", "list_files", r#"{"path": "."}"#);
+        let invalid_call = crate::tools::new_tool_call("call_2", "list_files", r#"{"dir": "."}"#);
         let (valid, invalid) = filter_tool_calls(&[valid_call, invalid_call], &schemas);
 
         assert_eq!(valid.len(), 1);

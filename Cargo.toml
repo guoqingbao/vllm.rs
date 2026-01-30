@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.8.10"
+version = "0.8.11"
 edition = "2021"
 default-run = "vllm-rs"
 
@@ -61,6 +61,8 @@ bytemuck = "1.24.0"
 regex = "1.12.2"
 local-ip-address = "0.6.5"
 url = "2.5.7"
+tool-parser = "1.0"
+openai-protocol = "1.0"
 
 [lib]
 name = "vllm_rs"

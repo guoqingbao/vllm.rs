@@ -259,7 +259,7 @@ impl Message {
 impl EngineConfig {
     #[new]
     #[pyo3(signature = (model_id=None, weight_path=None, weight_file=None,
-        hf_token=None, hf_token_path=None,
+        hf_token=None, hf_token_path=None, enforce_parser=None,
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
@@ -273,6 +273,7 @@ impl EngineConfig {
         weight_file: Option<String>,
         hf_token: Option<String>,
         hf_token_path: Option<String>,
+        enforce_parser: Option<String>,
         max_num_seqs: Option<usize>,
         config_model_len: Option<usize>,
         max_model_len: Option<usize>,
@@ -321,6 +322,7 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
+            enforce_parser,
             num_blocks: 128, //placeholder
             kv_fraction,
             cpu_mem_fold,

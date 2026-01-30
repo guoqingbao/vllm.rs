@@ -48,14 +48,15 @@ pub fn filter_tool_calls(
             }
         };
 
-        let mut parsed_args = match serde_json::from_str::<Value>(&call.function.arguments) {
+        let args_str = call.function.arguments.as_deref().unwrap_or("{}");
+        let mut parsed_args = match serde_json::from_str::<Value>(args_str) {
             Ok(value) => value,
             Err(e) => {
                 crate::log_warn!(
                     "Failed to parse arguments for tool '{}': {}. Args: {}",
                     call.function.name,
                     e,
-                    call.function.arguments
+                    args_str
                 );
                 invalid.push(call.clone());
                 continue;
@@ -103,15 +104,14 @@ pub fn filter_tool_calls(
             );
             invalid.push(call.clone());
         } else {
-            let normalized_args = serde_json::to_string(&filtered_args)
-                .unwrap_or_else(|_| call.function.arguments.clone());
+            let normalized_args =
+                serde_json::to_string(&filtered_args).unwrap_or_else(|_| args_str.to_string());
             valid.push(ToolCall {
-                index: call.index,
                 id: call.id.clone(),
-                call_type: call.call_type.clone(),
+                tool_type: call.tool_type.clone(),
                 function: FunctionCall {
                     name: call.function.name.clone(),
-                    arguments: normalized_args,
+                    arguments: Some(normalized_args),
                 },
             });
         }
@@ -128,7 +128,12 @@ pub fn format_tool_calls_summary(tool_calls: &[ToolCall]) -> String {
     tool_calls
         .iter()
         .map(|call| {
-            let args = call.function.arguments.replace('\n', " ");
+            let args = call
+                .function
+                .arguments
+                .as_deref()
+                .unwrap_or("")
+                .replace('\n', " ");
             let truncated = if args.len() > 160 {
                 let snippet: String = args.chars().take(160).collect();
                 format!("{}...", snippet)
@@ -156,8 +161,8 @@ mod tests {
 
     #[test]
     fn test_resolve_tools_prefers_request() {
-        let request_tools = vec![Tool::function("test", "desc").build()];
-        let mcp_tools = vec![Tool::function("mcp", "mcp desc").build()];
+        let request_tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mcp_tools = vec![crate::tools::function_tool("mcp", "mcp desc").build()];
 
         let resolved = resolve_tools(Some(&request_tools), &mcp_tools);
         assert_eq!(resolved.len(), 1);
@@ -166,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_resolve_tools_falls_back_to_mcp() {
-        let mcp_tools = vec![Tool::function("mcp", "mcp desc").build()];
+        let mcp_tools = vec![crate::tools::function_tool("mcp", "mcp desc").build()];
         let resolved = resolve_tools(None, &mcp_tools);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].function.name, "mcp");
@@ -174,7 +179,7 @@ mod tests {
 
     #[test]
     fn test_build_tool_schema_map() {
-        let tools = vec![Tool::function("test", "desc")
+        let tools = vec![crate::tools::function_tool("test", "desc")
             .param("arg1", "string", "desc", true)
             .build()];
         let map = build_tool_schema_map(&tools);

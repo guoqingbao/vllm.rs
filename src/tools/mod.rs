@@ -10,37 +10,40 @@ pub mod schema;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
+
+pub use openai_protocol::common::{Function, FunctionCallResponse as FunctionCall, Tool, ToolCall};
 
 /// A tool definition following OpenAI's function calling format
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
-    /// Type of the tool, always "function" for now
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    /// The function definition
-    pub function: FunctionDefinition,
-}
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub struct Tool {
+//     /// Type of the tool, always "function" for now
+//     #[serde(rename = "type")]
+//     pub tool_type: String,
+//     /// The function definition
+//     pub function: FunctionDefinition,
+// }
 
-impl Tool {
-    /// Create a new function tool
-    pub fn function(name: impl Into<String>, description: impl Into<String>) -> ToolBuilder {
-        ToolBuilder::new(name.into(), description.into())
-    }
-}
+// impl Tool {
+//     /// Create a new function tool
+//     pub fn function(name: impl Into<String>, description: impl Into<String>) -> ToolBuilder {
+//         ToolBuilder::new(name.into(), description.into())
+//     }
+// }
 
-/// Definition of a callable function
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionDefinition {
-    /// Name of the function
-    pub name: String,
-    /// Description of what the function does
-    pub description: String,
-    /// JSON Schema for the function parameters
-    pub parameters: Value,
-    /// Whether to enable strict schema adherence
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub strict: Option<bool>,
-}
+// /// Definition of a callable function
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub struct FunctionDefinition {
+//     /// Name of the function
+//     pub name: String,
+//     /// Description of what the function does
+//     pub description: String,
+//     /// JSON Schema for the function parameters
+//     pub parameters: Value,
+//     /// Whether to enable strict schema adherence
+//     #[serde(skip_serializing_if = "Option::is_none")]
+//     pub strict: Option<bool>,
+// }
 
 /// Builder for creating Tool definitions
 pub struct ToolBuilder {
@@ -105,14 +108,19 @@ impl ToolBuilder {
     pub fn build(self) -> Tool {
         Tool {
             tool_type: "function".to_string(),
-            function: FunctionDefinition {
+            function: Function {
                 name: self.name,
-                description: self.description,
+                description: Some(self.description),
                 parameters: self.parameters,
                 strict: self.strict,
             },
         }
     }
+}
+
+/// Create a new function tool builder (replacement for Tool::function).
+pub fn function_tool(name: impl Into<String>, description: impl Into<String>) -> ToolBuilder {
+    ToolBuilder::new(name.into(), description.into())
 }
 
 /// Tool choice configuration
@@ -153,52 +161,32 @@ pub struct ToolChoiceFunction {
     pub name: String,
 }
 
-/// A tool call made by the model
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// Index of this tool call in the tool_calls array (streaming only)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index: Option<usize>,
-    /// Unique identifier for this tool call
-    pub id: String,
-    /// Type of tool call (always "function")
-    #[serde(rename = "type")]
-    pub call_type: String,
-    /// The function call details
-    pub function: FunctionCall,
-}
-
-impl ToolCall {
-    /// Create a new tool call
-    pub fn new(
-        id: impl Into<String>,
-        name: impl Into<String>,
-        arguments: impl Into<String>,
-    ) -> Self {
-        Self {
-            index: None,
-            id: id.into(),
-            call_type: "function".to_string(),
-            function: FunctionCall {
-                name: name.into(),
-                arguments: arguments.into(),
-            },
-        }
-    }
-
-    pub fn with_index(mut self, index: usize) -> Self {
-        self.index = Some(index);
-        self
+/// Build a ToolCall from name/arguments with a provided ID.
+pub fn new_tool_call(
+    id: impl Into<String>,
+    name: impl Into<String>,
+    arguments: impl Into<String>,
+) -> ToolCall {
+    ToolCall {
+        id: id.into(),
+        tool_type: "function".to_string(),
+        function: FunctionCall {
+            name: name.into(),
+            arguments: Some(arguments.into()),
+        },
     }
 }
 
-/// Details of a function call
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionCall {
-    /// Name of the function to call
-    pub name: String,
-    /// JSON string of arguments
-    pub arguments: String,
+/// Convert a parsed tool call into an OpenAI-compatible ToolCall.
+pub fn tool_call_from_parser(parsed: tool_parser::ToolCall) -> ToolCall {
+    ToolCall {
+        id: format!("call_{}", Uuid::new_v4().simple()),
+        tool_type: "function".to_string(),
+        function: FunctionCall {
+            name: parsed.function.name,
+            arguments: Some(parsed.function.arguments),
+        },
+    }
 }
 
 /// Result of a tool execution

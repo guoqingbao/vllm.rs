@@ -37,12 +37,39 @@ def parse_args():
     parser.add_argument("--mcp_config", type=str, default=None)
     parser.add_argument("--mcp_command", type=str, default=None)
     parser.add_argument("--mcp_args", type=str, default=None)
+    parser.add_argument("--enforce-parser", type=str, default=None)
     parser.add_argument("--pd-server-prefix-cache-ratio", type=float, default=None)
     parser.add_argument("--pd-client-prefix-cache-ratio", type=float, default=None)
 
     args = parser.parse_args()
     if args.pd_server and args.ui_server:
         raise ValueError("PD Server cannot run with UI Server enabled!")
+    if args.enforce_parser is not None:
+        enforce_parser = args.enforce_parser.strip()
+        if enforce_parser == "":
+            args.enforce_parser = None
+        else:
+            valid_parsers = {
+                "passthrough",
+                "json",
+                "mistral",
+                "qwen",
+                "qwen_coder",
+                "pythonic",
+                "llama",
+                "deepseek",
+                "glm45_moe",
+                "glm47_moe",
+                "step3",
+                "kimik2",
+                "minimax_m2",
+            }
+            if enforce_parser not in valid_parsers:
+                valid_list = ", ".join(sorted(valid_parsers))
+                raise ValueError(
+                    f"Invalid --enforce-parser '{enforce_parser}'. Valid parsers: {valid_list}"
+                )
+            args.enforce_parser = enforce_parser
     return args
 
 def run_server(args):
@@ -73,6 +100,7 @@ def run_server(args):
         model_id=args.m,
         weight_path=args.w,
         weight_file=args.f,
+        enforce_parser=args.enforce_parser,
         max_num_seqs=max_num_seqs,
         max_model_len=args.max_model_len,
         max_tokens=args.max_tokens,

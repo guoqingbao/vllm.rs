@@ -26,6 +26,7 @@ use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -49,6 +50,41 @@ pub struct ChatCompletionRequest {
     /// How the model should choose which tool to call
     #[serde(default)]
     pub tool_choice: Option<crate::tools::ToolChoice>,
+}
+
+pub fn resolve_engine_model_id(econfig: &EngineConfig) -> Option<String> {
+    if let Some(model_id) = &econfig.model_id {
+        if !model_id.trim().is_empty() {
+            return Some(model_id.clone());
+        }
+    }
+
+    if let Some(weight_path) = &econfig.weight_path {
+        let trimmed = weight_path.trim_end_matches(['/', '\\']);
+        let path = Path::new(trimmed);
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        if let Some(component) = path.components().last() {
+            let name = component.as_os_str().to_string_lossy().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+
+    if let Some(weight_file) = &econfig.weight_file {
+        let path = Path::new(weight_file);
+        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Deserialize)]
@@ -442,6 +478,10 @@ pub struct Args {
     #[arg(long = "f")]
     pub weight_file: Option<String>,
 
+    /// Enforce a specific tool-call parser (e.g., qwen, qwen_coder, json)
+    #[arg(long, default_value = None)]
+    pub enforce_parser: Option<String>,
+
     pub hf_token: Option<String>,
 
     pub hf_token_path: Option<String>,
@@ -570,8 +610,9 @@ pub async fn execute_mcp_tool_calls_async(
     followup_messages.push(ChatMessage::with_tool_calls(tool_calls.clone()));
 
     for call in &tool_calls {
-        let args_value: serde_json::Value = serde_json::from_str(&call.function.arguments)
-            .unwrap_or_else(|_| serde_json::json!({"raw": call.function.arguments}));
+        let args_str = call.function.arguments.as_deref().unwrap_or("{}");
+        let args_value: serde_json::Value =
+            serde_json::from_str(args_str).unwrap_or_else(|_| serde_json::json!({"raw": args_str}));
         let args_map = args_value
             .as_object()
             .cloned()
