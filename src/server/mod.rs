@@ -219,6 +219,17 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
+/// Public tool call structure with correct serialization fields
+#[derive(Serialize, Debug, Clone)]
+pub struct PublicToolCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub function: crate::tools::FunctionCall,
+}
+
 /// Message in the response (may contain tool calls)
 #[derive(Serialize)]
 pub struct ChatResponseMessage {
@@ -226,7 +237,7 @@ pub struct ChatResponseMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
+    pub tool_calls: Option<Vec<PublicToolCall>>,
 }
 
 #[derive(Serialize, Debug)]
@@ -264,7 +275,7 @@ pub struct Delta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<crate::tools::ToolCall>>,
+    pub tool_calls: Option<Vec<PublicToolCall>>,
 }
 
 #[derive(Serialize)]

@@ -14,37 +14,6 @@ use uuid::Uuid;
 
 pub use openai_protocol::common::{Function, FunctionCallResponse as FunctionCall, Tool, ToolCall};
 
-/// A tool definition following OpenAI's function calling format
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct Tool {
-//     /// Type of the tool, always "function" for now
-//     #[serde(rename = "type")]
-//     pub tool_type: String,
-//     /// The function definition
-//     pub function: FunctionDefinition,
-// }
-
-// impl Tool {
-//     /// Create a new function tool
-//     pub fn function(name: impl Into<String>, description: impl Into<String>) -> ToolBuilder {
-//         ToolBuilder::new(name.into(), description.into())
-//     }
-// }
-
-// /// Definition of a callable function
-// #[derive(Debug, Clone, Serialize, Deserialize)]
-// pub struct FunctionDefinition {
-//     /// Name of the function
-//     pub name: String,
-//     /// Description of what the function does
-//     pub description: String,
-//     /// JSON Schema for the function parameters
-//     pub parameters: Value,
-//     /// Whether to enable strict schema adherence
-//     #[serde(skip_serializing_if = "Option::is_none")]
-//     pub strict: Option<bool>,
-// }
-
 /// Builder for creating Tool definitions
 pub struct ToolBuilder {
     name: String,

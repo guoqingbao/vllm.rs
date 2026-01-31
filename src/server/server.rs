@@ -430,11 +430,12 @@ pub async fn chat_completion(
                             }
                         }
 
-                        let (valid_calls, invalid_calls) =
+                        let (validated_calls, invalid_calls) =
                             filter_tool_calls(&pending_tool_calls, stream_tool_schemas.as_ref());
+
                         if !invalid_calls.is_empty() {
                             crate::log_warn!(
-                                "[Seq {}] Dropped {} invalid tool call(s)",
+                                "[Seq {}] Found {} invalid tool call(s)",
                                 current_seq_id,
                                 invalid_calls.len()
                             );
@@ -444,11 +445,44 @@ pub async fn chat_completion(
                             }
                         }
 
+                        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+
+                        let valid_calls = if strict_mode {
+                            if !invalid_calls.is_empty() {
+                                crate::log_warn!(
+                                    "[Seq {}] Strict mode enabled, dropping invalid calls",
+                                    current_seq_id
+                                );
+                            }
+                            validated_calls
+                        } else {
+                            if !invalid_calls.is_empty() {
+                                crate::log_warn!(
+                                    "[Seq {}] Strict mode disabled, keeping invalid calls",
+                                    current_seq_id
+                                );
+                            }
+                            pending_tool_calls
+                        };
+
                         let tool_calls = if valid_calls.is_empty() {
                             None
                         } else {
                             log_tool_calls("Valid", &valid_calls);
-                            Some(valid_calls)
+                            Some(
+                                valid_calls
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, tc)| crate::server::PublicToolCall {
+                                        index: Some(i),
+                                        id: tc.id,
+                                        type_: tc.tool_type,
+                                        function: tc.function,
+                                    })
+                                    .collect(),
+                            )
                         };
                         let has_any_tool_calls = tool_calls.is_some();
                         if tool_choice_required && !has_any_tool_calls {
@@ -657,12 +691,29 @@ pub async fn chat_completion(
                         );
                     }
                 }
-                let (valid_calls, invalid_calls) =
+                let (validated_calls, invalid_calls) =
                     filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
+
                 if !invalid_calls.is_empty() {
-                    crate::log_warn!("Dropped {} invalid tool call(s)", invalid_calls.len());
+                    crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
                     log_tool_calls("Invalid", &invalid_calls);
                 }
+
+                let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+
+                let valid_calls = if strict_mode {
+                    if !invalid_calls.is_empty() {
+                        crate::log_warn!("Strict mode enabled, dropping invalid calls");
+                    }
+                    validated_calls
+                } else {
+                    if !invalid_calls.is_empty() {
+                        crate::log_warn!("Strict mode disabled, keeping invalid calls");
+                    }
+                    parsed_calls
+                };
                 if valid_calls.is_empty() {
                     if tool_choice_required {
                         crate::log_warn!("Tool choice required but no tool calls were produced");
@@ -670,7 +721,16 @@ pub async fn chat_completion(
                     (Some(output.decode_output), None)
                 } else {
                     log_tool_calls("Valid", &valid_calls);
-                    (None, Some(valid_calls))
+                    let public_calls = valid_calls
+                        .into_iter()
+                        .map(|tc| crate::server::PublicToolCall {
+                            index: None,
+                            id: tc.id,
+                            type_: tc.tool_type,
+                            function: tc.function,
+                        })
+                        .collect();
+                    (None, Some(public_calls))
                 }
             } else {
                 (Some(output.decode_output), None)

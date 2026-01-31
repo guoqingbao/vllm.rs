@@ -627,7 +627,18 @@ impl StreamToolParser {
                 index: 0,
                 delta: Delta {
                     content: None,
-                    tool_calls: Some(tools),
+                    tool_calls: Some(
+                        tools
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, tc)| crate::server::PublicToolCall {
+                                index: Some(i),
+                                id: tc.id,
+                                type_: tc.tool_type,
+                                function: tc.function,
+                            })
+                            .collect(),
+                    ),
                 },
                 finish_reason: None,
                 error: None,

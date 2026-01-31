@@ -1512,29 +1512,51 @@ pub async fn messages(
                         let (tool_calls, has_tool_calls) = if pending_tool_calls.is_empty() {
                             (Vec::new(), false)
                         } else {
-                            let (valid, invalid) = filter_tool_calls(
+                            let (validated_calls, invalid) = filter_tool_calls(
                                 &pending_tool_calls,
                                 stream_tool_schemas.as_ref(),
                             );
                             if !invalid.is_empty() {
                                 crate::log_warn!(
-                                    "[Seq {}] Dropping {} invalid tool call(s)",
+                                    "[Seq {}] Found {} invalid tool call(s)",
                                     seq_id,
                                     invalid.len()
                                 );
-                                log_tool_calls("Invalid", seq_id, &invalid);
-                                if let Some(ref l) = stream_logger {
-                                    l.log_tool_calls("Invalid", &invalid);
-                                }
                             }
-                            if valid.is_empty() {
+                            let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                                .unwrap_or(false);
+
+                            let final_tool_calls = if strict_mode {
+                                if !invalid.is_empty() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Strict mode enabled, dropping invalid calls",
+                                        seq_id
+                                    );
+                                }
+                                validated_calls
+                            } else {
+                                if !invalid.is_empty() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Strict mode disabled, keeping invalid calls",
+                                        seq_id
+                                    );
+                                    log_tool_calls("Invalid", seq_id, &invalid);
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_tool_calls("Invalid", &invalid);
+                                    }
+                                }
+                                pending_tool_calls
+                            };
+
+                            if final_tool_calls.is_empty() {
                                 (Vec::new(), false)
                             } else {
-                                log_tool_calls("Valid", seq_id, &valid);
+                                log_tool_calls("Valid", seq_id, &final_tool_calls);
                                 if let Some(ref l) = stream_logger {
-                                    l.log_tool_calls("Valid", &valid);
+                                    l.log_tool_calls("Valid", &final_tool_calls);
                                 }
-                                (valid, true)
+                                (final_tool_calls, true)
                             }
                         };
 
@@ -1819,17 +1841,29 @@ pub async fn messages(
         let parsed_calls = tool_parser
             .parse_complete_with_fallback(&output.decode_output)
             .await;
-        let (valid_calls, invalid_calls) = filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
+        let (validated_calls, invalid_calls) =
+            filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
+
         if !invalid_calls.is_empty() {
-            crate::log_warn!(
-                "Dropping {} invalid tool call(s) for Claude response",
-                invalid_calls.len()
-            );
-            log_tool_calls("Invalid", output.seq_id, &invalid_calls);
-            if let Some(ref l) = logger {
-                l.log_tool_calls("Invalid", &invalid_calls);
-            }
+            crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
         }
+
+        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let valid_calls = if strict_mode {
+            if !invalid_calls.is_empty() {
+                crate::log_warn!("Strict mode enabled, dropping invalid calls");
+            }
+            validated_calls
+        } else {
+            if !invalid_calls.is_empty() {
+                crate::log_warn!("Strict mode disabled, keeping invalid calls");
+            }
+            parsed_calls
+        };
+
         if !valid_calls.is_empty() {
             log_tool_calls("Valid", output.seq_id, &valid_calls);
             if let Some(ref l) = logger {
