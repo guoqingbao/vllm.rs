@@ -3,19 +3,22 @@
 //! Handles model-specific tool call tokens and formats.
 
 use crate::server::{ChatChoiceChunk, ChatCompletionChunk, Delta};
-use crate::tools::{FunctionCall, ToolCall};
+use crate::tools::{Tool, ToolCall};
 use crate::utils::config::ModelType;
 use serde_json::Value;
 use std::collections::HashSet;
 use tokenizers::Tokenizer;
-
+use tool_parser::{
+    types::{StreamingParseResult, ToolCallItem},
+    ParserFactory, ToolParser as ExternalToolParser,
+};
 /// Parser state for streaming tool call detection
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParserState {
     /// Normal streaming mode - tokens pass through
     Normal,
     /// Potential start tag detected (partial match)
-    MaybeStart,
+    // MaybeStart,
     /// Buffering mode - accumulating confirmed tool call content
     Buffering,
 }
@@ -201,14 +204,15 @@ pub struct StreamToolParser {
     buffer: String,
     model_id: String,
     parse_strategy: String,
+    parser: Box<dyn ExternalToolParser>,
+    tools: Vec<Tool>,
+    streaming_calls: Vec<StreamingToolCallState>,
     // Accumulated output for final parsing
     accumulated_output: String,
     // Reasoning block tracking
     active_reasoning_end: Option<&'static str>,
     // Code block tracking
     in_code_block: bool,
-    // Tool call index counter
-    tool_call_index: usize,
 }
 
 /// Reasoning marker pairs: (start, end)
@@ -223,16 +227,57 @@ impl StreamToolParser {
     /// Create a new parser for the given model type
     pub fn new(model_type: ModelType, model_id: String) -> Self {
         let config = ToolConfig::for_model_type(&model_type);
-        Self::new_with_config(&model_type, model_id, config)
+        Self::new_with_config(&model_type, model_id, config, Vec::new(), None)
     }
 
     /// Create a new parser with a pre-validated tool config
-    pub fn new_with_config(model_type: &ModelType, model_id: String, config: ToolConfig) -> Self {
+    pub fn new_with_config(
+        model_type: &ModelType,
+        model_id: String,
+        config: ToolConfig,
+        tools: Vec<Tool>,
+        enforce_parser: Option<String>,
+    ) -> Self {
         let parse_strategy = match model_type {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
             _ => "json",
         }
         .to_string();
+
+        let factory = ParserFactory::new();
+        let parser_name = if let Some(name) = enforce_parser.as_ref().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }) {
+            if !factory.registry().has_parser(name) {
+                let valid = factory.list_parsers().join(", ");
+                panic!(
+                    "Invalid enforce-parser '{}'. Valid parsers: {}",
+                    name, valid
+                );
+            }
+            name
+        } else {
+            Self::parser_name_for_model(model_type, &model_id)
+        };
+        if !tools.is_empty() {
+            crate::log_info!(
+                "Tool parser selected: {} (model_id={}, enforce_parser={})",
+                parser_name,
+                model_id,
+                enforce_parser.as_deref().unwrap_or("none")
+            );
+        }
+        let parser = factory
+            .registry()
+            .create_parser(parser_name)
+            .or_else(|| factory.registry().create_for_model(&model_id))
+            .or_else(|| factory.registry().create_parser("passthrough"))
+            .expect("tool parser available");
 
         Self {
             config,
@@ -240,10 +285,12 @@ impl StreamToolParser {
             buffer: String::new(),
             model_id,
             parse_strategy,
+            parser,
+            tools,
+            streaming_calls: Vec::new(),
             accumulated_output: String::new(),
             active_reasoning_end: None,
             in_code_block: false,
-            tool_call_index: 0,
         }
     }
 
@@ -274,7 +321,7 @@ impl StreamToolParser {
 
     /// Process a single incoming token.
     /// Returns StreamResult indicating what action to take.
-    pub fn process_token(&mut self, token_id: u32, token_text: &str) -> StreamResult {
+    pub async fn process_token(&mut self, token_id: u32, token_text: &str) -> StreamResult {
         // Always accumulate
         self.accumulated_output.push_str(token_text);
 
@@ -314,16 +361,11 @@ impl StreamToolParser {
                 if self.is_start_token(token_id, token_text) {
                     self.state = ParserState::Buffering;
                     self.buffer.clear();
-
-                    if let Some(pos) = token_text.find(&self.config.start_token_str) {
-                        let before = &token_text[..pos];
-                        let after = &token_text[pos + self.config.start_token_str.len()..];
-                        if !after.is_empty() {
-                            self.buffer.push_str(after);
-                        }
-                        if !before.is_empty() {
-                            return StreamResult::Content(before.to_string());
-                        }
+                    self.buffer.push_str(token_text);
+                    self.streaming_calls.clear();
+                    if let Ok(result) = self.parser.parse_incremental(token_text, &self.tools).await
+                    {
+                        self.apply_streaming_result(&result);
                     }
 
                     crate::log_info!(
@@ -333,56 +375,17 @@ impl StreamToolParser {
                     );
                     return StreamResult::Buffering;
                 }
-
-                // Check for partial tag match at end of current token
-                if !self.config.has_start_tokens() {
-                    if let Some((prefix, partial)) = self.split_partial_start(token_text) {
-                        self.state = ParserState::MaybeStart;
-                        self.buffer.clear();
-                        self.buffer.push_str(&partial);
-                        return if prefix.is_empty() {
-                            StreamResult::Buffering
-                        } else {
-                            StreamResult::Content(prefix)
-                        };
-                    }
-                }
-
                 // Normal content
                 StreamResult::Content(token_text.to_string())
             }
-            ParserState::MaybeStart => {
-                self.buffer.push_str(token_text);
-
-                if let Some(tag_pos) = self.buffer.find(&self.config.start_token_str) {
-                    let before = self.buffer[..tag_pos].to_string();
-                    let after =
-                        self.buffer[tag_pos + self.config.start_token_str.len()..].to_string();
-                    self.buffer.clear();
-                    if !after.is_empty() {
-                        self.buffer.push_str(&after);
-                    }
-                    self.state = ParserState::Buffering;
-                    return if before.is_empty() {
-                        StreamResult::Buffering
-                    } else {
-                        StreamResult::Content(before)
-                    };
-                }
-
-                if self.partial_suffix_len(&self.buffer) > 0 {
-                    return StreamResult::Buffering;
-                }
-
-                // False alarm - not a tool call tag
-                self.state = ParserState::Normal;
-                let flushed = self.buffer.clone();
-                self.buffer.clear();
-                StreamResult::FlushBuffer(flushed)
-            }
             ParserState::Buffering => {
                 self.buffer.push_str(token_text);
-
+                if let Ok(result) = self.parser.parse_incremental(token_text, &self.tools).await {
+                    if !result.calls.is_empty() {
+                        crate::log_info!("Stream parsing: {:?}", result.calls);
+                    }
+                    self.apply_streaming_result(&result);
+                }
                 let end_reached = self.is_end_token(token_id, token_text)
                     || self.buffer_has_end_tag()
                     || self.maybe_complete_mistral_list();
@@ -393,51 +396,34 @@ impl StreamToolParser {
                         token_id
                     );
 
-                    let tool_calls = self.parse_buffer();
+                    if let Some(unstreamed) = self.parser.get_unstreamed_tool_args() {
+                        self.apply_stream_items(&unstreamed);
+                    }
+                    let mut tool_calls = self.build_tool_calls_from_streaming();
+                    if tool_calls.is_empty() {
+                        crate::log_info!(
+                            "Fallback to non-stream parsing for buffer: {}",
+                            self.buffer
+                        );
+                        tool_calls = self.parse_complete_with_fallback(&self.buffer).await;
+                    }
                     let result = if tool_calls.is_empty() {
                         // Parse failed - return buffered content
-                        crate::log_error!(
-                            "Unable to parse tool call buffer: {}\n of accumulated buffer: {}",
-                            self.buffer,
-                            self.accumulated_output
-                        );
+                        crate::log_error!("Unable to parse tool call buffer: {}", self.buffer,);
                         StreamResult::FlushBuffer(self.buffer.clone())
                     } else {
                         StreamResult::ToolCalls(tool_calls)
                     };
+                    self.parser.reset();
                     self.buffer.clear();
                     self.state = ParserState::Normal;
+                    self.streaming_calls.clear();
                     return result;
                 }
 
                 StreamResult::Buffering
             }
         }
-    }
-
-    /// Finalize parsing when stream ends
-    pub fn finalize(&mut self) -> Option<Vec<ToolCall>> {
-        match self.state {
-            ParserState::Buffering => {
-                if self.buffer.is_empty() {
-                    self.state = ParserState::Normal;
-                    return None;
-                }
-                let tool_calls = self.parse_buffer();
-                if !tool_calls.is_empty() {
-                    self.buffer.clear();
-                    self.state = ParserState::Normal;
-                    return Some(tool_calls);
-                }
-                // Leave buffer intact so caller can flush it.
-                self.state = ParserState::Normal;
-            }
-            ParserState::MaybeStart => {
-                self.state = ParserState::Normal;
-            }
-            ParserState::Normal => {}
-        }
-        None
     }
 
     /// Drain the buffer and reset parser state.
@@ -469,137 +455,82 @@ impl StreamToolParser {
         text.contains(&self.config.end_token_str)
     }
 
-    /// Parse buffered content into tool calls
-    fn parse_buffer(&mut self) -> Vec<ToolCall> {
-        let mut clean_text = self.buffer.trim().to_string();
-        if self.should_strip_end_tag() {
-            if let Some(pos) = clean_text.rfind(&self.config.end_token_str) {
-                clean_text.truncate(pos);
+    fn apply_streaming_result(&mut self, result: &StreamingParseResult) {
+        if !result.calls.is_empty() {
+            self.apply_stream_items(&result.calls);
+        }
+    }
+
+    fn apply_stream_items(&mut self, items: &[ToolCallItem]) {
+        for item in items {
+            if self.streaming_calls.len() <= item.tool_index {
+                self.streaming_calls
+                    .resize_with(item.tool_index + 1, StreamingToolCallState::default);
+            }
+            let state = &mut self.streaming_calls[item.tool_index];
+            if let Some(name) = &item.name {
+                state.name = Some(name.clone());
+            }
+            if !item.parameters.is_empty() {
+                state.arguments.push_str(&item.parameters);
             }
         }
+    }
+
+    fn build_tool_calls_from_streaming(&mut self) -> Vec<ToolCall> {
         let mut calls = Vec::new();
-
-        // Strategy 1: Mistral List [ {...}, {...} ]
-        if self.parse_strategy == "mistral_list" && clean_text.starts_with('[') {
-            if let Ok(list) = serde_json::from_str::<Vec<Value>>(&clean_text) {
-                for item in list.iter() {
-                    if let Some(call) = self.json_to_tool_call(item) {
-                        calls.push(call);
-                    }
-                }
-            }
+        crate::log_info!("Building tool call: {:?}", self.streaming_calls);
+        for state in &self.streaming_calls {
+            let Some(name) = &state.name else { continue };
+            let args = if state.arguments.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                state.arguments.clone()
+            };
+            calls.push(crate::tools::new_tool_call(
+                format!("call_{}", uuid::Uuid::new_v4().simple()),
+                name.clone(),
+                args,
+            ));
         }
-        // Strategy 2: Single JSON Object (Qwen, Llama, Phi)
-        else if let Ok(item) = serde_json::from_str::<Value>(&clean_text) {
-            if let Some(call) = self.json_to_tool_call(&item) {
-                calls.push(call);
-            }
-        }
-        // Strategy 3: QwenCoder XML-style function tags
-        else if clean_text.starts_with("<function=") && clean_text.contains("</function>") {
-            // Extract function name from <function=...> tag
-            let func_start = "<function=".len();
-            let func_end = clean_text.find('>').unwrap_or(0);
-            if func_end > func_start {
-                let func_name = &clean_text[func_start..func_end];
-
-                // Find parameter section
-                let params_start = clean_text.find("<parameter=");
-                let params_end = clean_text.find("</function>");
-
-                let mut params = std::collections::HashMap::new();
-
-                if let (Some(start), Some(end)) = (params_start, params_end) {
-                    let param_content = &clean_text[start..end];
-
-                    // Parse all parameter tags
-                    let mut pos = 0;
-                    while pos < param_content.len() {
-                        let param_start_tag = param_content[pos..].find("<parameter=");
-                        if param_start_tag.is_none() {
-                            break;
-                        }
-                        let param_start_tag = param_start_tag.unwrap() + pos;
-
-                        let key_start = param_start_tag + "<parameter=".len();
-                        let key_end = param_content[key_start..].find(">").unwrap_or(0) + key_start;
-
-                        if key_end > key_start {
-                            let key = &param_content[key_start..key_end];
-
-                            let value_start = key_end + 1;
-                            let value_end = param_content[value_start..]
-                                .find("</parameter>")
-                                .unwrap_or(0)
-                                + value_start;
-
-                            if value_end > value_start {
-                                let value = &param_content[value_start..value_end];
-                                params.insert(key.to_string(), value.trim().to_string());
-                            }
-                        }
-
-                        // Move position past this parameter
-                        let next_pos = param_content[pos..].find("</parameter>").unwrap_or(0)
-                            + pos
-                            + "</parameter>".len();
-                        if next_pos <= pos {
-                            break;
-                        }
-                        pos = next_pos;
-                    }
-                }
-
-                if let Ok(args) = serde_json::to_string(&params) {
-                    let call = ToolCall {
-                        index: Some(self.tool_call_index),
-                        id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-                        call_type: "function".to_string(),
-                        function: FunctionCall {
-                            name: func_name.to_string(),
-                            arguments: args,
-                        },
-                    };
-
-                    self.tool_call_index += 1;
-                    calls.push(call);
-                }
-            }
-        }
-        // Strategy 4: Repair unbalanced JSON and retry
-        else if let Some(repaired) = self.repair_unbalanced_json(&clean_text) {
-            if repaired != clean_text {
-                crate::log_warn!("Tool call JSON missing closing braces; attempting repair");
-            }
-            if let Ok(item) = serde_json::from_str::<Value>(&repaired) {
-                if let Some(call) = self.json_to_tool_call(&item) {
-                    calls.push(call);
-                }
-            }
-        }
-
         calls
     }
-    fn split_partial_start(&self, text: &str) -> Option<(String, String)> {
-        let tag = &self.config.start_token_str;
-        let suffix_len = self.partial_suffix_len(text);
-        if suffix_len > 0 && suffix_len < tag.len() {
-            let prefix = text[..text.len() - suffix_len].to_string();
-            let partial = text[text.len() - suffix_len..].to_string();
-            return Some((prefix, partial));
-        }
-        None
-    }
 
-    fn partial_suffix_len(&self, text: &str) -> usize {
-        let tag = &self.config.start_token_str;
-        let max = std::cmp::min(tag.len(), text.len());
-        for i in (1..=max).rev() {
-            if text.ends_with(&tag[..i]) {
-                return i;
+    pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
+        let mut parsed_calls = match self.parser.parse_complete(text).await {
+            Ok((_normal_text, calls)) => calls,
+            Err(err) => {
+                crate::log_warn!("Tool parse failed: {:?}", err);
+                Vec::new()
+            }
+        };
+
+        if parsed_calls.is_empty() && text.contains("<function=") {
+            let factory = ParserFactory::new();
+            if let Some(xml_parser) = factory.registry().create_parser("qwen_coder") {
+                if let Ok((_normal_text, calls)) = xml_parser.parse_complete(text).await {
+                    parsed_calls = calls;
+                }
             }
         }
-        0
+
+        if parsed_calls.is_empty()
+            && self.config.start_token_str.starts_with('<')
+            && self.config.end_token_str.starts_with('<')
+        {
+            let stripped = self.strip_tool_tags(text);
+            let factory = ParserFactory::new();
+            if let Some(json_parser) = factory.registry().create_parser("json") {
+                if let Ok((_normal_text, calls)) = json_parser.parse_complete(&stripped).await {
+                    parsed_calls = calls;
+                }
+            }
+        }
+
+        parsed_calls
+            .into_iter()
+            .map(crate::tools::tool_call_from_parser)
+            .collect()
     }
 
     fn buffer_has_end_tag(&self) -> bool {
@@ -626,92 +557,35 @@ impl StreamToolParser {
         serde_json::from_str::<Vec<Value>>(trimmed).is_ok()
     }
 
-    fn should_strip_end_tag(&self) -> bool {
-        let end_tag = self.config.end_token_str.as_str();
-        if end_tag.is_empty() {
-            return false;
+    fn parser_name_for_model(model_type: &ModelType, model_id: &str) -> &'static str {
+        let model_lower = model_id.to_ascii_lowercase();
+        match model_type {
+            ModelType::LLaMa => "llama",
+            ModelType::Mistral | ModelType::Mistral3VL => "mistral",
+            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
+                if model_lower.contains("coder") {
+                    "qwen_coder"
+                } else {
+                    "qwen"
+                }
+            }
+            ModelType::Gemma | ModelType::Gemma3 => "json",
+            ModelType::Phi | ModelType::Phi4 => "qwen",
+            ModelType::GLM4 | ModelType::GLM4MoE => "glm47_moe",
+            ModelType::Yi | ModelType::StableLM => "qwen",
+            ModelType::DeepSeek => "deepseek",
         }
-        if self.parse_strategy == "mistral_list" && end_tag == "]" {
-            return false;
-        }
-        end_tag.starts_with('<')
     }
 
-    fn repair_unbalanced_json(&self, text: &str) -> Option<String> {
-        let trimmed = text.trim();
-        if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-            return None;
+    fn strip_tool_tags(&self, text: &str) -> String {
+        let mut output = text.to_string();
+        if !self.config.start_token_str.is_empty() {
+            output = output.replace(&self.config.start_token_str, "");
         }
-
-        let mut in_string = false;
-        let mut escape = false;
-        let mut open_braces = 0usize;
-        let mut close_braces = 0usize;
-        let mut open_brackets = 0usize;
-        let mut close_brackets = 0usize;
-
-        for ch in trimmed.chars() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' if in_string => {
-                    escape = true;
-                }
-                '"' => {
-                    in_string = !in_string;
-                }
-                '{' if !in_string => open_braces += 1,
-                '}' if !in_string => close_braces += 1,
-                '[' if !in_string => open_brackets += 1,
-                ']' if !in_string => close_brackets += 1,
-                _ => {}
-            }
+        if !self.config.end_token_str.is_empty() {
+            output = output.replace(&self.config.end_token_str, "");
         }
-
-        if in_string {
-            return None;
-        }
-        if close_braces > open_braces || close_brackets > open_brackets {
-            return None;
-        }
-
-        if open_braces == close_braces && open_brackets == close_brackets {
-            return None;
-        }
-
-        let mut fixed = trimmed.to_string();
-        if open_brackets > close_brackets {
-            fixed.push_str(&"]".repeat(open_brackets - close_brackets));
-        }
-        if open_braces > close_braces {
-            fixed.push_str(&"}".repeat(open_braces - close_braces));
-        }
-        Some(fixed)
-    }
-
-    /// Convert JSON value to ToolCall
-    fn json_to_tool_call(&mut self, item: &Value) -> Option<ToolCall> {
-        let name = item["name"].as_str()?.to_string();
-        let arguments = if let Some(args) = item.get("arguments") {
-            if args.is_string() {
-                args.as_str().unwrap_or("{}").to_string()
-            } else {
-                args.to_string()
-            }
-        } else {
-            "{}".to_string()
-        };
-
-        let call = ToolCall {
-            index: Some(self.tool_call_index),
-            id: format!("call_{}", uuid::Uuid::new_v4().simple()),
-            call_type: "function".to_string(),
-            function: FunctionCall { name, arguments },
-        };
-        self.tool_call_index += 1;
-        Some(call)
+        output
     }
 
     // --- Chunk creation helpers (for use by server.rs) ---
@@ -753,7 +627,18 @@ impl StreamToolParser {
                 index: 0,
                 delta: Delta {
                     content: None,
-                    tool_calls: Some(tools),
+                    tool_calls: Some(
+                        tools
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, tc)| crate::server::PublicToolCall {
+                                index: Some(i),
+                                id: tc.id,
+                                type_: tc.tool_type,
+                                function: tc.function,
+                            })
+                            .collect(),
+                    ),
                 },
                 finish_reason: None,
                 error: None,
@@ -761,6 +646,12 @@ impl StreamToolParser {
             usage: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StreamingToolCallState {
+    name: Option<String>,
+    arguments: String,
 }
 
 #[cfg(test)]
@@ -783,33 +674,50 @@ mod tests {
         assert_eq!(config.start_token_str, "<tool_call>");
     }
 
-    #[test]
-    fn test_parser_normal_content() {
-        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
-        match parser.process_token(0, "Hello world") {
+    #[tokio::test]
+    async fn test_parser_normal_content() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+        match parser.process_token(0, "Hello world").await {
             StreamResult::Content(s) => assert_eq!(s, "Hello world"),
             _ => panic!("Expected Content"),
         }
     }
 
-    #[test]
-    fn test_parser_tool_call_detection() {
-        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
+    #[tokio::test]
+    async fn test_parser_tool_call_detection() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
 
         // Start tag triggers buffering
-        match parser.process_token(151657, "<tool_call>") {
+        match parser.process_token(151657, "<tool_call>").await {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering on start tag"),
         }
 
         // Content is buffered
-        match parser.process_token(0, r#"{"name": "test", "arguments": {}}"#) {
+        match parser
+            .process_token(0, r#"{"name": "test", "arguments": {}}"#)
+            .await
+        {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering"),
         }
 
         // End tag triggers parsing
-        match parser.process_token(151658, "</tool_call>") {
+        match parser.process_token(151658, "</tool_call>").await {
             StreamResult::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].function.name, "test");
@@ -818,24 +726,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parser_partial_start_text_mode() {
-        let mut parser = StreamToolParser::new(ModelType::Phi, "phi".to_string());
+    #[tokio::test]
+    async fn test_parser_partial_start_text_mode() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Phi,
+            "phi".to_string(),
+            ToolConfig::for_model_type(&ModelType::Phi),
+            tools,
+            None,
+        );
 
         // Partial start tag splits across tokens
-        match parser.process_token(0, "<tool_") {
+        match parser.process_token(0, "<tool_").await {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering on partial start"),
         }
-        match parser.process_token(0, "call>") {
+        match parser.process_token(0, "call>").await {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering on completed start"),
         }
-        match parser.process_token(0, r#"{"name": "test", "arguments": {}}"#) {
+        match parser
+            .process_token(0, r#"{"name": "test", "arguments": {}}"#)
+            .await
+        {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering"),
         }
-        match parser.process_token(0, "</tool_call>") {
+        match parser.process_token(0, "</tool_call>").await {
             StreamResult::ToolCalls(calls) => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].function.name, "test");
@@ -844,12 +762,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parser_token_id_strict_match() {
-        let mut parser = StreamToolParser::new(ModelType::Qwen3, "qwen3".to_string());
+    #[tokio::test]
+    async fn test_parser_token_id_strict_match() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
 
         // Text match should not trigger when token IDs are available
-        match parser.process_token(0, "<tool_call>") {
+        match parser.process_token(0, "<tool_call>").await {
             StreamResult::Content(text) => assert_eq!(text, "<tool_call>"),
             _ => panic!("Expected Content without token ID match"),
         }

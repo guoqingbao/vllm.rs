@@ -3,7 +3,7 @@
 //!
 //! Supports multiple formats used by different models.
 
-use super::ToolCall;
+use super::{new_tool_call, ToolCall};
 use regex::Regex;
 use serde_json::Value;
 
@@ -226,7 +226,7 @@ impl ToolParser {
         };
 
         *call_id += 1;
-        Some(ToolCall::new(
+        Some(new_tool_call(
             format!("call_{}", call_id),
             name.to_string(),
             args_str,
@@ -284,7 +284,12 @@ mod tests {
         let calls = parser.parse(text);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "get_weather");
-        assert!(calls[0].function.arguments.contains("Tokyo"));
+        assert!(calls[0]
+            .function
+            .arguments
+            .as_deref()
+            .unwrap_or("")
+            .contains("Tokyo"));
     }
 
     #[test]

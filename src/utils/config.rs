@@ -224,6 +224,7 @@ pub struct EngineConfig {
     pub model_id: Option<String>,
     pub weight_path: Option<String>,
     pub weight_file: Option<String>,
+    pub enforce_parser: Option<String>,
     pub hf_token: Option<String>,
     pub hf_token_path: Option<String>,
     pub num_blocks: usize,
@@ -265,6 +266,8 @@ pub struct EngineConfig {
     pub weight_path: Option<String>,
     #[pyo3(get, set)]
     pub weight_file: Option<String>,
+    #[pyo3(get, set)]
+    pub enforce_parser: Option<String>,
     #[pyo3(get, set)]
     pub hf_token: Option<String>,
     #[pyo3(get, set)]
@@ -329,6 +332,7 @@ impl EngineConfig {
         weight_file: Option<String>,
         hf_token: Option<String>,
         hf_token_path: Option<String>,
+        enforce_parser: Option<String>,
         max_num_seqs: Option<usize>,
         config_model_len: Option<usize>,
         max_model_len: Option<usize>,
@@ -370,6 +374,7 @@ impl EngineConfig {
             weight_file,
             hf_token,
             hf_token_path,
+            enforce_parser,
             num_blocks: 128, //placeholder
             cpu_mem_fold,
             kv_fraction,

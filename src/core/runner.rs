@@ -576,7 +576,7 @@ impl ModelRunner {
 
                 // Log thinking parameter only from first rank to avoid duplicate logs in multi-GPU
                 if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
-                    crate::log_warn!(
+                    crate::log_info!(
                         "User's thinking preference for reasoning models: {:?}",
                         user_params.thinking
                     );

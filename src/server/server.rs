@@ -16,7 +16,6 @@ use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
-use crate::tools::parser::ToolParser;
 use crate::tools::{ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
@@ -111,12 +110,13 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type, tool_config) = {
+    let (img_cfg, model_type, tool_config, engine_config) = {
         let e = data.engine.read();
         (
             e.img_cfg.clone(),
             e.model_type.clone(),
             e.tool_config.clone(),
+            e.econfig.clone(),
         )
     };
 
@@ -175,6 +175,9 @@ pub async fn chat_completion(
     }
 
     let mut chat_messages = request.messages.clone();
+    let parser_model_id =
+        super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
+    let enforce_parser = engine_config.enforce_parser.clone();
     if has_tools {
         let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
         let mut tool_prompt = if let Some(template) = tool_prompt_template {
@@ -259,8 +262,13 @@ pub async fn chat_completion(
         let _img_cfg_clone = img_cfg.clone();
 
         let tool_config = tool_config.clone();
-        let tool_parser =
-            StreamToolParser::new_with_config(&model_type, model_id.to_string(), tool_config);
+        let tool_parser = StreamToolParser::new_with_config(
+            &model_type,
+            parser_model_id.clone(),
+            tool_config,
+            resolved_tools.clone(),
+            enforce_parser.clone(),
+        );
         let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
@@ -321,7 +329,7 @@ pub async fn chat_completion(
 
                         // Use StreamToolParser for all tool call detection and buffering
                         if should_parse_tools {
-                            match tool_parser.process_token(token_id, &token) {
+                            match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
                                     if text.is_empty() {
                                         continue;
@@ -393,45 +401,18 @@ pub async fn chat_completion(
                     )) => {
                         total_decoded_tokens += final_decoded_length;
 
-                        // Finalize tool parsing and collect any remaining tool calls
+                        // Flush any buffered content at end of stream
                         if should_parse_tools {
-                            match tool_parser.state() {
-                                ParserState::Buffering => {
-                                    // Finalize any buffered content
-                                    if let Some(mut parsed) = tool_parser.finalize() {
-                                        if !parsed.is_empty() {
-                                            crate::log_info!(
-                                                "[Seq {}] Parsed {} tool call(s)",
-                                                current_seq_id,
-                                                parsed.len()
-                                            );
-                                        }
-                                        pending_tool_calls.append(&mut parsed);
-                                    } else {
-                                        // Parse failed - flush any remaining buffer as text
-                                        let buffer = tool_parser.take_buffer();
-                                        if !buffer.is_empty() {
-                                            crate::log_warn!(
-                                                "[Seq {}] Tool parse failed, flushing {} chars",
-                                                current_seq_id,
-                                                buffer.len()
-                                            );
-                                            stream_ctx.send_token(&buffer);
-                                        }
-                                    }
+                            if matches!(tool_parser.state(), ParserState::Buffering) {
+                                let buffer = tool_parser.take_buffer();
+                                if !buffer.is_empty() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Tool parse partial, flushing {} chars",
+                                        current_seq_id,
+                                        buffer.len()
+                                    );
+                                    stream_ctx.send_token(&buffer);
                                 }
-                                ParserState::MaybeStart => {
-                                    let buffer = tool_parser.take_buffer();
-                                    if !buffer.is_empty() {
-                                        crate::log_warn!(
-                                            "[Seq {}] Tool parse partial, flushing {} chars",
-                                            current_seq_id,
-                                            buffer.len()
-                                        );
-                                        stream_ctx.send_token(&buffer);
-                                    }
-                                }
-                                ParserState::Normal => {}
                             }
                         }
 
@@ -449,11 +430,12 @@ pub async fn chat_completion(
                             }
                         }
 
-                        let (valid_calls, invalid_calls) =
+                        let (validated_calls, invalid_calls) =
                             filter_tool_calls(&pending_tool_calls, stream_tool_schemas.as_ref());
+
                         if !invalid_calls.is_empty() {
                             crate::log_warn!(
-                                "[Seq {}] Dropped {} invalid tool call(s)",
+                                "[Seq {}] Found {} invalid tool call(s)",
                                 current_seq_id,
                                 invalid_calls.len()
                             );
@@ -463,11 +445,44 @@ pub async fn chat_completion(
                             }
                         }
 
+                        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                            .unwrap_or(false);
+
+                        let valid_calls = if strict_mode {
+                            if !invalid_calls.is_empty() {
+                                crate::log_warn!(
+                                    "[Seq {}] Strict mode enabled, dropping invalid calls",
+                                    current_seq_id
+                                );
+                            }
+                            validated_calls
+                        } else {
+                            if !invalid_calls.is_empty() {
+                                crate::log_warn!(
+                                    "[Seq {}] Strict mode disabled, keeping invalid calls",
+                                    current_seq_id
+                                );
+                            }
+                            pending_tool_calls
+                        };
+
                         let tool_calls = if valid_calls.is_empty() {
                             None
                         } else {
                             log_tool_calls("Valid", &valid_calls);
-                            Some(valid_calls)
+                            Some(
+                                valid_calls
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, tc)| crate::server::PublicToolCall {
+                                        index: Some(i),
+                                        id: tc.id,
+                                        type_: tc.tool_type,
+                                        function: tc.function,
+                                    })
+                                    .collect(),
+                            )
                         };
                         let has_any_tool_calls = tool_calls.is_some();
                         if tool_choice_required && !has_any_tool_calls {
@@ -653,10 +668,17 @@ pub async fn chat_completion(
             total_decoded_time_taken += decode_time_taken;
 
             // Parse tool calls from the model output if tools were provided
-            let tool_parser = ToolParser::new();
-
             let (content, tool_calls) = if has_tools {
-                let mut parsed_calls = tool_parser.parse(&output.decode_output);
+                let tool_parser = StreamToolParser::new_with_config(
+                    &model_type,
+                    parser_model_id.clone(),
+                    tool_config.clone(),
+                    resolved_tools.clone(),
+                    enforce_parser.clone(),
+                );
+                let mut parsed_calls = tool_parser
+                    .parse_complete_with_fallback(&output.decode_output)
+                    .await;
                 if let Some(ref forced_name) = forced_tool_name {
                     let before = parsed_calls.len();
                     parsed_calls.retain(|call| call.function.name == *forced_name);
@@ -669,12 +691,29 @@ pub async fn chat_completion(
                         );
                     }
                 }
-                let (valid_calls, invalid_calls) =
+                let (validated_calls, invalid_calls) =
                     filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
+
                 if !invalid_calls.is_empty() {
-                    crate::log_warn!("Dropped {} invalid tool call(s)", invalid_calls.len());
+                    crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
                     log_tool_calls("Invalid", &invalid_calls);
                 }
+
+                let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+
+                let valid_calls = if strict_mode {
+                    if !invalid_calls.is_empty() {
+                        crate::log_warn!("Strict mode enabled, dropping invalid calls");
+                    }
+                    validated_calls
+                } else {
+                    if !invalid_calls.is_empty() {
+                        crate::log_warn!("Strict mode disabled, keeping invalid calls");
+                    }
+                    parsed_calls
+                };
                 if valid_calls.is_empty() {
                     if tool_choice_required {
                         crate::log_warn!("Tool choice required but no tool calls were produced");
@@ -682,7 +721,16 @@ pub async fn chat_completion(
                     (Some(output.decode_output), None)
                 } else {
                     log_tool_calls("Valid", &valid_calls);
-                    (None, Some(valid_calls))
+                    let public_calls = valid_calls
+                        .into_iter()
+                        .map(|tc| crate::server::PublicToolCall {
+                            index: None,
+                            id: tc.id,
+                            type_: tc.tool_type,
+                            function: tc.function,
+                        })
+                        .collect();
+                    (None, Some(public_calls))
                 }
             } else {
                 (Some(output.decode_output), None)
