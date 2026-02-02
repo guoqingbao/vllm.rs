@@ -487,7 +487,7 @@ impl KVCacheAllocator {
         #[cfg(not(feature = "cuda"))]
         let _ = pd_config;
 
-        if cfg!(feature = "flash-context") {
+        if cfg!(feature = "flashinfer") || cfg!(feature = "flash-context") {
             assert!(
                 !self.fp8_kvcache,
                 "fp8 kvcache is not compatible with flash-context feature!"

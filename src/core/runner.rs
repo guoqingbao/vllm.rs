@@ -24,6 +24,8 @@ use crate::{
     utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
+#[cfg(feature = "flashinfer")]
+use attention_rs::FlashInferMetadata;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
@@ -484,6 +486,61 @@ impl ModelRunner {
         } else {
             None
         };
+
+        #[cfg(feature = "flashinfer")]
+        let flashinfer_metadata = {
+            let mut indptr = vec![0u32];
+            let mut indices = Vec::new();
+            let mut last_len = Vec::new();
+            for seq in seqs {
+                let bt = &seq.block_table;
+                indices.extend(bt.iter().map(|&x| x as u32));
+                indptr.push(indices.len() as u32);
+                let len = seq.len();
+                let last = if len == 0 {
+                    0
+                } else {
+                    (len - 1) % self.config.block_size + 1
+                };
+                last_len.push(last as u32);
+            }
+
+            let mut batch_indices_vec = Vec::new();
+            let mut positions_vec = Vec::new();
+            for (i, &start) in cu_seqlens_q_vec
+                .iter()
+                .take(cu_seqlens_q_vec.len() - 1)
+                .enumerate()
+            {
+                let end = cu_seqlens_q_vec[i + 1];
+                for pos in 0..(end - start) {
+                    batch_indices_vec.push(i as u32);
+                    positions_vec.push(pos as u32);
+                }
+            }
+
+            let indptr_host = indptr.clone();
+            let indptr = Tensor::from_vec(indptr, (indptr.len(),), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices.len(),), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len.len(),), &self.device)?;
+            let batch_indices =
+                Tensor::from_vec(batch_indices_vec, (batch_indices_vec.len(),), &self.device)?;
+            let positions = Tensor::from_vec(positions_vec, (positions_vec.len(),), &self.device)?;
+
+            Some(FlashInferMetadata {
+                indptr,
+                indptr_host,
+                indices,
+                last_len,
+                cu_seqlens_q_host: Some(cu_seqlens_q_vec.iter().map(|&x| x as u32).collect()),
+                total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
+                batch_indices: Some(batch_indices),
+                positions: Some(positions),
+            })
+        };
+        #[cfg(not(feature = "flashinfer"))]
+        let flashinfer_metadata = None;
+
         let input_metadata = InputMetadata {
             is_prefill: true,
             slot_mapping,
@@ -496,6 +553,8 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
+            #[cfg(feature = "flashinfer")]
+            flashinfer_metadata,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -533,7 +592,44 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
-        let block_tables = self.prepare_block_tables(seq_refs)?;
+        let block_tables = self.prepare_block_tables(seq_refs.clone())?;
+
+        #[cfg(feature = "flashinfer")]
+        let flashinfer_metadata = {
+            let mut indptr = vec![0u32];
+            let mut indices = Vec::new();
+            let mut last_len = Vec::new();
+            for seq in &seq_refs {
+                let bt = seq.block_table();
+                indices.extend(bt.iter().map(|&x| x as u32));
+                indptr.push(indices.len() as u32);
+                let len = seq.len();
+                let last = if len == 0 {
+                    0
+                } else {
+                    (len - 1) % self.config.block_size + 1
+                };
+                last_len.push(last as u32);
+            }
+            let indptr_host = indptr.clone();
+            let indptr = Tensor::from_vec(indptr, (indptr.len(),), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices.len(),), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len.len(),), &self.device)?;
+
+            Some(FlashInferMetadata {
+                indptr,
+                indptr_host,
+                indices,
+                last_len,
+                cu_seqlens_q_host: None,
+                total_num_rows: None,
+                batch_indices: None,
+                positions: None,
+            })
+        };
+        #[cfg(not(feature = "flashinfer"))]
+        let flashinfer_metadata = None;
+
         let input_metadata = InputMetadata {
             is_prefill: false,
             slot_mapping,
@@ -546,6 +642,8 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn: None,
             seqlens: None,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_metadata,
         };
 
         Ok((input_ids, positions, input_metadata))
