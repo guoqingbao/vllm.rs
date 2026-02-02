@@ -520,12 +520,18 @@ impl ModelRunner {
             }
 
             let indptr_host = indptr.clone();
-            let indptr = Tensor::from_vec(indptr, (indptr.len(),), &self.device)?;
-            let indices = Tensor::from_vec(indices, (indices.len(),), &self.device)?;
-            let last_len = Tensor::from_vec(last_len, (last_len.len(),), &self.device)?;
+            let indptr_len = indptr.len();
+            let indices_len = indices.len();
+            let last_len_val = last_len.len();
+            let batch_indices_len = batch_indices_vec.len();
+            let positions_len = positions_vec.len();
+
+            let indptr = Tensor::from_vec(indptr, (indptr_len,), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices_len,), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len_val,), &self.device)?;
             let batch_indices =
-                Tensor::from_vec(batch_indices_vec, (batch_indices_vec.len(),), &self.device)?;
-            let positions = Tensor::from_vec(positions_vec, (positions_vec.len(),), &self.device)?;
+                Tensor::from_vec(batch_indices_vec, (batch_indices_len,), &self.device)?;
+            let positions = Tensor::from_vec(positions_vec, (positions_len,), &self.device)?;
 
             Some(FlashInferMetadata {
                 indptr,
@@ -612,9 +618,13 @@ impl ModelRunner {
                 last_len.push(last as u32);
             }
             let indptr_host = indptr.clone();
-            let indptr = Tensor::from_vec(indptr, (indptr.len(),), &self.device)?;
-            let indices = Tensor::from_vec(indices, (indices.len(),), &self.device)?;
-            let last_len = Tensor::from_vec(last_len, (last_len.len(),), &self.device)?;
+            let indptr_len = indptr.len();
+            let indices_len = indices.len();
+            let last_len_val = last_len.len();
+
+            let indptr = Tensor::from_vec(indptr, (indptr_len,), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices_len,), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len_val,), &self.device)?;
 
             Some(FlashInferMetadata {
                 indptr,
