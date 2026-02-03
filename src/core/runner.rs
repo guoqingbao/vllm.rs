@@ -24,7 +24,6 @@ use crate::{
     utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
-#[cfg(feature = "flashinfer")]
 use attention_rs::FlashInferMetadata;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -387,6 +386,9 @@ impl ModelRunner {
     fn prepare_prefill(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
         let mut input_ids: Vec<u32> = Vec::new();
         let mut positions = Vec::new();
+        let mut batch_indices_vec: Vec<u32> = Vec::new();
+        let mut positions_vec: Vec<u32> = Vec::new();
+        let mut prefill_tokens: Vec<usize> = Vec::new();
         let mut cu_seqlens_q = vec![0];
         let mut cu_seqlens_k = vec![0];
         let mut max_seqlen_q = 0;
@@ -394,7 +396,7 @@ impl ModelRunner {
         let mut slot_mapping = Vec::new();
         let CHUNK_SIZE: usize = 8192;
         let mut max_context_len = 0;
-        for seq in seqs {
+        for (seq_idx, seq) in seqs.iter().enumerate() {
             let seqlen = seq.len();
             let num_tokens = std::cmp::min(CHUNK_SIZE, seqlen - seq.num_cached_tokens);
             input_ids
@@ -403,6 +405,11 @@ impl ModelRunner {
                 (seq.num_cached_tokens as i64..(seq.num_cached_tokens + num_tokens) as i64)
                     .collect::<Vec<_>>(),
             );
+            for pos in 0..num_tokens {
+                batch_indices_vec.push(seq_idx as u32);
+                positions_vec.push((seq.num_cached_tokens + pos) as u32);
+            }
+            prefill_tokens.push(num_tokens);
             if seqlen > max_context_len {
                 max_context_len = seqlen;
             }
@@ -487,36 +494,28 @@ impl ModelRunner {
             None
         };
 
-        #[cfg(feature = "flashinfer")]
-        let flashinfer_metadata = {
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
             let mut indptr = vec![0u32];
             let mut indices = Vec::new();
             let mut last_len = Vec::new();
-            for seq in seqs {
-                let bt = &seq.block_table;
-                indices.extend(bt.iter().map(|&x| x as u32));
-                indptr.push(indices.len() as u32);
-                let len = seq.len();
-                let last = if len == 0 {
+            for (seq, &num_tokens) in seqs.iter().zip(prefill_tokens.iter()) {
+                let effective_len = seq.num_cached_tokens + num_tokens;
+                let max_blocks = seq.block_table.len();
+                let num_blocks = if effective_len == 0 {
                     0
                 } else {
-                    (len - 1) % self.config.block_size + 1
+                    (effective_len + self.config.block_size - 1) / self.config.block_size
+                };
+                let num_blocks = std::cmp::min(num_blocks, max_blocks);
+                let bt = &seq.block_table[..num_blocks];
+                indices.extend(bt.iter().map(|&x| x as u32));
+                indptr.push(indices.len() as u32);
+                let last = if effective_len == 0 {
+                    0
+                } else {
+                    (effective_len - 1) % self.config.block_size + 1
                 };
                 last_len.push(last as u32);
-            }
-
-            let mut batch_indices_vec = Vec::new();
-            let mut positions_vec = Vec::new();
-            for (i, &start) in cu_seqlens_q_vec
-                .iter()
-                .take(cu_seqlens_q_vec.len() - 1)
-                .enumerate()
-            {
-                let end = cu_seqlens_q_vec[i + 1];
-                for pos in 0..(end - start) {
-                    batch_indices_vec.push(i as u32);
-                    positions_vec.push(pos as u32);
-                }
             }
 
             let indptr_host = indptr.clone();
@@ -543,9 +542,9 @@ impl ModelRunner {
                 batch_indices: Some(batch_indices),
                 positions: Some(positions),
             })
+        } else {
+            None
         };
-        #[cfg(not(feature = "flashinfer"))]
-        let flashinfer_metadata = None;
 
         let input_metadata = InputMetadata {
             is_prefill: true,
@@ -559,7 +558,6 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
-            #[cfg(feature = "flashinfer")]
             flashinfer_metadata,
         };
 
@@ -600,8 +598,7 @@ impl ModelRunner {
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
         let block_tables = self.prepare_block_tables(seq_refs.clone())?;
 
-        #[cfg(feature = "flashinfer")]
-        let flashinfer_metadata = {
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
             let mut indptr = vec![0u32];
             let mut indices = Vec::new();
             let mut last_len = Vec::new();
@@ -636,9 +633,9 @@ impl ModelRunner {
                 batch_indices: None,
                 positions: None,
             })
+        } else {
+            None
         };
-        #[cfg(not(feature = "flashinfer"))]
-        let flashinfer_metadata = None;
 
         let input_metadata = InputMetadata {
             is_prefill: false,
@@ -652,7 +649,6 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn: None,
             seqlens: None,
-            #[cfg(feature = "flashinfer")]
             flashinfer_metadata,
         };
 
