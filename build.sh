@@ -190,6 +190,8 @@ echo "Building Python extension with maturin..."
 
 FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
 FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-context\b//g' | xargs)
+FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashinfer\b//g' | xargs)
+
 echo "Python extension features: $FEATURES"
 
 if [[ "$PUBLISH" == true ]]; then

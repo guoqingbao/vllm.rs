@@ -541,6 +541,7 @@ impl ModelRunner {
                 total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
                 batch_indices: Some(batch_indices),
                 positions: Some(positions),
+                use_cuda_graph: false,
             })
         } else {
             None
@@ -599,6 +600,11 @@ impl ModelRunner {
         let block_tables = self.prepare_block_tables(seq_refs.clone())?;
 
         let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+            #[cfg(all(feature = "cuda", feature = "graph"))]
+            let use_cuda_graph = self.capturer.is_captured(seq_refs.len());
+            #[cfg(not(all(feature = "cuda", feature = "graph")))]
+            let use_cuda_graph = false;
+
             let mut indptr = vec![0u32];
             let mut indices = Vec::new();
             let mut last_len = Vec::new();
@@ -632,6 +638,7 @@ impl ModelRunner {
                 total_num_rows: None,
                 batch_indices: None,
                 positions: None,
+                use_cuda_graph,
             })
         } else {
             None

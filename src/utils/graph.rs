@@ -342,6 +342,12 @@ pub struct GraphCaptureVars {
     pub slot_mapping: Tensor,
     pub context_lens: Tensor,
     pub block_tables: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_indptr: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_indices: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_last_len: Tensor,
     pub outputs: BTreeMap<usize, Tensor>,
 }
 
@@ -395,11 +401,58 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         let slot_mapping = Tensor::zeros((max_bs,), DType::I64, device)?;
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
+        #[cfg(feature = "flashinfer")]
+        let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len) = {
+            let mut indptr = Vec::with_capacity(max_bs + 1);
+            indptr.push(0u32);
+            let mut indices = Vec::with_capacity(max_bs * max_num_blocks);
+            for _ in 0..max_bs {
+                for i in 0..max_num_blocks {
+                    indices.push(i as u32);
+                }
+                indptr.push(indices.len() as u32);
+            }
+            let last = if self.max_model_len == 0 {
+                0u32
+            } else {
+                ((self.max_model_len - 1) % self.block_size + 1) as u32
+            };
+            let last_len = vec![last; max_bs];
+
+            (
+                Tensor::from_vec(indptr, (max_bs + 1,), device)?,
+                Tensor::from_vec(indices, (max_bs * max_num_blocks,), device)?,
+                Tensor::from_vec(last_len, (max_bs,), device)?,
+            )
+        };
         let mut outputs = BTreeMap::<usize, Tensor>::new();
         for i in tqdm(0..self.graph_bs.len()).desc(Some("Graph capturing")) {
             let bs = self.graph_bs[self.graph_bs.len() - i - 1];
             let input_ids_bs = input_ids.narrow(0, 0, bs)?;
             let positions_bs = positions.narrow(0, 0, bs)?;
+            #[cfg(feature = "flashinfer")]
+            let flashinfer_metadata = {
+                let mut indptr_host = Vec::with_capacity(bs + 1);
+                indptr_host.push(0u32);
+                for i in 0..bs {
+                    indptr_host.push(((i + 1) * max_num_blocks) as u32);
+                }
+
+                Some(attention_rs::FlashInferMetadata {
+                    indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
+                    indptr_host,
+                    indices: flashinfer_indices.narrow(0, 0, bs * max_num_blocks)?,
+                    last_len: flashinfer_last_len.narrow(0, 0, bs)?,
+                    cu_seqlens_q_host: None,
+                    total_num_rows: None,
+                    batch_indices: None,
+                    positions: None,
+                    use_cuda_graph: true,
+                })
+            };
+            #[cfg(not(feature = "flashinfer"))]
+            let flashinfer_metadata = None;
+
             let input_metadata = InputMetadata {
                 is_prefill: false,
                 slot_mapping: slot_mapping.narrow(0, 0, bs)?,
@@ -412,6 +465,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 max_context_len: self.max_model_len,
                 disable_flash_attn: None,
                 seqlens: None,
+                flashinfer_metadata,
             };
 
             self.model.start_capture(bs)?;
@@ -434,6 +488,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             slot_mapping,
             context_lens,
             block_tables,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_indptr,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_indices,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_last_len,
             outputs,
         });
 
@@ -458,6 +518,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         positions: &Tensor,
         input_metadata: &InputMetadata,
     ) -> Result<Tensor> {
+        println!("start reply*****!");
         if input_metadata.is_prefill {
             candle_core::bail!("Graph replay is not used for prefill!")
         }
@@ -485,6 +546,18 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 graph_vars.block_tables.zero_()?;
                 graph_vars.block_tables.copy_(&padded_table, 0)?;
+
+                #[cfg(feature = "flashinfer")]
+                if let Some(fm) = &input_metadata.flashinfer_metadata {
+                    graph_vars.flashinfer_indptr.zero_()?;
+                    graph_vars.flashinfer_indptr.copy_(&fm.indptr, 0)?;
+
+                    graph_vars.flashinfer_last_len.zero_()?;
+                    graph_vars.flashinfer_last_len.copy_(&fm.last_len, 0)?;
+
+                    graph_vars.flashinfer_indices.zero_()?;
+                    graph_vars.flashinfer_last_len.copy_(&fm.indices, 0)?;
+                }
 
                 let result = self.model.replay(batch);
                 if result.is_err() {
