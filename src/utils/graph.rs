@@ -556,7 +556,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     graph_vars.flashinfer_last_len.copy_(&fm.last_len, 0)?;
 
                     graph_vars.flashinfer_indices.zero_()?;
-                    graph_vars.flashinfer_last_len.copy_(&fm.indices, 0)?;
+                    graph_vars.flashinfer_indices.copy_(&fm.indices, 0)?;
                 }
 
                 let result = self.model.replay(batch);
