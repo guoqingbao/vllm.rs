@@ -4,6 +4,8 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
+#[cfg(feature = "flashinfer")]
+use crate::utils::graph::FlashInferKvParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 use crate::utils::guidance::GuidanceState;
@@ -78,6 +80,8 @@ pub struct ModelRunner {
     config: EngineConfig,
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
+    #[cfg(feature = "flashinfer")]
+    flashinfer_kv_params: Option<FlashInferKvParams>,
     logit_processor: LogitsProcessor,
     /// Cached sampling strategy computed once during prefill, reused during decode
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
@@ -201,6 +205,23 @@ impl ModelRunner {
         } else {
             econfig.seed.unwrap()
         };
+        #[cfg(feature = "flashinfer")]
+        let flashinfer_kv_params = {
+            if gpu_kv_cache.is_empty() {
+                None
+            } else {
+                let (k_cache, _) = &gpu_kv_cache[0];
+                let (_, page_size, num_kv_heads, head_dim) = k_cache.dims4()?;
+                Some(FlashInferKvParams {
+                    kv_dtype: k_cache.dtype(),
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    num_qo_heads: config.num_attention_heads,
+                })
+            }
+        };
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -214,7 +235,11 @@ impl ModelRunner {
                 econfig.max_model_len.unwrap_or(4096),
                 econfig.block_size,
                 config.hidden_size,
+                #[cfg(feature = "flashinfer")]
+                &flashinfer_kv_params,
             ),
+            #[cfg(feature = "flashinfer")]
+            flashinfer_kv_params,
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
@@ -242,7 +267,7 @@ impl ModelRunner {
     }
 
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        let (input_ids, positions, input_metadata) = if is_prefill {
+        let (input_ids, positions, mut input_metadata) = if is_prefill {
             match seqs {
                 Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
                 Seqs::DecodeVec(_) => {
@@ -265,6 +290,27 @@ impl ModelRunner {
                 .replay(&input_ids, &positions, &input_metadata)?;
             let output_ids = self.sample(&logits, seqs, is_prefill)?;
             return Ok(output_ids);
+        }
+
+        #[cfg(feature = "flashinfer")]
+        if !is_prefill {
+            if let Some(fm) = input_metadata.flashinfer_metadata.as_mut() {
+                if fm.decode_plan_info.is_none() {
+                    if let Some(params) = self.flashinfer_kv_params {
+                        fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
+                            &self.device,
+                            params.kv_dtype,
+                            &fm.indptr_host,
+                            input_ids.dim(0)?,
+                            params.num_qo_heads,
+                            params.num_kv_heads,
+                            params.head_dim,
+                            params.page_size,
+                            false,
+                        )?);
+                    }
+                }
+            }
         }
 
         let images = if let Seqs::SeqRefs(s) = &seqs {
@@ -542,6 +588,7 @@ impl ModelRunner {
                 batch_indices: Some(batch_indices),
                 positions: Some(positions),
                 use_cuda_graph: false,
+                decode_plan_info: None,
             })
         } else {
             None
@@ -639,6 +686,7 @@ impl ModelRunner {
                 batch_indices: None,
                 positions: None,
                 use_cuda_graph,
+                decode_plan_info: None,
             })
         } else {
             None

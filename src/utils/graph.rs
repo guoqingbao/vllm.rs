@@ -359,6 +359,19 @@ pub struct GraphCapturer<M: CudaGraphModule> {
     pub max_model_len: usize,
     pub block_size: usize,
     pub hidden_size: usize,
+    pub device: Option<Device>,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_kv_params: Option<FlashInferKvParams>,
+}
+
+#[cfg(feature = "flashinfer")]
+#[derive(Clone, Copy)]
+pub struct FlashInferKvParams {
+    pub kv_dtype: DType,
+    pub page_size: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub num_qo_heads: usize,
 }
 
 impl<M: CudaGraphModule> GraphCapturer<M> {
@@ -368,6 +381,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         max_model_len: usize,
         block_size: usize,
         hidden_size: usize,
+        #[cfg(feature = "flashinfer")] flashinfer_kv_params: &Option<FlashInferKvParams>,
     ) -> Self {
         let graph_bs = (1..16)
             .collect::<Vec<_>>()
@@ -385,6 +399,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             max_model_len,
             block_size,
             hidden_size,
+            device: None,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_kv_params: flashinfer_kv_params.clone(),
         }
     }
 
@@ -393,6 +410,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         device: &Device,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
     ) -> Result<()> {
+        self.device = Some(device.clone());
         let max_bs = self.graph_bs[self.graph_bs.len() - 1];
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
 
@@ -438,6 +456,22 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     indptr_host.push(((i + 1) * max_num_blocks) as u32);
                 }
 
+                let decode_plan_info = if let Some(params) = self.flashinfer_kv_params {
+                    Some(attention_rs::flashinfer::decode_plan(
+                        device,
+                        params.kv_dtype,
+                        &indptr_host,
+                        bs,
+                        params.num_qo_heads,
+                        params.num_kv_heads,
+                        params.head_dim,
+                        params.page_size,
+                        true,
+                    )?)
+                } else {
+                    None
+                };
+
                 Some(attention_rs::FlashInferMetadata {
                     indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
                     indptr_host,
@@ -448,6 +482,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     batch_indices: None,
                     positions: None,
                     use_cuda_graph: true,
+                    decode_plan_info,
                 })
             };
             #[cfg(not(feature = "flashinfer"))]
@@ -518,7 +553,6 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         positions: &Tensor,
         input_metadata: &InputMetadata,
     ) -> Result<Tensor> {
-        println!("start reply*****!");
         if input_metadata.is_prefill {
             candle_core::bail!("Graph replay is not used for prefill!")
         }
@@ -549,14 +583,45 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 #[cfg(feature = "flashinfer")]
                 if let Some(fm) = &input_metadata.flashinfer_metadata {
-                    graph_vars.flashinfer_indptr.zero_()?;
-                    graph_vars.flashinfer_indptr.copy_(&fm.indptr, 0)?;
+                    // Pad indptr to the captured batch size so graph replay sees valid lengths.
+                    let mut indptr_host = Vec::with_capacity(batch + 1);
+                    indptr_host.extend_from_slice(&fm.indptr_host);
+                    let last = *fm.indptr_host.last().unwrap_or(&0);
+                    for _ in (input_batch + 1)..=batch {
+                        indptr_host.push(last);
+                    }
+
+                    let indptr_padded = Tensor::from_vec(
+                        indptr_host.clone(),
+                        (batch + 1,),
+                        graph_vars.input_ids.device(),
+                    )?;
+                    graph_vars.flashinfer_indptr.copy_(&indptr_padded, 0)?;
 
                     graph_vars.flashinfer_last_len.zero_()?;
                     graph_vars.flashinfer_last_len.copy_(&fm.last_len, 0)?;
 
                     graph_vars.flashinfer_indices.zero_()?;
                     graph_vars.flashinfer_indices.copy_(&fm.indices, 0)?;
+
+                    if let Some(params) = self.flashinfer_kv_params {
+                        let dev = self
+                            .device
+                            .as_ref()
+                            .ok_or_else(|| candle_core::Error::msg("graph device is missing"))?;
+                        // Refresh decode plan
+                        let _ = attention_rs::flashinfer::decode_plan(
+                            dev,
+                            params.kv_dtype,
+                            &indptr_host,
+                            batch,
+                            params.num_qo_heads,
+                            params.num_kv_heads,
+                            params.head_dim,
+                            params.page_size,
+                            fm.use_cuda_graph,
+                        )?;
+                    }
                 }
 
                 let result = self.model.replay(batch);
