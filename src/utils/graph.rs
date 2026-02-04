@@ -1,7 +1,5 @@
-use std::collections::BTreeMap;
-use std::ptr;
-use std::sync::Arc;
-
+#[cfg(feature = "flashinfer")]
+use super::FlashInferKvParams;
 use attention_rs::InputMetadata;
 use candle_core::cuda_backend::cudarc::driver::sys;
 use candle_core::cuda_backend::cudarc::driver::sys::{
@@ -11,7 +9,10 @@ use candle_core::cuda_backend::cudarc::driver::sys::{
 use candle_core::cuda_backend::CudaDevice;
 use candle_core::{DType, Device, Result, Tensor};
 use parking_lot::RwLock;
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
+use std::ptr;
+use std::sync::Arc;
 use tqdm::tqdm;
 
 #[allow(dead_code)]
@@ -364,16 +365,6 @@ pub struct GraphCapturer<M: CudaGraphModule> {
     pub flashinfer_kv_params: Option<FlashInferKvParams>,
 }
 
-#[cfg(feature = "flashinfer")]
-#[derive(Clone, Copy)]
-pub struct FlashInferKvParams {
-    pub kv_dtype: DType,
-    pub page_size: usize,
-    pub num_kv_heads: usize,
-    pub head_dim: usize,
-    pub num_qo_heads: usize,
-}
-
 impl<M: CudaGraphModule> GraphCapturer<M> {
     pub fn new(
         model: M,
@@ -420,7 +411,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
         #[cfg(feature = "flashinfer")]
-        let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len) = {
+        let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len, last_len_host) = {
             let mut indptr = Vec::with_capacity(max_bs + 1);
             indptr.push(0u32);
             let mut indices = Vec::with_capacity(max_bs * max_num_blocks);
@@ -440,7 +431,8 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             (
                 Tensor::from_vec(indptr, (max_bs + 1,), device)?,
                 Tensor::from_vec(indices, (max_bs * max_num_blocks,), device)?,
-                Tensor::from_vec(last_len, (max_bs,), device)?,
+                Tensor::from_vec(last_len.clone(), (max_bs,), device)?,
+                last_len,
             )
         };
         let mut outputs = BTreeMap::<usize, Tensor>::new();
@@ -456,27 +448,47 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     indptr_host.push(((i + 1) * max_num_blocks) as u32);
                 }
 
-                let decode_plan_info = if let Some(params) = self.flashinfer_kv_params {
-                    Some(attention_rs::flashinfer::decode_plan(
-                        device,
-                        params.kv_dtype,
-                        &indptr_host,
-                        bs,
-                        params.num_qo_heads,
-                        params.num_kv_heads,
-                        params.head_dim,
-                        params.page_size,
-                        true,
-                    )?)
-                } else {
-                    None
-                };
+                let (decode_plan_info, kv_len_arr_host) =
+                    if let Some(params) = self.flashinfer_kv_params {
+                        let mut kv_len_arr_host_bs = Vec::with_capacity(bs);
+                        for i in 0..bs {
+                            let num_pages = indptr_host[i + 1] - indptr_host[i];
+                            if num_pages == 0 {
+                                kv_len_arr_host_bs.push(0);
+                            } else {
+                                let full = (num_pages - 1) * params.page_size as u32;
+                                kv_len_arr_host_bs.push(full + last_len_host[i]);
+                            }
+                        }
+                        let kv_len_arr_host = kv_len_arr_host_bs.to_vec();
+                        (
+                            Some(attention_rs::flashinfer::decode_plan(
+                                device,
+                                params.kv_dtype,
+                                params.out_dtype,
+                                &indptr_host,
+                                Some(&last_len_host[..bs]),
+                                Some(kv_len_arr_host_bs.as_slice()),
+                                bs,
+                                params.num_qo_heads,
+                                params.num_kv_heads,
+                                params.head_dim,
+                                params.page_size,
+                                true,
+                            )?),
+                            Some(kv_len_arr_host),
+                        )
+                    } else {
+                        (None, None)
+                    };
 
                 Some(attention_rs::FlashInferMetadata {
                     indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
                     indptr_host,
                     indices: flashinfer_indices.narrow(0, 0, bs * max_num_blocks)?,
                     last_len: flashinfer_last_len.narrow(0, 0, bs)?,
+                    last_len_host: Some(last_len_host[..bs].to_vec()),
+                    kv_len_arr_host,
                     cu_seqlens_q_host: None,
                     total_num_rows: None,
                     batch_indices: None,
@@ -613,7 +625,10 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                         let _ = attention_rs::flashinfer::decode_plan(
                             dev,
                             params.kv_dtype,
+                            params.out_dtype,
                             &indptr_host,
+                            fm.last_len_host.as_deref(),
+                            fm.kv_len_arr_host.as_deref(),
                             batch,
                             params.num_qo_heads,
                             params.num_kv_heads,

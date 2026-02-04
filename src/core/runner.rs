@@ -4,14 +4,14 @@ use crate::models::layers::distributed::Comm;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
-#[cfg(feature = "flashinfer")]
-use crate::utils::graph::FlashInferKvParams;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
 use crate::utils::guidance::GuidanceState;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
+#[cfg(feature = "flashinfer")]
+use crate::utils::FlashInferKvParams;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
@@ -214,6 +214,7 @@ impl ModelRunner {
                 let (_, page_size, num_kv_heads, head_dim) = k_cache.dims4()?;
                 Some(FlashInferKvParams {
                     kv_dtype: k_cache.dtype(),
+                    out_dtype: dtype,
                     page_size,
                     num_kv_heads,
                     head_dim,
@@ -266,6 +267,7 @@ impl ModelRunner {
         }
     }
 
+    #[allow(unused)]
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
         let (input_ids, positions, mut input_metadata) = if is_prefill {
             match seqs {
@@ -300,13 +302,16 @@ impl ModelRunner {
                         fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
                             &self.device,
                             params.kv_dtype,
+                            params.out_dtype,
                             &fm.indptr_host,
+                            fm.last_len_host.as_deref(),
+                            fm.kv_len_arr_host.as_deref(),
                             input_ids.dim(0)?,
                             params.num_qo_heads,
                             params.num_kv_heads,
                             params.head_dim,
                             params.page_size,
-                            false,
+                            fm.use_cuda_graph,
                         )?);
                     }
                 }
@@ -565,6 +570,17 @@ impl ModelRunner {
             }
 
             let indptr_host = indptr.clone();
+            let last_len_host = last_len.clone();
+            let mut kv_len_arr_host = Vec::with_capacity(last_len_host.len());
+            for i in 0..last_len_host.len() {
+                let num_pages = indptr_host[i + 1] - indptr_host[i];
+                if num_pages == 0 {
+                    kv_len_arr_host.push(0);
+                } else {
+                    let full = (num_pages - 1) * self.config.block_size as u32;
+                    kv_len_arr_host.push(full + last_len_host[i]);
+                }
+            }
             let indptr_len = indptr.len();
             let indices_len = indices.len();
             let last_len_val = last_len.len();
@@ -583,6 +599,8 @@ impl ModelRunner {
                 indptr_host,
                 indices,
                 last_len,
+                last_len_host: Some(last_len_host),
+                kv_len_arr_host: Some(kv_len_arr_host),
                 cu_seqlens_q_host: Some(cu_seqlens_q_vec.iter().map(|&x| x as u32).collect()),
                 total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
                 batch_indices: Some(batch_indices),
@@ -668,6 +686,17 @@ impl ModelRunner {
                 last_len.push(last as u32);
             }
             let indptr_host = indptr.clone();
+            let last_len_host = last_len.clone();
+            let mut kv_len_arr_host = Vec::with_capacity(last_len_host.len());
+            for i in 0..last_len_host.len() {
+                let num_pages = indptr_host[i + 1] - indptr_host[i];
+                if num_pages == 0 {
+                    kv_len_arr_host.push(0);
+                } else {
+                    let full = (num_pages - 1) * self.config.block_size as u32;
+                    kv_len_arr_host.push(full + last_len_host[i]);
+                }
+            }
             let indptr_len = indptr.len();
             let indices_len = indices.len();
             let last_len_val = last_len.len();
@@ -681,6 +710,8 @@ impl ModelRunner {
                 indptr_host,
                 indices,
                 last_len,
+                last_len_host: Some(last_len_host),
+                kv_len_arr_host: Some(kv_len_arr_host),
                 cu_seqlens_q_host: None,
                 total_num_rows: None,
                 batch_indices: None,
