@@ -581,6 +581,18 @@ impl ModelRunner {
                     kv_len_arr_host.push(full + last_len_host[i]);
                 }
             }
+            if let Some((pos, &bad_idx)) = indices
+                .iter()
+                .enumerate()
+                .find(|(_, &idx)| idx as usize >= self.config.num_blocks)
+            {
+                candle_core::bail!(
+                    "flashinfer prefill block index out of range: indices[{}]={} >= num_gpu_blocks ({})",
+                    pos,
+                    bad_idx,
+                    self.config.num_blocks
+                );
+            }
             let indptr_len = indptr.len();
             let indices_len = indices.len();
             let last_len_val = last_len.len();
@@ -696,6 +708,18 @@ impl ModelRunner {
                     let full = (num_pages - 1) * self.config.block_size as u32;
                     kv_len_arr_host.push(full + last_len_host[i]);
                 }
+            }
+            if let Some((pos, &bad_idx)) = indices
+                .iter()
+                .enumerate()
+                .find(|(_, &idx)| idx as usize >= self.config.num_blocks)
+            {
+                candle_core::bail!(
+                    "flashinfer decode block index out of range: indices[{}]={} >= num_gpu_blocks ({})",
+                    pos,
+                    bad_idx,
+                    self.config.num_blocks
+                );
             }
             let indptr_len = indptr.len();
             let indices_len = indices.len();
