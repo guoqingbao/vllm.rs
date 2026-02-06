@@ -27,6 +27,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
+#[cfg(feature = "flashinfer")]
+#[derive(Clone, Copy)]
+pub struct FlashInferKvParams {
+    pub kv_dtype: DType,
+    pub out_dtype: DType,
+    pub page_size: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+    pub num_qo_heads: usize,
+}
+
 #[doc(hidden)]
 #[macro_export]
 macro_rules! serde_default {

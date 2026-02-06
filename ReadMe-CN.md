@@ -206,6 +206,9 @@ cd vllm.rs
 
 # 传入 `--prod` 以构建生产镜像（使用 `Dockerfile.prod`）
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+
+# 新增（使用FlashInfer后端）
+./build_docker.sh "cuda,nccl,flashinfer,python" sm_80
 ```
    </details>
 
@@ -247,6 +250,9 @@ apt-get install -y libnccl2 libnccl-dev
 # 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
 # 默认安装进/usr/local/bin，使用`--dst`更改安装目录
 ./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+
+# 新增（使用FlashInfer后端）
+./build.sh --release --features cuda,nccl,flashinfer
 ```
   </details>
 
@@ -488,6 +494,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **公共前缀缓存**
 * [x] **Claude/Anthropic API 兼容服务器**
 * [x] **支持CUDA 13**
+* [x] **支持FlashInfer后端**
 
 ## 📚 参考项目
 

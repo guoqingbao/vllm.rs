@@ -302,14 +302,6 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if prefix_cache.unwrap_or(false) && fp8_kvcache.unwrap_or(false) {
-            if cfg!(feature = "metal") {
-                panic!("Error: fp8 kvcache is not compatible with prefix cache on Metal!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
-            } else {
-                panic!("Error: This python package build has flash-context kernels which are not compatible with fp8 kvcache when prefix cache is enabled!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`) when building the package.");
-            }
-        }
-
         let mcp_args = if let Some(mcp_args) = mcp_args {
             Some(mcp_args.split(',').map(|s| s.to_string()).collect())
         } else {

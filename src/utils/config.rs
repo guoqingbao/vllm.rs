@@ -363,7 +363,7 @@ impl EngineConfig {
 
         if prefix_cache.unwrap_or(false)
             && fp8_kvcache.unwrap_or(false)
-            && (cfg!(feature = "metal") || cfg!(feature = "flash-context"))
+            && cfg!(feature = "flash-context")
         {
             panic!("Error: prefix-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
         }

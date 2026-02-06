@@ -207,6 +207,9 @@ cd vllm.rs
 
 # Pass `--prod` to build the production image (uses `Dockerfile.prod`)
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
+
+# New（Use FlashInfer backend）
+./build_docker.sh "cuda,nccl,flashinfer,python" sm_80
 ```
   </details>
 
@@ -249,6 +252,9 @@ Install vLLM.rs
 # Add `cutlass` for sm90+ (fp8 models)
 # Use `--dst` to change installation folder
 sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
+
+# New（Use FlashInfer backend）
+./build.sh --release --features cuda,nccl,flashinfer
 ```
   </details>
 
@@ -552,6 +558,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Prefix Caching**
 * [x] **Claude/Anthropic-compatible API Server**
 * [x] **Support CUDA 13**
+* [x] **Support FlashInfer backend**
 ---
 
 ## 📚 References
