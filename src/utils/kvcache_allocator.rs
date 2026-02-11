@@ -487,11 +487,19 @@ impl KVCacheAllocator {
         #[cfg(not(feature = "cuda"))]
         let _ = pd_config;
 
-        if cfg!(feature = "flash-context") {
+        let cache_dtype = if self.fp8_kvcache { DType::U8 } else { dtype };
+        crate::log_warn!(
+            "Using FP8 KV Cache? {}, cache dtype {:?}",
+            self.fp8_kvcache,
+            cache_dtype
+        );
+
+        if cfg!(feature = "flashinfer") || cfg!(feature = "flash-context") {
             assert!(
                 !self.fp8_kvcache,
-                "fp8 kvcache is not compatible with flash-context feature!"
+                "fp8 kvcache is not compatible with flashinfer or flash-context feature!"
             );
+
             let kv_shape = self.calculate_flash_key_value_block_shape();
 
             let mut gpu_cache = Vec::new();
@@ -499,13 +507,13 @@ impl KVCacheAllocator {
             for _ in 0..self.num_hidden_layers {
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
+                    cache_dtype,
                     device,
                     Some(sync_alloc),
                 )?;
                 let value_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
+                    cache_dtype,
                     device,
                     Some(sync_alloc),
                 )?;
@@ -514,24 +522,18 @@ impl KVCacheAllocator {
             for _ in 0..self.num_hidden_layers {
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
+                    cache_dtype,
                     &Device::Cpu,
                 )?;
                 let value_blocks = Tensor::zeros(
                     (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    dtype,
+                    cache_dtype,
                     &Device::Cpu,
                 )?;
                 cpu_cache.push((key_blocks, value_blocks));
             }
             Ok((gpu_cache, cpu_cache))
         } else {
-            let cache_dtype = if self.fp8_kvcache { DType::U8 } else { dtype };
-            crate::log_warn!(
-                "Using FP8 KV Cache? {}, cache dtype {:?}",
-                self.fp8_kvcache,
-                cache_dtype
-            );
             let kshape = self.calculate_key_block_shape(cache_dtype);
             let vshape = self.calculate_value_block_shape();
 

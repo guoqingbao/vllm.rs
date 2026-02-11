@@ -10,6 +10,8 @@ use crate::utils::guidance::GuidanceState;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
+#[cfg(feature = "flashinfer")]
+use crate::utils::FlashInferKvParams;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
@@ -24,6 +26,7 @@ use crate::{
     utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
+use attention_rs::FlashInferMetadata;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
@@ -77,6 +80,8 @@ pub struct ModelRunner {
     config: EngineConfig,
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub capturer: GraphCapturer<CudaGraphWrapper<CudaGraphFn>>,
+    #[cfg(feature = "flashinfer")]
+    flashinfer_kv_params: Option<FlashInferKvParams>,
     logit_processor: LogitsProcessor,
     /// Cached sampling strategy computed once during prefill, reused during decode
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
@@ -200,6 +205,26 @@ impl ModelRunner {
         } else {
             econfig.seed.unwrap()
         };
+        #[cfg(feature = "flashinfer")]
+        let flashinfer_kv_params = {
+            if gpu_kv_cache.is_empty() {
+                None
+            } else {
+                let (k_cache, _) = &gpu_kv_cache[0];
+                let (_, page_size, num_kv_heads, head_dim) = k_cache.dims4()?;
+                Some(FlashInferKvParams {
+                    kv_dtype: k_cache.dtype(),
+                    out_dtype: dtype,
+                    page_size,
+                    num_kv_heads,
+                    head_dim,
+                    num_qo_heads: config.num_attention_heads / comm.world_size(),
+                })
+            }
+        };
+        #[cfg(feature = "flashinfer")]
+        crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -213,7 +238,11 @@ impl ModelRunner {
                 econfig.max_model_len.unwrap_or(4096),
                 econfig.block_size,
                 config.hidden_size,
+                #[cfg(feature = "flashinfer")]
+                &flashinfer_kv_params,
             ),
+            #[cfg(feature = "flashinfer")]
+            flashinfer_kv_params,
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
@@ -240,8 +269,9 @@ impl ModelRunner {
         }
     }
 
+    #[allow(unused)]
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
-        let (input_ids, positions, input_metadata) = if is_prefill {
+        let (input_ids, positions, mut input_metadata) = if is_prefill {
             match seqs {
                 Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
                 Seqs::DecodeVec(_) => {
@@ -264,6 +294,30 @@ impl ModelRunner {
                 .replay(&input_ids, &positions, &input_metadata)?;
             let output_ids = self.sample(&logits, seqs, is_prefill)?;
             return Ok(output_ids);
+        }
+
+        #[cfg(feature = "flashinfer")]
+        if !is_prefill {
+            if let Some(fm) = input_metadata.flashinfer_metadata.as_mut() {
+                if fm.decode_plan_info.is_none() {
+                    if let Some(params) = self.flashinfer_kv_params {
+                        fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
+                            &self.device,
+                            params.kv_dtype,
+                            params.out_dtype,
+                            &fm.indptr_host,
+                            fm.last_len_host.as_deref(),
+                            fm.kv_len_arr_host.as_deref(),
+                            input_ids.dim(0)?,
+                            params.num_qo_heads,
+                            params.num_kv_heads,
+                            params.head_dim,
+                            params.page_size,
+                            fm.use_cuda_graph,
+                        )?);
+                    }
+                }
+            }
         }
 
         let images = if let Seqs::SeqRefs(s) = &seqs {
@@ -385,6 +439,9 @@ impl ModelRunner {
     fn prepare_prefill(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
         let mut input_ids: Vec<u32> = Vec::new();
         let mut positions = Vec::new();
+        let mut batch_indices_vec: Vec<u32> = Vec::new();
+        let mut positions_vec: Vec<u32> = Vec::new();
+        let mut prefill_tokens: Vec<usize> = Vec::new();
         let mut cu_seqlens_q = vec![0];
         let mut cu_seqlens_k = vec![0];
         let mut max_seqlen_q = 0;
@@ -392,7 +449,7 @@ impl ModelRunner {
         let mut slot_mapping = Vec::new();
         let CHUNK_SIZE: usize = 8192;
         let mut max_context_len = 0;
-        for seq in seqs {
+        for (seq_idx, seq) in seqs.iter().enumerate() {
             let seqlen = seq.len();
             let num_tokens = std::cmp::min(CHUNK_SIZE, seqlen - seq.num_cached_tokens);
             input_ids
@@ -401,6 +458,11 @@ impl ModelRunner {
                 (seq.num_cached_tokens as i64..(seq.num_cached_tokens + num_tokens) as i64)
                     .collect::<Vec<_>>(),
             );
+            for pos in 0..num_tokens {
+                batch_indices_vec.push(seq_idx as u32);
+                positions_vec.push((seq.num_cached_tokens + pos) as u32);
+            }
+            prefill_tokens.push(num_tokens);
             if seqlen > max_context_len {
                 max_context_len = seqlen;
             }
@@ -467,11 +529,11 @@ impl ModelRunner {
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
         // Handle cached prefix KV reuse
-        let (context_lens, block_tables) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
-            let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
-            let context_lens_t = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
+        let (block_tables, context_lens) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let block_tables_t = self.prepare_block_tables(seqs)?;
-            (Some(context_lens_t), Some(block_tables_t))
+            let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
+            let context_lens = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
+            (Some(block_tables_t), Some(context_lens))
         } else {
             (None, None)
         };
@@ -484,6 +546,86 @@ impl ModelRunner {
         } else {
             None
         };
+
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+            let mut indptr = vec![0u32];
+            let mut indices = Vec::new();
+            let mut last_len = Vec::new();
+            for (seq, &num_tokens) in seqs.iter().zip(prefill_tokens.iter()) {
+                let effective_len = seq.num_cached_tokens + num_tokens;
+                let max_blocks = seq.block_table.len();
+                let num_blocks = if effective_len == 0 {
+                    0
+                } else {
+                    (effective_len + self.config.block_size - 1) / self.config.block_size
+                };
+                let num_blocks = std::cmp::min(num_blocks, max_blocks);
+                let bt = &seq.block_table[..num_blocks];
+                indices.extend(bt.iter().map(|&x| x as u32));
+                indptr.push(indices.len() as u32);
+                let last = if effective_len == 0 {
+                    0
+                } else {
+                    (effective_len - 1) % self.config.block_size + 1
+                };
+                last_len.push(last as u32);
+            }
+
+            let indptr_host = indptr.clone();
+            let last_len_host = last_len.clone();
+            let mut kv_len_arr_host = Vec::with_capacity(last_len_host.len());
+            for i in 0..last_len_host.len() {
+                let num_pages = indptr_host[i + 1] - indptr_host[i];
+                if num_pages == 0 {
+                    kv_len_arr_host.push(0);
+                } else {
+                    let full = (num_pages - 1) * self.config.block_size as u32;
+                    kv_len_arr_host.push(full + last_len_host[i]);
+                }
+            }
+            if let Some((pos, &bad_idx)) = indices
+                .iter()
+                .enumerate()
+                .find(|(_, &idx)| idx as usize >= self.config.num_blocks)
+            {
+                candle_core::bail!(
+                    "flashinfer prefill block index out of range: indices[{}]={} >= num_gpu_blocks ({})",
+                    pos,
+                    bad_idx,
+                    self.config.num_blocks
+                );
+            }
+            let indptr_len = indptr.len();
+            let indices_len = indices.len();
+            let last_len_val = last_len.len();
+            let batch_indices_len = batch_indices_vec.len();
+            let positions_len = positions_vec.len();
+
+            let indptr = Tensor::from_vec(indptr, (indptr_len,), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices_len,), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len_val,), &self.device)?;
+            let batch_indices =
+                Tensor::from_vec(batch_indices_vec, (batch_indices_len,), &self.device)?;
+            let positions = Tensor::from_vec(positions_vec, (positions_len,), &self.device)?;
+
+            Some(FlashInferMetadata {
+                indptr,
+                indptr_host,
+                indices,
+                last_len,
+                last_len_host: Some(last_len_host),
+                kv_len_arr_host: Some(kv_len_arr_host),
+                cu_seqlens_q_host: Some(cu_seqlens_q_vec.iter().map(|&x| x as u32).collect()),
+                total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
+                batch_indices: Some(batch_indices),
+                positions: Some(positions),
+                use_cuda_graph: false,
+                decode_plan_info: None,
+            })
+        } else {
+            None
+        };
+
         let input_metadata = InputMetadata {
             is_prefill: true,
             slot_mapping,
@@ -496,6 +638,7 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
+            flashinfer_metadata,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -533,7 +676,79 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
-        let block_tables = self.prepare_block_tables(seq_refs)?;
+        let block_tables = self.prepare_block_tables(seq_refs.clone())?;
+
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+            #[cfg(all(feature = "cuda", feature = "graph"))]
+            let use_cuda_graph = self.capturer.is_captured(seq_refs.len());
+            #[cfg(not(all(feature = "cuda", feature = "graph")))]
+            let use_cuda_graph = false;
+
+            let mut indptr = vec![0u32];
+            let mut indices = Vec::new();
+            let mut last_len = Vec::new();
+            for seq in &seq_refs {
+                let bt = seq.block_table();
+                indices.extend(bt.iter().map(|&x| x as u32));
+                indptr.push(indices.len() as u32);
+                let len = seq.len();
+                let last = if len == 0 {
+                    0
+                } else {
+                    (len - 1) % self.config.block_size + 1
+                };
+                last_len.push(last as u32);
+            }
+            let indptr_host = indptr.clone();
+            let last_len_host = last_len.clone();
+            let mut kv_len_arr_host = Vec::with_capacity(last_len_host.len());
+            for i in 0..last_len_host.len() {
+                let num_pages = indptr_host[i + 1] - indptr_host[i];
+                if num_pages == 0 {
+                    kv_len_arr_host.push(0);
+                } else {
+                    let full = (num_pages - 1) * self.config.block_size as u32;
+                    kv_len_arr_host.push(full + last_len_host[i]);
+                }
+            }
+            if let Some((pos, &bad_idx)) = indices
+                .iter()
+                .enumerate()
+                .find(|(_, &idx)| idx as usize >= self.config.num_blocks)
+            {
+                candle_core::bail!(
+                    "flashinfer decode block index out of range: indices[{}]={} >= num_gpu_blocks ({})",
+                    pos,
+                    bad_idx,
+                    self.config.num_blocks
+                );
+            }
+            let indptr_len = indptr.len();
+            let indices_len = indices.len();
+            let last_len_val = last_len.len();
+
+            let indptr = Tensor::from_vec(indptr, (indptr_len,), &self.device)?;
+            let indices = Tensor::from_vec(indices, (indices_len,), &self.device)?;
+            let last_len = Tensor::from_vec(last_len, (last_len_val,), &self.device)?;
+
+            Some(FlashInferMetadata {
+                indptr,
+                indptr_host,
+                indices,
+                last_len,
+                last_len_host: Some(last_len_host),
+                kv_len_arr_host: Some(kv_len_arr_host),
+                cu_seqlens_q_host: None,
+                total_num_rows: None,
+                batch_indices: None,
+                positions: None,
+                use_cuda_graph,
+                decode_plan_info: None,
+            })
+        } else {
+            None
+        };
+
         let input_metadata = InputMetadata {
             is_prefill: false,
             slot_mapping,
@@ -546,6 +761,7 @@ impl ModelRunner {
             max_context_len,
             disable_flash_attn: None,
             seqlens: None,
+            flashinfer_metadata,
         };
 
         Ok((input_ids, positions, input_metadata))

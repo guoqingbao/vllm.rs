@@ -1,7 +1,5 @@
-use std::collections::BTreeMap;
-use std::ptr;
-use std::sync::Arc;
-
+#[cfg(feature = "flashinfer")]
+use super::FlashInferKvParams;
 use attention_rs::InputMetadata;
 use candle_core::cuda_backend::cudarc::driver::sys;
 use candle_core::cuda_backend::cudarc::driver::sys::{
@@ -11,7 +9,10 @@ use candle_core::cuda_backend::cudarc::driver::sys::{
 use candle_core::cuda_backend::CudaDevice;
 use candle_core::{DType, Device, Result, Tensor};
 use parking_lot::RwLock;
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
+use std::ptr;
+use std::sync::Arc;
 use tqdm::tqdm;
 
 #[allow(dead_code)]
@@ -342,6 +343,12 @@ pub struct GraphCaptureVars {
     pub slot_mapping: Tensor,
     pub context_lens: Tensor,
     pub block_tables: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_indptr: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_indices: Tensor,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_last_len: Tensor,
     pub outputs: BTreeMap<usize, Tensor>,
 }
 
@@ -353,6 +360,9 @@ pub struct GraphCapturer<M: CudaGraphModule> {
     pub max_model_len: usize,
     pub block_size: usize,
     pub hidden_size: usize,
+    pub device: Option<Device>,
+    #[cfg(feature = "flashinfer")]
+    pub flashinfer_kv_params: Option<FlashInferKvParams>,
 }
 
 impl<M: CudaGraphModule> GraphCapturer<M> {
@@ -362,6 +372,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         max_model_len: usize,
         block_size: usize,
         hidden_size: usize,
+        #[cfg(feature = "flashinfer")] flashinfer_kv_params: &Option<FlashInferKvParams>,
     ) -> Self {
         let graph_bs = (1..16)
             .collect::<Vec<_>>()
@@ -379,6 +390,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             max_model_len,
             block_size,
             hidden_size,
+            device: None,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_kv_params: flashinfer_kv_params.clone(),
         }
     }
 
@@ -387,6 +401,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         device: &Device,
         kv_caches: Option<&Vec<(Tensor, Tensor)>>,
     ) -> Result<()> {
+        self.device = Some(device.clone());
         let max_bs = self.graph_bs[self.graph_bs.len() - 1];
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
 
@@ -395,11 +410,96 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         let slot_mapping = Tensor::zeros((max_bs,), DType::I64, device)?;
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
+        #[cfg(feature = "flashinfer")]
+        let (flashinfer_indptr, flashinfer_indices, flashinfer_last_len, last_len_host) = {
+            let mut indptr = Vec::with_capacity(max_bs + 1);
+            indptr.push(0u32);
+            let mut indices = Vec::with_capacity(max_bs * max_num_blocks);
+            for _ in 0..max_bs {
+                for i in 0..max_num_blocks {
+                    indices.push(i as u32);
+                }
+                indptr.push(indices.len() as u32);
+            }
+            let last = if self.max_model_len == 0 {
+                0u32
+            } else {
+                ((self.max_model_len - 1) % self.block_size + 1) as u32
+            };
+            let last_len = vec![last; max_bs];
+
+            (
+                Tensor::from_vec(indptr, (max_bs + 1,), device)?,
+                Tensor::from_vec(indices, (max_bs * max_num_blocks,), device)?,
+                Tensor::from_vec(last_len.clone(), (max_bs,), device)?,
+                last_len,
+            )
+        };
         let mut outputs = BTreeMap::<usize, Tensor>::new();
         for i in tqdm(0..self.graph_bs.len()).desc(Some("Graph capturing")) {
             let bs = self.graph_bs[self.graph_bs.len() - i - 1];
             let input_ids_bs = input_ids.narrow(0, 0, bs)?;
             let positions_bs = positions.narrow(0, 0, bs)?;
+            #[cfg(feature = "flashinfer")]
+            let flashinfer_metadata = {
+                let mut indptr_host = Vec::with_capacity(bs + 1);
+                indptr_host.push(0u32);
+                for i in 0..bs {
+                    indptr_host.push(((i + 1) * max_num_blocks) as u32);
+                }
+
+                let (decode_plan_info, kv_len_arr_host) =
+                    if let Some(params) = self.flashinfer_kv_params {
+                        let mut kv_len_arr_host_bs = Vec::with_capacity(bs);
+                        for i in 0..bs {
+                            let num_pages = indptr_host[i + 1] - indptr_host[i];
+                            if num_pages == 0 {
+                                kv_len_arr_host_bs.push(0);
+                            } else {
+                                let full = (num_pages - 1) * params.page_size as u32;
+                                kv_len_arr_host_bs.push(full + last_len_host[i]);
+                            }
+                        }
+                        let kv_len_arr_host = kv_len_arr_host_bs.to_vec();
+                        (
+                            Some(attention_rs::flashinfer::decode_plan(
+                                device,
+                                params.kv_dtype,
+                                params.out_dtype,
+                                &indptr_host,
+                                Some(&last_len_host[..bs]),
+                                Some(kv_len_arr_host_bs.as_slice()),
+                                bs,
+                                params.num_qo_heads,
+                                params.num_kv_heads,
+                                params.head_dim,
+                                params.page_size,
+                                true,
+                            )?),
+                            Some(kv_len_arr_host),
+                        )
+                    } else {
+                        (None, None)
+                    };
+
+                Some(attention_rs::FlashInferMetadata {
+                    indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
+                    indptr_host,
+                    indices: flashinfer_indices.narrow(0, 0, bs * max_num_blocks)?,
+                    last_len: flashinfer_last_len.narrow(0, 0, bs)?,
+                    last_len_host: Some(last_len_host[..bs].to_vec()),
+                    kv_len_arr_host,
+                    cu_seqlens_q_host: None,
+                    total_num_rows: None,
+                    batch_indices: None,
+                    positions: None,
+                    use_cuda_graph: true,
+                    decode_plan_info,
+                })
+            };
+            #[cfg(not(feature = "flashinfer"))]
+            let flashinfer_metadata = None;
+
             let input_metadata = InputMetadata {
                 is_prefill: false,
                 slot_mapping: slot_mapping.narrow(0, 0, bs)?,
@@ -412,6 +512,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 max_context_len: self.max_model_len,
                 disable_flash_attn: None,
                 seqlens: None,
+                flashinfer_metadata,
             };
 
             self.model.start_capture(bs)?;
@@ -434,6 +535,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             slot_mapping,
             context_lens,
             block_tables,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_indptr,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_indices,
+            #[cfg(feature = "flashinfer")]
+            flashinfer_last_len,
             outputs,
         });
 
@@ -485,6 +592,52 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 graph_vars.block_tables.zero_()?;
                 graph_vars.block_tables.copy_(&padded_table, 0)?;
+
+                #[cfg(feature = "flashinfer")]
+                if let Some(fm) = &input_metadata.flashinfer_metadata {
+                    // Pad indptr to the captured batch size so graph replay sees valid lengths.
+                    let mut indptr_host = Vec::with_capacity(batch + 1);
+                    indptr_host.extend_from_slice(&fm.indptr_host);
+                    let last = *fm.indptr_host.last().unwrap_or(&0);
+                    for _ in (input_batch + 1)..=batch {
+                        indptr_host.push(last);
+                    }
+
+                    let indptr_padded = Tensor::from_vec(
+                        indptr_host.clone(),
+                        (batch + 1,),
+                        graph_vars.input_ids.device(),
+                    )?;
+                    graph_vars.flashinfer_indptr.copy_(&indptr_padded, 0)?;
+
+                    graph_vars.flashinfer_last_len.zero_()?;
+                    graph_vars.flashinfer_last_len.copy_(&fm.last_len, 0)?;
+
+                    graph_vars.flashinfer_indices.zero_()?;
+                    graph_vars.flashinfer_indices.copy_(&fm.indices, 0)?;
+
+                    if let Some(params) = self.flashinfer_kv_params {
+                        let dev = self
+                            .device
+                            .as_ref()
+                            .ok_or_else(|| candle_core::Error::msg("graph device is missing"))?;
+                        // Refresh decode plan
+                        let _ = attention_rs::flashinfer::decode_plan(
+                            dev,
+                            params.kv_dtype,
+                            params.out_dtype,
+                            &indptr_host,
+                            fm.last_len_host.as_deref(),
+                            fm.kv_len_arr_host.as_deref(),
+                            batch,
+                            params.num_qo_heads,
+                            params.num_kv_heads,
+                            params.head_dim,
+                            params.page_size,
+                            fm.use_cuda_graph,
+                        )?;
+                    }
+                }
 
                 let result = self.model.replay(batch);
                 if result.is_err() {
