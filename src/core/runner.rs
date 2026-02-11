@@ -218,10 +218,12 @@ impl ModelRunner {
                     page_size,
                     num_kv_heads,
                     head_dim,
-                    num_qo_heads: config.num_attention_heads,
+                    num_qo_heads: config.num_attention_heads / comm.world_size(),
                 })
             }
         };
+        #[cfg(feature = "flashinfer")]
+        crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
 
         Ok(Self {
             model,

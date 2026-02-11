@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
 #[cfg(feature = "flashinfer")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct FlashInferKvParams {
     pub kv_dtype: DType,
     pub out_dtype: DType,
