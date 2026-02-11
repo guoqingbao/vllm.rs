@@ -229,7 +229,6 @@ Install build dependencies
 ```sh
 sudo apt-get update
 sudo apt-get install -y git build-essential libssl-dev pkg-config
-pip3 install maturin patchelf cffi
 ```
 
 Install CUDA toolkit (optional)

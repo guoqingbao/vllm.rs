@@ -227,7 +227,6 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```sh
 sudo apt-get update
 sudo apt-get install -y git build-essential libssl-dev pkg-config
-pip3 install maturin patchelf cffi
 ```
 
 安装 CUDA Toolkit：
