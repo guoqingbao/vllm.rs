@@ -502,6 +502,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
             let input_metadata = InputMetadata {
                 is_prefill: false,
+                sequence_ids: None,
                 slot_mapping: slot_mapping.narrow(0, 0, bs)?,
                 block_tables: Some(block_tables.narrow(0, 0, bs)?),
                 context_lens: Some(context_lens.narrow(0, 0, bs)?),

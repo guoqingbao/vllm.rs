@@ -198,13 +198,6 @@ pub struct Config {
     pub quantization_config: Option<QuantConfig>,
     pub is_multi_model: Option<bool>,
     pub extra_config_json: Option<String>,
-    // Qwen3.5 hybrid architecture fields
-    pub layers_block_type: Option<Vec<String>>,
-    pub conv_kernel_size: Option<usize>,
-    pub linear_num_heads: Option<usize>,
-    pub linear_num_key_value_heads: Option<usize>,
-    pub linear_key_head_dim: Option<usize>,
-    pub linear_value_head_dim: Option<usize>,
 }
 
 impl Config {

@@ -638,8 +638,11 @@ impl ModelRunner {
             None
         };
 
+        let sequence_ids = Some(seqs.iter().map(|s| s.id()).collect::<Vec<_>>());
+
         let input_metadata = InputMetadata {
             is_prefill: true,
+            sequence_ids,
             slot_mapping,
             block_tables,
             context_lens,
@@ -761,8 +764,11 @@ impl ModelRunner {
             None
         };
 
+        let sequence_ids = Some(seq_refs.iter().map(|s| s.id()).collect::<Vec<_>>());
+
         let input_metadata = InputMetadata {
             is_prefill: false,
+            sequence_ids,
             slot_mapping,
             block_tables: Some(block_tables),
             context_lens: Some(context_lens),
@@ -954,12 +960,19 @@ impl ModelRunner {
         let _ = seq_tokens.remove(&id);
         let mut guidance_states = self.guidance_states.write();
         let _ = guidance_states.remove(&id);
+        match &self.model {
+            Model::Qwen3_5(model) => model.release_sequence_state(id),
+            Model::Qwen3_5MoE(model) => model.release_sequence_state(id),
+            _ => {}
+        }
     }
 
     pub fn get_model_vocab_size(&self) -> usize {
         match &self.model {
             Model::Qwen3(model) => model.get_vocab_size(),
             Model::Qwen3MoE(model) => model.get_vocab_size(),
+            Model::Qwen3_5(model) => model.get_vocab_size(),
+            Model::Qwen3_5MoE(model) => model.get_vocab_size(),
             Model::LLaMa(model) => model.get_vocab_size(),
             Model::Phi4(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),

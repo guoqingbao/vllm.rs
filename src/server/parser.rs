@@ -63,7 +63,11 @@ impl ToolConfig {
                     end_token_str: "<|eom_id|>".to_string(),
                 }
             }
-            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
+            ModelType::Qwen3
+            | ModelType::Qwen3MoE
+            | ModelType::Qwen3_5
+            | ModelType::Qwen3_5MoE
+            | ModelType::Qwen3VL => {
                 // Qwen 2.5 / 3
                 start_ids.insert(151657); // <tool_call>
                 end_ids.insert(151658); // </tool_call>
@@ -567,7 +571,11 @@ impl StreamToolParser {
         match model_type {
             ModelType::LLaMa => "llama",
             ModelType::Mistral | ModelType::Mistral3VL => "mistral",
-            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
+            ModelType::Qwen3
+            | ModelType::Qwen3MoE
+            | ModelType::Qwen3_5
+            | ModelType::Qwen3_5MoE
+            | ModelType::Qwen3VL => {
                 if model_lower.contains("coder") {
                     "qwen_coder"
                 } else {

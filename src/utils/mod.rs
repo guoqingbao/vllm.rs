@@ -384,6 +384,130 @@ fn is_multi_model(config_path: &PathBuf) -> Result<DummyMultiModelConfig> {
     Ok(config)
 }
 
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Qwen3HybridRawConfig {
+    #[serde(alias = "layer_types")]
+    pub layers_block_type: Option<Vec<String>>,
+    #[serde(alias = "linear_conv_kernel_dim")]
+    pub conv_kernel_size: Option<usize>,
+    pub full_attention_interval: Option<usize>,
+    pub linear_num_heads: Option<usize>,
+    #[serde(alias = "linear_num_key_heads")]
+    pub linear_num_key_heads: Option<usize>,
+    #[serde(alias = "linear_num_value_heads")]
+    pub linear_num_value_heads: Option<usize>,
+    pub linear_num_key_value_heads: Option<usize>,
+    pub linear_key_head_dim: Option<usize>,
+    pub linear_value_head_dim: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Qwen3HybridConfig {
+    pub layer_types: Vec<String>,
+    pub conv_kernel_size: usize,
+    pub num_v_heads: usize,
+    pub num_k_heads: usize,
+    pub key_head_dim: usize,
+    pub value_head_dim: usize,
+}
+
+pub fn is_qwen3_hybrid_arch_name(arch: &str) -> bool {
+    matches!(
+        arch,
+        "Qwen3_5ForCausalLM"
+            | "Qwen3_5MoeForCausalLM"
+            | "Qwen3NextForCausalLM"
+            | "Qwen3_5ForConditionalGeneration"
+            | "Qwen3_5MoeForConditionalGeneration"
+            | "Qwen3NextForConditionalGeneration"
+    )
+}
+
+fn is_qwen3_hybrid_arch(config: &Config) -> bool {
+    let arch = config.architectures.as_ref().and_then(|a| a.first());
+    arch.map(|a| is_qwen3_hybrid_arch_name(a)).unwrap_or(false)
+}
+
+fn qwen3_hybrid_raw_from_extra_config(config: &Config) -> Option<Qwen3HybridRawConfig> {
+    if !is_qwen3_hybrid_arch(config) {
+        return None;
+    }
+    let extra = config.extra_config_json.as_ref()?;
+    let root = serde_json::from_str::<serde_json::Value>(extra).ok()?;
+    let cfg = root.get("text_config").cloned().unwrap_or(root);
+    serde_json::from_value::<Qwen3HybridRawConfig>(cfg).ok()
+}
+
+pub fn resolve_qwen3_hybrid_config(config: &Config) -> Qwen3HybridConfig {
+    let raw_cfg = qwen3_hybrid_raw_from_extra_config(config).unwrap_or_default();
+
+    let mut layer_types = if let Some(layer_types) = raw_cfg.layers_block_type {
+        layer_types
+    } else if let Some(interval) = raw_cfg.full_attention_interval {
+        if interval > 0 {
+            (0..config.num_hidden_layers)
+                .map(|idx| {
+                    if (idx + 1) % interval == 0 {
+                        "full_attention".to_string()
+                    } else {
+                        "linear_attention".to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec!["full_attention".to_string(); config.num_hidden_layers]
+        }
+    } else {
+        vec!["full_attention".to_string(); config.num_hidden_layers]
+    };
+
+    for layer_type in layer_types.iter_mut() {
+        if layer_type == "attention" {
+            *layer_type = "full_attention".to_string();
+        }
+    }
+    if layer_types.len() != config.num_hidden_layers {
+        crate::log_warn!(
+            "Qwen3 hybrid layer_types length {} != num_hidden_layers {}, fallback to full_attention.",
+            layer_types.len(),
+            config.num_hidden_layers
+        );
+        layer_types = vec!["full_attention".to_string(); config.num_hidden_layers];
+    }
+
+    let num_v_heads = raw_cfg
+        .linear_num_value_heads
+        .or(raw_cfg.linear_num_heads)
+        .unwrap_or(config.num_attention_heads);
+    let num_k_heads = raw_cfg
+        .linear_num_key_heads
+        .or(raw_cfg.linear_num_key_value_heads)
+        .unwrap_or(num_v_heads);
+    let key_head_dim = raw_cfg.linear_key_head_dim.unwrap_or(
+        config
+            .head_dim
+            .unwrap_or(config.hidden_size / config.num_attention_heads),
+    );
+    let value_head_dim = raw_cfg.linear_value_head_dim.unwrap_or(key_head_dim);
+    let conv_kernel_size = raw_cfg.conv_kernel_size.unwrap_or(4);
+
+    Qwen3HybridConfig {
+        layer_types,
+        conv_kernel_size,
+        num_v_heads,
+        num_k_heads,
+        key_head_dim,
+        value_head_dim,
+    }
+}
+
+pub fn qwen3_hybrid_layer_types(config: &Config) -> Option<Vec<String>> {
+    if !is_qwen3_hybrid_arch(config) {
+        return None;
+    }
+    Some(resolve_qwen3_hybrid_config(config).layer_types)
+}
+
 fn require_model_penalty(arch: String) -> bool {
     matches!(
         arch.as_str(),
@@ -438,7 +562,8 @@ pub fn init_config_tokenizer(
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }
-                    "Qwen3VLMoeForConditionalGeneration" => {
+                    "Qwen3VLMoeForConditionalGeneration"
+                    | "Qwen3_5MoeForConditionalGeneration" => {
                         let mut config: Config = serde_json::from_value(config_value.clone())
                             .map_err(candle_core::Error::wrap)?;
                         let moe_cfg: MoEConfig = serde_json::from_value(config_value)
@@ -471,6 +596,12 @@ pub fn init_config_tokenizer(
                 .map_err(candle_core::Error::wrap)?
         };
 
+        if config.extra_config_json.is_none() {
+            if let Ok(raw) = std::fs::read_to_string(&config_path) {
+                config.extra_config_json = Some(raw);
+            }
+        }
+
         if let Some(qcfg) = &config.quantization_config {
             assert!(
                 qcfg.quant_method == "gptq"
@@ -490,17 +621,28 @@ pub fn init_config_tokenizer(
                 candle_core::bail!("GPTQ/AWQ models are only supported under CUDA platform!");
             }
         }
-        let architectures = config.architectures.as_ref().unwrap();
-        if matches!(
-            architectures[0].as_str(),
-            "Qwen2MoeForCausalLM" | "Qwen3MoeForCausalLM" | "Glm4MoeForCausalLM"
-        ) {
-            let moe_cfg: MoEConfig = serde_json::from_slice(
-                &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
+        let arch_name = config.architectures.as_ref().unwrap()[0].clone();
+        if config.moe_cfg.is_none()
+            && matches!(
+                arch_name.as_str(),
+                "Qwen2MoeForCausalLM"
+                    | "Qwen3MoeForCausalLM"
+                    | "Glm4MoeForCausalLM"
+                    | "Qwen3_5MoeForCausalLM"
+                    | "Qwen3_5MoeForConditionalGeneration"
+                    | "Qwen3NextForCausalLM"
+                    | "Qwen3NextForConditionalGeneration"
             )
-            .map_err(candle_core::Error::wrap)?;
-            config.moe_cfg = Some(moe_cfg);
+        {
+            if let Ok(raw_cfg) = std::fs::read(&config_path) {
+                if let Ok(moe_cfg) = serde_json::from_slice::<MoEConfig>(&raw_cfg) {
+                    if moe_cfg.num_experts.unwrap_or(0) > 0 {
+                        config.moe_cfg = Some(moe_cfg);
+                    }
+                }
+            }
         }
+
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
         let mut config_tokenizer: TokenizerConfig = {
@@ -533,7 +675,7 @@ pub fn init_config_tokenizer(
             let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
             Some(cfg)
         } else {
-            if require_model_penalty(architectures[0].clone()) {
+            if require_model_penalty(arch_name.clone()) {
                 Some(GenerationConfig {
                     temperature: Some(0.7),
                     top_p: Some(0.9),
@@ -861,8 +1003,12 @@ pub fn get_arch_rope(
         ("mistral3", false),
         ("Gemma3ForConditionalGeneration", false),
         ("Gemma3ForCausalLM", false),
+        ("Qwen3_5ForCausalLM", false),
         ("Qwen3_5ForConditionalGeneration", false),
+        ("Qwen3_5MoeForCausalLM", false),
         ("Qwen3_5MoeForConditionalGeneration", false),
+        ("Qwen3NextForCausalLM", false),
+        ("Qwen3NextForConditionalGeneration", false),
     ]
     .iter()
     .cloned()
@@ -879,11 +1025,11 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3_5ForConditionalGeneration" => (
+        "Qwen3_5ForCausalLM" | "Qwen3NextForCausalLM" => (
             ModelType::Qwen3_5,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3_5MoeForConditionalGeneration" => (
+        "Qwen3_5MoeForCausalLM" => (
             ModelType::Qwen3_5MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
@@ -891,7 +1037,11 @@ pub fn get_arch_rope(
             ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3VLForConditionalGeneration" | "Qwen3VLMoeForConditionalGeneration" => (
+        "Qwen3VLForConditionalGeneration"
+        | "Qwen3VLMoeForConditionalGeneration"
+        | "Qwen3_5ForConditionalGeneration"
+        | "Qwen3_5MoeForConditionalGeneration"
+        | "Qwen3NextForConditionalGeneration" => (
             ModelType::Qwen3VL,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),

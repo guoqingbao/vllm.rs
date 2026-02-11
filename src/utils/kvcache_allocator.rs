@@ -16,6 +16,7 @@
 //! let (gpu_cache, cpu_cache) = allocator.init_kv_cache(&allocation, dtype, &device)?;
 //! ```
 
+use super::qwen3_hybrid_layer_types;
 use crate::utils::config::{Config, EngineConfig};
 use candle_core::{DType, Device, Result, Tensor};
 use std::fmt;
@@ -137,8 +138,11 @@ impl KVCacheAllocator {
             .unwrap_or(config.max_position_embeddings);
 
         // For hybrid models (e.g., Qwen3.5), only count full-attention layers
-        let num_kv_layers = if let Some(ref block_types) = config.layers_block_type {
-            block_types.iter().filter(|t| t.as_str() == "full_attention").count()
+        let num_kv_layers = if let Some(block_types) = qwen3_hybrid_layer_types(config) {
+            block_types
+                .iter()
+                .filter(|t| t.as_str() == "full_attention")
+                .count()
         } else {
             config.num_hidden_layers
         };

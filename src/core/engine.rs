@@ -131,6 +131,15 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
         let arch = config.architectures.as_ref().unwrap()[0].clone();
+        if econfig.prefix_cache.unwrap_or(false)
+            && crate::utils::is_qwen3_hybrid_arch_name(arch.as_str())
+        {
+            log_warn!(
+                "Prefix cache is disabled for {}: KV blocks can be reused, but Mamba/GDN recurrent states are not prefix-cached yet.",
+                arch
+            );
+            econfig.prefix_cache = Some(false);
+        }
 
         let (model_type, default_chat_template, is_rope_i) =
             crate::utils::get_arch_rope(&tokenizer, arch.clone())?;
