@@ -526,14 +526,14 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
-        let context_lens = Some(Tensor::from_vec(context_lens, seqs.len(), &self.device)?);
         // Handle cached prefix KV reuse
-        let block_tables = if cu_seqlens_k.last() > cu_seqlens_q.last() {
+        let (block_tables, context_lens) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let block_tables_t = self.prepare_block_tables(seqs)?;
-            Some(block_tables_t)
+            let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
+            let context_lens = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
+            (Some(block_tables_t), Some(context_lens))
         } else {
-            None
+            (None, None)
         };
         let cu_seqlens_q_vec = cu_seqlens_q.clone();
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
