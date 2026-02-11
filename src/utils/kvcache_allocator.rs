@@ -495,12 +495,10 @@ impl KVCacheAllocator {
         );
 
         if cfg!(feature = "flashinfer") || cfg!(feature = "flash-context") {
-            if cfg!(feature = "flash-context") {
-                assert!(
-                    !self.fp8_kvcache,
-                    "fp8 kvcache is not compatible with flash-context feature!"
-                );
-            }
+            assert!(
+                !self.fp8_kvcache,
+                "fp8 kvcache is not compatible with flashinfer or flash-context feature!"
+            );
 
             let kv_shape = self.calculate_flash_key_value_block_shape();
 

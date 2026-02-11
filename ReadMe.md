@@ -209,7 +209,7 @@ cd vllm.rs
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 
 # New（Use FlashInfer backend）
-./build_docker.sh "cuda,nccl,flashinfer,python" sm_80
+./build_docker.sh "cuda,nccl,flashinfer,graph,cutlass,python" sm_90 13.0.0
 ```
   </details>
 
@@ -229,6 +229,7 @@ Install build dependencies
 ```sh
 sudo apt-get update
 sudo apt-get install -y git build-essential libssl-dev pkg-config
+pip3 install maturin patchelf cffi
 ```
 
 Install CUDA toolkit (optional)
@@ -254,7 +255,7 @@ Install vLLM.rs
 sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
 
 # New（Use FlashInfer backend）
-./build.sh --release --features cuda,nccl,flashinfer
+./build.sh --install --features cuda,nccl,flashinfer,graph,cutlass
 ```
   </details>
 
@@ -545,7 +546,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Prefix cache for Metal/macOS
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
-* [ ] FP8 KV Cache (with Flash-Attn)
+* [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
 * [ ] Additional model support (LLaMa 4, Kimi K2 Thinking, etc.)
 * [x] CPU KV Cache Offloading
@@ -559,6 +560,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Claude/Anthropic-compatible API Server**
 * [x] **Support CUDA 13**
 * [x] **Support FlashInfer backend**
+* [ ] TentorRT-LLM 
 ---
 
 ## 📚 References

@@ -208,7 +208,7 @@ cd vllm.rs
 ./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
 
 # 新增（使用FlashInfer后端）
-./build_docker.sh "cuda,nccl,flashinfer,python" sm_80
+./build_docker.sh "cuda,nccl,flashinfer,graph,cutlass,python" sm_90 13.0.0
 ```
    </details>
 
@@ -227,6 +227,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```sh
 sudo apt-get update
 sudo apt-get install -y git build-essential libssl-dev pkg-config
+pip3 install maturin patchelf cffi
 ```
 
 安装 CUDA Toolkit：
@@ -249,10 +250,10 @@ apt-get install -y libnccl2 libnccl-dev
 # CUDA下只去掉`flash-context`可使用FP8 KVCache
 # 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
 # 默认安装进/usr/local/bin，使用`--dst`更改安装目录
-./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
 
 # 新增（使用FlashInfer后端）
-./build.sh --release --features cuda,nccl,flashinfer
+./build.sh --install --features cuda,nccl,flashinfer,graph,cutlass
 ```
   </details>
 
@@ -481,7 +482,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Metal/macOS平台前缀缓存
 * [x] FP8 KV Cache (CUDA)
 * [x] FP8 KV Cache (Metal)
-* [ ] FP8 KV Cache (with Flash-Attn)
+* [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
 * [ ] 支持更多模型类型（LLaMa 4, Kimi K2 Thinking等）
 * [x] CPU KV Cache 卸载
@@ -495,6 +496,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Claude/Anthropic API 兼容服务器**
 * [x] **支持CUDA 13**
 * [x] **支持FlashInfer后端**
+* [ ] TentorRT-LLM 后端
 
 ## 📚 参考项目
 
