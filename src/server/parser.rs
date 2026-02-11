@@ -434,6 +434,11 @@ impl StreamToolParser {
 
     /// Check if token/text matches start trigger
     fn is_start_token(&self, id: u32, text: &str) -> bool {
+        match self.accumulated_output[..self.accumulated_output.len() - text.len()].chars().last() {
+            // Empty buffer or newline are valid "start of line" checks for tool calls
+            None | Some('\n') => {},
+            _ => return false
+        };
         // Token ID match (if available)
         if self.config.has_start_tokens() {
             return self.config.start_token_ids.contains(&id);
