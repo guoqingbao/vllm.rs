@@ -78,7 +78,13 @@ impl<'de> Deserialize<'de> for NcclId {
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), arr.as_mut_ptr() as *mut u8, 128);
             }
-            Ok(NcclId(Id::uninit(arr)))
+            #[cfg(not(target_arch = "aarch64"))]
+            return Ok(NcclId(Id::uninit(arr)));
+            #[cfg(target_arch = "aarch64")]
+            {
+                let arr_u8 = arr.map(|b| b as u8);
+                return Ok(NcclId(Id::uninit(arr_u8)));
+            }
         } else {
             struct Visitor;
             impl<'de> serde::de::Visitor<'de> for Visitor {
@@ -99,7 +105,13 @@ impl<'de> Deserialize<'de> for NcclId {
                     unsafe {
                         std::ptr::copy_nonoverlapping(v.as_ptr(), arr.as_mut_ptr() as *mut u8, 128);
                     }
-                    Ok(NcclId(Id::uninit(arr)))
+                    #[cfg(not(target_arch = "aarch64"))]
+                    return Ok(NcclId(Id::uninit(arr)));
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        let arr_u8 = arr.map(|b| b as u8);
+                        return Ok(NcclId(Id::uninit(arr_u8)));
+                    }
                 }
             }
 
