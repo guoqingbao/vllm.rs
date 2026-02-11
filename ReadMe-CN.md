@@ -60,6 +60,7 @@
 * ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）（支持硬件FP8加速，SM90+）
 * ✅ Qwen2/Qwen3 Moe 系列（支持硬件FP8加速，SM90+）
+* ✅ Qwen3.5 系列
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)

@@ -861,6 +861,8 @@ pub fn get_arch_rope(
         ("mistral3", false),
         ("Gemma3ForConditionalGeneration", false),
         ("Gemma3ForCausalLM", false),
+        ("Qwen3_5ForConditionalGeneration", false),
+        ("Qwen3_5MoeForConditionalGeneration", false),
     ]
     .iter()
     .cloned()
@@ -875,6 +877,14 @@ pub fn get_arch_rope(
         | "qwen2"
         | "qwen3" => (
             ModelType::Qwen3,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "Qwen3_5ForConditionalGeneration" => (
+            ModelType::Qwen3_5,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "Qwen3_5MoeForConditionalGeneration" => (
+            ModelType::Qwen3_5MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (

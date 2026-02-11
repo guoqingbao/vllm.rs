@@ -92,6 +92,8 @@ impl std::error::Error for KVCacheError {}
 pub struct KVCacheAllocator {
     // Model parameters
     num_hidden_layers: usize,
+    /// Number of layers that need KV cache (excludes GDN/Mamba layers)
+    num_kv_layers: usize,
     num_kv_heads: usize,
     head_dim: usize,
     num_shards: usize,
@@ -134,8 +136,16 @@ impl KVCacheAllocator {
             .config_model_len
             .unwrap_or(config.max_position_embeddings);
 
+        // For hybrid models (e.g., Qwen3.5), only count full-attention layers
+        let num_kv_layers = if let Some(ref block_types) = config.layers_block_type {
+            block_types.iter().filter(|t| t.as_str() == "full_attention").count()
+        } else {
+            config.num_hidden_layers
+        };
+
         Self {
             num_hidden_layers: config.num_hidden_layers,
+            num_kv_layers,
             num_kv_heads: config.num_key_value_heads,
             head_dim,
             num_shards,
@@ -183,7 +193,7 @@ impl KVCacheAllocator {
             * self.head_dim
             * self.dtype_size
             * 2 // K and V
-            * self.num_hidden_layers
+            * self.num_kv_layers
     }
 
     /// Calculate required memory for given parameters
@@ -504,7 +514,7 @@ impl KVCacheAllocator {
 
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     cache_dtype,
@@ -519,7 +529,7 @@ impl KVCacheAllocator {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     cache_dtype,
@@ -539,7 +549,7 @@ impl KVCacheAllocator {
 
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
@@ -554,7 +564,7 @@ impl KVCacheAllocator {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,

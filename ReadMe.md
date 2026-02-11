@@ -61,6 +61,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
 * ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8 support，SM90+)
 * ✅ Qwen2/Qwen3 Moe (+Hardware FP8 support，SM90+)
+* ✅ Qwen3.5 Dense/Moe
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)

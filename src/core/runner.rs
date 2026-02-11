@@ -20,6 +20,8 @@ use crate::{
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::phi4::Phi4ForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
+    models::qwen3_5::Qwen3_5ForCausalLM,
+    models::qwen3_5_moe::Qwen3_5MoEForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
     utils::config::{Config, EngineConfig, ModelType},
@@ -52,6 +54,8 @@ pub enum Seqs<'a> {
 pub enum Model {
     Qwen3(Arc<Qwen3ForCausalLM>),
     Qwen3MoE(Arc<Qwen3MoEForCausalLM>),
+    Qwen3_5(Arc<Qwen3_5ForCausalLM>),
+    Qwen3_5MoE(Arc<Qwen3_5MoEForCausalLM>),
     LLaMa(Arc<LLaMaForCausalLM>),
     Phi4(Arc<Phi4ForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
@@ -121,6 +125,8 @@ impl ModelRunner {
             {
                 Qwen3 => Qwen3ForCausalLM,
                 Qwen3MoE => Qwen3MoEForCausalLM,
+                Qwen3_5 => Qwen3_5ForCausalLM,
+                Qwen3_5MoE => Qwen3_5MoEForCausalLM,
                 LLaMa => LLaMaForCausalLM,
                 Phi4 => Phi4ForCausalLM,
                 GLM4 => GLM4ForCausalLM,
@@ -138,6 +144,8 @@ impl ModelRunner {
             {
                 Qwen3 => EmbedInputs,
                 Qwen3MoE => EmbedInputs,
+                Qwen3_5 => EmbedInputs,
+                Qwen3_5MoE => EmbedInputs,
                 LLaMa => EmbedInputs,
                 Phi4 => EmbedInputs,
                 GLM4 => EmbedInputs,
@@ -350,6 +358,8 @@ impl ModelRunner {
             {
                 Qwen3 => false,
                 Qwen3MoE => false,
+                Qwen3_5 => false,
+                Qwen3_5MoE => false,
                 LLaMa => false,
                 Phi4 => false,
                 GLM4 => false,
@@ -373,6 +383,8 @@ impl ModelRunner {
             {
                 Qwen3 => false,
                 Qwen3MoE => false,
+                Qwen3_5 => false,
+                Qwen3_5MoE => false,
                 LLaMa => false,
                 Phi4 => false,
                 GLM4 => false,
