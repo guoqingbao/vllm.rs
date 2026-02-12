@@ -337,6 +337,7 @@ impl MergedParallelColumnLinear {
         out_dim: usize,
         chunk_dim: usize,
         chunks: Vec<usize>,
+        chunk_shards: Option<Vec<Shard>>,
         vb: VarBuilderX,
         comm: Rc<Comm>,
         quant_cfg: &Option<QuantConfig>,
@@ -347,6 +348,15 @@ impl MergedParallelColumnLinear {
             candle_core::bail!(
                 "Merged quantized weight is not supported at the moment, using ISQ instead!"
             );
+        }
+        if let Some(chunk_shards) = &chunk_shards {
+            if chunk_shards.len() != chunks.len() {
+                candle_core::bail!(
+                    "chunk_shards length mismatch: expected {}, got {}",
+                    chunks.len(),
+                    chunk_shards.len()
+                );
+            }
         }
         let mut vec_linear = Vec::<TensorParallelColumnLinear>::new();
         match vb.0 {
@@ -362,10 +372,32 @@ impl MergedParallelColumnLinear {
                 for chunk_idx in 0..chunks.len() {
                     let chunk_size = chunks[chunk_idx];
                     let ws = weight.narrow(chunk_dim, chunk_start, chunk_size)?;
-                    let c_chunk_size = ws.dim(0)? / comm.world_size();
-                    let ws_chunk = ws
-                        .narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
-                        .contiguous()?;
+                    let ws_chunk = if let Some(chunk_shards) = &chunk_shards {
+                        let chunk_shard = &chunk_shards[chunk_idx];
+                        if ws.dim(0)? % chunk_shard.world_size != 0 {
+                            candle_core::bail!(
+                                "merged chunk {} dim {} is not divisible by shard world_size {}",
+                                chunk_idx,
+                                ws.dim(0)?,
+                                chunk_shard.world_size
+                            );
+                        }
+                        let c_chunk_size = ws.dim(0)? / chunk_shard.world_size;
+                        ws.narrow(0, chunk_shard.rank * c_chunk_size, c_chunk_size)?
+                            .contiguous()?
+                    } else {
+                        if ws.dim(0)? % comm.world_size() != 0 {
+                            candle_core::bail!(
+                                "merged chunk {} dim {} is not divisible by comm world_size {}",
+                                chunk_idx,
+                                ws.dim(0)?,
+                                comm.world_size()
+                            );
+                        }
+                        let c_chunk_size = ws.dim(0)? / comm.world_size();
+                        ws.narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
+                            .contiguous()?
+                    };
                     chunk_start += chunk_size;
 
                     let ln = crate::models::layers::linear::Linear::new(ws_chunk, None);
