@@ -330,18 +330,28 @@ pub struct Qwen3_5MoEForCausalLM {
 }
 
 impl Qwen3_5MoEForCausalLM {
-    fn resolve_sequence_ids(input_metadata: &InputMetadata, token_count: usize) -> Vec<usize> {
-        if let Some(sequence_ids) = &input_metadata.sequence_ids {
-            return sequence_ids.clone();
+    fn resolve_sequence_ids(
+        input_metadata: &InputMetadata,
+        token_count: usize,
+    ) -> Result<Vec<usize>> {
+        let sequence_ids = input_metadata.sequence_ids.clone().ok_or_else(|| {
+            candle_core::Error::Msg(
+                "Qwen3.5 MoE requires input_metadata.sequence_ids for Mamba/GDN cache mapping"
+                    .into(),
+            )
+        })?;
+
+        if sequence_ids.is_empty() {
+            candle_core::bail!("Qwen3.5 MoE received empty sequence_ids")
         }
-        if input_metadata.is_prefill {
-            if let Some(cumulative) = &input_metadata.seqlens {
-                return (0..cumulative.len()).collect();
-            }
-        } else {
-            return (0..token_count).collect();
+        if !input_metadata.is_prefill && sequence_ids.len() != token_count {
+            candle_core::bail!(
+                "Qwen3.5 MoE decode sequence_ids length mismatch: ids={} tokens={}",
+                sequence_ids.len(),
+                token_count
+            )
         }
-        vec![0]
+        Ok(sequence_ids)
     }
 
     pub fn new(
@@ -588,7 +598,7 @@ impl Qwen3_5MoEForCausalLM {
 
         let mut kv_cache_idx = 0usize;
         let mut mamba_cache = self.mamba_cache.write();
-        let sequence_ids = Self::resolve_sequence_ids(input_metadata, xs.dim(0)?);
+        let sequence_ids = Self::resolve_sequence_ids(input_metadata, xs.dim(0)?)?;
         let seq_slots = mamba_cache.ensure_slots_for_sequences(&sequence_ids)?;
 
         for (i, layer) in self.layers.iter().enumerate() {

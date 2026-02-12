@@ -990,7 +990,24 @@ pub fn spawn_runner(
 }
 
 pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
-    let black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+    let black_list = vec![
+        "Phi3ForCausalLM",
+        "Phi4ForCausalLM",
+        "phi3",
+        "phi4",
+        // Qwen3.5/Qwen3Next use per-sequence Mamba/GDN states keyed by sequence_id.
+        // CUDA graph capture currently stores static metadata and cannot replay dynamic ids safely.
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5ForConditionalGeneration",
+        "Qwen3_5MoeForCausalLM",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3NextForCausalLM",
+        "Qwen3NextForConditionalGeneration",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3next",
+        "qwen3_next",
+    ];
 
     black_list.contains(&architectures.as_str())
 }

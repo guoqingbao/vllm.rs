@@ -903,6 +903,8 @@ impl LLMEngine {
         for i in 0..self.cancelled_sequences.len() {
             let seq_id = self.cancelled_sequences[i];
             self.scheduler.cancel(seq_id);
+            // Ensure model-side per-sequence state (e.g., Qwen3.5 Mamba cache slot) is released.
+            let _ = self.notify_runner_finished(seq_id);
             if let Some(_) = self.active_requests.get(&seq_id) {
                 self.active_requests.remove(&seq_id);
             }
