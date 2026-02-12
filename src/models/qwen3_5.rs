@@ -15,7 +15,7 @@ use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -140,7 +140,7 @@ impl Qwen3_5DecoderLayer {
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
         mamba_cache: &mut MambaCache,
-        seq_slots: &[usize],
+        seq_slots: &Tensor,
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
@@ -192,27 +192,28 @@ pub struct Qwen3_5ForCausalLM {
 }
 
 impl Qwen3_5ForCausalLM {
-    fn resolve_sequence_ids(
-        input_metadata: &InputMetadata,
-        token_count: usize,
-    ) -> Result<Vec<usize>> {
-        let sequence_ids = input_metadata.sequence_ids.clone().ok_or_else(|| {
-            candle_core::Error::Msg(
-                "Qwen3.5 requires input_metadata.sequence_ids for Mamba/GDN cache mapping".into(),
-            )
-        })?;
-
-        if sequence_ids.is_empty() {
-            candle_core::bail!("Qwen3.5 received empty sequence_ids")
+    fn resolve_seq_slots(input_metadata: &InputMetadata, token_count: usize) -> Result<Tensor> {
+        if let Some(slot_mapping) = &input_metadata.mamba_slot_mapping {
+            if slot_mapping.dtype() != DType::I64 {
+                candle_core::bail!(
+                    "Qwen3.5 expects mamba_slot_mapping dtype I64, got {:?}",
+                    slot_mapping.dtype()
+                )
+            }
+            let slot_count = slot_mapping.dim(0)?;
+            if slot_count == 0 {
+                candle_core::bail!("Qwen3.5 received empty mamba_slot_mapping")
+            }
+            if !input_metadata.is_prefill && slot_count != token_count {
+                candle_core::bail!(
+                    "Qwen3.5 decode mamba_slot_mapping length mismatch: slots={} tokens={}",
+                    slot_count,
+                    token_count
+                )
+            }
+            return Ok(slot_mapping.clone());
         }
-        if !input_metadata.is_prefill && sequence_ids.len() != token_count {
-            candle_core::bail!(
-                "Qwen3.5 decode sequence_ids length mismatch: ids={} tokens={}",
-                sequence_ids.len(),
-                token_count
-            )
-        }
-        Ok(sequence_ids)
+        candle_core::bail!("Qwen3.5 requires input_metadata.mamba_slot_mapping")
     }
 
     pub fn new(
@@ -396,8 +397,8 @@ impl Qwen3_5ForCausalLM {
         let conv_kernel_size = hybrid.conv_kernel_size;
         let d_conv = num_k_heads * key_head_dim * 2 + num_v_heads * value_head_dim;
 
-        // max_batch_size: use a reasonable default; will be updated at runtime
-        let max_batch_size = 128;
+        // Start small and let runner preallocate to the final engine capacity.
+        let max_batch_size = 1;
         let mamba_cache = if num_gdn_layers > 0 {
             MambaCache::new(
                 num_gdn_layers,
@@ -463,8 +464,7 @@ impl Qwen3_5ForCausalLM {
 
         let mut kv_cache_idx = 0usize;
         let mut mamba_cache = self.mamba_cache.write();
-        let sequence_ids = Self::resolve_sequence_ids(input_metadata, xs.dim(0)?)?;
-        let seq_slots = mamba_cache.ensure_slots_for_sequences(&sequence_ids)?;
+        let seq_slots = Self::resolve_seq_slots(input_metadata, xs.dim(0)?)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = if layer.is_full_attention() {
@@ -584,6 +584,30 @@ impl Qwen3_5ForCausalLM {
 
     pub fn release_sequence_state(&self, sequence_id: usize) {
         self.mamba_cache.write().free_slot(sequence_id);
+    }
+
+    pub fn ensure_mamba_slots_for_sequences(&self, sequence_ids: &[usize]) -> Result<Vec<usize>> {
+        self.mamba_cache
+            .write()
+            .ensure_slots_for_sequences(sequence_ids)
+    }
+
+    pub fn get_mamba_slots_for_sequences(&self, sequence_ids: &[usize]) -> Result<Vec<usize>> {
+        self.mamba_cache
+            .write()
+            .get_slots_for_sequences(sequence_ids)
+    }
+
+    pub fn lock_mamba_cache_for_graph(&self) -> RwLockWriteGuard<'_, MambaCache> {
+        self.mamba_cache.write()
+    }
+
+    pub fn preallocate_mamba_cache(&self, max_num_seqs: usize) -> Result<()> {
+        self.mamba_cache.write().reserve_capacity(max_num_seqs)
+    }
+
+    pub fn reset_mamba_cache(&self) -> Result<()> {
+        self.mamba_cache.write().reset_all()
     }
 
     pub fn dtype(&self) -> DType {

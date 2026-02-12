@@ -537,9 +537,10 @@ impl GatedDeltaNet {
         xs: &Tensor,
         mamba_cache: &mut MambaCache,
         input_metadata: &InputMetadata,
-        seq_slots: &[usize],
+        seq_slots: &Tensor,
     ) -> Result<Tensor> {
-        if seq_slots.is_empty() {
+        let slot_count = seq_slots.dim(0)?;
+        if slot_count == 0 {
             candle_core::bail!("Linear attention requires non-empty sequence slots");
         }
         let (token_count, _hidden) = xs.dims2()?;
@@ -551,11 +552,11 @@ impl GatedDeltaNet {
         let mut conv_state = mamba_cache.get_batch_conv_state(self.gdn_layer_idx, seq_slots)?;
         let kv_conv = if is_prefill {
             let lengths = Self::prefill_lengths(input_metadata, token_count)?;
-            if lengths.len() != seq_slots.len() {
+            if lengths.len() != slot_count {
                 candle_core::bail!(
                     "Linear attention prefill mismatch: {} sequences in metadata vs {} sequence slots",
                     lengths.len(),
-                    seq_slots.len()
+                    slot_count
                 );
             }
             let mut cu = Vec::with_capacity(lengths.len() + 1);
@@ -576,11 +577,11 @@ impl GatedDeltaNet {
                 true, // SiLU activation
             )?
         } else {
-            if token_count != seq_slots.len() {
+            if token_count != slot_count {
                 candle_core::bail!(
                     "Linear attention decode mismatch: {} tokens vs {} sequence slots",
                     token_count,
-                    seq_slots.len()
+                    slot_count
                 );
             }
             gdn::causal_conv1d_update(
@@ -651,7 +652,7 @@ impl GatedDeltaNet {
             let seq_output_refs = seq_outputs.iter().collect::<Vec<_>>();
             Tensor::cat(&seq_output_refs, 0)?
         } else {
-            let batch = seq_slots.len();
+            let batch = slot_count;
             let q_b = q.reshape((batch, self.num_v_heads, self.head_k_dim))?;
             let k_b = k.reshape((batch, self.num_v_heads, self.head_k_dim))?;
             let v_b = v.reshape((batch, self.num_v_heads, self.head_v_dim))?;

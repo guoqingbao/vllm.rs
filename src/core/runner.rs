@@ -5,7 +5,9 @@ use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
-use crate::utils::graph::{CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn};
+use crate::utils::graph::{
+    planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
+};
 use crate::utils::guidance::GuidanceState;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
@@ -98,6 +100,35 @@ pub struct ModelRunner {
 }
 
 impl ModelRunner {
+    const MAMBA_CACHE_FIXED_CAPACITY: usize = 128;
+
+    fn prepare_mamba_slot_mapping(
+        &self,
+        sequence_ids: &[usize],
+        is_prefill: bool,
+    ) -> Result<Option<Tensor>> {
+        let slots = match &self.model {
+            Model::Qwen3_5(model) => Some(if is_prefill {
+                model.ensure_mamba_slots_for_sequences(sequence_ids)?
+            } else {
+                model.get_mamba_slots_for_sequences(sequence_ids)?
+            }),
+            Model::Qwen3_5MoE(model) => Some(if is_prefill {
+                model.ensure_mamba_slots_for_sequences(sequence_ids)?
+            } else {
+                model.get_mamba_slots_for_sequences(sequence_ids)?
+            }),
+            _ => None,
+        };
+        if let Some(slots) = slots {
+            let slots_i64 = slots.iter().map(|&s| s as i64).collect::<Vec<_>>();
+            let len = slots_i64.len();
+            Ok(Some(Tensor::from_vec(slots_i64, (len,), &self.device)?))
+        } else {
+            Ok(None)
+        }
+    }
+
     #[allow(unused)]
     pub fn new(
         model_type: ModelType,
@@ -195,6 +226,36 @@ impl ModelRunner {
             kvcache_memory_bytes: econfig.kvcache_memory_bytes,
             max_num_batched_tokens: econfig.max_num_batched_tokens,
         };
+
+        let mamba_cache_capacity = Self::MAMBA_CACHE_FIXED_CAPACITY;
+        if econfig.max_num_seqs > mamba_cache_capacity {
+            crate::log_warn!(
+                "max_num_seqs={} is larger than fixed Mamba cache capacity={}; runtime may grow cache dynamically.",
+                econfig.max_num_seqs,
+                mamba_cache_capacity
+            );
+        }
+        #[cfg(all(feature = "cuda", feature = "graph"))]
+        {
+            let capture_capacity = planned_graph_capture_batches(econfig.max_num_seqs)
+                .into_iter()
+                .max()
+                .unwrap_or(1);
+            if capture_capacity > mamba_cache_capacity {
+                crate::log_warn!(
+                    "graph capture batch {} exceeds fixed Mamba cache capacity {}; consider increasing fixed capacity.",
+                    capture_capacity,
+                    mamba_cache_capacity
+                );
+            }
+        }
+
+        match &model {
+            Model::Qwen3_5(model) => model.preallocate_mamba_cache(mamba_cache_capacity)?,
+            Model::Qwen3_5MoE(model) => model.preallocate_mamba_cache(mamba_cache_capacity)?,
+            _ => {}
+        }
+
         let (gpu_kv_cache, cpu_kv_cache) =
             allocator.init_kv_cache(&allocation, dtype, &device, econfig.pd_config.as_ref())?;
 
@@ -296,12 +357,33 @@ impl ModelRunner {
         };
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
-        if !is_prefill && self.capturer.is_captured(input_ids.dim(0)?) {
-            let logits = self
-                .capturer
-                .replay(&input_ids, &positions, &input_metadata)?;
-            let output_ids = self.sample(&logits, seqs, is_prefill)?;
-            return Ok(output_ids);
+        {
+            let input_batch = input_ids.dim(0)?;
+            let require_exact_graph = input_metadata.mamba_slot_mapping.is_some();
+            let can_replay = if require_exact_graph {
+                self.capturer.is_exact_captured(input_batch)
+            } else {
+                self.capturer.is_captured(input_batch)
+            };
+            if !is_prefill && can_replay {
+                let logits = match &self.model {
+                    Model::Qwen3_5(model) => {
+                        let _guard = model.lock_mamba_cache_for_graph();
+                        self.capturer
+                            .replay(&input_ids, &positions, &input_metadata)?
+                    }
+                    Model::Qwen3_5MoE(model) => {
+                        let _guard = model.lock_mamba_cache_for_graph();
+                        self.capturer
+                            .replay(&input_ids, &positions, &input_metadata)?
+                    }
+                    _ => self
+                        .capturer
+                        .replay(&input_ids, &positions, &input_metadata)?,
+                };
+                let output_ids = self.sample(&logits, seqs, is_prefill)?;
+                return Ok(output_ids);
+            }
         }
 
         #[cfg(feature = "flashinfer")]
@@ -638,11 +720,14 @@ impl ModelRunner {
             None
         };
 
-        let sequence_ids = Some(seqs.iter().map(|s| s.id()).collect::<Vec<_>>());
+        let sequence_ids_vec = seqs.iter().map(|s| s.id()).collect::<Vec<_>>();
+        let mamba_slot_mapping = self.prepare_mamba_slot_mapping(&sequence_ids_vec, true)?;
+        let sequence_ids = Some(sequence_ids_vec);
 
         let input_metadata = InputMetadata {
             is_prefill: true,
             sequence_ids,
+            mamba_slot_mapping,
             slot_mapping,
             block_tables,
             context_lens,
@@ -695,7 +780,11 @@ impl ModelRunner {
 
         let flashinfer_metadata = if cfg!(feature = "flashinfer") {
             #[cfg(all(feature = "cuda", feature = "graph"))]
-            let use_cuda_graph = self.capturer.is_captured(seq_refs.len());
+            let use_cuda_graph = if matches!(self.model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_)) {
+                self.capturer.is_exact_captured(seq_refs.len())
+            } else {
+                self.capturer.is_captured(seq_refs.len())
+            };
             #[cfg(not(all(feature = "cuda", feature = "graph")))]
             let use_cuda_graph = false;
 
@@ -765,10 +854,17 @@ impl ModelRunner {
         };
 
         let sequence_ids = Some(seq_refs.iter().map(|s| s.id()).collect::<Vec<_>>());
+        let mamba_slot_mapping = self.prepare_mamba_slot_mapping(
+            sequence_ids
+                .as_ref()
+                .expect("sequence_ids should exist for decode"),
+            false,
+        )?;
 
         let input_metadata = InputMetadata {
             is_prefill: false,
             sequence_ids,
+            mamba_slot_mapping,
             slot_mapping,
             block_tables: Some(block_tables),
             context_lens: Some(context_lens),
@@ -986,7 +1082,13 @@ impl ModelRunner {
     #[cfg(all(feature = "cuda", feature = "graph"))]
     pub fn warmup_capture(&mut self) -> Result<()> {
         let kv_cache_lock = self.gpu_kv_cache.lock().unwrap(); // no custom method call on `self`
-        self.capturer.capture(&self.device, Some(&kv_cache_lock))
+        self.capturer.capture(&self.device, Some(&kv_cache_lock))?;
+        match &self.model {
+            Model::Qwen3_5(model) => model.reset_mamba_cache()?,
+            Model::Qwen3_5MoE(model) => model.reset_mamba_cache()?,
+            _ => {}
+        }
+        Ok(())
     }
 
     pub fn swap_kvcache(&self, mappings: HashMap<usize, usize>, swap_in: bool) -> Result<bool> {
