@@ -549,8 +549,8 @@ impl GatedDeltaNet {
         let (q, k, v, z, b, a) = self.project_inputs(xs)?;
         let mixed_qkv = Tensor::cat(&[&q, &k, &v], 1)?;
 
-        let mut conv_state = mamba_cache.get_batch_conv_state(self.gdn_layer_idx, seq_slots)?;
-        let kv_conv = if is_prefill {
+        let (kv_conv, prefill_conv_state) = if is_prefill {
+            let mut conv_state = mamba_cache.get_batch_conv_state(self.gdn_layer_idx, seq_slots)?;
             let lengths = Self::prefill_lengths(input_metadata, token_count)?;
             if lengths.len() != slot_count {
                 candle_core::bail!(
@@ -568,14 +568,15 @@ impl GatedDeltaNet {
             }
             let cu_len = cu.len();
             let cu_seqlens = Tensor::from_vec(cu, (cu_len,), xs.device())?;
-            gdn::causal_conv1d_fwd(
+            let out = gdn::causal_conv1d_fwd(
                 &mixed_qkv,
                 &self.conv_weight,
                 self.conv_bias.as_ref(),
                 &mut conv_state,
                 Some(&cu_seqlens),
                 true, // SiLU activation
-            )?
+            )?;
+            (out, Some(conv_state))
         } else {
             if token_count != slot_count {
                 candle_core::bail!(
@@ -584,15 +585,19 @@ impl GatedDeltaNet {
                     slot_count
                 );
             }
-            gdn::causal_conv1d_update(
+            let out = gdn::causal_conv1d_update_slots(
                 &mixed_qkv,
                 &self.conv_weight,
                 self.conv_bias.as_ref(),
-                &mut conv_state,
+                mamba_cache.conv_state_mut(self.gdn_layer_idx),
+                seq_slots,
                 true,
-            )?
+            )?;
+            (out, None)
         };
-        mamba_cache.set_batch_conv_state(self.gdn_layer_idx, seq_slots, &conv_state)?;
+        if let Some(conv_state) = prefill_conv_state {
+            mamba_cache.set_batch_conv_state(self.gdn_layer_idx, seq_slots, &conv_state)?;
+        }
 
         // Split convolved output back into q', k', v'
         let q_conv = kv_conv.narrow(1, 0, self.key_dim)?;
@@ -610,10 +615,10 @@ impl GatedDeltaNet {
         let q = q_conv.reshape((token_count, self.num_k_heads, self.head_k_dim))?;
         let k = k_conv.reshape((token_count, self.num_k_heads, self.head_k_dim))?;
         let v = v_conv.reshape((token_count, self.num_v_heads, self.head_v_dim))?;
-        let q = self.repeat_kv_heads(q)?;
-        let k = self.repeat_kv_heads(k)?;
         let q = Self::l2_norm_last_dim(&q, 1e-6)?;
         let k = Self::l2_norm_last_dim(&k, 1e-6)?;
+        let q = self.repeat_kv_heads(q)?;
+        let k = self.repeat_kv_heads(k)?;
 
         let mut recurrent_state =
             mamba_cache.get_batch_recurrent_state(self.gdn_layer_idx, seq_slots)?;
@@ -672,46 +677,22 @@ impl GatedDeltaNet {
         // output: [seq_len, num_v_heads, head_v_dim] -> [seq_len, value_dim]
         let output = output.reshape((token_count, self.value_dim))?;
 
-        // Gated RMSNorm: norm(output) * silu(z)
-        let z_gate = candle_nn::ops::silu(&z)?;
-        let normed = self.gated_rms_norm(&output)?;
-        let gated_output = (normed * z_gate)?;
+        // Gated RMSNorm: norm(output) * silu(z) via fused kernel
+        let group_size = if self.gdn_norm_per_head {
+            self.head_v_dim
+        } else {
+            self.value_dim
+        };
+        let gated_output = gdn::gated_rmsnorm_silu_mul(
+            &output,
+            &z,
+            &self.gdn_norm_weight,
+            self.gdn_norm_bias.as_ref(),
+            self.rms_norm_eps,
+            group_size,
+        )?;
 
         // Output projection
         self.out_proj.forward(&gated_output.to_dtype(xs.dtype())?)
-    }
-
-    fn gated_rms_norm(&self, x: &Tensor) -> Result<Tensor> {
-        if self.gdn_norm_per_head {
-            let (token_count, _) = x.dims2()?;
-            let x_f32 = x.to_dtype(DType::F32)?.reshape((
-                token_count,
-                self.num_v_heads,
-                self.head_v_dim,
-            ))?;
-            let variance = (&x_f32 * &x_f32)?.mean_keepdim(2)?;
-            let x_normed = x_f32.broadcast_div(&(variance + self.rms_norm_eps)?.sqrt()?)?;
-            let x_normed = x_normed.broadcast_mul(&self.gdn_norm_weight.to_dtype(DType::F32)?)?;
-            let x_normed = if let Some(ref bias) = self.gdn_norm_bias {
-                x_normed.broadcast_add(&bias.to_dtype(DType::F32)?)?
-            } else {
-                x_normed
-            };
-            x_normed
-                .reshape((token_count, self.value_dim))?
-                .to_dtype(x.dtype())
-        } else {
-            // Simple RMSNorm with learnable weight (and optional bias) across full value dim.
-            let x_f32 = x.to_dtype(DType::F32)?;
-            let variance = (&x_f32 * &x_f32)?.mean_keepdim(1)?;
-            let x_normed = x_f32.broadcast_div(&(variance + self.rms_norm_eps)?.sqrt()?)?;
-            let x_normed = x_normed.broadcast_mul(&self.gdn_norm_weight.to_dtype(DType::F32)?)?;
-            let x_normed = if let Some(ref bias) = self.gdn_norm_bias {
-                x_normed.broadcast_add(&bias.to_dtype(DType::F32)?)?
-            } else {
-                x_normed
-            };
-            x_normed.to_dtype(x.dtype())
-        }
     }
 }

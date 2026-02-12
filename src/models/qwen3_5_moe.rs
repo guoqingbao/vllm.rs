@@ -546,10 +546,11 @@ impl Qwen3_5MoEForCausalLM {
                 key_head_dim,
                 value_head_dim,
                 dtype,
+                DType::F32,
                 device,
             )?
         } else {
-            MambaCache::new(0, 1, 1, 2, 1, 1, 1, dtype, device)?
+            MambaCache::new(0, 1, 1, 2, 1, 1, 1, dtype, DType::F32, device)?
         };
 
         Ok(Self {
