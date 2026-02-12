@@ -1,6 +1,5 @@
 // src/models/qwen3_5.rs
 // Qwen3.5 dense model with hybrid attention (full attention + GatedDeltaNet layers)
-use crate::models::layers::attention::Attention;
 use crate::models::layers::deltanet::GatedDeltaNet;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
@@ -8,6 +7,7 @@ use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
+use crate::models::qwen3_5_attention::Qwen3_5Attention;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::utils::resolve_qwen3_hybrid_config;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 // =============================================================================
 
 pub enum Qwen3_5AttnType {
-    FullAttention(Attention),
+    FullAttention(Qwen3_5Attention),
     LinearAttention(GatedDeltaNet),
 }
 
@@ -50,7 +50,7 @@ impl Qwen3_5DecoderLayer {
         let is_qvar_builder = vb.is_qvar_builder();
 
         let attn = if layer_type == "full_attention" {
-            Qwen3_5AttnType::FullAttention(Attention::new(
+            Qwen3_5AttnType::FullAttention(Qwen3_5Attention::new(
                 if is_qvar_builder {
                     vb.clone()
                 } else {
@@ -102,7 +102,7 @@ impl Qwen3_5DecoderLayer {
                 vb.pp("input_layernorm").clone()
             },
             DType::F32,
-            false,
+            true,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -114,7 +114,7 @@ impl Qwen3_5DecoderLayer {
                 vb.pp("post_attention_layernorm").clone()
             },
             DType::F32,
-            false,
+            true,
         )?;
 
         let rotary = if layer_type == "full_attention" {
@@ -344,7 +344,7 @@ impl Qwen3_5ForCausalLM {
                 vb.pp(&format!("{}norm", prefix))
             },
             DType::F32,
-            false,
+            true,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(
@@ -369,8 +369,19 @@ impl Qwen3_5ForCausalLM {
         )?;
 
         // Initialize MambaCache for GDN layers
+        let world_size = comm.world_size();
         let num_v_heads = hybrid.num_v_heads;
         let num_k_heads = hybrid.num_k_heads;
+        if num_v_heads % world_size != 0 || num_k_heads % world_size != 0 {
+            candle_core::bail!(
+                "linear attention heads must be divisible by tensor parallel world_size (num_v_heads={}, num_k_heads={}, world_size={})",
+                num_v_heads,
+                num_k_heads,
+                world_size
+            );
+        }
+        let num_v_heads = num_v_heads / world_size;
+        let num_k_heads = num_k_heads / world_size;
         let key_head_dim = hybrid.key_head_dim;
         let value_head_dim = hybrid.value_head_dim;
         let conv_kernel_size = hybrid.conv_kernel_size;

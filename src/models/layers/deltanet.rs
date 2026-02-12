@@ -26,11 +26,6 @@ enum GdnProjection {
         in_proj_b: TensorParallelColumnLinear,
         in_proj_a: TensorParallelColumnLinear,
     },
-    // Legacy local migration format
-    Legacy {
-        in_proj: TensorParallelColumnLinear,
-        in_proj_ba: TensorParallelColumnLinear,
-    },
 }
 
 pub struct GatedDeltaNet {
@@ -42,6 +37,7 @@ pub struct GatedDeltaNet {
     dt_bias: Tensor,
     gdn_norm_weight: Tensor,
     gdn_norm_bias: Option<Tensor>,
+    gdn_norm_per_head: bool,
     num_k_heads: usize,
     num_v_heads: usize,
     head_k_dim: usize,
@@ -54,113 +50,109 @@ pub struct GatedDeltaNet {
 }
 
 impl GatedDeltaNet {
-    fn load_col_linear(
-        vb: &VarBuilderX,
-        name: &str,
-        in_size: usize,
-        out_size: usize,
-        comm: Rc<Comm>,
-        config: &Config,
-        dtype: DType,
-    ) -> Result<TensorParallelColumnLinear> {
-        TensorParallelColumnLinear::load_with_hints(
-            in_size,
-            out_size,
-            false,
-            vb.pp(name),
-            comm,
-            &config.quantization_config,
-            &config.quant,
-            dtype,
-        )
-    }
-
     fn load_projection(
         vb: &VarBuilderX,
         hidden_size: usize,
-        key_dim: usize,
-        value_dim: usize,
-        num_v_heads: usize,
+        key_dim_global: usize,
+        value_dim_global: usize,
+        num_v_heads_global: usize,
         comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
     ) -> Result<GdnProjection> {
+        // linear_attn.in_proj_qkvz(2)
+        // linear_attn.in_proj_qkvz.weight	[12 288, 2 048]	F8_E4M3
+        // linear_attn.in_proj_qkvz.weight_scale_inv	[96, 16] BF16
+
         // Qwen3Next format: fused qkvz + fused ba
-        let projection_size_qkvz = key_dim * 2 + value_dim * 2;
-        let projection_size_ba = num_v_heads * 2;
-        let fused_qkvz = Self::load_col_linear(
-            vb,
-            "in_proj_qkvz",
+        let projection_size_qkvz = key_dim_global * 2 + value_dim_global * 2;
+        let projection_size_ba = num_v_heads_global * 2;
+        let fused_qkvz = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             projection_size_qkvz,
+            false,
+            vb.pp("in_proj_qkvz"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         );
-        let fused_ba = Self::load_col_linear(
-            vb,
-            "in_proj_ba",
+
+        let fused_ba = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             projection_size_ba,
+            false,
+            vb.pp("in_proj_ba"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         );
+
         if let (Ok(in_proj_qkvz), Ok(in_proj_ba)) = (fused_qkvz, fused_ba) {
+            // Qwen3 Next projection
             return Ok(GdnProjection::FusedQkvzBa {
                 in_proj_qkvz,
                 in_proj_ba,
             });
-        }
+        };
 
         // Qwen3.5 format: split qkv, z, b, a
-        let split_qkv = Self::load_col_linear(
-            vb,
-            "in_proj_qkv",
+        let split_qkv = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
-            key_dim * 2 + value_dim,
+            key_dim_global * 2 + value_dim_global,
+            false,
+            vb.pp("in_proj_qkv"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         );
-        let split_z = Self::load_col_linear(
-            vb,
-            "in_proj_z",
+
+        let split_z = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
-            value_dim,
+            value_dim_global,
+            false,
+            vb.pp("in_proj_z"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         );
-        let split_b = Self::load_col_linear(
-            vb,
-            "in_proj_ba",
+
+        let split_b = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
-            num_v_heads,
+            num_v_heads_global,
+            false,
+            vb.pp("in_proj_ba"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         )
         .or_else(|_| {
-            Self::load_col_linear(
-                vb,
-                "in_proj_b",
+            TensorParallelColumnLinear::load_with_hints(
                 hidden_size,
-                num_v_heads,
+                num_v_heads_global,
+                false,
+                vb.pp("in_proj_b"),
                 comm.clone(),
-                config,
+                &config.quantization_config,
+                &config.quant,
                 dtype,
             )
         });
-        let split_a = Self::load_col_linear(
-            vb,
-            "in_proj_a",
+        let split_a = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
-            num_v_heads,
+            num_v_heads_global,
+            false,
+            vb.pp("in_proj_a"),
             comm.clone(),
-            config,
+            &config.quantization_config,
+            &config.quant,
             dtype,
         );
+
         if let (Ok(in_proj_qkv), Ok(in_proj_z), Ok(in_proj_b), Ok(in_proj_a)) =
             (split_qkv, split_z, split_b, split_a)
         {
@@ -172,33 +164,7 @@ impl GatedDeltaNet {
             });
         }
 
-        // Legacy format
-        let legacy_proj = Self::load_col_linear(
-            vb,
-            "in_proj",
-            hidden_size,
-            key_dim * 2 + value_dim * 2 + num_v_heads,
-            comm.clone(),
-            config,
-            dtype,
-        );
-        let legacy_ba = Self::load_col_linear(
-            vb,
-            "in_proj_ba",
-            hidden_size,
-            num_v_heads * 2,
-            comm,
-            config,
-            dtype,
-        );
-        if let (Ok(in_proj), Ok(in_proj_ba)) = (legacy_proj, legacy_ba) {
-            return Ok(GdnProjection::Legacy {
-                in_proj,
-                in_proj_ba,
-            });
-        }
-
-        candle_core::bail!("Unable to load Qwen3.5/Qwen3Next linear attention projection weights")
+        candle_core::bail!("Unable to load Qwen3.5/Qwen3Next linear attention projection weights",)
     }
 
     fn fix_qwen3next_projection_order(
@@ -262,24 +228,6 @@ impl GatedDeltaNet {
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
                 let a = in_proj_a.forward(xs)?;
-                Ok((q, k, v, z, b, a))
-            }
-            GdnProjection::Legacy {
-                in_proj,
-                in_proj_ba,
-            } => {
-                let proj = in_proj.forward(xs)?;
-                let mut offset = 0usize;
-                let q = proj.narrow(1, offset, self.key_dim)?;
-                offset += self.key_dim;
-                let k = proj.narrow(1, offset, self.key_dim)?;
-                offset += self.key_dim;
-                let v = proj.narrow(1, offset, self.value_dim)?;
-                offset += self.value_dim;
-                let z = proj.narrow(1, offset, self.value_dim)?;
-                let ba = in_proj_ba.forward(xs)?;
-                let b = ba.narrow(1, 0, self.num_v_heads)?;
-                let a = ba.narrow(1, self.num_v_heads, self.num_v_heads)?;
                 Ok((q, k, v, z, b, a))
             }
         }
@@ -435,37 +383,93 @@ impl GatedDeltaNet {
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let hybrid = resolve_qwen3_hybrid_config(config);
-        let num_v_heads = hybrid.num_v_heads;
-        let num_k_heads = hybrid.num_k_heads;
-        if num_v_heads % num_k_heads != 0 {
+        let world_size = comm.world_size();
+        let rank = comm.rank();
+
+        let num_v_heads_global = hybrid.num_v_heads;
+        let num_k_heads_global = hybrid.num_k_heads;
+        if num_v_heads_global % num_k_heads_global != 0 {
             candle_core::bail!(
                 "linear_num_value_heads ({}) must be divisible by linear_num_key_heads ({})",
-                num_v_heads,
-                num_k_heads
+                num_v_heads_global,
+                num_k_heads_global
             );
         }
+        if num_v_heads_global % world_size != 0 || num_k_heads_global % world_size != 0 {
+            candle_core::bail!(
+                "linear attention heads must be divisible by tensor parallel world_size (num_v_heads={}, num_k_heads={}, world_size={})",
+                num_v_heads_global,
+                num_k_heads_global,
+                world_size
+            );
+        }
+
+        let num_v_heads = num_v_heads_global / world_size;
+        let num_k_heads = num_k_heads_global / world_size;
         let head_k_dim = hybrid.key_head_dim;
         let head_v_dim = hybrid.value_head_dim;
+        let key_dim_global = num_k_heads_global * head_k_dim;
+        let value_dim_global = num_v_heads_global * head_v_dim;
         let key_dim = num_k_heads * head_k_dim;
         let value_dim = num_v_heads * head_v_dim;
         let kv_group_size = num_v_heads / num_k_heads;
         let conv_kernel_size = hybrid.conv_kernel_size;
-        let conv_dim = key_dim * 2 + value_dim;
+        let conv_dim_global = key_dim_global * 2 + value_dim_global;
+        // linear_attn.A_log	[32]	BF16
+
+        // linear_attn.conv1d.weight	[8 192, 1, 4]	BF16
+        // linear_attn.dt_bias	[32]	BF16
+        // linear_attn.in_proj_ba.weight	[64, 2 048]	BF16
+        // Learned GDN parameters
+        let a_log = vb
+            .get((num_v_heads_global,), "A_log")?
+            .narrow(0, rank * num_v_heads, num_v_heads)?
+            .contiguous()?;
+        let dt_bias = vb
+            .get((num_v_heads_global,), "dt_bias")?
+            .narrow(0, rank * num_v_heads, num_v_heads)?
+            .contiguous()?;
 
         let projection = Self::load_projection(
             &vb,
             hidden_size,
-            key_dim,
-            value_dim,
-            num_v_heads,
+            key_dim_global,
+            value_dim_global,
+            num_v_heads_global,
             comm.clone(),
             config,
             dtype,
         )?;
 
+        // Conv1D weights are stored global; slice rank-local q/k/v channel blocks.
+        let conv_weight = vb.get((conv_dim_global, 1, conv_kernel_size), "conv1d.weight")?;
+        let q_start = rank * key_dim;
+        let k_start = key_dim_global + rank * key_dim;
+        let v_start = key_dim_global * 2 + rank * value_dim;
+        let q_w = conv_weight.narrow(0, q_start, key_dim)?;
+        let k_w = conv_weight.narrow(0, k_start, key_dim)?;
+        let v_w = conv_weight.narrow(0, v_start, value_dim)?;
+        let conv_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+
+        let conv_bias = vb.get((conv_dim_global,), "conv1d.bias").ok();
+        let conv_bias = if let Some(cb) = conv_bias {
+            let q_b = cb.narrow(0, q_start, key_dim)?;
+            let k_b = cb.narrow(0, k_start, key_dim)?;
+            let v_b = cb.narrow(0, v_start, value_dim)?;
+            Some(Tensor::cat(&[&q_b, &k_b, &v_b], 0)?)
+        } else {
+            None
+        };
+
+        // linear_attn.norm.weight	[128]	BF16
+
+        // linear_attn.out_proj(2)
+        // linear_attn.out_proj.weight	[2 048, 4 096]	F8_E4M3
+        // linear_attn.out_proj.weight_scale_inv	[16, 32]	BF16
+
         // Output projection
         let out_proj = TensorParallelRowLinear::load_with_hints(
-            value_dim,
+            value_dim_global,
             hidden_size,
             vb.pp("out_proj"),
             comm.clone(),
@@ -474,16 +478,37 @@ impl GatedDeltaNet {
             dtype,
         )?;
 
-        let conv_weight = vb.get((conv_dim, 1, conv_kernel_size), "conv1d.weight")?;
-        let conv_bias = vb.get((conv_dim,), "conv1d.bias").ok();
-
-        // Learned GDN parameters
-        let a_log = vb.get((num_v_heads,), "A_log")?;
-        let dt_bias = vb.get((num_v_heads,), "dt_bias")?;
-
         // GDN output norm (gated RMSNorm)
-        let gdn_norm_weight = vb.get((value_dim,), "norm.weight")?;
-        let gdn_norm_bias = vb.get((value_dim,), "norm.bias").ok();
+        // Qwen3.5 checkpoints typically store [value_dim], while Qwen3Next can store per-head [head_v_dim].
+        let (gdn_norm_weight, gdn_norm_bias, gdn_norm_per_head) = match vb
+            .get((value_dim_global,), "norm.weight")
+        {
+            Ok(weight) => {
+                let weight = weight
+                    .narrow(0, rank * value_dim, value_dim)?
+                    .contiguous()?;
+                let bias = vb
+                    .get((value_dim_global,), "norm.bias")
+                    .ok()
+                    .map(|b| {
+                        b.narrow(0, rank * value_dim, value_dim)
+                            .and_then(|x| x.contiguous())
+                    })
+                    .transpose()?;
+                (weight, bias, false)
+            }
+            Err(full_err) => match vb.get((head_v_dim,), "norm.weight") {
+                Ok(weight) => {
+                    let bias = vb.get((head_v_dim,), "norm.bias").ok();
+                    (weight, bias, true)
+                }
+                Err(head_err) => {
+                    candle_core::bail!(
+                            "Unable to load linear_attn.norm.weight: expected [{value_dim_global}] or [{head_v_dim}], full={full_err}, per_head={head_err}"
+                        )
+                }
+            },
+        };
 
         Ok(Self {
             projection,
@@ -494,6 +519,7 @@ impl GatedDeltaNet {
             dt_bias,
             gdn_norm_weight,
             gdn_norm_bias,
+            gdn_norm_per_head,
             num_k_heads,
             num_v_heads,
             head_k_dim,
@@ -655,16 +681,36 @@ impl GatedDeltaNet {
     }
 
     fn gated_rms_norm(&self, x: &Tensor) -> Result<Tensor> {
-        // Simple RMSNorm with learnable weight (and optional bias)
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let variance = (&x_f32 * &x_f32)?.mean_keepdim(1)?;
-        let x_normed = x_f32.broadcast_div(&(variance + self.rms_norm_eps)?.sqrt()?)?;
-        let x_normed = x_normed.broadcast_mul(&self.gdn_norm_weight.to_dtype(DType::F32)?)?;
-        let x_normed = if let Some(ref bias) = self.gdn_norm_bias {
-            x_normed.broadcast_add(&bias.to_dtype(DType::F32)?)?
-        } else {
+        if self.gdn_norm_per_head {
+            let (token_count, _) = x.dims2()?;
+            let x_f32 = x.to_dtype(DType::F32)?.reshape((
+                token_count,
+                self.num_v_heads,
+                self.head_v_dim,
+            ))?;
+            let variance = (&x_f32 * &x_f32)?.mean_keepdim(2)?;
+            let x_normed = x_f32.broadcast_div(&(variance + self.rms_norm_eps)?.sqrt()?)?;
+            let x_normed = x_normed.broadcast_mul(&self.gdn_norm_weight.to_dtype(DType::F32)?)?;
+            let x_normed = if let Some(ref bias) = self.gdn_norm_bias {
+                x_normed.broadcast_add(&bias.to_dtype(DType::F32)?)?
+            } else {
+                x_normed
+            };
             x_normed
-        };
-        x_normed.to_dtype(x.dtype())
+                .reshape((token_count, self.value_dim))?
+                .to_dtype(x.dtype())
+        } else {
+            // Simple RMSNorm with learnable weight (and optional bias) across full value dim.
+            let x_f32 = x.to_dtype(DType::F32)?;
+            let variance = (&x_f32 * &x_f32)?.mean_keepdim(1)?;
+            let x_normed = x_f32.broadcast_div(&(variance + self.rms_norm_eps)?.sqrt()?)?;
+            let x_normed = x_normed.broadcast_mul(&self.gdn_norm_weight.to_dtype(DType::F32)?)?;
+            let x_normed = if let Some(ref bias) = self.gdn_norm_bias {
+                x_normed.broadcast_add(&bias.to_dtype(DType::F32)?)?
+            } else {
+                x_normed
+            };
+            x_normed.to_dtype(x.dtype())
+        }
     }
 }

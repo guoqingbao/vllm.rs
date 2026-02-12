@@ -17,7 +17,7 @@ use candle_nn::var_builder::ShardedVarBuilder as VarBuilder;
 use either::Either;
 
 #[derive(Clone)]
-pub struct VarBuilderX<'a>(pub Either<VarBuilder<'a>, QVarBuilder>);
+pub struct VarBuilderX<'a>(pub Either<VarBuilder<'a>, QVarBuilder>, pub String);
 
 impl VarBuilderX<'_> {
     pub fn new(
@@ -36,7 +36,7 @@ impl VarBuilderX<'_> {
                 weight_files[0].clone(),
                 device,
             )?;
-            Ok(Self(Either::Right(vb)))
+            Ok(Self(Either::Right(vb), String::new()))
         } else {
             let vb = unsafe {
                 candle_nn::var_builder::ShardedSafeTensors::var_builder(
@@ -45,7 +45,7 @@ impl VarBuilderX<'_> {
                     device,
                 )?
             };
-            Ok(Self(Either::Left(vb)))
+            Ok(Self(Either::Left(vb), String::new()))
         }
     }
 
@@ -65,10 +65,19 @@ impl VarBuilderX<'_> {
     }
 
     pub fn pp(&self, name: &str) -> VarBuilderX<'_> {
+        let next_path = if self.1.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}.{}", self.1, name)
+        };
         match &self.0 {
-            Either::Left(vb) => VarBuilderX(Either::Left(vb.pp(name))),
-            Either::Right(vb) => VarBuilderX(Either::Right(vb.pp(name))),
+            Either::Left(vb) => VarBuilderX(Either::Left(vb.pp(name)), next_path),
+            Either::Right(vb) => VarBuilderX(Either::Right(vb.pp(name)), next_path),
         }
+    }
+
+    pub fn module_path(&self) -> &str {
+        &self.1
     }
 
     pub fn has_key(&self, name: &str) -> bool {

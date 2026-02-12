@@ -179,6 +179,8 @@ pub struct Config {
     pub vocab_size: Option<usize>,
     pub rope_theta: Option<f64>,
     pub attention_bias: Option<bool>,
+    pub qkv_bias: Option<bool>,
+    pub attn_output_gate: Option<bool>,
     pub attn_logit_softcapping: Option<f64>,
     pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
@@ -591,4 +593,6 @@ pub struct QuantConfig {
     pub checkpoint_format: Option<String>,
     pub fmt: Option<String>,
     pub weight_block_size: Option<Vec<usize>>,
+    #[serde(default, alias = "ignore")]
+    pub modules_to_not_convert: Vec<String>,
 }

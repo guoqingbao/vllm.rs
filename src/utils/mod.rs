@@ -17,6 +17,7 @@ use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
+use crate::utils::config::QuantConfig;
 use crate::utils::config::RopeScalingValue;
 use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
@@ -46,6 +47,25 @@ macro_rules! serde_default {
             $v
         }
     };
+}
+
+pub fn module_path_matches_not_convert(module_path: &str, item: &str) -> bool {
+    let module_path = module_path.trim_end_matches(".weight");
+    let item = item.trim_end_matches(".weight");
+    module_path == item
+        || module_path.ends_with(item)
+        || module_path.ends_with(&format!(".{item}"))
+        || item.ends_with(module_path)
+        || item.ends_with(&format!(".{module_path}"))
+}
+
+pub fn should_skip_fp8_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
+    if module_path.is_empty() || cfg.modules_to_not_convert.is_empty() {
+        return false;
+    }
+    cfg.modules_to_not_convert
+        .iter()
+        .any(|item| module_path_matches_not_convert(module_path, item))
 }
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
@@ -348,6 +368,8 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         vocab_size,
         rope_theta: Some(rope_freq_base as f64),
         attention_bias: None,
+        qkv_bias: None,
+        attn_output_gate: None,
         attn_logit_softcapping: None,
         final_logit_softcapping: None,
         tie_word_embeddings: Some(!has_output_weight),
@@ -562,8 +584,7 @@ pub fn init_config_tokenizer(
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }
-                    "Qwen3VLMoeForConditionalGeneration"
-                    | "Qwen3_5MoeForConditionalGeneration" => {
+                    "Qwen3VLMoeForConditionalGeneration" | "Qwen3_5MoeForConditionalGeneration" => {
                         let mut config: Config = serde_json::from_value(config_value.clone())
                             .map_err(candle_core::Error::wrap)?;
                         let moe_cfg: MoEConfig = serde_json::from_value(config_value)
@@ -1025,8 +1046,12 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3_5ForCausalLM" | "Qwen3NextForCausalLM" => (
+        "Qwen3_5ForCausalLM" => (
             ModelType::Qwen3_5,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
+        "Qwen3NextForCausalLM" => (
+            ModelType::Qwen3_5MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "Qwen3_5MoeForCausalLM" => (
