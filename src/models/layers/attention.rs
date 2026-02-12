@@ -1,5 +1,5 @@
 use crate::models::layers::distributed::{
-    Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    shard, Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
@@ -67,6 +67,31 @@ impl Attention {
         let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
             || arch == "Gemma3ForCausalLM".to_string();
 
+        let world_size = comm.world_size();
+        let attention_heads = num_heads / world_size;
+        // Align with vLLM behavior:
+        // - if total KV heads >= TP size: partition KV heads across ranks;
+        // - else: replicate KV heads across TP ranks.
+        let (kv_heads, kv_shard) = if num_kv_heads >= world_size {
+            if num_kv_heads % world_size != 0 {
+                candle_core::bail!(
+                    "kv heads must be divisible by tensor parallel world_size when partitioned (num_kv_heads={}, world_size={})",
+                    num_kv_heads,
+                    world_size
+                );
+            }
+            (num_kv_heads / world_size, shard(0, comm.rank(), world_size))
+        } else {
+            if world_size % num_kv_heads != 0 {
+                candle_core::bail!(
+                    "tensor parallel world_size must be divisible by kv heads when kv heads are replicated (num_kv_heads={}, world_size={})",
+                    num_kv_heads,
+                    world_size
+                );
+            }
+            (1, shard(0, comm.rank() % num_kv_heads, num_kv_heads))
+        };
+
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_heads * head_dim,
@@ -81,7 +106,7 @@ impl Attention {
             &config.quant,
             dtype,
         )?;
-        let k_proj = TensorParallelColumnLinear::load_with_hints(
+        let k_proj = TensorParallelColumnLinear::load_with_shard(
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
@@ -90,14 +115,14 @@ impl Attention {
             } else {
                 vb.pp("k_proj")
             },
-            comm.clone(),
+            kv_shard,
             &config.quantization_config,
             &config.quant,
             dtype,
         )?;
         //v_proj requires higher precision format
         let q8_0_qunat = Some("q8_0".to_string());
-        let v_proj = TensorParallelColumnLinear::load_with_hints(
+        let v_proj = TensorParallelColumnLinear::load_with_shard(
             hidden_size,
             num_kv_heads * head_dim,
             attention_bias,
@@ -106,7 +131,7 @@ impl Attention {
             } else {
                 vb.pp("v_proj")
             },
-            comm.clone(),
+            kv_shard,
             &config.quantization_config,
             if config.quant.is_some() && config.quantization_config.is_none() {
                 &q8_0_qunat
@@ -171,9 +196,6 @@ impl Attention {
         } else {
             None
         };
-
-        let attention_heads = num_heads / comm.world_size();
-        let kv_heads = num_kv_heads / comm.world_size();
 
         Ok(Self {
             q_proj,
