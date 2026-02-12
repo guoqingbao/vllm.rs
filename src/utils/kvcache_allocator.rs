@@ -111,9 +111,30 @@ pub struct KVCacheAllocator {
 }
 
 impl KVCacheAllocator {
+    fn kv_heads_per_shard(&self) -> usize {
+        if self.num_shards == 0 {
+            // Defensive fallback: constructor normalizes this to >=1.
+            return 1;
+        }
+
+        if self.num_kv_heads >= self.num_shards {
+            self.num_kv_heads / self.num_shards
+        } else {
+            // For MQA/GQA configs where TP shards exceed KV heads, each shard still stores
+            // one replicated KV head, matching runtime attention behavior.
+            1
+        }
+    }
+
     /// Create a new KVCacheAllocator from engine and model configs
     pub fn new(econfig: &EngineConfig, config: &Config, dtype: DType) -> Self {
-        let num_shards = econfig.num_shards.unwrap_or(1);
+        let configured_num_shards = econfig.num_shards.unwrap_or(1);
+        if configured_num_shards == 0 {
+            crate::log_warn!(
+                "EngineConfig.num_shards=0 is invalid; defaulting to 1 for KVCache allocation"
+            );
+        }
+        let num_shards = configured_num_shards.max(1);
         let head_dim = config
             .head_dim
             .unwrap_or(config.hidden_size / config.num_attention_heads);
@@ -193,7 +214,7 @@ impl KVCacheAllocator {
     /// Calculate per-block memory size in bytes
     pub fn per_block_bytes(&self) -> usize {
         self.block_size
-            * (self.num_kv_heads / self.num_shards)
+            * self.kv_heads_per_shard()
             * self.head_dim
             * self.dtype_size
             * 2 // K and V
@@ -346,6 +367,20 @@ impl KVCacheAllocator {
         num_shards: usize,
     ) -> std::result::Result<KVCacheAllocation, KVCacheError> {
         let per_block = self.per_block_bytes();
+        if per_block == 0 {
+            return Err(KVCacheError::InvalidConfiguration {
+                message: format!(
+                    "Invalid KVCache block size: per_block=0 (num_kv_heads={}, num_shards={}, head_dim={}, block_size={}, dtype_size={}, num_kv_layers={})",
+                    self.num_kv_heads,
+                    self.num_shards,
+                    self.head_dim,
+                    self.block_size,
+                    self.dtype_size,
+                    self.num_kv_layers
+                ),
+            });
+        }
+
         let mut available_memory_for_kvcache = min_available_memory;
         let (max_num_seqs, max_model_len) = if let (Some(max_num_seqs), Some(max_model_len)) =
             (self.user_max_num_seqs, self.user_max_model_len)
@@ -439,11 +474,7 @@ impl KVCacheAllocator {
 
     /// Calculate flash-context KV block shape: [num_blocks, block_size, num_kv_heads, head_size]
     fn calculate_flash_key_value_block_shape(&self) -> (usize, usize, usize) {
-        (
-            self.block_size,
-            self.num_kv_heads / self.num_shards,
-            self.head_dim,
-        )
+        (self.block_size, self.kv_heads_per_shard(), self.head_dim)
     }
 
     /// Calculate key block shape for paged attention
@@ -451,7 +482,7 @@ impl KVCacheAllocator {
         let element_size = cache_dtype.size_in_bytes();
         let x = 16 / element_size;
         (
-            self.num_kv_heads / self.num_shards,
+            self.kv_heads_per_shard(),
             self.head_dim / x,
             self.block_size,
             x,
@@ -460,11 +491,7 @@ impl KVCacheAllocator {
 
     /// Calculate value block shape for paged attention
     fn calculate_value_block_shape(&self) -> (usize, usize, usize) {
-        (
-            self.num_kv_heads / self.num_shards,
-            self.head_dim,
-            self.block_size,
-        )
+        (self.kv_heads_per_shard(), self.head_dim, self.block_size)
     }
 
     /// Initialize KV cache tensors on GPU and CPU
