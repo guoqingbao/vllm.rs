@@ -10,7 +10,7 @@ use crate::utils::resolve_qwen3_hybrid_config;
 use attention_rs::gdn;
 use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
-use candle_core::{DType, IndexOp, Result, Tensor};
+use candle_core::{DType, Result, Tensor};
 use std::rc::Rc;
 
 enum GdnProjection {
@@ -248,33 +248,6 @@ impl GatedDeltaNet {
             .reshape((seq_len, self.num_v_heads, self.head_k_dim))
     }
 
-    fn prefill_lengths(input_metadata: &InputMetadata, token_count: usize) -> Result<Vec<usize>> {
-        if let Some(cumulative) = &input_metadata.seqlens {
-            if cumulative.is_empty() {
-                candle_core::bail!("Missing prefill sequence lengths for linear attention batch")
-            }
-            let mut prev = 0usize;
-            let mut lens = Vec::with_capacity(cumulative.len());
-            for &cur_end in cumulative {
-                let cur = cur_end as usize;
-                if cur < prev {
-                    candle_core::bail!("Invalid cumulative sequence lengths for linear attention")
-                }
-                lens.push(cur - prev);
-                prev = cur;
-            }
-            if prev != token_count {
-                candle_core::bail!(
-                    "Linear attention token mismatch: cumulative {} vs token count {}",
-                    prev,
-                    token_count
-                )
-            }
-            return Ok(lens);
-        }
-        Ok(vec![token_count])
-    }
-
     fn l2_norm_last_dim(x: &Tensor, eps: f64) -> Result<Tensor> {
         let x_f32 = x.to_dtype(DType::F32)?;
         let inv_norm = (&x_f32 * &x_f32)?
@@ -283,41 +256,6 @@ impl GatedDeltaNet {
             .sqrt()?
             .recip()?;
         x_f32.broadcast_mul(&inv_norm)?.to_dtype(x.dtype())
-    }
-
-    fn recurrent_delta_rule_single_sequence(
-        &self,
-        q_seq: &Tensor,         // [seq, heads, k_dim], l2-normalized
-        k_seq: &Tensor,         // [seq, heads, k_dim], l2-normalized
-        v_seq: &Tensor,         // [seq, heads, v_dim]
-        g_seq: &Tensor,         // [seq, heads]
-        beta_seq: &Tensor,      // [seq, heads]
-        state_seq: &mut Tensor, // [heads, k_dim, v_dim]
-    ) -> Result<Tensor> {
-        let (_seq_len, heads, k_dim) = q_seq.dims3()?;
-        let v_dim = v_seq.dim(2)?;
-        let scale = 1.0f64 / (k_dim as f64).sqrt();
-
-        let q_bh = (q_seq.transpose(0, 1)?.contiguous()?.to_dtype(DType::F32)? * scale)?;
-        let k_bh = k_seq.transpose(0, 1)?.contiguous()?.to_dtype(DType::F32)?;
-        let v_bh = v_seq.transpose(0, 1)?.contiguous()?.to_dtype(DType::F32)?;
-        let g_bh = g_seq.transpose(0, 1)?.contiguous()?.to_dtype(DType::F32)?;
-        let beta_bh = beta_seq
-            .transpose(0, 1)?
-            .contiguous()?
-            .to_dtype(DType::F32)?;
-
-        let state_dtype = state_seq.dtype();
-        let mut state_bh = state_seq.to_dtype(DType::F32)?.contiguous()?;
-        let out_bh =
-            gdn::gated_delta_rule_recurrence(&q_bh, &k_bh, &v_bh, &g_bh, &beta_bh, &mut state_bh)?;
-        *state_seq = state_bh.to_dtype(state_dtype)?;
-
-        out_bh
-            .reshape((heads, q_seq.dim(0)?, v_dim))?
-            .transpose(0, 1)?
-            .contiguous()?
-            .to_dtype(q_seq.dtype())
     }
 
     fn recurrent_delta_rule_decode_batch(
@@ -461,12 +399,6 @@ impl GatedDeltaNet {
             None
         };
 
-        // linear_attn.norm.weight	[128]	BF16
-
-        // linear_attn.out_proj(2)
-        // linear_attn.out_proj.weight	[2 048, 4 096]	F8_E4M3
-        // linear_attn.out_proj.weight_scale_inv	[16, 32]	BF16
-
         // Output projection
         let out_proj = TensorParallelRowLinear::load_with_hints(
             value_dim_global,
@@ -551,29 +483,17 @@ impl GatedDeltaNet {
 
         let (kv_conv, prefill_conv_state) = if is_prefill {
             let mut conv_state = mamba_cache.get_batch_conv_state(self.gdn_layer_idx, seq_slots)?;
-            let lengths = Self::prefill_lengths(input_metadata, token_count)?;
-            if lengths.len() != slot_count {
-                candle_core::bail!(
-                    "Linear attention prefill mismatch: {} sequences in metadata vs {} sequence slots",
-                    lengths.len(),
-                    slot_count
-                );
-            }
-            let mut cu = Vec::with_capacity(lengths.len() + 1);
-            cu.push(0u32);
-            let mut acc = 0u32;
-            for &len in &lengths {
-                acc += len as u32;
-                cu.push(acc);
-            }
-            let cu_len = cu.len();
-            let cu_seqlens = Tensor::from_vec(cu, (cu_len,), xs.device())?;
+            let cu_seqlens = input_metadata
+                .cu_seqlens_q
+                .as_ref()
+                .expect("cu_seqlens_q must be present in prefill!");
+
             let out = gdn::causal_conv1d_fwd(
                 &mixed_qkv,
                 &self.conv_weight,
                 self.conv_bias.as_ref(),
                 &mut conv_state,
-                Some(&cu_seqlens),
+                Some(cu_seqlens),
                 true, // SiLU activation
             )?;
             (out, Some(conv_state))
@@ -623,39 +543,29 @@ impl GatedDeltaNet {
         let mut recurrent_state =
             mamba_cache.get_batch_recurrent_state(self.gdn_layer_idx, seq_slots)?;
         let output = if is_prefill {
-            let lengths = Self::prefill_lengths(input_metadata, token_count)?;
-            let mut seq_outputs = Vec::with_capacity(lengths.len());
-            let mut start = 0usize;
-            for (batch_idx, &len) in lengths.iter().enumerate() {
-                let q_seq = q.narrow(0, start, len)?;
-                let k_seq = k.narrow(0, start, len)?;
-                let v_seq = v.narrow(0, start, len)?;
-                let g_seq = g.narrow(0, start, len)?;
-                let beta_seq = beta.narrow(0, start, len)?;
+            // S1: Use batched varlen recurrence — one CUDA launch for all sequences
+            let scale = 1.0f64 / (self.head_k_dim as f64).sqrt();
+            let q_scaled = (&q * scale)?;
 
-                let mut state_seq = recurrent_state.i(batch_idx)?;
-                let out_seq = self.recurrent_delta_rule_single_sequence(
-                    &q_seq,
-                    &k_seq,
-                    &v_seq,
-                    &g_seq,
-                    &beta_seq,
-                    &mut state_seq,
-                )?;
-                recurrent_state = recurrent_state.slice_assign(
-                    &[
-                        batch_idx..batch_idx + 1,
-                        0..self.num_v_heads,
-                        0..self.head_k_dim,
-                        0..self.head_v_dim,
-                    ],
-                    &state_seq.unsqueeze(0)?,
-                )?;
-                seq_outputs.push(out_seq);
-                start += len;
-            }
-            let seq_output_refs = seq_outputs.iter().collect::<Vec<_>>();
-            Tensor::cat(&seq_output_refs, 0)?
+            let cu_seqlens = input_metadata
+                .cu_seqlens_q
+                .as_ref()
+                .expect("cu_seqlens_q must be present in prefill!");
+
+            // Get mutable reference to global state for in-place update (optimized prefill)
+            let global_state = mamba_cache.recurrent_state_mut(self.gdn_layer_idx);
+
+            let out = gdn::gated_delta_rule_recurrence_varlen(
+                &q_scaled,
+                &k,
+                &v,
+                &g,
+                &beta,
+                global_state,
+                seq_slots,
+                &cu_seqlens,
+            )?;
+            out
         } else {
             let batch = slot_count;
             let q_b = q.reshape((batch, self.num_v_heads, self.head_k_dim))?;
@@ -672,7 +582,14 @@ impl GatedDeltaNet {
                 &mut recurrent_state,
             )?
         };
-        mamba_cache.set_batch_recurrent_state(self.gdn_layer_idx, seq_slots, &recurrent_state)?;
+        // Scatter recurrent state back (only needed for decode, prefill uses global state directly)
+        if !is_prefill {
+            mamba_cache.set_batch_recurrent_state(
+                self.gdn_layer_idx,
+                seq_slots,
+                &recurrent_state,
+            )?;
+        }
 
         // output: [seq_len, num_v_heads, head_v_dim] -> [seq_len, value_dim]
         let output = output.reshape((token_count, self.value_dim))?;
