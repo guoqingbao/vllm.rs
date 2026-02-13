@@ -249,13 +249,7 @@ impl GatedDeltaNet {
     }
 
     fn l2_norm_last_dim(x: &Tensor, eps: f64) -> Result<Tensor> {
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let inv_norm = (&x_f32 * &x_f32)?
-            .sum_keepdim(2)?
-            .broadcast_add(&Tensor::new(eps as f32, x.device())?)?
-            .sqrt()?
-            .recip()?;
-        x_f32.broadcast_mul(&inv_norm)?.to_dtype(x.dtype())
+        gdn::l2_norm_last_dim(x, eps)
     }
 
     fn recurrent_delta_rule_decode_batch(
@@ -271,39 +265,20 @@ impl GatedDeltaNet {
         let v_dim = v.dim(2)?;
         let scale = 1.0f64 / (k_dim as f64).sqrt();
 
-        let q_bh = (q
-            .contiguous()?
-            .reshape((batch * heads, 1, k_dim))?
-            .to_dtype(DType::F32)?
-            * scale)?;
-        let k_bh = k
-            .contiguous()?
-            .reshape((batch * heads, 1, k_dim))?
-            .to_dtype(DType::F32)?;
-        let v_bh = v
-            .contiguous()?
-            .reshape((batch * heads, 1, v_dim))?
-            .to_dtype(DType::F32)?;
-        let g_bh = g
-            .contiguous()?
-            .reshape((batch * heads, 1))?
-            .to_dtype(DType::F32)?;
-        let beta_bh = beta
-            .contiguous()?
-            .reshape((batch * heads, 1))?
-            .to_dtype(DType::F32)?;
+        let q_bh = (q.contiguous()?.reshape((batch * heads, 1, k_dim))? * scale)?; // Scale in native dtype
+        let k_bh = k.contiguous()?.reshape((batch * heads, 1, k_dim))?;
+        let v_bh = v.contiguous()?.reshape((batch * heads, 1, v_dim))?;
+        let g_bh = g.contiguous()?.reshape((batch * heads, 1))?;
+        let beta_bh = beta.contiguous()?.reshape((batch * heads, 1))?;
 
-        let state_dtype = recurrent_state.dtype();
-        let mut state_bh = recurrent_state
-            .to_dtype(DType::F32)?
-            .reshape((batch * heads, k_dim, v_dim))?
-            .contiguous()?;
-
-        let out_bh =
-            gdn::gated_delta_rule_recurrence(&q_bh, &k_bh, &v_bh, &g_bh, &beta_bh, &mut state_bh)?;
-        *recurrent_state = state_bh
-            .reshape((batch, heads, k_dim, v_dim))?
-            .to_dtype(state_dtype)?;
+        let out_bh = gdn::gated_delta_rule_recurrence(
+            &q_bh,
+            &k_bh,
+            &v_bh,
+            &g_bh,
+            &beta_bh,
+            recurrent_state,
+        )?;
 
         out_bh
             .reshape((batch, heads, 1, v_dim))?
@@ -353,11 +328,7 @@ impl GatedDeltaNet {
         let kv_group_size = num_v_heads / num_k_heads;
         let conv_kernel_size = hybrid.conv_kernel_size;
         let conv_dim_global = key_dim_global * 2 + value_dim_global;
-        // linear_attn.A_log	[32]	BF16
 
-        // linear_attn.conv1d.weight	[8 192, 1, 4]	BF16
-        // linear_attn.dt_bias	[32]	BF16
-        // linear_attn.in_proj_ba.weight	[64, 2 048]	BF16
         // Learned GDN parameters
         let a_log = vb
             .get((num_v_heads_global,), "A_log")?
@@ -555,7 +526,7 @@ impl GatedDeltaNet {
             // Get mutable reference to global state for in-place update (optimized prefill)
             let global_state = mamba_cache.recurrent_state_mut(self.gdn_layer_idx);
 
-            let out = gdn::gated_delta_rule_recurrence_varlen(
+            gdn::gated_delta_rule_recurrence_varlen(
                 &q_scaled,
                 &k,
                 &v,
@@ -564,8 +535,7 @@ impl GatedDeltaNet {
                 global_state,
                 seq_slots,
                 &cu_seqlens,
-            )?;
-            out
+            )?
         } else {
             let batch = slot_count;
             let q_b = q.reshape((batch, self.num_v_heads, self.head_k_dim))?;
@@ -573,40 +543,37 @@ impl GatedDeltaNet {
             let v_b = v.reshape((batch, self.num_v_heads, self.head_v_dim))?;
             let g_b = g.reshape((batch, self.num_v_heads))?;
             let beta_b = beta.reshape((batch, self.num_v_heads))?;
-            self.recurrent_delta_rule_decode_batch(
+            let out = self.recurrent_delta_rule_decode_batch(
                 &q_b,
                 &k_b,
                 &v_b,
                 &g_b,
                 &beta_b,
                 &mut recurrent_state,
-            )?
-        };
-        // Scatter recurrent state back (only needed for decode, prefill uses global state directly)
-        if !is_prefill {
+            )?;
             mamba_cache.set_batch_recurrent_state(
                 self.gdn_layer_idx,
                 seq_slots,
                 &recurrent_state,
             )?;
-        }
+            out
+        };
 
         // output: [seq_len, num_v_heads, head_v_dim] -> [seq_len, value_dim]
         let output = output.reshape((token_count, self.value_dim))?;
 
         // Gated RMSNorm: norm(output) * silu(z) via fused kernel
-        let group_size = if self.gdn_norm_per_head {
-            self.head_v_dim
-        } else {
-            self.value_dim
-        };
         let gated_output = gdn::gated_rmsnorm_silu_mul(
             &output,
             &z,
             &self.gdn_norm_weight,
             self.gdn_norm_bias.as_ref(),
             self.rms_norm_eps,
-            group_size,
+            if self.gdn_norm_per_head {
+                self.head_v_dim
+            } else {
+                self.value_dim
+            },
         )?;
 
         // Output projection
