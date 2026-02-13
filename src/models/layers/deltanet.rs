@@ -252,41 +252,6 @@ impl GatedDeltaNet {
         gdn::l2_norm_last_dim(x, eps)
     }
 
-    fn recurrent_delta_rule_decode_batch(
-        &self,
-        q: &Tensor,                   // [batch, heads, k_dim], l2-normalized
-        k: &Tensor,                   // [batch, heads, k_dim], l2-normalized
-        v: &Tensor,                   // [batch, heads, v_dim]
-        g: &Tensor,                   // [batch, heads]
-        beta: &Tensor,                // [batch, heads]
-        recurrent_state: &mut Tensor, // [batch, heads, k_dim, v_dim]
-    ) -> Result<Tensor> {
-        let (batch, heads, k_dim) = q.dims3()?;
-        let v_dim = v.dim(2)?;
-        let scale = 1.0f64 / (k_dim as f64).sqrt();
-
-        let q_bh = (q.contiguous()?.reshape((batch * heads, 1, k_dim))? * scale)?; // Scale in native dtype
-        let k_bh = k.contiguous()?.reshape((batch * heads, 1, k_dim))?;
-        let v_bh = v.contiguous()?.reshape((batch * heads, 1, v_dim))?;
-        let g_bh = g.contiguous()?.reshape((batch * heads, 1))?;
-        let beta_bh = beta.contiguous()?.reshape((batch * heads, 1))?;
-
-        let out_bh = gdn::gated_delta_rule_recurrence(
-            &q_bh,
-            &k_bh,
-            &v_bh,
-            &g_bh,
-            &beta_bh,
-            recurrent_state,
-        )?;
-
-        out_bh
-            .reshape((batch, heads, 1, v_dim))?
-            .transpose(1, 2)?
-            .squeeze(1)?
-            .to_dtype(q.dtype())
-    }
-
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
@@ -511,8 +476,6 @@ impl GatedDeltaNet {
         let q = self.repeat_kv_heads(q)?;
         let k = self.repeat_kv_heads(k)?;
 
-        let mut recurrent_state =
-            mamba_cache.get_batch_recurrent_state(self.gdn_layer_idx, seq_slots)?;
         let output = if is_prefill {
             // S1: Use batched varlen recurrence — one CUDA launch for all sequences
             let scale = 1.0f64 / (self.head_k_dim as f64).sqrt();
@@ -538,25 +501,22 @@ impl GatedDeltaNet {
             )?
         } else {
             let batch = slot_count;
-            let q_b = q.reshape((batch, self.num_v_heads, self.head_k_dim))?;
+            let scale = 1.0f64 / (self.head_k_dim as f64).sqrt();
+            let q_b = (q.reshape((batch, self.num_v_heads, self.head_k_dim))? * scale)?;
             let k_b = k.reshape((batch, self.num_v_heads, self.head_k_dim))?;
             let v_b = v.reshape((batch, self.num_v_heads, self.head_v_dim))?;
             let g_b = g.reshape((batch, self.num_v_heads))?;
             let beta_b = beta.reshape((batch, self.num_v_heads))?;
-            let out = self.recurrent_delta_rule_decode_batch(
+            let global_state = mamba_cache.recurrent_state_mut(self.gdn_layer_idx);
+            gdn::gated_delta_rule_decode_slots(
                 &q_b,
                 &k_b,
                 &v_b,
                 &g_b,
                 &beta_b,
-                &mut recurrent_state,
-            )?;
-            mamba_cache.set_batch_recurrent_state(
-                self.gdn_layer_idx,
+                global_state,
                 seq_slots,
-                &recurrent_state,
-            )?;
-            out
+            )?
         };
 
         // output: [seq_len, num_v_heads, head_v_dim] -> [seq_len, value_dim]
