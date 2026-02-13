@@ -1,5 +1,5 @@
 use crate::models::layers::distributed::{
-    shard, Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    kv_head_shard, Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
@@ -69,28 +69,7 @@ impl Attention {
 
         let world_size = comm.world_size();
         let attention_heads = num_heads / world_size;
-        // Align with vLLM behavior:
-        // - if total KV heads >= TP size: partition KV heads across ranks;
-        // - else: replicate KV heads across TP ranks.
-        let (kv_heads, kv_shard) = if num_kv_heads >= world_size {
-            if num_kv_heads % world_size != 0 {
-                candle_core::bail!(
-                    "kv heads must be divisible by tensor parallel world_size when partitioned (num_kv_heads={}, world_size={})",
-                    num_kv_heads,
-                    world_size
-                );
-            }
-            (num_kv_heads / world_size, shard(0, comm.rank(), world_size))
-        } else {
-            if world_size % num_kv_heads != 0 {
-                candle_core::bail!(
-                    "tensor parallel world_size must be divisible by kv heads when kv heads are replicated (num_kv_heads={}, world_size={})",
-                    num_kv_heads,
-                    world_size
-                );
-            }
-            (1, shard(0, comm.rank() % num_kv_heads, num_kv_heads))
-        };
+        let (kv_heads, kv_shard) = kv_head_shard(num_kv_heads, comm.rank(), world_size)?;
 
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,

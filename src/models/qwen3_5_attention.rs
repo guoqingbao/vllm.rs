@@ -1,7 +1,7 @@
 // src/models/qwen3_5_attention.rs
 // Model-specific full attention for Qwen3.5/Qwen3Next (supports attn_output_gate).
 use crate::models::layers::distributed::{
-    shard, Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
+    kv_head_shard, Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
@@ -70,34 +70,7 @@ impl Qwen3_5Attention {
         let q_out_dim = total_num_heads * head_dim * if attn_output_gate { 2 } else { 1 };
         let kv_out_dim = total_num_kv_heads * head_dim;
         let num_heads = total_num_heads / world_size;
-        // Align with vLLM behavior:
-        // - if total KV heads >= TP size: partition KV heads across ranks;
-        // - else: replicate KV heads across TP ranks.
-        let (num_kv_heads, kv_shard) = if total_num_kv_heads >= world_size {
-            if total_num_kv_heads % world_size != 0 {
-                candle_core::bail!(
-                    "kv heads must be divisible by tensor parallel world_size when partitioned (num_kv_heads={}, world_size={})",
-                    total_num_kv_heads,
-                    world_size
-                );
-            }
-            (
-                total_num_kv_heads / world_size,
-                shard(0, comm.rank(), world_size),
-            )
-        } else {
-            if world_size % total_num_kv_heads != 0 {
-                candle_core::bail!(
-                    "tensor parallel world_size must be divisible by kv heads when kv heads are replicated (num_kv_heads={}, world_size={})",
-                    total_num_kv_heads,
-                    world_size
-                );
-            }
-            (
-                1,
-                shard(0, comm.rank() % total_num_kv_heads, total_num_kv_heads),
-            )
-        };
+        let (num_kv_heads, kv_shard) = kv_head_shard(total_num_kv_heads, comm.rank(), world_size)?;
 
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,

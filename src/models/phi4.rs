@@ -1,7 +1,8 @@
 // src/models/phi4.rs
 // This implementation is adapted from Phi-3, using the local Candle layers.
 use crate::models::layers::distributed::{
-    shard, Comm, MergedParallelColumnLinear, ReplicatedLinear, TensorParallelRowLinear,
+    kv_head_shard, shard, Comm, MergedParallelColumnLinear, ReplicatedLinear,
+    TensorParallelRowLinear,
 };
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
@@ -245,28 +246,9 @@ impl Phi4Attention {
 
         let world_size = comm.world_size();
         let attention_heads = num_heads / world_size;
-        // Align with vLLM behavior:
-        // - if total KV heads >= TP size: partition KV heads across ranks;
-        // - else: replicate KV heads across TP ranks.
-        let (kv_heads, kv_shard_rank, kv_shard_world_size) = if num_kv_heads >= world_size {
-            if num_kv_heads % world_size != 0 {
-                candle_core::bail!(
-                    "kv heads must be divisible by tensor parallel world_size when partitioned (num_kv_heads={}, world_size={})",
-                    num_kv_heads,
-                    world_size
-                );
-            }
-            (num_kv_heads / world_size, comm.rank(), world_size)
-        } else {
-            if world_size % num_kv_heads != 0 {
-                candle_core::bail!(
-                    "tensor parallel world_size must be divisible by kv heads when kv heads are replicated (num_kv_heads={}, world_size={})",
-                    num_kv_heads,
-                    world_size
-                );
-            }
-            (1, comm.rank() % num_kv_heads, num_kv_heads)
-        };
+        let (kv_heads, kv_shard) = kv_head_shard(num_kv_heads, comm.rank(), world_size)?;
+        let kv_shard_rank = kv_shard.rank;
+        let kv_shard_world_size = kv_shard.world_size;
 
         let qkv_proj = MergedParallelColumnLinear::load_merged_chunks(
             cfg.hidden_size,
