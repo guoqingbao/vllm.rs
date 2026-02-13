@@ -5,6 +5,7 @@
 use crate::server::{ChatChoiceChunk, ChatCompletionChunk, Delta};
 use crate::tools::{Tool, ToolCall};
 use crate::utils::config::ModelType;
+use serde_json::Map;
 use serde_json::Value;
 use std::collections::HashSet;
 use tokenizers::Tokenizer;
@@ -526,6 +527,10 @@ impl StreamToolParser {
             }
         }
 
+        if parsed_calls.is_empty() && self.is_qwen3_next_coder_model() {
+            parsed_calls = self.parse_qwen3_next_coder_calls(text);
+        }
+
         if parsed_calls.is_empty()
             && self.config.start_token_str.starts_with('<')
             && self.config.end_token_str.starts_with('<')
@@ -579,7 +584,7 @@ impl StreamToolParser {
             | ModelType::Qwen3_5
             | ModelType::Qwen3_5MoE
             | ModelType::Qwen3VL => {
-                if model_lower.contains("coder") {
+                if Self::uses_qwen_coder_parser(&model_lower) {
                     "qwen_coder"
                 } else {
                     "qwen"
@@ -591,6 +596,199 @@ impl StreamToolParser {
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
         }
+    }
+
+    fn uses_qwen_coder_parser(model_lower: &str) -> bool {
+        Self::is_qwen2_5_coder_model(model_lower)
+            || Self::is_qwen3_next_coder_model_name(model_lower)
+    }
+
+    fn is_qwen2_5_coder_model(model_lower: &str) -> bool {
+        model_lower.contains("coder")
+            && (model_lower.contains("qwen2.5") || model_lower.contains("qwen2_5"))
+    }
+
+    fn is_qwen3_next_coder_model_name(model_lower: &str) -> bool {
+        model_lower.contains("coder")
+            && model_lower.contains("next")
+            && (model_lower.contains("qwen3") || model_lower.contains("qwen-3"))
+    }
+
+    fn is_qwen3_next_coder_model(&self) -> bool {
+        Self::is_qwen3_next_coder_model_name(&self.model_id.to_ascii_lowercase())
+    }
+
+    fn parse_qwen3_next_coder_calls(&self, text: &str) -> Vec<tool_parser::types::ToolCall> {
+        let mut parsed_calls = Vec::new();
+        let mut tool_index = 0;
+
+        let mut blocks = Vec::new();
+        let mut cursor = 0;
+        while let Some(start_rel) = text[cursor..].find("<tool_call>") {
+            let start = cursor + start_rel + "<tool_call>".len();
+            if let Some(end_rel) = text[start..].find("</tool_call>") {
+                let end = start + end_rel;
+                blocks.push(&text[start..end]);
+                cursor = end + "</tool_call>".len();
+            } else {
+                blocks.push(&text[start..]);
+                break;
+            }
+        }
+
+        if blocks.is_empty() && text.contains("<function=") {
+            blocks.push(text);
+        }
+
+        for block in blocks {
+            let mut pos = 0;
+            while let Some(func_rel) = block[pos..].find("<function=") {
+                let name_start = pos + func_rel + "<function=".len();
+                let rest = &block[name_start..];
+                let Some(name_end_rel) = rest.find('>') else {
+                    break;
+                };
+                let func_name = &rest[..name_end_rel];
+                let body_start = name_start + name_end_rel + 1;
+                let func_end = block[body_start..]
+                    .find("</function>")
+                    .map(|v| body_start + v)
+                    .unwrap_or(block.len());
+                let func_body = &block[body_start..func_end];
+
+                let mut params = Map::new();
+                let mut ppos = 0;
+                while let Some(p_rel) = func_body[ppos..].find("<parameter=") {
+                    let p_name_start = ppos + p_rel + "<parameter=".len();
+                    let p_rest = &func_body[p_name_start..];
+                    let Some(p_name_end_rel) = p_rest.find('>') else {
+                        break;
+                    };
+                    let p_name = &p_rest[..p_name_end_rel];
+                    let p_val_start = p_name_start + p_name_end_rel + 1;
+                    let p_val_rest = &func_body[p_val_start..];
+
+                    let end_parameter = p_val_rest.find("</parameter>");
+                    let next_parameter = p_val_rest.find("<parameter=");
+
+                    let (value_end, consumed) = match (end_parameter, next_parameter) {
+                        (Some(a), Some(b)) if b < a => (b, b),
+                        (Some(a), _) => (a, a + "</parameter>".len()),
+                        (None, Some(b)) => (b, b),
+                        (None, None) => (p_val_rest.len(), p_val_rest.len()),
+                    };
+
+                    let mut raw_value = p_val_rest[..value_end].to_string();
+                    if let Some(stripped) = raw_value.strip_prefix('\n') {
+                        raw_value = stripped.to_string();
+                    }
+                    if let Some(stripped) = raw_value.strip_suffix('\n') {
+                        raw_value = stripped.to_string();
+                    }
+                    let converted = self.convert_qwen3_next_parameter_value(
+                        &raw_value,
+                        p_name,
+                        &self.qwen3_next_tool_param_config(func_name),
+                        func_name,
+                    );
+                    params.insert(p_name.to_string(), converted);
+                    ppos = p_val_start + consumed;
+                }
+
+                parsed_calls.push(tool_parser::types::ToolCall {
+                    tool_index,
+                    name: func_name.to_string(),
+                    parameters: Value::Object(params).to_string(),
+                });
+                tool_index += 1;
+                pos = if func_end < block.len() {
+                    func_end + "</function>".len()
+                } else {
+                    block.len()
+                };
+            }
+        }
+
+        parsed_calls
+    }
+
+    fn qwen3_next_tool_param_config(&self, func_name: &str) -> Map<String, Value> {
+        for tool in &self.tools {
+            if tool.tool_type == "function" && tool.function.name == func_name {
+                if let Some(obj) = tool
+                    .function
+                    .parameters
+                    .get("properties")
+                    .and_then(Value::as_object)
+                {
+                    return obj.clone();
+                }
+                if let Some(obj) = tool.function.parameters.as_object() {
+                    return obj.clone();
+                }
+                return Map::new();
+            }
+        }
+        Map::new()
+    }
+
+    fn convert_qwen3_next_parameter_value(
+        &self,
+        raw: &str,
+        param_name: &str,
+        param_config: &Map<String, Value>,
+        _func_name: &str,
+    ) -> Value {
+        if raw.eq_ignore_ascii_case("null") {
+            return Value::Null;
+        }
+        let param_type = param_config
+            .get(param_name)
+            .and_then(Value::as_object)
+            .and_then(|v| v.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("string")
+            .to_ascii_lowercase();
+
+        if ["string", "str", "text", "varchar", "char", "enum"].contains(&param_type.as_str()) {
+            return Value::String(raw.to_string());
+        }
+        if param_type.starts_with("int")
+            || param_type.starts_with("uint")
+            || param_type.starts_with("long")
+            || param_type.starts_with("short")
+            || param_type.starts_with("unsigned")
+        {
+            if let Ok(v) = raw.parse::<i64>() {
+                return Value::Number(v.into());
+            }
+            return Value::String(raw.to_string());
+        }
+        if param_type.starts_with("num") || param_type.starts_with("float") {
+            if let Ok(v) = raw.parse::<f64>() {
+                if let Some(n) = serde_json::Number::from_f64(v) {
+                    return Value::Number(n);
+                }
+            }
+            return Value::String(raw.to_string());
+        }
+        if ["boolean", "bool", "binary"].contains(&param_type.as_str()) {
+            return Value::Bool(raw.eq_ignore_ascii_case("true"));
+        }
+        if param_type == "object"
+            || param_type == "array"
+            || param_type == "arr"
+            || param_type.starts_with("dict")
+            || param_type.starts_with("list")
+        {
+            if let Ok(v) = serde_json::from_str::<Value>(raw) {
+                return v;
+            }
+        }
+        if let Ok(v) = serde_json::from_str::<Value>(raw) {
+            return v;
+        }
+        Value::String(raw.to_string())
     }
 
     fn strip_tool_tags(&self, text: &str) -> String {
@@ -794,5 +992,51 @@ mod tests {
             StreamResult::Content(text) => assert_eq!(text, "<tool_call>"),
             _ => panic!("Expected Content without token ID match"),
         }
+    }
+
+    #[test]
+    fn test_qwen_coder_parser_only_for_qwen_2_5_coder() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(
+                &ModelType::Qwen3,
+                "Qwen/Qwen2.5-Coder-32B-Instruct"
+            ),
+            "qwen_coder"
+        );
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(
+                &ModelType::Qwen3_5MoE,
+                "Qwen/Qwen3-Coder-Next-FP8"
+            ),
+            "qwen_coder"
+        );
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(
+                &ModelType::Qwen3_5,
+                "Qwen/Qwen3.5-Coder-32B-Instruct"
+            ),
+            "qwen"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_qwen3_next_parser_fallback_function_parameter_format() {
+        let tools = vec![crate::tools::function_tool("calc", "desc")
+            .param("x", "integer", "x", true)
+            .param("flag", "boolean", "flag", false)
+            .build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3_5MoE,
+            "Qwen/Qwen3-Coder-Next-FP8".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3_5MoE),
+            tools,
+            None,
+        );
+
+        let text = "<tool_call><function=calc><parameter=x>42</parameter><parameter=flag>true</parameter></function></tool_call>";
+        let calls = parser.parse_complete_with_fallback(text).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "calc");
+        assert_eq!(calls[0].function.arguments, r#"{"flag":true,"x":42}"#);
     }
 }
