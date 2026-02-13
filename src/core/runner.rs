@@ -227,14 +227,7 @@ impl ModelRunner {
             max_num_batched_tokens: econfig.max_num_batched_tokens,
         };
 
-        let mamba_cache_capacity = Self::MAMBA_CACHE_FIXED_CAPACITY;
-        if econfig.max_num_seqs > mamba_cache_capacity {
-            crate::log_warn!(
-                "max_num_seqs={} is larger than fixed Mamba cache capacity={}; runtime may grow cache dynamically.",
-                econfig.max_num_seqs,
-                mamba_cache_capacity
-            );
-        }
+        let mamba_cache_capacity = Self::MAMBA_CACHE_FIXED_CAPACITY.max(econfig.max_num_seqs);
         #[cfg(all(feature = "cuda", feature = "graph"))]
         {
             let capture_capacity = planned_graph_capture_batches(econfig.max_num_seqs)
@@ -242,8 +235,8 @@ impl ModelRunner {
                 .max()
                 .unwrap_or(1);
             if capture_capacity > mamba_cache_capacity {
-                crate::log_warn!(
-                    "graph capture batch {} exceeds fixed Mamba cache capacity {}; consider increasing fixed capacity.",
+                candle_core::bail!(
+                    "graph capture batch {} exceeds mamba cache capacity {}",
                     capture_capacity,
                     mamba_cache_capacity
                 );
