@@ -3,7 +3,6 @@
 //!
 //! These functions handle tool resolution, schema mapping, and tool call validation.
 
-use super::schema::validate_arguments;
 use super::{FunctionCall, Tool, ToolCall};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -94,27 +93,16 @@ pub fn filter_tool_calls(
                 parsed_args.clone()
             };
 
-        if let Err(e) = validate_arguments(schema, &filtered_args) {
-            crate::log_warn!(
-                "Schema validation failed for tool '{}': {}. Schema: {:?}, Args: {:?}",
-                call.function.name,
-                e,
-                schema,
-                filtered_args
-            );
-            invalid.push(call.clone());
-        } else {
-            let normalized_args =
-                serde_json::to_string(&filtered_args).unwrap_or_else(|_| args_str.to_string());
-            valid.push(ToolCall {
-                id: call.id.clone(),
-                tool_type: call.tool_type.clone(),
-                function: FunctionCall {
-                    name: call.function.name.clone(),
-                    arguments: Some(normalized_args),
-                },
-            });
-        }
+        let normalized_args =
+            serde_json::to_string(&filtered_args).unwrap_or_else(|_| args_str.to_string());
+        valid.push(ToolCall {
+            id: call.id.clone(),
+            tool_type: call.tool_type.clone(),
+            function: FunctionCall {
+                name: call.function.name.clone(),
+                arguments: Some(normalized_args),
+            },
+        });
     }
 
     (valid, invalid)
