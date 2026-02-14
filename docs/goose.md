@@ -10,7 +10,7 @@ Goose -> vLLM.rs (OpenAI-compatible)
 
 ```bash
 # Rust
-./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
+./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1 --prefix-cache
 # Python
 python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --server --prefix-cache
 ```

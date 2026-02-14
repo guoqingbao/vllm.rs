@@ -39,6 +39,7 @@ pub struct BlockManager {
     block_size: usize,
     runners: Arc<RwLock<RunnerType>>,
     prefix_cache: Option<PrefixCache>,
+    mamba_prefix_enabled: bool,
 }
 
 impl BlockManager {
@@ -48,6 +49,7 @@ impl BlockManager {
         num_cpu_blocks: usize,
         block_size: usize,
         prefix_cache: PrefixCacheConfig,
+        mamba_prefix_enabled: bool,
     ) -> Self {
         let mut blocks = Vec::with_capacity(num_blocks);
         let mut free_block_ids = VecDeque::with_capacity(num_blocks);
@@ -86,6 +88,7 @@ impl BlockManager {
             block_size,
             runners,
             prefix_cache,
+            mamba_prefix_enabled,
         }
     }
 
@@ -99,6 +102,8 @@ impl BlockManager {
     }
 
     fn allocate_fresh(&mut self, seq: &mut Sequence) -> Result<()> {
+        seq.num_cached_tokens = 0;
+        seq.mamba_prefix_hash = None;
         for _ in 0..seq.num_blocks() {
             let block_id = self
                 .free_block_ids
@@ -129,11 +134,17 @@ impl BlockManager {
     }
 
     pub fn required_blocks(&mut self, seq: &Sequence) -> usize {
-        if let Some(prefix_cache) = self.prefix_cache.as_mut() {
+        if self.prefix_cache.is_some() {
+            let mut prefix_cache = self.prefix_cache.take().unwrap();
             let seed = seq.images.as_ref().map(Self::image_prefix_seed);
             let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
-            let matched_blocks =
-                self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
+            let matched_blocks = self.resolve_mamba_matched_blocks(
+                &prefix_cache,
+                seq.id,
+                self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks),
+                prefix_match.last_hash,
+            );
+            self.prefix_cache = Some(prefix_cache);
             seq.num_blocks().saturating_sub(matched_blocks)
         } else {
             seq.num_blocks()
@@ -239,6 +250,46 @@ impl BlockManager {
         }
     }
 
+    fn resolve_mamba_matched_blocks(
+        &mut self,
+        prefix_cache: &PrefixCache,
+        seq_id: usize,
+        mut matched_blocks: usize,
+        last_hash: Option<u64>,
+    ) -> usize {
+        if !self.mamba_prefix_enabled {
+            return matched_blocks;
+        }
+        if matched_blocks == 0 {
+            return 0;
+        }
+        let Some(hash) = last_hash else {
+            return 0;
+        };
+        let hashes = prefix_cache.hashes_for_match(hash);
+        if hashes.len() < matched_blocks {
+            return 0;
+        }
+        while matched_blocks > 0 {
+            let candidate_hash = hashes[matched_blocks - 1];
+            match self.try_has_mamba_prefix_state(candidate_hash) {
+                Ok(true) => break,
+                Ok(false) => {
+                    matched_blocks -= 1;
+                }
+                Err(e) => {
+                    crate::log_warn!(
+                        "Failed to query mamba prefix state for seq {}: {}",
+                        seq_id,
+                        e
+                    );
+                    return 0;
+                }
+            }
+        }
+        matched_blocks
+    }
+
     fn allocate_with_prefix(
         &mut self,
         seq: &mut Sequence,
@@ -254,6 +305,27 @@ impl BlockManager {
             last_hash = prefix_match.last_hash;
             matched_blocks =
                 self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);
+            matched_blocks =
+                self.resolve_mamba_matched_blocks(prefix_cache, seq.id, matched_blocks, last_hash);
+        }
+
+        seq.mamba_prefix_hash = None;
+        if self.mamba_prefix_enabled && matched_blocks > 0 {
+            let mut matched_hash = None;
+            if let Some(hash) = last_hash {
+                let hashes = prefix_cache.hashes_for_match(hash);
+                if hashes.len() >= matched_blocks {
+                    matched_hash = Some(hashes[matched_blocks - 1]);
+                } else {
+                    matched_blocks = 0;
+                }
+            } else {
+                matched_blocks = 0;
+            }
+            if matched_blocks == 0 {
+                crate::log_info!("Prefix cache mamba-state miss seq {} (fallback)", seq.id);
+            }
+            seq.mamba_prefix_hash = matched_hash;
         }
 
         let cached_tokens = matched_blocks * self.block_size;
@@ -293,6 +365,36 @@ impl BlockManager {
         }
 
         Ok(())
+    }
+
+    pub fn capture_mamba_prefix_state(&self, seq: &Sequence, processed_tokens: usize) {
+        if !self.mamba_prefix_enabled {
+            return;
+        }
+        let Some(prefix_cache) = self.prefix_cache.as_ref() else {
+            return;
+        };
+        if !prefix_cache.enabled() {
+            return;
+        }
+        let processed_tokens = processed_tokens.min(seq.token_ids.len());
+        let full_blocks = processed_tokens / self.block_size;
+        if full_blocks == 0 {
+            return;
+        }
+        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+        let Some(hash) = prefix_cache.hash_for_blocks_with_seed(&seq.token_ids, full_blocks, seed)
+        else {
+            return;
+        };
+        if let Err(e) = self.try_capture_mamba_prefix_state(seq.id, hash) {
+            crate::log_warn!(
+                "Failed to capture mamba prefix state for seq {} hash {}: {}",
+                seq.id,
+                hash,
+                e
+            );
+        }
     }
 
     pub fn cache_sequence(&mut self, seq: &Sequence) {
@@ -358,16 +460,23 @@ impl BlockManager {
     /// Returns how many tokens of `seq` are already cached in the prefix cache.
     /// Used to decide whether to do local prefill vs transfer to PD server.
     pub fn get_prefix_cache_match_tokens(&mut self, seq: &Sequence) -> usize {
-        let Some(prefix_cache) = self.prefix_cache.as_mut() else {
+        if self.prefix_cache.is_none() {
             return 0;
-        };
+        }
+        let mut prefix_cache = self.prefix_cache.take().unwrap();
         if !prefix_cache.enabled() {
+            self.prefix_cache = Some(prefix_cache);
             return 0;
         }
         let seed = seq.images.as_ref().map(Self::image_prefix_seed);
         let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
-        let matched_blocks =
-            self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks);
+        let matched_blocks = self.resolve_mamba_matched_blocks(
+            &prefix_cache,
+            seq.id,
+            self.adjusted_matched_blocks(seq.token_ids.len(), prefix_match.matched_blocks),
+            prefix_match.last_hash,
+        );
+        self.prefix_cache = Some(prefix_cache);
         matched_blocks * self.block_size
     }
 
@@ -560,6 +669,28 @@ impl BlockManager {
         MessageType::CheckKvCacheRelease,
         (seq_id),
         MessageType::CheckKvCacheReleaseResponse,
+        bool
+    );
+
+    // Capture and query mamba prefix states for hybrid models.
+    def_broadcast_message_to_runners!(
+        pub,
+        try_capture_mamba_prefix_state,
+        capture_mamba_prefix_state,
+        (seq_id: usize, hash: u64),
+        MessageType::CaptureMambaPrefixState,
+        ((seq_id, hash)),
+        MessageType::CaptureMambaPrefixStateResponse,
+        bool
+    );
+    def_broadcast_message_to_runners!(
+        pub,
+        try_has_mamba_prefix_state,
+        has_mamba_prefix_state,
+        (hash: u64),
+        MessageType::HasMambaPrefixState,
+        (hash),
+        MessageType::HasMambaPrefixStateResponse,
         bool
     );
 

@@ -340,6 +340,7 @@ where
 pub struct GraphCaptureVars {
     pub input_ids: Tensor,
     pub positions: Tensor,
+    pub mamba_slot_mapping: Tensor,
     pub slot_mapping: Tensor,
     pub context_lens: Tensor,
     pub block_tables: Tensor,
@@ -365,6 +366,15 @@ pub struct GraphCapturer<M: CudaGraphModule> {
     pub flashinfer_kv_params: Option<FlashInferKvParams>,
 }
 
+pub fn planned_graph_capture_batches(max_num_seqs: usize) -> Vec<usize> {
+    let small_max = max_num_seqs.clamp(1, 15);
+    let mut graph_bs = (1..=small_max).collect::<Vec<_>>();
+    if max_num_seqs >= 16 {
+        graph_bs.extend((16..=max_num_seqs.min(32)).step_by(16));
+    }
+    graph_bs
+}
+
 impl<M: CudaGraphModule> GraphCapturer<M> {
     pub fn new(
         model: M,
@@ -374,12 +384,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         hidden_size: usize,
         #[cfg(feature = "flashinfer")] flashinfer_kv_params: &Option<FlashInferKvParams>,
     ) -> Self {
-        let graph_bs = (1..16)
-            .collect::<Vec<_>>()
-            .iter()
-            .copied()
-            .chain((16..=max_num_seqs.min(32)).step_by(16))
-            .collect();
+        let graph_bs = planned_graph_capture_batches(max_num_seqs);
         println!("The following batches for capture: {:?}", graph_bs);
 
         Self {
@@ -407,6 +412,11 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
         let input_ids = Tensor::zeros((max_bs,), DType::U32, device)?;
         let positions = Tensor::zeros((max_bs,), DType::I64, device)?;
+        let mamba_slot_mapping = Tensor::from_vec(
+            (0..max_bs).map(|i| i as i64).collect::<Vec<_>>(),
+            (max_bs,),
+            device,
+        )?;
         let slot_mapping = Tensor::zeros((max_bs,), DType::I64, device)?;
         let context_lens = Tensor::zeros((max_bs,), DType::U32, device)?;
         let block_tables = Tensor::zeros((max_bs, max_num_blocks), DType::U32, device)?;
@@ -502,6 +512,8 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
             let input_metadata = InputMetadata {
                 is_prefill: false,
+                sequence_ids: None,
+                mamba_slot_mapping: Some(mamba_slot_mapping.narrow(0, 0, bs)?),
                 slot_mapping: slot_mapping.narrow(0, 0, bs)?,
                 block_tables: Some(block_tables.narrow(0, 0, bs)?),
                 context_lens: Some(context_lens.narrow(0, 0, bs)?),
@@ -532,6 +544,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         self.graph_vars = Some(GraphCaptureVars {
             input_ids,
             positions,
+            mamba_slot_mapping,
             slot_mapping,
             context_lens,
             block_tables,
@@ -559,6 +572,16 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 .is_some()
     }
 
+    pub fn is_exact_captured(&self, batch: usize) -> bool {
+        self.graph_vars.is_some()
+            && self
+                .graph_vars
+                .as_ref()
+                .unwrap()
+                .outputs
+                .contains_key(&batch)
+    }
+
     pub fn replay(
         &self,
         input_ids: &Tensor,
@@ -570,12 +593,33 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         }
         let max_num_blocks = (self.max_model_len + self.block_size - 1) / self.block_size;
         let input_batch = input_ids.dim(0)?;
+        let require_exact_batch = input_metadata.mamba_slot_mapping.is_some();
         if let Some(graph_vars) = &self.graph_vars {
-            if let Some(&batch) = graph_vars.outputs.keys().find(|&&x| x >= input_batch) {
+            let selected_batch = if require_exact_batch {
+                graph_vars
+                    .outputs
+                    .keys()
+                    .find(|&&x| x == input_batch)
+                    .copied()
+            } else {
+                graph_vars
+                    .outputs
+                    .keys()
+                    .find(|&&x| x >= input_batch)
+                    .copied()
+            };
+            if let Some(batch) = selected_batch {
                 graph_vars.input_ids.zero_()?;
                 graph_vars.input_ids.copy_(&input_ids, 0)?;
                 graph_vars.positions.zero_()?;
                 graph_vars.positions.copy_(&positions, 0)?;
+
+                if let Some(ms_mapping) = input_metadata.mamba_slot_mapping.as_ref() {
+                    graph_vars.mamba_slot_mapping.zero_()?;
+                    graph_vars.mamba_slot_mapping.copy_(&ms_mapping, 0)?;
+                } else {
+                    graph_vars.mamba_slot_mapping.zero_()?;
+                }
 
                 let s_mapping = input_metadata.slot_mapping.as_ref();
                 graph_vars.slot_mapping.zero_()?;
@@ -595,20 +639,24 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
                 #[cfg(feature = "flashinfer")]
                 if let Some(fm) = &input_metadata.flashinfer_metadata {
-                    // Pad indptr to the captured batch size so graph replay sees valid lengths.
-                    let mut indptr_host = Vec::with_capacity(batch + 1);
-                    indptr_host.extend_from_slice(&fm.indptr_host);
-                    let last = *fm.indptr_host.last().unwrap_or(&0);
-                    for _ in (input_batch + 1)..=batch {
-                        indptr_host.push(last);
-                    }
+                    let mut indptr_host = fm.indptr_host.clone();
+                    if input_batch == batch {
+                        graph_vars.flashinfer_indptr.zero_()?;
+                        graph_vars.flashinfer_indptr.copy_(&fm.indptr, 0)?;
+                    } else {
+                        // Pad indptr to the captured batch size so graph replay sees valid lengths.
+                        let last = *indptr_host.last().unwrap_or(&0);
+                        for _ in (input_batch + 1)..=batch {
+                            indptr_host.push(last);
+                        }
 
-                    let indptr_padded = Tensor::from_vec(
-                        indptr_host.clone(),
-                        (batch + 1,),
-                        graph_vars.input_ids.device(),
-                    )?;
-                    graph_vars.flashinfer_indptr.copy_(&indptr_padded, 0)?;
+                        let indptr_padded = Tensor::from_vec(
+                            indptr_host.clone(),
+                            (batch + 1,),
+                            graph_vars.input_ids.device(),
+                        )?;
+                        graph_vars.flashinfer_indptr.copy_(&indptr_padded, 0)?;
+                    }
 
                     graph_vars.flashinfer_last_len.zero_()?;
                     graph_vars.flashinfer_last_len.copy_(&fm.last_len, 0)?;

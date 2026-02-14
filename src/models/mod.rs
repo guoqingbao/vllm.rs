@@ -6,5 +6,7 @@ pub mod llama;
 pub mod mistral3_vl;
 pub mod phi4;
 pub mod qwen3;
+pub mod qwen3_5;
+pub mod qwen3_5_moe;
 pub mod qwen3_moe;
 pub mod qwen3_vl;

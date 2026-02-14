@@ -2,6 +2,7 @@
 use super::wna16::WNA16;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
+use crate::utils::should_skip_fp8_for_module;
 use candle_core::quantized;
 use candle_core::quantized::GgmlDType;
 use candle_core::Module;
@@ -461,12 +462,33 @@ pub fn linear_x(
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
+    let module_path = vb.module_path().to_string();
     match &vb.0 {
         Either::Left(vb) => {
             if let Some(cfg) = quant_cfg {
                 if cfg.quant_method == "fp8" {
-                    let ln = LnFp8::new(in_dim, out_dim, vb.clone(), shards, cfg)?;
-                    return Ok(LinearX::LnFp8(ln));
+                    if should_skip_fp8_for_module(&module_path, cfg) {
+                        let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
+
+                    let has_fp8_scale = vb.contains_tensor("weight_scale")
+                        || vb.contains_tensor("weight_scale_inv");
+                    if !has_fp8_scale {
+                        let weight = vb.get_with_hints((out_dim, in_dim), "weight", shards)?;
+                        if matches!(
+                            weight.dtype(),
+                            DType::BF16 | DType::F16 | DType::F32 | DType::F64
+                        ) {
+                            let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                            return Ok(LinearX::Linear(ln));
+                        }
+                    }
+
+                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, true) {
+                        Ok(ln) => return Ok(LinearX::LnFp8(ln)),
+                        Err(err) => return Err(err),
+                    }
                 }
 
                 let wna16 = WNA16::new(
@@ -518,12 +540,33 @@ pub fn linear_no_bias_x(
     quant: &Option<String>,
     dtype: DType,
 ) -> Result<LinearX> {
+    let module_path = vb.module_path().to_string();
     match &vb.0 {
         Either::Left(vb) => {
             if let Some(cfg) = quant_cfg {
                 if cfg.quant_method == "fp8" {
-                    let ln = LnFp8::new(in_dim, out_dim, vb.clone(), shards, cfg)?;
-                    return Ok(LinearX::LnFp8(ln));
+                    if should_skip_fp8_for_module(&module_path, cfg) {
+                        let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
+
+                    let has_fp8_scale = vb.contains_tensor("weight_scale")
+                        || vb.contains_tensor("weight_scale_inv");
+                    if !has_fp8_scale {
+                        let weight = vb.get_with_hints((out_dim, in_dim), "weight", shards)?;
+                        if matches!(
+                            weight.dtype(),
+                            DType::BF16 | DType::F16 | DType::F32 | DType::F64
+                        ) {
+                            let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                            return Ok(LinearX::Linear(ln));
+                        }
+                    }
+
+                    match load_ln_fp8_with_hints(in_dim, out_dim, vb.clone(), shards, cfg, false) {
+                        Ok(ln) => return Ok(LinearX::LnFp8(ln)),
+                        Err(err) => return Err(err),
+                    }
                 }
 
                 let wna16 = WNA16::new(
@@ -717,6 +760,164 @@ impl LnFp8 {
             sm_version,
         })
     }
+}
+
+fn load_ln_fp8_with_hints(
+    in_dim: usize,
+    out_dim: usize,
+    vb: VarBuilder,
+    shard: Shard,
+    quant_cfg: &QuantConfig,
+    load_bias: bool,
+) -> Result<LnFp8> {
+    fn normalize_sharded_2d(
+        t: Tensor,
+        shard: Shard,
+        global_dim0: usize,
+        global_dim1: usize,
+        name: &str,
+    ) -> Result<Tensor> {
+        if shard.world_size <= 1 {
+            return Ok(t);
+        }
+        if shard.dim > 1 {
+            candle_core::bail!("LnFp8: unsupported shard dim {} for {}", shard.dim, name);
+        }
+        let (d0, d1) = t.dims2()?;
+        if shard.dim == 0 {
+            let local = global_dim0 / shard.world_size;
+            if d0 == local {
+                return Ok(t);
+            }
+            if d0 == global_dim0 {
+                return t.narrow(0, shard.rank * local, local)?.contiguous();
+            }
+            candle_core::bail!(
+                "LnFp8: unexpected {} shape ({}, {}), shard dim 0 expects local {} or global {}",
+                name,
+                d0,
+                d1,
+                local,
+                global_dim0
+            )
+        } else {
+            let local = global_dim1 / shard.world_size;
+            if d1 == local {
+                return Ok(t);
+            }
+            if d1 == global_dim1 {
+                return t.narrow(1, shard.rank * local, local)?.contiguous();
+            }
+            candle_core::bail!(
+                "LnFp8: unexpected {} shape ({}, {}), shard dim 1 expects local {} or global {}",
+                name,
+                d0,
+                d1,
+                local,
+                global_dim1
+            )
+        }
+    }
+
+    fn normalize_sharded_1d(
+        t: Tensor,
+        shard: Shard,
+        global_dim: usize,
+        name: &str,
+    ) -> Result<Tensor> {
+        if shard.world_size <= 1 {
+            return Ok(t);
+        }
+        let d0 = t.dim(0)?;
+        let local = global_dim / shard.world_size;
+        if d0 == local {
+            return Ok(t);
+        }
+        if d0 == global_dim {
+            return t.narrow(0, shard.rank * local, local)?.contiguous();
+        }
+        candle_core::bail!(
+            "LnFp8: unexpected {} shape ({}), expects local {} or global {}",
+            name,
+            d0,
+            local,
+            global_dim
+        )
+    }
+
+    let block_size = quant_cfg
+        .weight_block_size
+        .clone()
+        .unwrap_or(vec![128, 128]);
+    if block_size.len() != 2 {
+        candle_core::bail!("LnFp8: weight_block_size must have 2 elements");
+    }
+
+    let by = block_size[0];
+    let bx = block_size[1];
+    let scale_dim0 = (out_dim + by - 1) / by;
+    let scale_dim1 = (in_dim + bx - 1) / bx;
+
+    let weight = vb.get_with_hints_dtype((out_dim, in_dim), "weight", shard, DType::U8)?;
+    let weight = normalize_sharded_2d(weight, shard, out_dim, in_dim, "weight")?;
+    let weight_scale = match vb.get_with_hints_dtype(
+        (scale_dim0, scale_dim1),
+        "weight_scale",
+        shard,
+        DType::F32,
+    ) {
+        Ok(s) => s,
+        Err(_) => vb
+            .get_with_hints_dtype(
+                (scale_dim0, scale_dim1),
+                "weight_scale_inv",
+                shard,
+                DType::F32,
+            )
+            .map_err(|_| {
+                candle_core::Error::Msg("LnFp8: Missing weight_scale or weight_scale_inv".into())
+            })?,
+    };
+    let weight_scale = normalize_sharded_2d(
+        weight_scale,
+        shard,
+        scale_dim0,
+        scale_dim1,
+        "weight_scale(_inv)",
+    )?;
+
+    #[cfg(feature = "cuda")]
+    let sm_version =
+        attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?).unwrap_or(0) as usize;
+
+    #[cfg(not(feature = "cuda"))]
+    let sm_version = 0;
+
+    #[cfg(feature = "cutlass")]
+    let weight_scale = if sm_version >= 100 {
+        weight_scale.t()?
+    } else if sm_version >= 90 {
+        weight_scale.t()?.contiguous()?
+    } else {
+        weight_scale
+    };
+
+    let bias = if load_bias {
+        vb.get_with_hints_dtype((out_dim,), "bias", shard, DType::F32)
+            .ok()
+            .map(|b| normalize_sharded_1d(b, shard, out_dim, "bias"))
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(LnFp8 {
+        weight,
+        weight_scale,
+        bias,
+        weight_block_size: block_size,
+        sm_version,
+    })
 }
 
 impl Module for LnFp8 {

@@ -1,7 +1,8 @@
 // src/models/phi4.rs
 // This implementation is adapted from Phi-3, using the local Candle layers.
 use crate::models::layers::distributed::{
-    Comm, MergedParallelColumnLinear, ReplicatedLinear, TensorParallelRowLinear,
+    kv_head_shard, shard, Comm, MergedParallelColumnLinear, ReplicatedLinear,
+    TensorParallelRowLinear,
 };
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
@@ -242,6 +243,13 @@ impl Phi4Attention {
             .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
         let op_size = num_heads * head_dim + 2 * num_kv_heads * head_dim;
         let is_qvar_builder = vb.is_qvar_builder();
+
+        let world_size = comm.world_size();
+        let attention_heads = num_heads / world_size;
+        let (kv_heads, kv_shard) = kv_head_shard(num_kv_heads, comm.rank(), world_size)?;
+        let kv_shard_rank = kv_shard.rank;
+        let kv_shard_world_size = kv_shard.world_size;
+
         let qkv_proj = MergedParallelColumnLinear::load_merged_chunks(
             cfg.hidden_size,
             op_size,
@@ -251,6 +259,11 @@ impl Phi4Attention {
                 num_kv_heads * head_dim,
                 num_kv_heads * head_dim,
             ],
+            Some(vec![
+                shard(0, comm.rank(), world_size),
+                shard(0, kv_shard_rank, kv_shard_world_size),
+                shard(0, kv_shard_rank, kv_shard_world_size),
+            ]),
             if is_qvar_builder {
                 vb.pp("attn_qkv")
             } else {
@@ -275,8 +288,6 @@ impl Phi4Attention {
             dtype,
         )?;
 
-        let attention_heads = num_heads / comm.world_size();
-        let kv_heads = num_kv_heads / comm.world_size();
         Ok(Self {
             qkv_proj,
             o_proj,

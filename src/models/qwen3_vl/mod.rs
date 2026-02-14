@@ -7,6 +7,8 @@ pub mod vision;
 
 use crate::models::layers::VarBuilderX;
 use crate::models::qwen3::Qwen3ForCausalLM;
+use crate::models::qwen3_5::Qwen3_5ForCausalLM;
+use crate::models::qwen3_5_moe::Qwen3_5MoEForCausalLM;
 use crate::models::qwen3_moe::Qwen3MoEForCausalLM;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
@@ -19,6 +21,8 @@ use vision::Qwen3VLVisionModel;
 pub enum Qwen3TextModel {
     Dense(Qwen3ForCausalLM),
     MoE(Qwen3MoEForCausalLM),
+    Dense35(Qwen3_5ForCausalLM),
+    MoE35(Qwen3_5MoEForCausalLM),
 }
 
 #[allow(dead_code)]
@@ -69,9 +73,75 @@ impl Qwen3VLForConditionalGeneration {
         if cfg.quantization_config.is_some() {
             config_text.quantization_config = cfg.quantization_config.clone();
         }
+        let next_is_moe = config_text
+            .moe_cfg
+            .as_ref()
+            .and_then(|m| m.num_experts)
+            .unwrap_or(0)
+            > 0;
 
-        let text_model = if matches!(arch, "Qwen3VLMoeForConditionalGeneration") {
-            Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
+        let text_model = match arch {
+            "Qwen3VLMoeForConditionalGeneration" => {
+                Qwen3TextModel::MoE(Qwen3MoEForCausalLM::new_with_prefix(
+                    &vb,
+                    comm.clone(),
+                    &config_text,
+                    dtype,
+                    is_rope_i,
+                    device,
+                    progress_reporter,
+                    Some("model.language_model.".to_string()),
+                )?)
+            }
+            "Qwen3_5MoeForConditionalGeneration" => {
+                Qwen3TextModel::MoE35(Qwen3_5MoEForCausalLM::new_with_prefix(
+                    &vb,
+                    comm.clone(),
+                    &config_text,
+                    dtype,
+                    is_rope_i,
+                    device,
+                    progress_reporter,
+                    Some("model.language_model.".to_string()),
+                )?)
+            }
+            "Qwen3_5ForConditionalGeneration" => {
+                Qwen3TextModel::Dense35(Qwen3_5ForCausalLM::new_with_prefix(
+                    &vb,
+                    comm.clone(),
+                    &config_text,
+                    dtype,
+                    is_rope_i,
+                    device,
+                    progress_reporter,
+                    Some("model.language_model.".to_string()),
+                )?)
+            }
+            "Qwen3NextForConditionalGeneration" if next_is_moe => {
+                Qwen3TextModel::MoE35(Qwen3_5MoEForCausalLM::new_with_prefix(
+                    &vb,
+                    comm.clone(),
+                    &config_text,
+                    dtype,
+                    is_rope_i,
+                    device,
+                    progress_reporter,
+                    Some("model.language_model.".to_string()),
+                )?)
+            }
+            "Qwen3NextForConditionalGeneration" => {
+                Qwen3TextModel::Dense35(Qwen3_5ForCausalLM::new_with_prefix(
+                    &vb,
+                    comm.clone(),
+                    &config_text,
+                    dtype,
+                    is_rope_i,
+                    device,
+                    progress_reporter,
+                    Some("model.language_model.".to_string()),
+                )?)
+            }
+            _ => Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
                 &vb,
                 comm.clone(),
                 &config_text,
@@ -80,18 +150,7 @@ impl Qwen3VLForConditionalGeneration {
                 device,
                 progress_reporter,
                 Some("model.language_model.".to_string()),
-            )?)
-        } else {
-            Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
-                &vb,
-                comm.clone(),
-                &config_text,
-                dtype,
-                is_rope_i,
-                device,
-                progress_reporter,
-                Some("model.language_model.".to_string()),
-            )?)
+            )?),
         };
 
         Ok(Self {
@@ -116,6 +175,8 @@ impl Qwen3VLForConditionalGeneration {
         let (mut input_embeds, dtype) = match &self.text_model {
             Qwen3TextModel::Dense(m) => (m.embed_forward(input_ids)?, m.dtype()),
             Qwen3TextModel::MoE(m) => (m.embed_forward(input_ids)?, m.dtype()),
+            Qwen3TextModel::Dense35(m) => (m.embed_forward(input_ids)?, m.dtype()),
+            Qwen3TextModel::MoE35(m) => (m.embed_forward(input_ids)?, m.dtype()),
         };
         let device = input_embeds.device().clone();
         let mut visual_pos_masks: Option<Tensor> = None;
@@ -249,6 +310,24 @@ impl Qwen3VLForConditionalGeneration {
                 &visual_pos_masks,
                 &deepstack_visual_embeds,
             ),
+            Qwen3TextModel::Dense35(m) => m.forward_with_deepstack(
+                &input_embeds,
+                &positions,
+                kv_caches,
+                input_metadata,
+                true,
+                &visual_pos_masks,
+                &deepstack_visual_embeds,
+            ),
+            Qwen3TextModel::MoE35(m) => m.forward_with_deepstack(
+                &input_embeds,
+                &positions,
+                kv_caches,
+                input_metadata,
+                true,
+                &visual_pos_masks,
+                &deepstack_visual_embeds,
+            ),
         }
     }
 
@@ -256,6 +335,8 @@ impl Qwen3VLForConditionalGeneration {
         match &self.text_model {
             Qwen3TextModel::Dense(m) => m.get_vocab_size(),
             Qwen3TextModel::MoE(m) => m.get_vocab_size(),
+            Qwen3TextModel::Dense35(m) => m.get_vocab_size(),
+            Qwen3TextModel::MoE35(m) => m.get_vocab_size(),
         }
     }
 }

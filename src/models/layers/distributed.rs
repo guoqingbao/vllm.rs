@@ -129,6 +129,7 @@ impl CustomOp1 for AllReduce {
         l: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::cudarc::driver::DeviceSlice;
         use candle_core::cuda_backend::cudarc::nccl::safe::ReduceOp;
         use candle_core::cuda_backend::WrapErr;
         use candle_core::DType;
@@ -141,8 +142,18 @@ impl CustomOp1 for AllReduce {
         let dst = match s.dtype() {
             DType::BF16 => {
                 let full_slice = s.as_cuda_slice::<bf16>()?;
+                let full_len = full_slice.len();
+                let end_offset = start_offset.saturating_add(elem_count);
+                if end_offset > full_len {
+                    candle_core::bail!(
+                        "all_reduce BF16 slice out of bounds: start={}, elem_count={}, len={}",
+                        start_offset,
+                        elem_count,
+                        full_len
+                    );
+                }
                 // Slice to only the valid elements (handles narrow/view tensors)
-                let src_slice = full_slice.slice(start_offset..start_offset + elem_count);
+                let src_slice = full_slice.slice(start_offset..end_offset);
                 let mut dst = unsafe { dev.alloc::<bf16>(elem_count) }.w()?;
                 self.comm
                     .all_reduce(&src_slice, &mut dst, &ReduceOp::Sum)
@@ -151,8 +162,18 @@ impl CustomOp1 for AllReduce {
             }
             DType::F16 => {
                 let full_slice = s.as_cuda_slice::<f16>()?;
+                let full_len = full_slice.len();
+                let end_offset = start_offset.saturating_add(elem_count);
+                if end_offset > full_len {
+                    candle_core::bail!(
+                        "all_reduce F16 slice out of bounds: start={}, elem_count={}, len={}",
+                        start_offset,
+                        elem_count,
+                        full_len
+                    );
+                }
                 // Slice to only the valid elements (handles narrow/view tensors)
-                let src_slice = full_slice.slice(start_offset..start_offset + elem_count);
+                let src_slice = full_slice.slice(start_offset..end_offset);
                 let mut dst = unsafe { dev.alloc::<f16>(elem_count) }.w()?;
                 self.comm
                     .all_reduce(&src_slice, &mut dst, &ReduceOp::Sum)
@@ -229,6 +250,52 @@ pub fn shard(dim: usize, rank: usize, world_size: usize) -> candle_nn::var_build
         dim,
         rank,
         world_size,
+    }
+}
+
+/// Determine local KV heads and shard mapping for tensor-parallel attention.
+///
+/// In replicated KV mode (`total_num_kv_heads < world_size`), query heads are sharded in
+/// contiguous rank ranges, so KV head replication must follow the same contiguous grouping.
+pub fn kv_head_shard(
+    total_num_kv_heads: usize,
+    rank: usize,
+    world_size: usize,
+) -> Result<(usize, Shard)> {
+    if total_num_kv_heads == 0 {
+        candle_core::bail!("num_kv_heads must be > 0");
+    }
+    if world_size == 0 {
+        candle_core::bail!("tensor parallel world_size must be > 0");
+    }
+    if rank >= world_size {
+        candle_core::bail!(
+            "rank out of bounds for tensor parallel group (rank={}, world_size={})",
+            rank,
+            world_size
+        );
+    }
+
+    if total_num_kv_heads >= world_size {
+        if total_num_kv_heads % world_size != 0 {
+            candle_core::bail!(
+                "kv heads must be divisible by tensor parallel world_size when partitioned (num_kv_heads={}, world_size={})",
+                total_num_kv_heads,
+                world_size
+            );
+        }
+        Ok((total_num_kv_heads / world_size, shard(0, rank, world_size)))
+    } else {
+        if world_size % total_num_kv_heads != 0 {
+            candle_core::bail!(
+                "tensor parallel world_size must be divisible by kv heads when kv heads are replicated (num_kv_heads={}, world_size={})",
+                total_num_kv_heads,
+                world_size
+            );
+        }
+        let ranks_per_kv_head = world_size / total_num_kv_heads;
+        let kv_head_rank = rank / ranks_per_kv_head;
+        Ok((1, shard(0, kv_head_rank, total_num_kv_heads)))
     }
 }
 
@@ -316,6 +383,7 @@ impl MergedParallelColumnLinear {
         out_dim: usize,
         chunk_dim: usize,
         chunks: Vec<usize>,
+        chunk_shards: Option<Vec<Shard>>,
         vb: VarBuilderX,
         comm: Rc<Comm>,
         quant_cfg: &Option<QuantConfig>,
@@ -326,6 +394,15 @@ impl MergedParallelColumnLinear {
             candle_core::bail!(
                 "Merged quantized weight is not supported at the moment, using ISQ instead!"
             );
+        }
+        if let Some(chunk_shards) = &chunk_shards {
+            if chunk_shards.len() != chunks.len() {
+                candle_core::bail!(
+                    "chunk_shards length mismatch: expected {}, got {}",
+                    chunks.len(),
+                    chunk_shards.len()
+                );
+            }
         }
         let mut vec_linear = Vec::<TensorParallelColumnLinear>::new();
         match vb.0 {
@@ -341,10 +418,32 @@ impl MergedParallelColumnLinear {
                 for chunk_idx in 0..chunks.len() {
                     let chunk_size = chunks[chunk_idx];
                     let ws = weight.narrow(chunk_dim, chunk_start, chunk_size)?;
-                    let c_chunk_size = ws.dim(0)? / comm.world_size();
-                    let ws_chunk = ws
-                        .narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
-                        .contiguous()?;
+                    let ws_chunk = if let Some(chunk_shards) = &chunk_shards {
+                        let chunk_shard = &chunk_shards[chunk_idx];
+                        if ws.dim(0)? % chunk_shard.world_size != 0 {
+                            candle_core::bail!(
+                                "merged chunk {} dim {} is not divisible by shard world_size {}",
+                                chunk_idx,
+                                ws.dim(0)?,
+                                chunk_shard.world_size
+                            );
+                        }
+                        let c_chunk_size = ws.dim(0)? / chunk_shard.world_size;
+                        ws.narrow(0, chunk_shard.rank * c_chunk_size, c_chunk_size)?
+                            .contiguous()?
+                    } else {
+                        if ws.dim(0)? % comm.world_size() != 0 {
+                            candle_core::bail!(
+                                "merged chunk {} dim {} is not divisible by comm world_size {}",
+                                chunk_idx,
+                                ws.dim(0)?,
+                                comm.world_size()
+                            );
+                        }
+                        let c_chunk_size = ws.dim(0)? / comm.world_size();
+                        ws.narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
+                            .contiguous()?
+                    };
                     chunk_start += chunk_size;
 
                     let ln = crate::models::layers::linear::Linear::new(ws_chunk, None);

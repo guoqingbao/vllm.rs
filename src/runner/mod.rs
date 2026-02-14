@@ -193,6 +193,12 @@ pub enum MessageType {
     /// Sent by main process to notify the finished decoding sequences.
     FinishDecode(usize),
 
+    // Hybrid mamba-prefix state management.
+    CaptureMambaPrefixState((usize, u64)),
+    CaptureMambaPrefixStateResponse(bool),
+    HasMambaPrefixState(u64),
+    HasMambaPrefixStateResponse(bool),
+
     /// Optional: runner can send back an error message.
     Error(String),
 

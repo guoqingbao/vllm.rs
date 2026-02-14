@@ -263,6 +263,33 @@ fn main() -> anyhow::Result<()> {
             Ok(MessageType::FinishDecode(id)) => {
                 runner.finished(id);
             }
+            Ok(MessageType::CaptureMambaPrefixState((seq_id, hash))) => {
+                let ret = runner.capture_mamba_prefix_state(seq_id, hash);
+                if ret.is_err() {
+                    vllm_rs::log_error!(
+                        "CaptureMambaPrefixState failed for seq {} hash {}: {:?}",
+                        seq_id,
+                        hash,
+                        ret
+                    );
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::CaptureMambaPrefixStateResponse(ret.unwrap_or(false)),
+                    false,
+                )?;
+            }
+            Ok(MessageType::HasMambaPrefixState(hash)) => {
+                let ret = runner.has_mamba_prefix_state(hash);
+                if ret.is_err() {
+                    vllm_rs::log_error!("HasMambaPrefixState failed for hash {}: {:?}", hash, ret);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::HasMambaPrefixStateResponse(ret.unwrap_or(false)),
+                    false,
+                )?;
+            }
             Ok(MessageType::TransferPrefill(sequence)) => {
                 let ret = runner.transfer_prefill(&sequence);
                 // if ret.is_err() {

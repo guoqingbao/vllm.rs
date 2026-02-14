@@ -131,7 +131,19 @@ impl LLMEngine {
             "Only one architecture is supported at the moment!"
         );
         let arch = config.architectures.as_ref().unwrap()[0].clone();
-
+        if crate::utils::is_qwen3_hybrid_arch_name(arch.as_str()) {
+            if let Some(p_cfg) = &econfig.pd_config {
+                let role = match p_cfg.role {
+                    PdRole::Server => "pd-server",
+                    PdRole::Client => "pd-client",
+                };
+                candle_core::bail!(
+                    "{} is enabled with {} (hybrid Mamba model), but PD separation is not supported because Mamba states are not transferred across PD nodes.",
+                    role,
+                    arch
+                );
+            }
+        }
         let (model_type, default_chat_template, is_rope_i) =
             crate::utils::get_arch_rope(&tokenizer, arch.clone())?;
         log_info!("Use ROPE interleaved {is_rope_i}");
@@ -894,6 +906,8 @@ impl LLMEngine {
         for i in 0..self.cancelled_sequences.len() {
             let seq_id = self.cancelled_sequences[i];
             self.scheduler.cancel(seq_id);
+            // Ensure model-side per-sequence state (e.g., Qwen3.5 Mamba cache slot) is released.
+            let _ = self.notify_runner_finished(seq_id);
             if let Some(_) = self.active_requests.get(&seq_id) {
                 self.active_requests.remove(&seq_id);
             }

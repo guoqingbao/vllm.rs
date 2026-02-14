@@ -16,6 +16,7 @@
 //! let (gpu_cache, cpu_cache) = allocator.init_kv_cache(&allocation, dtype, &device)?;
 //! ```
 
+use super::qwen3_hybrid_layer_types;
 use crate::utils::config::{Config, EngineConfig};
 use candle_core::{DType, Device, Result, Tensor};
 use std::fmt;
@@ -92,6 +93,8 @@ impl std::error::Error for KVCacheError {}
 pub struct KVCacheAllocator {
     // Model parameters
     num_hidden_layers: usize,
+    /// Number of layers that need KV cache (excludes GDN/Mamba layers)
+    num_kv_layers: usize,
     num_kv_heads: usize,
     head_dim: usize,
     num_shards: usize,
@@ -108,9 +111,30 @@ pub struct KVCacheAllocator {
 }
 
 impl KVCacheAllocator {
+    fn kv_heads_per_shard(&self) -> usize {
+        if self.num_shards == 0 {
+            // Defensive fallback: constructor normalizes this to >=1.
+            return 1;
+        }
+
+        if self.num_kv_heads >= self.num_shards {
+            self.num_kv_heads / self.num_shards
+        } else {
+            // For MQA/GQA configs where TP shards exceed KV heads, each shard still stores
+            // one replicated KV head, matching runtime attention behavior.
+            1
+        }
+    }
+
     /// Create a new KVCacheAllocator from engine and model configs
     pub fn new(econfig: &EngineConfig, config: &Config, dtype: DType) -> Self {
-        let num_shards = econfig.num_shards.unwrap_or(1);
+        let configured_num_shards = econfig.num_shards.unwrap_or(1);
+        if configured_num_shards == 0 {
+            crate::log_warn!(
+                "EngineConfig.num_shards=0 is invalid; defaulting to 1 for KVCache allocation"
+            );
+        }
+        let num_shards = configured_num_shards.max(1);
         let head_dim = config
             .head_dim
             .unwrap_or(config.hidden_size / config.num_attention_heads);
@@ -134,8 +158,19 @@ impl KVCacheAllocator {
             .config_model_len
             .unwrap_or(config.max_position_embeddings);
 
+        // For hybrid models (e.g., Qwen3.5), only count full-attention layers
+        let num_kv_layers = if let Some(block_types) = qwen3_hybrid_layer_types(config) {
+            block_types
+                .iter()
+                .filter(|t| t.as_str() == "full_attention")
+                .count()
+        } else {
+            config.num_hidden_layers
+        };
+
         Self {
             num_hidden_layers: config.num_hidden_layers,
+            num_kv_layers,
             num_kv_heads: config.num_key_value_heads,
             head_dim,
             num_shards,
@@ -179,11 +214,11 @@ impl KVCacheAllocator {
     /// Calculate per-block memory size in bytes
     pub fn per_block_bytes(&self) -> usize {
         self.block_size
-            * (self.num_kv_heads / self.num_shards)
+            * self.kv_heads_per_shard()
             * self.head_dim
             * self.dtype_size
             * 2 // K and V
-            * self.num_hidden_layers
+            * self.num_kv_layers
     }
 
     /// Calculate required memory for given parameters
@@ -332,6 +367,20 @@ impl KVCacheAllocator {
         num_shards: usize,
     ) -> std::result::Result<KVCacheAllocation, KVCacheError> {
         let per_block = self.per_block_bytes();
+        if per_block == 0 {
+            return Err(KVCacheError::InvalidConfiguration {
+                message: format!(
+                    "Invalid KVCache block size: per_block=0 (num_kv_heads={}, num_shards={}, head_dim={}, block_size={}, dtype_size={}, num_kv_layers={})",
+                    self.num_kv_heads,
+                    self.num_shards,
+                    self.head_dim,
+                    self.block_size,
+                    self.dtype_size,
+                    self.num_kv_layers
+                ),
+            });
+        }
+
         let mut available_memory_for_kvcache = min_available_memory;
         let (max_num_seqs, max_model_len) = if let (Some(max_num_seqs), Some(max_model_len)) =
             (self.user_max_num_seqs, self.user_max_model_len)
@@ -425,11 +474,7 @@ impl KVCacheAllocator {
 
     /// Calculate flash-context KV block shape: [num_blocks, block_size, num_kv_heads, head_size]
     fn calculate_flash_key_value_block_shape(&self) -> (usize, usize, usize) {
-        (
-            self.block_size,
-            self.num_kv_heads / self.num_shards,
-            self.head_dim,
-        )
+        (self.block_size, self.kv_heads_per_shard(), self.head_dim)
     }
 
     /// Calculate key block shape for paged attention
@@ -437,7 +482,7 @@ impl KVCacheAllocator {
         let element_size = cache_dtype.size_in_bytes();
         let x = 16 / element_size;
         (
-            self.num_kv_heads / self.num_shards,
+            self.kv_heads_per_shard(),
             self.head_dim / x,
             self.block_size,
             x,
@@ -446,11 +491,7 @@ impl KVCacheAllocator {
 
     /// Calculate value block shape for paged attention
     fn calculate_value_block_shape(&self) -> (usize, usize, usize) {
-        (
-            self.num_kv_heads / self.num_shards,
-            self.head_dim,
-            self.block_size,
-        )
+        (self.kv_heads_per_shard(), self.head_dim, self.block_size)
     }
 
     /// Initialize KV cache tensors on GPU and CPU
@@ -504,7 +545,7 @@ impl KVCacheAllocator {
 
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     cache_dtype,
@@ -519,7 +560,7 @@ impl KVCacheAllocator {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
                     cache_dtype,
@@ -539,7 +580,7 @@ impl KVCacheAllocator {
 
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
@@ -554,7 +595,7 @@ impl KVCacheAllocator {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            for _ in 0..self.num_hidden_layers {
+            for _ in 0..self.num_kv_layers {
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,

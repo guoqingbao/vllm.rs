@@ -18,8 +18,10 @@ non-empty prefill step for correct sampling.
 - `--prefix-cache`: enable prefix cache.
 - `--prefix-cache-max-tokens <N>`: cap cache size in tokens (rounded down to block size).
 
-If `--prefix-cache-max-tokens` is not set, a default of ~25% of the GPU KV blocks
-is reserved for cached prefixes.
+If `--prefix-cache-max-tokens` is not set, defaults are:
+- Normal mode: ~50% of GPU KV blocks
+- PD server: ~75% of GPU KV blocks
+- PD client: ~35% of GPU KV blocks
 
 ## Notes
 - Prefix cache uses the same KV memory pool as active sequences. A larger cache
