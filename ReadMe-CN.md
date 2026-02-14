@@ -60,7 +60,8 @@
 * ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）（支持硬件FP8加速，SM90+）
 * ✅ Qwen2/Qwen3 Moe 系列（支持硬件FP8加速，SM90+）
-* ✅ Qwen3.5 系列
+* ✅ Qwen3 Next 系列（支持硬件FP8加速，SM90+）
+* ✅ Qwen3.5 系列（测试TBD）
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
@@ -295,6 +296,8 @@ cargo install --features metal
 
    ```bash
    vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
+    # Or Qwen3-Next 80B
+  ./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1
    ```
   </details>
 

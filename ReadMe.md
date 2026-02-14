@@ -59,9 +59,10 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 ## 🧠 Supported Architectures
 
 * ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
-* ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8 support，SM90+)
-* ✅ Qwen2/Qwen3 Moe (+Hardware FP8 support，SM90+)
-* ✅ Qwen3.5 Dense/Moe
+* ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8，SM90+)
+* ✅ Qwen2/Qwen3 Moe (+Hardware FP8, SM90+)
+* ✅ Qwen3 Next (+Hardware FP8，SM90+)
+* ✅ Qwen3.5 Dense/Moe (Test TBD)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -309,6 +310,8 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 ```bash
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
 vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+# Or Qwen3-Next 80B
+./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1
 # MacOS/Metal (Dense)
 vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```

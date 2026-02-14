@@ -11,7 +11,7 @@ Claude Code -> vLLM.rs (Anthropic-compatible)
 
 ```bash
 # Rust
-./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --w /home/Qwen3-Coder-30B-A3B-Instruct/ --prefix-cache --server --d 0,1
+./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1
 
 # Different model
 ./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --server --prefix-cache
