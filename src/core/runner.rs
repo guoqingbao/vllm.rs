@@ -706,8 +706,8 @@ impl ModelRunner {
             }
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             let seqlen_k = if self.config.prefix_cache.unwrap_or(false)
-                || self.config.prefix_cache.unwrap_or(false)
-                || (seq.num_cached_tokens > 0 && cfg!(feature = "flash-context"))
+                || (seq.num_cached_tokens > 0
+                    && (cfg!(feature = "flash-context") || cfg!(feature = "flashinfer")))
             {
                 seq.num_cached_tokens + num_tokens
             } else {

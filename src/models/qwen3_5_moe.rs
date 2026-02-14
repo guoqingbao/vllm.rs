@@ -1,5 +1,6 @@
 // src/models/qwen3_5_moe.rs
 // Qwen3.5 MoE variant with hybrid attention (full attention + GatedDeltaNet layers)
+use crate::models::layers::attention::Attention;
 use crate::models::layers::deltanet::GatedDeltaNet;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX as Linear;
@@ -9,7 +10,6 @@ use crate::models::layers::moe::{FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeIS
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
-use crate::models::qwen3_5_attention::Qwen3_5Attention;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::utils::resolve_qwen3_hybrid_config;
@@ -52,7 +52,7 @@ impl MoeOrMlp {
 // =============================================================================
 
 enum Qwen3_5MoEAttnType {
-    FullAttention(Qwen3_5Attention),
+    FullAttention(Attention),
     LinearAttention(GatedDeltaNet),
 }
 
@@ -85,7 +85,7 @@ impl Qwen3_5MoEDecoderLayer {
 
         // Attention dispatch
         let attn = if layer_type == "full_attention" {
-            Qwen3_5MoEAttnType::FullAttention(Qwen3_5Attention::new(
+            Qwen3_5MoEAttnType::FullAttention(Attention::new(
                 if is_qvar_builder {
                     vb.clone()
                 } else {

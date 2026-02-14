@@ -1,5 +1,6 @@
 // src/models/qwen3_5.rs
 // Qwen3.5 dense model with hybrid attention (full attention + GatedDeltaNet layers)
+use crate::models::layers::attention::Attention;
 use crate::models::layers::deltanet::GatedDeltaNet;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
@@ -7,7 +8,6 @@ use crate::models::layers::mlp::MLP;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
-use crate::models::qwen3_5_attention::Qwen3_5Attention;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::utils::resolve_qwen3_hybrid_config;
@@ -25,7 +25,7 @@ use std::sync::Arc;
 // =============================================================================
 
 pub enum Qwen3_5AttnType {
-    FullAttention(Qwen3_5Attention),
+    FullAttention(Attention),
     LinearAttention(GatedDeltaNet),
 }
 
@@ -50,7 +50,7 @@ impl Qwen3_5DecoderLayer {
         let is_qvar_builder = vb.is_qvar_builder();
 
         let attn = if layer_type == "full_attention" {
-            Qwen3_5AttnType::FullAttention(Qwen3_5Attention::new(
+            Qwen3_5AttnType::FullAttention(Attention::new(
                 if is_qvar_builder {
                     vb.clone()
                 } else {

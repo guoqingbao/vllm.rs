@@ -21,6 +21,7 @@ pub struct Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
+    attn_output_gate: bool,
     attn: PagedAttention,
     softcapping: Option<f64>,
     dtype: DType,
@@ -40,7 +41,6 @@ impl Attention {
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads;
         let head_dim = config.head_dim.unwrap_or(hidden_size / num_heads);
-        let attention_bias = config.attention_bias.unwrap_or(true);
         let key_map: HashMap<&str, &str> = [
             ("q_proj", "attn_q"),
             ("k_proj", "attn_k"),
@@ -54,18 +54,46 @@ impl Attention {
         .collect();
 
         let is_qvar_builder = vb.is_qvar_builder();
+        let arch = config.architectures.as_ref().unwrap()[0].clone();
+        let is_qwen35_or_next = matches!(
+            arch.as_str(),
+            "Qwen3_5ForCausalLM"
+                | "Qwen3_5ForConditionalGeneration"
+                | "Qwen3_5MoeForCausalLM"
+                | "Qwen3_5MoeForConditionalGeneration"
+                | "Qwen3NextForCausalLM"
+                | "Qwen3NextForConditionalGeneration"
+        );
+        let attention_bias = if is_qwen35_or_next {
+            config.qkv_bias.or(config.attention_bias).unwrap_or(false)
+        } else {
+            config.qkv_bias.or(config.attention_bias).unwrap_or(true)
+        };
+        let attn_output_gate = if is_qwen35_or_next {
+            config.attn_output_gate.unwrap_or(true)
+        } else {
+            config.attn_output_gate.unwrap_or(false)
+        };
+        let q_out_dim = num_heads * head_dim * if attn_output_gate { 2 } else { 1 };
         let no_per_head_norm_models: Vec<String> = vec![
             "Gemma3ForConditionalGeneration",
             "Gemma3ForCausalLM",
             "Qwen3VLForConditionalGeneration",
             "Qwen3VLMoeForConditionalGeneration",
+            "Qwen3_5ForCausalLM",
+            "Qwen3_5ForConditionalGeneration",
+            "Qwen3_5MoeForCausalLM",
+            "Qwen3_5MoeForConditionalGeneration",
+            "Qwen3NextForCausalLM",
+            "Qwen3NextForConditionalGeneration",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let arch = config.architectures.as_ref().unwrap()[0].clone();
         let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
             || arch == "Gemma3ForCausalLM".to_string();
+        // Qwen3.5/Qwen3Next per-head q/k norms use Gemma-style +1 weight semantics.
+        let qk_norm_add_one = is_gemma || is_qwen35_or_next;
 
         let world_size = comm.world_size();
         let attention_heads = num_heads / world_size;
@@ -73,7 +101,7 @@ impl Attention {
 
         let q_proj = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
-            num_heads * head_dim,
+            q_out_dim,
             attention_bias,
             if is_qvar_builder {
                 vb.pp(key_map["q_proj"])
@@ -147,7 +175,7 @@ impl Attention {
             } else {
                 dtype
             },
-            is_gemma,
+            qk_norm_add_one,
         );
         let q_norm = if q_norm.is_ok() {
             Some(q_norm.unwrap())
@@ -168,7 +196,7 @@ impl Attention {
             } else {
                 dtype
             },
-            is_gemma,
+            qk_norm_add_one,
         );
         let k_norm = if k_norm.is_ok() {
             Some(k_norm.unwrap())
@@ -186,6 +214,7 @@ impl Attention {
             num_heads: attention_heads,
             num_kv_heads: kv_heads,
             head_dim,
+            attn_output_gate,
             attn: PagedAttention::new(
                 attention_heads,
                 head_dim,
@@ -213,11 +242,32 @@ impl Attention {
     ) -> Result<Tensor> {
         let (seq_len, _) = xs.dims2()?;
 
-        let q = self.q_proj.forward(xs)?;
+        let q_raw = self.q_proj.forward(xs)?;
         let k = self.k_proj.forward(xs)?;
         let v = self.v_proj.forward(xs)?;
 
-        let q = q
+        let local_q_dim = self.num_heads * self.head_dim;
+        let (q_linear, gate) = if self.attn_output_gate {
+            let q_dim = q_raw.dim(1)?;
+            if q_dim != local_q_dim * 2 {
+                candle_core::bail!(
+                    "q_proj output dim mismatch for gated attention, expected {}, got {}",
+                    local_q_dim * 2,
+                    q_dim
+                );
+            }
+            let q_gate = q_raw.reshape((seq_len, self.num_heads, self.head_dim * 2))?;
+            let q = q_gate.narrow(2, 0, self.head_dim)?;
+            let gate = q_gate.narrow(2, self.head_dim, self.head_dim)?;
+            (
+                q.reshape((seq_len, local_q_dim))?,
+                Some(gate.reshape((seq_len, local_q_dim))?),
+            )
+        } else {
+            (q_raw, None)
+        };
+
+        let q = q_linear
             .reshape((1, seq_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
@@ -302,6 +352,17 @@ impl Attention {
                 self.softcapping,
             )?
             .reshape((seq_len, ()))?;
+
+        let y = if let Some(gate) = gate {
+            let gate = if gate.dtype() != y.dtype() {
+                gate.to_dtype(y.dtype())?
+            } else {
+                gate
+            };
+            y.broadcast_mul(&candle_nn::ops::sigmoid(&gate)?)?
+        } else {
+            y
+        };
 
         self.o_proj.forward(&y.to_dtype(xs.dtype())?)
     }
