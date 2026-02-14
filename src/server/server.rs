@@ -169,7 +169,11 @@ pub async fn chat_completion(
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
     // Streaming tool parsing is handled in the StreamToolParser
-    params.mcp_mode = if !use_stream && has_tools { Some(true) } else { None };
+    params.mcp_mode = if !use_stream && has_tools {
+        Some(true)
+    } else {
+        None
+    };
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");
