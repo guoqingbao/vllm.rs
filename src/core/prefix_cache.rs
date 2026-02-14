@@ -121,6 +121,40 @@ impl PrefixCache {
         blocks
     }
 
+    pub fn hashes_for_match(&self, last_hash: u64) -> Vec<u64> {
+        let mut hashes = Vec::new();
+        let mut current = Some(last_hash);
+        while let Some(hash) = current {
+            let entry = match self.entries.get(&hash) {
+                Some(entry) => entry,
+                None => break,
+            };
+            hashes.push(hash);
+            current = entry.parent;
+        }
+        hashes.reverse();
+        hashes
+    }
+
+    pub fn hash_for_blocks_with_seed(
+        &self,
+        tokens: &[u32],
+        full_blocks: usize,
+        seed: Option<u64>,
+    ) -> Option<u64> {
+        if full_blocks == 0 {
+            return None;
+        }
+        let mut parent_hash = seed.unwrap_or(0u64);
+        let mut last_hash = None;
+        for block_tokens in tokens.chunks(self.block_size).take(full_blocks) {
+            let hash = Self::hash_block(parent_hash, block_tokens);
+            parent_hash = hash;
+            last_hash = Some(hash);
+        }
+        last_hash
+    }
+
     pub fn insert_prefix(&mut self, tokens: &[u32], blocks: &[usize]) -> PrefixCacheUpdate {
         self.insert_prefix_with_seed(tokens, blocks, None)
     }

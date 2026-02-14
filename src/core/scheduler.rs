@@ -43,6 +43,9 @@ pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 50; // check prefill s
 pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
 /// When prefix cache hit is high, prefer local prefill if new tokens < this threshold
 pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
+const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.5;
+const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.75;
+const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.35;
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -68,11 +71,15 @@ fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
         };
 
         let ratio = if is_pd_server {
-            econfig.pd_server_prefix_cache_ratio.unwrap_or(0.5)
+            econfig
+                .pd_server_prefix_cache_ratio
+                .unwrap_or(PREFIX_CACHE_RATIO_PD_SERVER)
         } else if is_pd_client {
-            econfig.pd_client_prefix_cache_ratio.unwrap_or(0.15)
+            econfig
+                .pd_client_prefix_cache_ratio
+                .unwrap_or(PREFIX_CACHE_RATIO_PD_CLIENT)
         } else {
-            0.25f32
+            PREFIX_CACHE_RATIO_NORMAL
         };
 
         ((econfig.num_blocks as f32) * ratio) as usize
@@ -116,6 +123,12 @@ impl Scheduler {
                 (econfig.cpu_mem_fold.unwrap_or(0.2f32) * econfig.num_blocks as f32) as usize,
                 econfig.block_size,
                 prefix_cache_cfg,
+                config
+                    .architectures
+                    .as_ref()
+                    .and_then(|arches| arches.first())
+                    .map(|arch| crate::utils::is_qwen3_hybrid_arch_name(arch))
+                    .unwrap_or(false),
             ),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
@@ -382,6 +395,8 @@ impl Scheduler {
                         if success {
                             // Insert into prefix cache so future requests can benefit
                             // LRU eviction will handle memory pressure automatically
+                            self.block_manager
+                                .capture_mamba_prefix_state(seq, seq.len());
                             self.block_manager.cache_sequence(seq);
                             // Maintain resources until client asks to release or cache eviction
                             seq.status = SequenceStatus::Cached;
@@ -437,6 +452,8 @@ impl Scheduler {
                     seq.is_tool_call_end = true;
                     // External tool mode: finish stream so client can handle tool calls
                     seq.status = SequenceStatus::Finished;
+                    self.block_manager
+                        .capture_mamba_prefix_state(seq, seq.len());
                     self.block_manager.cache_sequence(seq);
                     self.block_manager.deallocate(seq);
                     continue;
@@ -459,10 +476,16 @@ impl Scheduler {
                     );
                 }
                 seq.status = SequenceStatus::Finished;
+                self.block_manager
+                    .capture_mamba_prefix_state(seq, seq.len());
                 self.block_manager.cache_sequence(seq);
                 self.block_manager.deallocate(seq);
             } else {
                 seq.append_token(token);
+                if seq.len() % self.cfg.block_size == 0 {
+                    self.block_manager
+                        .capture_mamba_prefix_state(seq, seq.len());
+                }
             }
         }
     }
@@ -552,6 +575,8 @@ impl Scheduler {
             if *id < self.running.len() {
                 let seq = &self.running[*id];
                 if seq.len() < CHUNK_SIZE || seq.num_cached_tokens + CHUNK_SIZE >= seq.len() {
+                    self.block_manager
+                        .capture_mamba_prefix_state(seq, seq.len());
                     if seq.len() > CHUNK_SIZE {
                         crate::log_warn!(
                             "Seq {} - chunk prefill finished ({} tokens)",
@@ -561,6 +586,8 @@ impl Scheduler {
                     }
                     finished_seqs.push((i, seq.id));
                 } else {
+                    self.block_manager
+                        .capture_mamba_prefix_state(seq, seq.num_cached_tokens + CHUNK_SIZE);
                     remove_ids.push(seq.id);
                     //unfinished due to chunked_prefill, push back to waiting list
                     let mut seq = seq.clone();

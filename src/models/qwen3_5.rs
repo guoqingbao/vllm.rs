@@ -607,6 +607,22 @@ impl Qwen3_5ForCausalLM {
         self.mamba_cache.write().reserve_capacity(max_num_seqs)
     }
 
+    pub fn set_mamba_prefix_cache_capacity(&self, capacity: usize) {
+        self.mamba_cache.write().set_prefix_cache_capacity(capacity);
+    }
+
+    pub fn capture_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        self.mamba_cache.write().capture_prefix_state(seq_id, hash)
+    }
+
+    pub fn has_mamba_prefix_state(&self, hash: u64) -> bool {
+        self.mamba_cache.read().has_prefix_state(hash)
+    }
+
+    pub fn restore_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        self.mamba_cache.write().restore_prefix_state(seq_id, hash)
+    }
+
     pub fn reset_mamba_cache(&self) -> Result<()> {
         self.mamba_cache.write().reset_all()
     }

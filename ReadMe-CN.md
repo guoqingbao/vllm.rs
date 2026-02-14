@@ -297,7 +297,7 @@ cargo install --features metal
    ```bash
    vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
     # Or Qwen3-Next 80B
-  ./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1
+  ./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
    ```
   </details>
 

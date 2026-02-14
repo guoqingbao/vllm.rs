@@ -35,7 +35,7 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use toktrie::TokTrie;
@@ -92,6 +92,7 @@ pub struct ModelRunner {
     /// Cached sampling strategy computed once during prefill, reused during decode
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
+    restored_prefix_sequences: RwLock<HashSet<usize>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
@@ -100,7 +101,12 @@ pub struct ModelRunner {
 }
 
 impl ModelRunner {
-    const MAMBA_CACHE_FIXED_CAPACITY: usize = 128;
+    const MAMBA_CACHE_FIXED_CAPACITY: usize = 64;
+    #[cfg(all(feature = "cuda", feature = "graph"))]
+    const GRAPH_CAPTURE_MIN_BATCH: usize = 16;
+    const DEFAULT_PREFIX_CACHE_RATIO: f32 = 0.5;
+    const PD_SERVER_PREFIX_CACHE_RATIO: f32 = 0.75;
+    const PD_CLIENT_PREFIX_CACHE_RATIO: f32 = 0.35;
 
     fn prepare_mamba_slot_mapping(
         &self,
@@ -127,6 +133,30 @@ impl ModelRunner {
         } else {
             Ok(None)
         }
+    }
+
+    fn mamba_prefix_capacity_blocks(econfig: &EngineConfig) -> usize {
+        if !econfig.prefix_cache.unwrap_or(false) {
+            return 0;
+        }
+        if let Some(max_tokens) = econfig.prefix_cache_max_tokens {
+            return (max_tokens / econfig.block_size).min(econfig.num_blocks);
+        }
+
+        let ratio = if let Some(p_cfg) = &econfig.pd_config {
+            if matches!(p_cfg.role, crate::transfer::PdRole::Server) {
+                econfig
+                    .pd_server_prefix_cache_ratio
+                    .unwrap_or(Self::PD_SERVER_PREFIX_CACHE_RATIO)
+            } else {
+                econfig
+                    .pd_client_prefix_cache_ratio
+                    .unwrap_or(Self::PD_CLIENT_PREFIX_CACHE_RATIO)
+            }
+        } else {
+            Self::DEFAULT_PREFIX_CACHE_RATIO
+        };
+        ((econfig.num_blocks as f32) * ratio) as usize
     }
 
     #[allow(unused)]
@@ -227,25 +257,43 @@ impl ModelRunner {
             max_num_batched_tokens: econfig.max_num_batched_tokens,
         };
 
-        let mamba_cache_capacity = Self::MAMBA_CACHE_FIXED_CAPACITY.max(econfig.max_num_seqs);
+        let is_hybrid_mamba_model = matches!(model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_));
+        let mamba_cache_capacity = if is_hybrid_mamba_model {
+            Self::MAMBA_CACHE_FIXED_CAPACITY.max(econfig.max_num_seqs)
+        } else {
+            0
+        };
+
+        #[cfg(all(feature = "cuda", feature = "graph"))]
+        let graph_capture_max_num_seqs = econfig.max_num_seqs.max(Self::GRAPH_CAPTURE_MIN_BATCH);
+
         #[cfg(all(feature = "cuda", feature = "graph"))]
         {
-            let capture_capacity = planned_graph_capture_batches(econfig.max_num_seqs)
-                .into_iter()
-                .max()
-                .unwrap_or(1);
-            if capture_capacity > mamba_cache_capacity {
-                candle_core::bail!(
-                    "graph capture batch {} exceeds mamba cache capacity {}",
-                    capture_capacity,
-                    mamba_cache_capacity
-                );
+            if is_hybrid_mamba_model {
+                let capture_capacity = planned_graph_capture_batches(graph_capture_max_num_seqs)
+                    .into_iter()
+                    .max()
+                    .unwrap_or(1);
+                if capture_capacity > mamba_cache_capacity {
+                    candle_core::bail!(
+                        "graph capture batch {} exceeds mamba cache capacity {}",
+                        capture_capacity,
+                        mamba_cache_capacity
+                    );
+                }
             }
         }
 
+        let mamba_prefix_capacity = Self::mamba_prefix_capacity_blocks(econfig);
         match &model {
-            Model::Qwen3_5(model) => model.preallocate_mamba_cache(mamba_cache_capacity)?,
-            Model::Qwen3_5MoE(model) => model.preallocate_mamba_cache(mamba_cache_capacity)?,
+            Model::Qwen3_5(model) => {
+                model.preallocate_mamba_cache(mamba_cache_capacity)?;
+                model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
+            }
+            Model::Qwen3_5MoE(model) => {
+                model.preallocate_mamba_cache(mamba_cache_capacity)?;
+                model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
+            }
             _ => {}
         }
 
@@ -287,6 +335,16 @@ impl ModelRunner {
         #[cfg(feature = "flashinfer")]
         crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
 
+        if mamba_prefix_capacity > 0
+            && comm.rank() == 0
+            && matches!(model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_))
+        {
+            crate::log_info!(
+                "Hybrid mamba prefix-state cache enabled: {} entries",
+                mamba_prefix_capacity
+            );
+        }
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -296,7 +354,7 @@ impl ModelRunner {
             #[cfg(all(feature = "cuda", feature = "graph"))]
             capturer: GraphCapturer::new(
                 wrapper,
-                econfig.max_num_seqs,
+                graph_capture_max_num_seqs,
                 econfig.max_model_len.unwrap_or(4096),
                 econfig.block_size,
                 config.hidden_size,
@@ -308,6 +366,7 @@ impl ModelRunner {
             logit_processor: LogitsProcessor::new(seed, temperature, top_k, top_p),
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
+            restored_prefix_sequences: RwLock::new(HashSet::new()),
             guidance_states: RwLock::new(HashMap::new()),
             transfer,
             is_first_rank: comm.rank() == 0,
@@ -331,10 +390,96 @@ impl ModelRunner {
         }
     }
 
+    fn restore_mamba_prefix_states_for_prefill(&self, seqs: &[&Sequence]) -> Result<()> {
+        match &self.model {
+            Model::Qwen3_5(_) => {
+                for seq in seqs {
+                    if seq.num_cached_tokens == 0 {
+                        continue;
+                    }
+                    let Some(hash) = seq.mamba_prefix_hash else {
+                        continue;
+                    };
+                    if self.restored_prefix_sequences.read().contains(&seq.id) {
+                        continue;
+                    }
+                    let restored = self.restore_mamba_prefix_state(seq.id, hash)?;
+                    if !restored {
+                        candle_core::bail!(
+                            "Missing mamba prefix snapshot for seq {} hash {}",
+                            seq.id,
+                            hash
+                        );
+                    }
+                    self.restored_prefix_sequences.write().insert(seq.id);
+                    crate::log_info!(
+                        "Restored mamba prefix state for seq {} (cached {} tokens)",
+                        seq.id,
+                        seq.num_cached_tokens
+                    );
+                }
+                Ok(())
+            }
+            Model::Qwen3_5MoE(_) => {
+                for seq in seqs {
+                    if seq.num_cached_tokens == 0 {
+                        continue;
+                    }
+                    let Some(hash) = seq.mamba_prefix_hash else {
+                        continue;
+                    };
+                    if self.restored_prefix_sequences.read().contains(&seq.id) {
+                        continue;
+                    }
+                    let restored = self.restore_mamba_prefix_state(seq.id, hash)?;
+                    if !restored {
+                        candle_core::bail!(
+                            "Missing mamba prefix snapshot for seq {} hash {}",
+                            seq.id,
+                            hash
+                        );
+                    }
+                    self.restored_prefix_sequences.write().insert(seq.id);
+                    crate::log_info!(
+                        "Restored mamba prefix state for seq {} (cached {} tokens)",
+                        seq.id,
+                        seq.num_cached_tokens
+                    );
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn restore_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        match &self.model {
+            Model::Qwen3_5(model) => model.restore_mamba_prefix_state(seq_id, hash),
+            Model::Qwen3_5MoE(model) => model.restore_mamba_prefix_state(seq_id, hash),
+            _ => Ok(true),
+        }
+    }
+
+    pub fn capture_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        match &self.model {
+            Model::Qwen3_5(model) => model.capture_mamba_prefix_state(seq_id, hash),
+            Model::Qwen3_5MoE(model) => model.capture_mamba_prefix_state(seq_id, hash),
+            _ => return Ok(true),
+        }
+    }
+
+    pub fn has_mamba_prefix_state(&self, hash: u64) -> Result<bool> {
+        match &self.model {
+            Model::Qwen3_5(model) => Ok(model.has_mamba_prefix_state(hash)),
+            Model::Qwen3_5MoE(model) => Ok(model.has_mamba_prefix_state(hash)),
+            _ => Ok(true),
+        }
+    }
+
     #[allow(unused)]
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
         let (input_ids, positions, mut input_metadata) = if is_prefill {
-            match seqs {
+            match &seqs {
                 Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
                 Seqs::DecodeVec(_) => {
                     candle_core::bail!(
@@ -343,11 +488,17 @@ impl ModelRunner {
                 }
             }
         } else {
-            match seqs {
-                Seqs::SeqRefs(seqs) => self.prepare_decode(seqs)?,
+            match &seqs {
+                Seqs::SeqRefs(seqs) => self.prepare_decode(*seqs)?,
                 Seqs::DecodeVec(decode_seqs) => self.prepare_decode(decode_seqs.iter())?,
             }
         };
+
+        if is_prefill {
+            if let Seqs::SeqRefs(seqs_ref) = &seqs {
+                self.restore_mamba_prefix_states_for_prefill(seqs_ref)?;
+            }
+        }
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
         {
@@ -1047,6 +1198,8 @@ impl ModelRunner {
     pub fn finished(&self, id: usize) {
         let mut seq_tokens = self.seq_tokens.write();
         let _ = seq_tokens.remove(&id);
+        let mut restored = self.restored_prefix_sequences.write();
+        let _ = restored.remove(&id);
         let mut guidance_states = self.guidance_states.write();
         let _ = guidance_states.remove(&id);
         match &self.model {
@@ -1081,6 +1234,7 @@ impl ModelRunner {
             Model::Qwen3_5MoE(model) => model.reset_mamba_cache()?,
             _ => {}
         }
+        self.restored_prefix_sequences.write().clear();
         Ok(())
     }
 
