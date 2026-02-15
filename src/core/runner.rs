@@ -102,6 +102,7 @@ pub struct ModelRunner {
 
 impl ModelRunner {
     const MAMBA_CACHE_FIXED_CAPACITY: usize = 64;
+    const MAMBA_PREFIX_CACHE_SNAPSHOT_FACTOR: usize = 2;
     #[cfg(all(feature = "cuda", feature = "graph"))]
     const GRAPH_CAPTURE_MIN_BATCH: usize = 16;
     const DEFAULT_PREFIX_CACHE_RATIO: f32 = 0.5;
@@ -157,6 +158,18 @@ impl ModelRunner {
             Self::DEFAULT_PREFIX_CACHE_RATIO
         };
         ((econfig.num_blocks as f32) * ratio) as usize
+    }
+
+    fn effective_mamba_prefix_capacity(
+        requested_capacity: usize,
+        mamba_cache_capacity: usize,
+    ) -> usize {
+        if requested_capacity == 0 || mamba_cache_capacity == 0 {
+            return 0;
+        }
+
+        requested_capacity
+            .min(mamba_cache_capacity.saturating_mul(Self::MAMBA_PREFIX_CACHE_SNAPSHOT_FACTOR))
     }
 
     #[allow(unused)]
@@ -284,7 +297,20 @@ impl ModelRunner {
             }
         }
 
-        let mamba_prefix_capacity = Self::mamba_prefix_capacity_blocks(econfig);
+        let requested_mamba_prefix_capacity = Self::mamba_prefix_capacity_blocks(econfig);
+        let mamba_prefix_capacity = Self::effective_mamba_prefix_capacity(
+            requested_mamba_prefix_capacity,
+            mamba_cache_capacity,
+        );
+        if requested_mamba_prefix_capacity > 0
+            && requested_mamba_prefix_capacity != mamba_prefix_capacity
+        {
+            crate::log_warn!(
+                "Capping hybrid mamba prefix-state cache from {} to {} entries to avoid stale-state pollution and runaway memory use.",
+                requested_mamba_prefix_capacity,
+                mamba_prefix_capacity
+            );
+        }
         match &model {
             Model::Qwen3_5(model) => {
                 model.preallocate_mamba_cache(mamba_cache_capacity)?;

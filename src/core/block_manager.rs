@@ -40,6 +40,8 @@ pub struct BlockManager {
     runners: Arc<RwLock<RunnerType>>,
     prefix_cache: Option<PrefixCache>,
     mamba_prefix_enabled: bool,
+    mamba_prefix_hashes_by_block: HashMap<usize, HashSet<u64>>,
+    valid_mamba_prefix_hashes: HashSet<u64>,
 }
 
 impl BlockManager {
@@ -89,6 +91,8 @@ impl BlockManager {
             runners,
             prefix_cache,
             mamba_prefix_enabled,
+            mamba_prefix_hashes_by_block: HashMap::new(),
+            valid_mamba_prefix_hashes: HashSet::new(),
         }
     }
 
@@ -272,6 +276,10 @@ impl BlockManager {
         }
         while matched_blocks > 0 {
             let candidate_hash = hashes[matched_blocks - 1];
+            if !self.valid_mamba_prefix_hashes.contains(&candidate_hash) {
+                matched_blocks -= 1;
+                continue;
+            }
             match self.try_has_mamba_prefix_state(candidate_hash) {
                 Ok(true) => break,
                 Ok(false) => {
@@ -367,7 +375,7 @@ impl BlockManager {
         Ok(())
     }
 
-    pub fn capture_mamba_prefix_state(&self, seq: &Sequence, processed_tokens: usize) {
+    pub fn capture_mamba_prefix_state(&mut self, seq: &Sequence, processed_tokens: usize) {
         if !self.mamba_prefix_enabled {
             return;
         }
@@ -387,13 +395,40 @@ impl BlockManager {
         else {
             return;
         };
-        if let Err(e) = self.try_capture_mamba_prefix_state(seq.id, hash) {
-            crate::log_warn!(
-                "Failed to capture mamba prefix state for seq {} hash {}: {}",
-                seq.id,
-                hash,
-                e
-            );
+        match self.try_capture_mamba_prefix_state(seq.id, hash) {
+            Ok(true) => {
+                if let Some(&block_id_u32) = seq.block_table.get(full_blocks.saturating_sub(1)) {
+                    let block_id = block_id_u32 as usize;
+                    self.valid_mamba_prefix_hashes.insert(hash);
+                    self.mamba_prefix_hashes_by_block
+                        .entry(block_id)
+                        .or_default()
+                        .insert(hash);
+                }
+            }
+            Ok(false) => {}
+            Err(e) => {
+                crate::log_warn!(
+                    "Failed to capture mamba prefix state for seq {} hash {}: {}",
+                    seq.id,
+                    hash,
+                    e
+                );
+            }
+        }
+    }
+
+    fn handle_mamba_prefix_evicted_blocks(&mut self, evicted_block_ids: &[usize]) {
+        if !self.mamba_prefix_enabled || evicted_block_ids.is_empty() {
+            return;
+        }
+
+        for &block_id in evicted_block_ids {
+            if let Some(hashes) = self.mamba_prefix_hashes_by_block.remove(&block_id) {
+                for hash in hashes {
+                    self.valid_mamba_prefix_hashes.remove(&hash);
+                }
+            }
         }
     }
 
@@ -440,9 +475,11 @@ impl BlockManager {
         for block_id in inserted {
             self.increment_block_ref(block_id);
         }
+        let evicted_blocks = evicted.clone();
         for block_id in evicted {
             self.decrement_block_ref(block_id);
         }
+        self.handle_mamba_prefix_evicted_blocks(&evicted_blocks);
     }
 
     pub fn prefix_cache_enabled(&self) -> bool {
@@ -485,9 +522,11 @@ impl BlockManager {
             return;
         };
         let evicted = prefix_cache.clear();
+        let evicted_blocks = evicted.clone();
         for block_id in evicted {
             self.decrement_block_ref(block_id);
         }
+        self.handle_mamba_prefix_evicted_blocks(&evicted_blocks);
     }
 
     pub fn evict_prefix_cache_blocks(&mut self, num_blocks: usize) -> usize {
@@ -498,11 +537,13 @@ impl BlockManager {
             return 0;
         }
         let evicted = prefix_cache.evict_blocks(num_blocks);
-        let count = evicted.len();
+        let evicted_count = evicted.len();
+        let evicted_blocks = evicted.clone();
         for block_id in evicted {
             self.decrement_block_ref(block_id);
         }
-        count
+        self.handle_mamba_prefix_evicted_blocks(&evicted_blocks);
+        evicted_count
     }
 
     pub fn evict_prefix_cache_until_free(&mut self, min_free_blocks: usize) -> usize {
@@ -521,9 +562,11 @@ impl BlockManager {
                 break;
             }
             total_evicted += evicted.len();
+            let evicted_blocks = evicted.clone();
             for block_id in evicted {
                 self.decrement_block_ref(block_id);
             }
+            self.handle_mamba_prefix_evicted_blocks(&evicted_blocks);
         }
         total_evicted
     }
@@ -693,7 +736,6 @@ impl BlockManager {
         MessageType::HasMambaPrefixStateResponse,
         bool
     );
-
     // Zero specific blocks
     def_broadcast_message_to_runners!(
         pub,
