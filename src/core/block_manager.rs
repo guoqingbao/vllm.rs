@@ -41,6 +41,7 @@ pub struct BlockManager {
     prefix_cache: Option<PrefixCache>,
     mamba_prefix_enabled: bool,
     mamba_prefix_hashes_by_block: HashMap<usize, HashSet<u64>>,
+    mamba_prefix_block_by_hash: HashMap<u64, usize>,
     valid_mamba_prefix_hashes: HashSet<u64>,
 }
 
@@ -92,6 +93,7 @@ impl BlockManager {
             prefix_cache,
             mamba_prefix_enabled,
             mamba_prefix_hashes_by_block: HashMap::new(),
+            mamba_prefix_block_by_hash: HashMap::new(),
             valid_mamba_prefix_hashes: HashSet::new(),
         }
     }
@@ -283,6 +285,7 @@ impl BlockManager {
             match self.try_has_mamba_prefix_state(candidate_hash) {
                 Ok(true) => break,
                 Ok(false) => {
+                    self.invalidate_mamba_prefix_hash(candidate_hash);
                     matched_blocks -= 1;
                 }
                 Err(e) => {
@@ -399,6 +402,20 @@ impl BlockManager {
             Ok(true) => {
                 if let Some(&block_id_u32) = seq.block_table.get(full_blocks.saturating_sub(1)) {
                     let block_id = block_id_u32 as usize;
+                    if let Some(old_block_id) =
+                        self.mamba_prefix_block_by_hash.insert(hash, block_id)
+                    {
+                        if old_block_id != block_id {
+                            if let Some(hashes) =
+                                self.mamba_prefix_hashes_by_block.get_mut(&old_block_id)
+                            {
+                                hashes.remove(&hash);
+                                if hashes.is_empty() {
+                                    self.mamba_prefix_hashes_by_block.remove(&old_block_id);
+                                }
+                            }
+                        }
+                    }
                     self.valid_mamba_prefix_hashes.insert(hash);
                     self.mamba_prefix_hashes_by_block
                         .entry(block_id)
@@ -418,6 +435,18 @@ impl BlockManager {
         }
     }
 
+    fn invalidate_mamba_prefix_hash(&mut self, hash: u64) {
+        self.valid_mamba_prefix_hashes.remove(&hash);
+        if let Some(block_id) = self.mamba_prefix_block_by_hash.remove(&hash) {
+            if let Some(hashes) = self.mamba_prefix_hashes_by_block.get_mut(&block_id) {
+                hashes.remove(&hash);
+                if hashes.is_empty() {
+                    self.mamba_prefix_hashes_by_block.remove(&block_id);
+                }
+            }
+        }
+    }
+
     fn handle_mamba_prefix_evicted_blocks(&mut self, evicted_block_ids: &[usize]) {
         if !self.mamba_prefix_enabled || evicted_block_ids.is_empty() {
             return;
@@ -427,6 +456,7 @@ impl BlockManager {
             if let Some(hashes) = self.mamba_prefix_hashes_by_block.remove(&block_id) {
                 for hash in hashes {
                     self.valid_mamba_prefix_hashes.remove(&hash);
+                    self.mamba_prefix_block_by_hash.remove(&hash);
                 }
             }
         }

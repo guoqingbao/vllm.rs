@@ -101,6 +101,7 @@ pub struct ModelRunner {
 }
 
 impl ModelRunner {
+    // Mamba slots track concurrent sequence states (not KV token blocks).
     const MAMBA_CACHE_FIXED_CAPACITY: usize = 64;
     const MAMBA_PREFIX_CACHE_SNAPSHOT_FACTOR: usize = 2;
     #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -321,6 +322,15 @@ impl ModelRunner {
                 model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
             }
             _ => {}
+        }
+
+        if is_hybrid_mamba_model {
+            crate::log_info!(
+                "Hybrid mamba slots preallocated: {} (max_num_seqs={}); prefix-state capacity={} entries",
+                mamba_cache_capacity,
+                econfig.max_num_seqs,
+                mamba_prefix_capacity
+            );
         }
 
         let (gpu_kv_cache, cpu_kv_cache) =
