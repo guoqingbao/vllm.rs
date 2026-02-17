@@ -82,6 +82,7 @@
 - [工具调用解析](docs/tool_parsing.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)
+- [OpenCode使用vLLM.rs后端](docs/open_code.md)
 - [Goose AI Agent使用vLLM.rs后端](docs/goose.md)
 - [Embedding](docs/embeddings.md)
 - [多模态 (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)

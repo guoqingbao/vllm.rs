@@ -83,6 +83,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Tool Parsing](docs/tool_parsing.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
 - [Work with Claude Code](docs/claude_code.md)
+- [Work with OpenCode](docs/open_code.md)
 - [Work with Goose AI Agent](docs/goose.md)
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
