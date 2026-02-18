@@ -16,7 +16,7 @@
 //! let (gpu_cache, cpu_cache) = allocator.init_kv_cache(&allocation, dtype, &device)?;
 //! ```
 
-use super::qwen3_hybrid_layer_types;
+use super::{qwen3_hybrid_layer_types, resolve_qwen3_hybrid_config};
 use crate::utils::config::{Config, EngineConfig};
 use candle_core::{DType, Device, Result, Tensor};
 use std::fmt;
@@ -25,6 +25,8 @@ use std::fmt;
 const CUDA_RESERVED_BYTES: u64 = 512 * 1024 * 1024; // 512 MB recommended minimum remaining memory
 const SIZE_IN_MB: f64 = (1024 * 1024) as f64;
 const SIZE_IN_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+const DEFAULT_HYBRID_MAMBA_FRACTION: f64 = 0.1;
+const MAX_HYBRID_MAMBA_FRACTION: f64 = 0.3;
 
 /// Represents the result of KVCache allocation planning
 #[derive(Debug, Clone)]
@@ -108,6 +110,9 @@ pub struct KVCacheAllocator {
     fp8_kvcache: bool,
     cpu_mem_fold: f32,
     dtype_size: usize,
+    model_dtype_size: usize,
+    hybrid_mamba_slot_bytes: Option<usize>,
+    hybrid_num_gdn_layers: usize,
 }
 
 impl KVCacheAllocator {
@@ -145,6 +150,7 @@ impl KVCacheAllocator {
         } else {
             dtype.size_in_bytes()
         };
+        let model_dtype_size = dtype.size_in_bytes();
 
         let kv_fraction = econfig
             .kv_fraction
@@ -166,6 +172,52 @@ impl KVCacheAllocator {
                 .count()
         } else {
             config.num_hidden_layers
+        };
+
+        let (hybrid_mamba_slot_bytes, hybrid_num_gdn_layers) = if let Some(block_types) =
+            qwen3_hybrid_layer_types(config)
+        {
+            let num_gdn_layers = block_types
+                .iter()
+                .filter(|t| t.as_str() == "linear_attention")
+                .count();
+            if num_gdn_layers == 0 {
+                (None, 0)
+            } else {
+                let hybrid = resolve_qwen3_hybrid_config(config);
+                let shard_count = num_shards.max(1);
+                if hybrid.num_v_heads % shard_count != 0 || hybrid.num_k_heads % shard_count != 0 {
+                    crate::log_warn!(
+                            "Hybrid mamba heads are not divisible by num_shards (v_heads={}, k_heads={}, shards={}); memory estimate uses floor division.",
+                            hybrid.num_v_heads,
+                            hybrid.num_k_heads,
+                            shard_count
+                        );
+                }
+                let num_v_heads = std::cmp::max(1, hybrid.num_v_heads / shard_count);
+                let num_k_heads = std::cmp::max(1, hybrid.num_k_heads / shard_count);
+                let conv_window = hybrid.conv_kernel_size.saturating_sub(1);
+                let d_conv = num_k_heads
+                    .saturating_mul(hybrid.key_head_dim)
+                    .saturating_mul(2)
+                    .saturating_add(num_v_heads.saturating_mul(hybrid.value_head_dim));
+                let per_layer_conv_bytes = d_conv
+                    .saturating_mul(conv_window)
+                    .saturating_mul(model_dtype_size);
+                let per_layer_recurrent_bytes = num_v_heads
+                    .saturating_mul(hybrid.key_head_dim)
+                    .saturating_mul(hybrid.value_head_dim)
+                    .saturating_mul(DType::F32.size_in_bytes());
+                let per_slot_bytes = num_gdn_layers
+                    .saturating_mul(per_layer_conv_bytes.saturating_add(per_layer_recurrent_bytes));
+                if per_slot_bytes == 0 {
+                    (None, num_gdn_layers)
+                } else {
+                    (Some(per_slot_bytes), num_gdn_layers)
+                }
+            }
+        } else {
+            (None, 0)
         };
 
         Self {
@@ -190,26 +242,107 @@ impl KVCacheAllocator {
             fp8_kvcache,
             cpu_mem_fold: econfig.cpu_mem_fold.unwrap_or(0.2),
             dtype_size,
+            model_dtype_size,
+            hybrid_mamba_slot_bytes,
+            hybrid_num_gdn_layers,
         }
     }
 
     pub fn plan(&self, device_ids: &[usize], econfig: &mut EngineConfig) -> Result<()> {
-        match self.get_available_memory(&device_ids) {
-            Ok(min_available) => match self.plan_allocation(min_available, device_ids.len()) {
-                Ok(allocation) => {
-                    self.apply_to_config(&allocation, econfig);
-                    Ok(())
+        match self.get_available_memory(device_ids) {
+            Ok(min_available) => {
+                let mut kv_budget = min_available;
+                let mut mamba_budget = 0u64;
+                let mut mamba_capacity = 0usize;
+                let mut mamba_budget_enabled = false;
+
+                if let Some(slot_bytes) = self.hybrid_mamba_slot_bytes {
+                    let requested_fraction = econfig
+                        .mamba_fraction
+                        .map(|f| f as f64)
+                        .unwrap_or(DEFAULT_HYBRID_MAMBA_FRACTION)
+                        .clamp(0.0, MAX_HYBRID_MAMBA_FRACTION);
+                    if requested_fraction > 0.0 {
+                        mamba_budget_enabled = true;
+
+                        let mut target_budget =
+                            ((min_available as f64) * requested_fraction) as u64;
+                        let min_one_slot = slot_bytes as u64;
+                        if target_budget > 0 && target_budget < min_one_slot {
+                            crate::log_warn!(
+                                "Hybrid mamba budget {:.2} MB is smaller than one slot {:.2} MB; bumping to one slot.",
+                                target_budget as f64 / SIZE_IN_MB,
+                                min_one_slot as f64 / SIZE_IN_MB
+                            );
+                            target_budget = min_one_slot;
+                        }
+                        if target_budget >= min_available {
+                            candle_core::bail!(
+                                "Hybrid mamba budget ({:.2} GB) leaves no memory for KV cache. Reduce mamba_fraction or max_model_len.",
+                                target_budget as f64 / SIZE_IN_GB
+                            );
+                        }
+
+                        mamba_budget = target_budget;
+                        kv_budget = min_available.saturating_sub(mamba_budget);
+                        mamba_capacity = if slot_bytes == 0 {
+                            0
+                        } else {
+                            (mamba_budget as usize / slot_bytes).max(1)
+                        };
+                    }
                 }
-                Err(e) => {
-                    crate::log_error!("KVCache allocation failed: {}", e);
-                    candle_core::bail!("KVCache allocation failed: {}", e)
+
+                match self.plan_allocation(kv_budget, device_ids.len()) {
+                    Ok(allocation) => {
+                        self.apply_to_config(&allocation, econfig);
+
+                        if let Some(slot_bytes) = self.hybrid_mamba_slot_bytes {
+                            if !mamba_budget_enabled {
+                                econfig.mamba_slot_bytes = 0;
+                                econfig.mamba_memory_bytes = 0;
+                                econfig.mamba_cache_capacity = None;
+                                return Ok(());
+                            }
+                            if allocation.max_num_seqs > mamba_capacity {
+                                crate::log_warn!(
+                                    "Clamping max_num_seqs from {} to {} due to hybrid mamba slot capacity.",
+                                    allocation.max_num_seqs,
+                                    mamba_capacity
+                                );
+                                econfig.max_num_seqs = mamba_capacity;
+                            }
+                            econfig.mamba_slot_bytes = slot_bytes;
+                            econfig.mamba_memory_bytes = mamba_budget as usize;
+                            econfig.mamba_cache_capacity = Some(mamba_capacity);
+                            crate::log_warn!(
+                                "Hybrid Mamba Allocation: {} slot(s), {:.2} GB budget, {:.2} MB/slot, {} linear-attention layer(s), model dtype {} bytes",
+                                mamba_capacity,
+                                mamba_budget as f64 / SIZE_IN_GB,
+                                slot_bytes as f64 / SIZE_IN_MB,
+                                self.hybrid_num_gdn_layers,
+                                self.model_dtype_size
+                            );
+                        } else {
+                            econfig.mamba_slot_bytes = 0;
+                            econfig.mamba_memory_bytes = 0;
+                            econfig.mamba_cache_capacity = None;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => {
+                        crate::log_error!("KVCache allocation failed: {}", e);
+                        candle_core::bail!("KVCache allocation failed: {}", e)
+                    }
                 }
-            },
+            }
             Err(e) => {
                 crate::log_error!("Failed to get available memory: {:?}", e);
                 Err(e)
             }
-        }
+        }?;
+
+        Ok(())
     }
     /// Calculate per-block memory size in bytes
     pub fn per_block_bytes(&self) -> usize {
@@ -252,7 +385,7 @@ impl KVCacheAllocator {
             let usable = (free as f64 * self.kv_fraction) as u64;
 
             crate::log_warn!(
-                "GPU {}: total {:.2} GB, free {:.2} GB, kv_fraction {:.0}%, Max usable for KVCache {:.2} GB",
+                "GPU {}: total {:.2} GB, free {:.2} GB, kv_fraction {:.0}%, Max usable cache budget {:.2} GB",
                 device_id,
                 total as f64 / SIZE_IN_GB,
                 free as f64 / SIZE_IN_GB,
@@ -287,7 +420,7 @@ impl KVCacheAllocator {
         let usable = (avail_mem as f64 * self.kv_fraction) as u64;
 
         crate::log_warn!(
-            "Memory: available {:.2} GB, kv_fraction {:.0}%, Max usable for KVCache {:.2} GB",
+            "Memory: available {:.2} GB, kv_fraction {:.0}%, Max usable cache budget {:.2} GB",
             avail_mem as f64 / SIZE_IN_GB,
             self.kv_fraction * 100.0,
             usable as f64 / SIZE_IN_GB

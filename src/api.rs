@@ -29,6 +29,7 @@ pub struct EngineBuilder {
     dtype: Option<DType>,
     flash_attn: Option<bool>,
     fp8_kvcache: Option<bool>,
+    mamba_fraction: Option<f32>,
     prefix_cache: Option<bool>,
     prefix_cache_max_tokens: Option<usize>,
     pd_server_prefix_cache_ratio: Option<f32>,
@@ -44,6 +45,7 @@ impl EngineBuilder {
             dtype: None,
             flash_attn: None,
             fp8_kvcache: None,
+            mamba_fraction: None,
             prefix_cache: None,
             prefix_cache_max_tokens: None,
             pd_server_prefix_cache_ratio: None,
@@ -69,6 +71,11 @@ impl EngineBuilder {
 
     pub fn with_fp8_kvcache(mut self) -> Self {
         self.fp8_kvcache = Some(true);
+        self
+    }
+
+    pub fn with_mamba_fraction(mut self, ratio: f32) -> Self {
+        self.mamba_fraction = Some(ratio);
         self
     }
 
@@ -136,6 +143,7 @@ impl EngineBuilder {
             None,
             None,
             None,
+            self.mamba_fraction,
             None,
             None,
             None,

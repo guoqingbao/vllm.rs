@@ -231,8 +231,15 @@ pub struct EngineConfig {
     pub hf_token_path: Option<String>,
     pub num_blocks: usize,
     pub kv_fraction: Option<f32>, // After loading the model, the remaining percent of gpu used for kvcache
+    pub mamba_fraction: Option<f32>, // Percent of cache budget reserved for hybrid mamba states
     pub cpu_mem_fold: Option<f32>, // the percentage of gpu kvcache: 0.1x to 10x, default 1.0x
     pub kvcache_memory_bytes: usize,
+    #[serde(default)]
+    pub mamba_memory_bytes: usize,
+    #[serde(default)]
+    pub mamba_slot_bytes: usize,
+    #[serde(default)]
+    pub mamba_cache_capacity: Option<usize>,
     pub block_size: usize,
     pub max_num_seqs: usize,
     pub max_num_batched_tokens: usize,
@@ -280,8 +287,16 @@ pub struct EngineConfig {
     pub cpu_mem_fold: Option<f32>,
     #[pyo3(get, set)]
     pub kv_fraction: Option<f32>,
+    #[pyo3(get, set)]
+    pub mamba_fraction: Option<f32>,
     pub block_size: usize,
     pub kvcache_memory_bytes: usize,
+    #[serde(default)]
+    pub mamba_memory_bytes: usize,
+    #[serde(default)]
+    pub mamba_slot_bytes: usize,
+    #[pyo3(get, set)]
+    pub mamba_cache_capacity: Option<usize>,
     #[pyo3(get, set)]
     pub max_num_seqs: usize,
     #[pyo3(get, set)]
@@ -350,6 +365,7 @@ impl EngineConfig {
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
+        mamba_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
         mcp_command: Option<String>,
         mcp_config: Option<String>,
@@ -380,7 +396,11 @@ impl EngineConfig {
             num_blocks: 128, //placeholder
             cpu_mem_fold,
             kv_fraction,
+            mamba_fraction,
             kvcache_memory_bytes: 0, //placeholder
+            mamba_memory_bytes: 0,
+            mamba_slot_bytes: 0,
+            mamba_cache_capacity: None,
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: max_num_seqs.unwrap_or(32) * 1024, //placeholder

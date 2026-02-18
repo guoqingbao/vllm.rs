@@ -323,6 +323,73 @@ impl Scheduler {
         ids.iter().map(|&i| &self.running[i]).collect()
     }
 
+    /// For prefill sequences that rely on cached prefix tokens, verify mamba state snapshots
+    /// still exist. If a snapshot is missing/evicted, downgrade that sequence to full prefill.
+    pub fn fallback_missing_mamba_prefix_snapshots(
+        &mut self,
+        scheduled_ids: &[usize],
+    ) -> Result<usize> {
+        let (running, block_manager) = (&mut self.running, &mut self.block_manager);
+        let mut downgraded = 0usize;
+
+        for &idx in scheduled_ids {
+            if idx >= running.len() {
+                continue;
+            }
+            let seq = &mut running[idx];
+            if seq.num_cached_tokens == 0 {
+                continue;
+            }
+            let Some(hash) = seq.mamba_prefix_hash else {
+                continue;
+            };
+
+            let has_snapshot = match block_manager.try_has_mamba_prefix_state(hash) {
+                Ok(v) => v,
+                Err(e) => {
+                    crate::log_warn!(
+                        "Seq {}: failed to query mamba prefix snapshot hash {}: {}. Falling back to full prefill.",
+                        seq.id,
+                        hash,
+                        e
+                    );
+                    false
+                }
+            };
+            if has_snapshot {
+                continue;
+            }
+
+            let prev_cached = seq.num_cached_tokens;
+            let required_blocks = seq.num_blocks();
+
+            // Drop current block refs (including any shared prefix refs), then rebuild from scratch.
+            block_manager.deallocate(seq);
+            seq.clear_block_table();
+
+            if !block_manager.can_allocate_without_prefix(seq) {
+                let evicted = block_manager.evict_prefix_cache_until_free(required_blocks);
+                if evicted > 0 {
+                    crate::log_warn!(
+                        "Seq {}: evicted {} prefix cache block(s) before mamba fallback reallocation.",
+                        seq.id,
+                        evicted
+                    );
+                }
+            }
+            block_manager.allocate_without_prefix(seq)?;
+            downgraded += 1;
+            crate::log_warn!(
+                "Seq {}: missing mamba snapshot hash {} (cached {} tokens). Downgraded to full prefill.",
+                seq.id,
+                hash,
+                prev_cached
+            );
+        }
+
+        Ok(downgraded)
+    }
+
     pub fn get_running(&self, idx: usize) -> Option<&Sequence> {
         if idx < self.running.len() {
             Some(&self.running[idx])
@@ -1016,6 +1083,28 @@ impl Scheduler {
             kvcache_memory_gb,
             cpu_swap_log,
         );
+        if let Some(capacity) = self.cfg.mamba_cache_capacity {
+            if capacity > 0 && self.cfg.mamba_slot_bytes > 0 {
+                let active_slots = (self.running.len()
+                    + self.waiting.len()
+                    + self.cached.len()
+                    + self.transferred.len())
+                .min(capacity);
+                let active_percent = active_slots as f32 * 100.0f32 / capacity as f32;
+                let slot_mb = self.cfg.mamba_slot_bytes as f32 / 1024.0f32 / 1024.0f32;
+                let used_gb = (active_slots * self.cfg.mamba_slot_bytes) as f32 / SIZE_IN_GB as f32;
+                let budget_gb = self.cfg.mamba_memory_bytes as f32 / SIZE_IN_GB as f32;
+                crate::log_info!(
+                    "GPU MambaState: {} / {} slots used ({:.1}%), approx {:.2}GB/{:.2}GB (slot {:.2}MB)",
+                    active_slots,
+                    capacity,
+                    active_percent,
+                    used_gb,
+                    budget_gb,
+                    slot_mb
+                );
+            }
+        }
     }
 
     pub fn kv_cache_usage_percent(&self) -> f32 {

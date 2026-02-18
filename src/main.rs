@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
         Some(args.server || args.ui_server || !interactive),
         args.cpu_mem_fold,
         args.kv_fraction,
+        args.mamba_fraction,
         pd_config,
         args.mcp_command.clone(),
         args.mcp_config.clone(),

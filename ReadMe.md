@@ -118,7 +118,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper (SM90+) / Blackwell (SM120+)
 
-Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.8.7), unzip it, then install the `.whl`
+Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.2), unzip it, then install the `.whl`
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
