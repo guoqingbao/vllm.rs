@@ -78,20 +78,28 @@ pub fn filter_tool_calls(
             continue;
         }
 
-        let filtered_args =
-            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
-                let mut filtered = serde_json::Map::new();
-                if let Some(args_obj) = parsed_args.as_object() {
-                    for (key, value) in args_obj {
-                        if props.contains_key(key) {
-                            filtered.insert(key.clone(), value.clone());
-                        }
-                    }
-                }
-                Value::Object(filtered)
-            } else {
-                parsed_args.clone()
-            };
+        let args_obj = match parsed_args.as_object() {
+            Some(obj) => obj,
+            None => {
+                invalid.push(call.clone());
+                continue;
+            }
+        };
+
+        let normalized_args_obj = normalize_argument_keys(args_obj, schema);
+
+        if let Some(missing) = missing_required_keys(&normalized_args_obj, schema) {
+            crate::log_warn!(
+                "Missing required argument(s) for tool '{}': {:?}. Args: {}",
+                call.function.name,
+                missing,
+                args_str
+            );
+            invalid.push(call.clone());
+            continue;
+        }
+
+        let filtered_args = Value::Object(normalized_args_obj);
 
         let normalized_args =
             serde_json::to_string(&filtered_args).unwrap_or_else(|_| args_str.to_string());
@@ -106,6 +114,74 @@ pub fn filter_tool_calls(
     }
 
     (valid, invalid)
+}
+
+fn normalize_argument_keys(
+    args_obj: &serde_json::Map<String, Value>,
+    schema: &Value,
+) -> serde_json::Map<String, Value> {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return args_obj.clone();
+    };
+
+    let mut canonical_props: HashMap<String, Vec<String>> = HashMap::new();
+    for prop in props.keys() {
+        canonical_props
+            .entry(canonicalize_key(prop))
+            .or_default()
+            .push(prop.clone());
+    }
+
+    let mut normalized = serde_json::Map::new();
+    for (key, value) in args_obj {
+        if props.contains_key(key) {
+            normalized.insert(key.clone(), value.clone());
+            continue;
+        }
+
+        let canonical = canonicalize_key(key);
+        if let Some(candidates) = canonical_props.get(&canonical) {
+            if candidates.len() == 1 {
+                normalized.insert(candidates[0].clone(), value.clone());
+                continue;
+            }
+        }
+
+        // Common fallback for editor/file tools where models often emit "file".
+        if key == "file" && props.contains_key("filePath") && !props.contains_key("file") {
+            normalized.insert("filePath".to_string(), value.clone());
+        }
+    }
+
+    normalized
+}
+
+fn canonicalize_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+fn missing_required_keys(
+    args_obj: &serde_json::Map<String, Value>,
+    schema: &Value,
+) -> Option<Vec<String>> {
+    let required = schema.get("required").and_then(|r| r.as_array())?;
+    let mut missing = Vec::new();
+    for key in required {
+        let Some(name) = key.as_str() else {
+            continue;
+        };
+        if !args_obj.get(name).is_some_and(|value| !value.is_null()) {
+            missing.push(name.to_string());
+        }
+    }
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
+    }
 }
 
 /// Format tool calls for logging - returns a summary string
@@ -146,6 +222,7 @@ pub fn log_tool_calls(label: &str, tool_calls: &[ToolCall]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_resolve_tools_prefers_request() {
