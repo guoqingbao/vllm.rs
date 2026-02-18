@@ -438,26 +438,25 @@ impl StreamToolParser {
     }
 
     /// Check if token/text matches start trigger
-    fn is_start_token(&self, id: u32, text: &str) -> bool {
+    fn is_start_token(&self, id: u32, _text: &str) -> bool {
         // Token ID match (if available)
         if self.config.has_start_tokens() {
             return self.config.start_token_ids.contains(&id);
         }
 
-        match self.accumulated_output[..self.accumulated_output.len() - text.len()]
-            .chars()
-            .last()
-        {
-            // Empty buffer or newline are valid "start of line" checks for text-matched tags.
-            None | Some('\n') => {}
-            _ => return false,
-        };
-        // Text match (including partial prefix chunks in text-only mode)
-        if text.contains(&self.config.start_token_str) {
+        // Text-only mode: detect on the current line, allowing split tags while
+        // avoiding overly eager triggers like a lone "<".
+        let current_line = self.accumulated_output.rsplit('\n').next().unwrap_or("");
+        let candidate = current_line.trim_start_matches(|c| c == ' ' || c == '\t' || c == '\r');
+
+        if candidate.starts_with(&self.config.start_token_str) {
             return true;
         }
-        let chunk = text.trim_start_matches(|c| c == '\n' || c == '\r' || c == ' ');
-        !chunk.is_empty() && self.config.start_token_str.starts_with(chunk)
+
+        let min_prefix_len = Self::safe_partial_prefix_len(&self.config.start_token_str);
+        !candidate.is_empty()
+            && candidate.len() >= min_prefix_len
+            && self.config.start_token_str.starts_with(candidate)
     }
 
     /// Check if token/text matches end trigger
@@ -608,6 +607,15 @@ impl StreamToolParser {
             output = output.replace(&self.config.end_token_str, "");
         }
         output
+    }
+
+    fn safe_partial_prefix_len(start_tag: &str) -> usize {
+        if let Some(idx) = start_tag.find('_') {
+            // E.g. "<tool_call>" => require at least "<tool"
+            return idx.max(2);
+        }
+        // Default minimum for tags without underscore.
+        start_tag.find('>').map_or(6, |idx| idx).clamp(2, 6)
     }
 
     // --- Chunk creation helpers (for use by server.rs) ---
