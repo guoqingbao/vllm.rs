@@ -251,6 +251,8 @@ impl Message {
             role,
             content,
             num_images,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 }

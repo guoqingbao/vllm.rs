@@ -354,13 +354,14 @@ impl StreamToolParser {
             }
         }
 
-        // Don't detect tool calls inside reasoning or code blocks
-        if self.in_reasoning() || self.in_code_block {
-            return StreamResult::Content(token_text.to_string());
-        }
-
         match self.state.clone() {
             ParserState::Normal => {
+                // Don't detect tool-call starts inside reasoning or code blocks.
+                // Once buffering starts we must continue buffering even if arguments
+                // contain code fences/backticks.
+                if self.in_reasoning() || self.in_code_block {
+                    return StreamResult::Content(token_text.to_string());
+                }
                 // Check for start trigger
                 if self.is_start_token(token_id, token_text) {
                     self.state = ParserState::Buffering;
@@ -437,21 +438,25 @@ impl StreamToolParser {
     }
 
     /// Check if token/text matches start trigger
-    fn is_start_token(&self, id: u32, text: &str) -> bool {
-        match self.accumulated_output[..self.accumulated_output.len() - text.len()]
-            .chars()
-            .last()
-        {
-            // Empty buffer or newline are valid "start of line" checks for tool calls
-            None | Some('\n') => {}
-            _ => return false,
-        };
+    fn is_start_token(&self, id: u32, _text: &str) -> bool {
         // Token ID match (if available)
         if self.config.has_start_tokens() {
             return self.config.start_token_ids.contains(&id);
         }
-        // Text match
-        text.contains(&self.config.start_token_str)
+
+        // Text-only mode: detect on the current line, allowing split tags while
+        // avoiding overly eager triggers like a lone "<".
+        let current_line = self.accumulated_output.rsplit('\n').next().unwrap_or("");
+        let candidate = current_line.trim_start_matches(|c| c == ' ' || c == '\t' || c == '\r');
+
+        if candidate.starts_with(&self.config.start_token_str) {
+            return true;
+        }
+
+        let min_prefix_len = Self::safe_partial_prefix_len(&self.config.start_token_str);
+        !candidate.is_empty()
+            && candidate.len() >= min_prefix_len
+            && self.config.start_token_str.starts_with(candidate)
     }
 
     /// Check if token/text matches end trigger
@@ -602,6 +607,15 @@ impl StreamToolParser {
             output = output.replace(&self.config.end_token_str, "");
         }
         output
+    }
+
+    fn safe_partial_prefix_len(start_tag: &str) -> usize {
+        if let Some(idx) = start_tag.find('_') {
+            // E.g. "<tool_call>" => require at least "<tool"
+            return idx.max(2);
+        }
+        // Default minimum for tags without underscore.
+        start_tag.find('>').map_or(6, |idx| idx).clamp(2, 6)
     }
 
     // --- Chunk creation helpers (for use by server.rs) ---
@@ -793,6 +807,30 @@ mod tests {
         match parser.process_token(0, "<tool_call>").await {
             StreamResult::Content(text) => assert_eq!(text, "<tool_call>"),
             _ => panic!("Expected Content without token ID match"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parser_keeps_buffering_when_args_include_code_fence() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        match parser.process_token(151657, "<tool_call>").await {
+            StreamResult::Buffering => {}
+            _ => panic!("Expected Buffering on start tag"),
+        }
+
+        // Code-fence-like content inside buffered arguments should not switch the
+        // parser back to normal content mode.
+        match parser.process_token(0, "\n```markdown\n").await {
+            StreamResult::Buffering => {}
+            _ => panic!("Expected Buffering while inside tool call arguments"),
         }
     }
 }

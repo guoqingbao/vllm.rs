@@ -1527,27 +1527,24 @@ pub async fn messages(
                                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                                 .unwrap_or(false);
 
-                            let final_tool_calls = if strict_mode {
-                                if !invalid.is_empty() {
+                            if !invalid.is_empty() {
+                                if strict_mode {
                                     crate::log_warn!(
                                         "[Seq {}] Strict mode enabled, dropping invalid calls",
                                         seq_id
                                     );
-                                }
-                                validated_calls
-                            } else {
-                                if !invalid.is_empty() {
+                                } else {
                                     crate::log_warn!(
-                                        "[Seq {}] Strict mode disabled, keeping invalid calls",
+                                        "[Seq {}] Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads",
                                         seq_id
                                     );
-                                    log_tool_calls("Invalid", seq_id, &invalid);
-                                    if let Some(ref l) = stream_logger {
-                                        l.log_tool_calls("Invalid", &invalid);
-                                    }
                                 }
-                                pending_tool_calls
-                            };
+                                log_tool_calls("Invalid", seq_id, &invalid);
+                                if let Some(ref l) = stream_logger {
+                                    l.log_tool_calls("Invalid", &invalid);
+                                }
+                            }
+                            let final_tool_calls = validated_calls;
 
                             if final_tool_calls.is_empty() {
                                 (Vec::new(), false)
@@ -1852,17 +1849,16 @@ pub async fn messages(
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        let valid_calls = if strict_mode {
-            if !invalid_calls.is_empty() {
+        if !invalid_calls.is_empty() {
+            if strict_mode {
                 crate::log_warn!("Strict mode enabled, dropping invalid calls");
+            } else {
+                crate::log_warn!(
+                    "Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads"
+                );
             }
-            validated_calls
-        } else {
-            if !invalid_calls.is_empty() {
-                crate::log_warn!("Strict mode disabled, keeping invalid calls");
-            }
-            parsed_calls
-        };
+        }
+        let valid_calls = validated_calls;
 
         if !valid_calls.is_empty() {
             log_tool_calls("Valid", output.seq_id, &valid_calls);
