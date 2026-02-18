@@ -626,6 +626,18 @@ impl LLMEngine {
             Err(_) => (vec![], true),
         };
         let decoded_ids = if !scheduled_ids.is_empty() {
+            if is_prefill {
+                let downgraded = self
+                    .scheduler
+                    .fallback_missing_mamba_prefix_snapshots(&scheduled_ids)?;
+                if downgraded > 0 {
+                    crate::log_warn!(
+                        "Prefill fallback: {} sequence(s) downgraded to full prefill due to missing mamba snapshots.",
+                        downgraded
+                    );
+                }
+            }
+
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 

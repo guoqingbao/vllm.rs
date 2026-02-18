@@ -308,35 +308,46 @@ impl BlockManager {
     ) -> Result<()> {
         let tokens = &seq.token_ids;
         let mut matched_blocks = 0usize;
+        let mut raw_matched_blocks = 0usize;
         let mut last_hash = None;
 
         if prefix_cache.enabled() {
             let seed = seq.images.as_ref().map(Self::image_prefix_seed);
             let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed);
             last_hash = prefix_match.last_hash;
-            matched_blocks =
+            raw_matched_blocks =
                 self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);
-            matched_blocks =
-                self.resolve_mamba_matched_blocks(prefix_cache, seq.id, matched_blocks, last_hash);
+            matched_blocks = self.resolve_mamba_matched_blocks(
+                prefix_cache,
+                seq.id,
+                raw_matched_blocks,
+                last_hash,
+            );
         }
 
         seq.mamba_prefix_hash = None;
-        if self.mamba_prefix_enabled && matched_blocks > 0 {
-            let mut matched_hash = None;
-            if let Some(hash) = last_hash {
-                let hashes = prefix_cache.hashes_for_match(hash);
-                if hashes.len() >= matched_blocks {
-                    matched_hash = Some(hashes[matched_blocks - 1]);
+        if self.mamba_prefix_enabled {
+            if raw_matched_blocks > 0 && matched_blocks == 0 {
+                crate::log_info!(
+                    "Prefix cache mamba-state miss seq {} (raw {} blocks matched, but no compatible mamba snapshot)",
+                    seq.id,
+                    raw_matched_blocks
+                );
+            }
+            if matched_blocks > 0 {
+                let mut matched_hash = None;
+                if let Some(hash) = last_hash {
+                    let hashes = prefix_cache.hashes_for_match(hash);
+                    if hashes.len() >= matched_blocks {
+                        matched_hash = Some(hashes[matched_blocks - 1]);
+                    } else {
+                        matched_blocks = 0;
+                    }
                 } else {
                     matched_blocks = 0;
                 }
-            } else {
-                matched_blocks = 0;
+                seq.mamba_prefix_hash = matched_hash;
             }
-            if matched_blocks == 0 {
-                crate::log_info!("Prefix cache mamba-state miss seq {} (fallback)", seq.id);
-            }
-            seq.mamba_prefix_hash = matched_hash;
         }
 
         let cached_tokens = matched_blocks * self.block_size;
@@ -356,7 +367,13 @@ impl BlockManager {
                 }
             }
         } else if prefix_cache.enabled() && tokens.len() >= self.block_size {
-            crate::log_info!("Prefix cache miss seq {} ({} tokens)", seq.id, tokens.len());
+            crate::log_info!(
+                "Prefix cache miss seq {} ({} tokens, {} cached blocks, raw_match={} blocks)",
+                seq.id,
+                tokens.len(),
+                prefix_cache.cached_blocks(),
+                raw_matched_blocks
+            );
         }
 
         seq.num_cached_tokens = cached_tokens;
@@ -423,7 +440,16 @@ impl BlockManager {
                         .insert(hash);
                 }
             }
-            Ok(false) => {}
+            Ok(false) => {
+                if processed_tokens == seq.token_ids.len() {
+                    crate::log_info!(
+                        "Seq {}: mamba prefix snapshot capture returned false at {} tokens (hash {}).",
+                        seq.id,
+                        processed_tokens,
+                        hash
+                    );
+                }
+            }
             Err(e) => {
                 crate::log_warn!(
                     "Failed to capture mamba prefix state for seq {} hash {}: {}",

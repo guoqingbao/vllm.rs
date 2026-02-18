@@ -103,12 +103,8 @@ pub struct ModelRunner {
 impl ModelRunner {
     // Mamba slots track concurrent sequence states (not KV token blocks).
     const MAMBA_CACHE_FIXED_CAPACITY: usize = 64;
-    const MAMBA_PREFIX_CACHE_SNAPSHOT_FACTOR: usize = 2;
     #[cfg(all(feature = "cuda", feature = "graph"))]
     const GRAPH_CAPTURE_MIN_BATCH: usize = 16;
-    const DEFAULT_PREFIX_CACHE_RATIO: f32 = 0.5;
-    const PD_SERVER_PREFIX_CACHE_RATIO: f32 = 0.75;
-    const PD_CLIENT_PREFIX_CACHE_RATIO: f32 = 0.35;
 
     fn prepare_mamba_slot_mapping(
         &self,
@@ -137,40 +133,15 @@ impl ModelRunner {
         }
     }
 
-    fn mamba_prefix_capacity_blocks(econfig: &EngineConfig) -> usize {
-        if !econfig.prefix_cache.unwrap_or(false) {
-            return 0;
-        }
-        if let Some(max_tokens) = econfig.prefix_cache_max_tokens {
-            return (max_tokens / econfig.block_size).min(econfig.num_blocks);
-        }
-
-        let ratio = if let Some(p_cfg) = &econfig.pd_config {
-            if matches!(p_cfg.role, crate::transfer::PdRole::Server) {
-                econfig
-                    .pd_server_prefix_cache_ratio
-                    .unwrap_or(Self::PD_SERVER_PREFIX_CACHE_RATIO)
-            } else {
-                econfig
-                    .pd_client_prefix_cache_ratio
-                    .unwrap_or(Self::PD_CLIENT_PREFIX_CACHE_RATIO)
-            }
-        } else {
-            Self::DEFAULT_PREFIX_CACHE_RATIO
-        };
-        ((econfig.num_blocks as f32) * ratio) as usize
-    }
-
     fn effective_mamba_prefix_capacity(
-        requested_capacity: usize,
+        prefix_cache_enabled: bool,
         mamba_cache_capacity: usize,
     ) -> usize {
-        if requested_capacity == 0 || mamba_cache_capacity == 0 {
+        if !prefix_cache_enabled || mamba_cache_capacity == 0 {
             return 0;
         }
-
-        requested_capacity
-            .min(mamba_cache_capacity.saturating_mul(Self::MAMBA_PREFIX_CACHE_SNAPSHOT_FACTOR))
+        // Prefix snapshots are sized from auto-planned mamba slot capacity.
+        mamba_cache_capacity
     }
 
     #[allow(unused)]
@@ -273,13 +244,22 @@ impl ModelRunner {
 
         let is_hybrid_mamba_model = matches!(model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_));
         let mamba_cache_capacity = if is_hybrid_mamba_model {
-            Self::MAMBA_CACHE_FIXED_CAPACITY.max(econfig.max_num_seqs)
+            econfig
+                .mamba_cache_capacity
+                .unwrap_or_else(|| Self::MAMBA_CACHE_FIXED_CAPACITY.max(econfig.max_num_seqs))
         } else {
             0
         };
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
-        let graph_capture_max_num_seqs = econfig.max_num_seqs.max(Self::GRAPH_CAPTURE_MIN_BATCH);
+        let graph_capture_max_num_seqs = if is_hybrid_mamba_model {
+            std::cmp::min(
+                econfig.max_num_seqs.max(Self::GRAPH_CAPTURE_MIN_BATCH),
+                mamba_cache_capacity.max(1),
+            )
+        } else {
+            econfig.max_num_seqs.max(Self::GRAPH_CAPTURE_MIN_BATCH)
+        };
 
         #[cfg(all(feature = "cuda", feature = "graph"))]
         {
@@ -298,19 +278,27 @@ impl ModelRunner {
             }
         }
 
-        let requested_mamba_prefix_capacity = Self::mamba_prefix_capacity_blocks(econfig);
-        let mamba_prefix_capacity = Self::effective_mamba_prefix_capacity(
-            requested_mamba_prefix_capacity,
+        let mut mamba_prefix_capacity = Self::effective_mamba_prefix_capacity(
+            econfig.prefix_cache.unwrap_or(false),
             mamba_cache_capacity,
         );
-        if requested_mamba_prefix_capacity > 0
-            && requested_mamba_prefix_capacity != mamba_prefix_capacity
-        {
-            crate::log_warn!(
-                "Capping hybrid mamba prefix-state cache from {} to {} entries to avoid stale-state pollution and runaway memory use.",
-                requested_mamba_prefix_capacity,
-                mamba_prefix_capacity
-            );
+        if is_hybrid_mamba_model && econfig.mamba_slot_bytes > 0 && econfig.mamba_memory_bytes > 0 {
+            let active_reserved = mamba_cache_capacity.saturating_mul(econfig.mamba_slot_bytes);
+            let prefix_budget_slots = econfig.mamba_memory_bytes.saturating_sub(active_reserved)
+                / econfig.mamba_slot_bytes;
+            if prefix_budget_slots == 0 && mamba_prefix_capacity > 0 {
+                crate::log_info!(
+                    "Hybrid mamba budget leaves 0 explicit snapshot slots; using auto prefix-state capacity {}.",
+                    mamba_prefix_capacity
+                );
+            } else if mamba_prefix_capacity > prefix_budget_slots {
+                crate::log_warn!(
+                    "Capping hybrid mamba prefix-state cache from {} to {} entries by memory budget.",
+                    mamba_prefix_capacity,
+                    prefix_budget_slots
+                );
+                mamba_prefix_capacity = prefix_budget_slots;
+            }
         }
         match &model {
             Model::Qwen3_5(model) => {
@@ -325,11 +313,22 @@ impl ModelRunner {
         }
 
         if is_hybrid_mamba_model {
+            const SIZE_IN_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+            const SIZE_IN_MB: f64 = 1024.0 * 1024.0;
+            let active_reserved_bytes =
+                mamba_cache_capacity.saturating_mul(econfig.mamba_slot_bytes);
+            let prefix_budget_bytes = econfig
+                .mamba_memory_bytes
+                .saturating_sub(active_reserved_bytes);
             crate::log_info!(
-                "Hybrid mamba slots preallocated: {} (max_num_seqs={}); prefix-state capacity={} entries",
+                "Hybrid mamba slots preallocated: {} (max_num_seqs={}); prefix-state capacity={} entries; mamba memory budget={:.2}GB (active={:.2}GB, prefix={:.2}GB, per-slot={:.2}MB)",
                 mamba_cache_capacity,
                 econfig.max_num_seqs,
-                mamba_prefix_capacity
+                mamba_prefix_capacity,
+                econfig.mamba_memory_bytes as f64 / SIZE_IN_GB,
+                active_reserved_bytes as f64 / SIZE_IN_GB,
+                prefix_budget_bytes as f64 / SIZE_IN_GB,
+                econfig.mamba_slot_bytes as f64 / SIZE_IN_MB
             );
         }
 

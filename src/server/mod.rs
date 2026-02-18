@@ -570,6 +570,10 @@ pub struct Args {
     #[arg(long, default_value = None)]
     pub kv_fraction: Option<f32>,
 
+    // For hybrid mamba models, percentage of cache budget reserved for mamba states
+    #[arg(long, default_value = None)]
+    pub mamba_fraction: Option<f32>,
+
     #[arg(long, default_value = None)]
     pub cpu_mem_fold: Option<f32>, //the percentage of cpu vs. gpu kvcache size
 

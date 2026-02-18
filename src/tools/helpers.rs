@@ -4,8 +4,10 @@
 //! These functions handle tool resolution, schema mapping, and tool call validation.
 
 use super::{FunctionCall, Tool, ToolCall};
+use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Resolve tools from request or MCP fallback
 pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool> {
@@ -86,7 +88,8 @@ pub fn filter_tool_calls(
             }
         };
 
-        let normalized_args_obj = normalize_argument_keys(args_obj, schema);
+        let repaired_args_obj = repair_embedded_parameter_blocks(args_obj, schema);
+        let normalized_args_obj = normalize_argument_keys(&repaired_args_obj, schema);
 
         if let Some(missing) = missing_required_keys(&normalized_args_obj, schema) {
             crate::log_warn!(
@@ -134,26 +137,68 @@ fn normalize_argument_keys(
 
     let mut normalized = serde_json::Map::new();
     for (key, value) in args_obj {
-        if props.contains_key(key) {
-            normalized.insert(key.clone(), value.clone());
-            continue;
-        }
-
-        let canonical = canonicalize_key(key);
-        if let Some(candidates) = canonical_props.get(&canonical) {
-            if candidates.len() == 1 {
-                normalized.insert(candidates[0].clone(), value.clone());
+        for candidate_key in normalized_key_candidates(key) {
+            if props.contains_key(&candidate_key) {
+                normalized
+                    .entry(candidate_key.clone())
+                    .or_insert_with(|| value.clone());
                 continue;
             }
-        }
 
-        // Common fallback for editor/file tools where models often emit "file".
-        if key == "file" && props.contains_key("filePath") && !props.contains_key("file") {
-            normalized.insert("filePath".to_string(), value.clone());
+            let canonical = canonicalize_key(&candidate_key);
+            if let Some(candidates) = canonical_props.get(&canonical) {
+                if candidates.len() == 1 {
+                    let target = &candidates[0];
+                    normalized
+                        .entry(target.clone())
+                        .or_insert_with(|| value.clone());
+                    continue;
+                }
+            }
+
+            // Common fallback for editor/file tools where models often emit "file".
+            if candidate_key == "file"
+                && props.contains_key("filePath")
+                && !props.contains_key("file")
+            {
+                normalized
+                    .entry("filePath".to_string())
+                    .or_insert_with(|| value.clone());
+            }
         }
     }
 
     normalized
+}
+
+fn normalized_key_candidates(key: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    let trimmed = key.trim();
+    if !trimmed.is_empty() {
+        candidates.push(trimmed.to_string());
+    }
+
+    let stripped = strip_parameter_artifacts(trimmed);
+    if !stripped.is_empty() && stripped != trimmed {
+        candidates.push(stripped.to_string());
+    }
+
+    if let Some(name) = extract_parameter_name(trimmed) {
+        if !name.is_empty() && !candidates.iter().any(|c| c == &name) {
+            candidates.push(name);
+        }
+    }
+
+    candidates
+}
+
+fn strip_parameter_artifacts(key: &str) -> &str {
+    let end = key
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '\n' | '\r' | '<').then_some(idx))
+        .unwrap_or(key.len());
+    key[..end].trim()
 }
 
 fn canonicalize_key(key: &str) -> String {
@@ -161,6 +206,14 @@ fn canonicalize_key(key: &str) -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .map(|c| c.to_ascii_lowercase())
         .collect()
+}
+
+fn parameter_start_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?is)<\s*parameter\s*=\s*([^>\n\r]+)")
+            .expect("parameter start regex must compile")
+    })
 }
 
 fn missing_required_keys(
@@ -181,6 +234,125 @@ fn missing_required_keys(
         None
     } else {
         Some(missing)
+    }
+}
+
+fn qwen_parameter_block_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"(?is)<\s*parameter\s*=\s*([^>\n\r]+)\s*>(.*?)</\s*parameter\s*>")
+            .expect("qwen parameter regex must compile")
+    })
+}
+
+fn parse_loose_value(raw: &str) -> Value {
+    let trimmed = raw.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        v
+    } else {
+        Value::String(trimmed.to_string())
+    }
+}
+
+fn parse_unclosed_parameter_block(text: &str) -> Option<(usize, String, Value)> {
+    let caps = parameter_start_regex().captures(text)?;
+    let (Some(full), Some(name_m)) = (caps.get(0), caps.get(1)) else {
+        return None;
+    };
+    let start = full.start();
+    let mut value_start = full.end();
+    let name = name_m.as_str().trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    if text.as_bytes().get(value_start) == Some(&b'>') {
+        value_start += 1;
+    }
+
+    let value = parse_loose_value(&text[value_start..]);
+    Some((start, name.to_string(), value))
+}
+
+fn repair_embedded_parameter_blocks(
+    args_obj: &serde_json::Map<String, Value>,
+    schema: &Value,
+) -> serde_json::Map<String, Value> {
+    let re = qwen_parameter_block_regex();
+    let mut repaired = args_obj.clone();
+    let mut extracted_raw = serde_json::Map::new();
+
+    for (key, value) in args_obj {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        if !parameter_start_regex().is_match(text) {
+            if let Some(name) = extract_parameter_name(key) {
+                extracted_raw.insert(name, parse_loose_value(text));
+                repaired.remove(key);
+            }
+            continue;
+        }
+
+        let mut first_marker_start = None;
+        let mut matched_any = false;
+        for caps in re.captures_iter(text) {
+            let (Some(full), Some(name_m), Some(value_m)) = (caps.get(0), caps.get(1), caps.get(2))
+            else {
+                continue;
+            };
+            matched_any = true;
+            first_marker_start =
+                Some(first_marker_start.map_or(full.start(), |s: usize| s.min(full.start())));
+            let name = name_m.as_str().trim();
+            if name.is_empty() {
+                continue;
+            }
+            extracted_raw.insert(name.to_string(), parse_loose_value(value_m.as_str()));
+        }
+
+        if !matched_any {
+            if let Some((marker_start, name, value)) = parse_unclosed_parameter_block(text) {
+                matched_any = true;
+                first_marker_start = Some(marker_start);
+                extracted_raw.insert(name, value);
+            }
+        }
+
+        if !matched_any {
+            continue;
+        }
+
+        if let Some(marker_start) = first_marker_start {
+            let prefix = text[..marker_start].trim();
+            if prefix.is_empty() {
+                // The value is only malformed nested parameter blocks.
+                repaired.remove(key);
+            } else {
+                repaired.insert(key.clone(), Value::String(prefix.to_string()));
+            }
+        }
+    }
+
+    if extracted_raw.is_empty() {
+        return repaired;
+    }
+
+    // Canonicalize recovered keys against tool schema and merge.
+    let extracted_normalized = normalize_argument_keys(&extracted_raw, schema);
+    for (k, v) in extracted_normalized {
+        repaired.insert(k, v);
+    }
+    repaired
+}
+
+fn extract_parameter_name(text: &str) -> Option<String> {
+    let caps = parameter_start_regex().captures(text)?;
+    let name = caps.get(1)?.as_str().trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -222,7 +394,6 @@ pub fn log_tool_calls(label: &str, tool_calls: &[ToolCall]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn test_resolve_tools_prefers_request() {
@@ -249,5 +420,175 @@ mod tests {
             .build()];
         let map = build_tool_schema_map(&tools);
         assert!(map.contains_key("test"));
+    }
+
+    #[test]
+    fn repairs_embedded_qwen_parameter_blocks_for_write_tool() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type":"string"},
+                "content": {"type":"string"}
+            },
+            "required": ["filePath", "content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "file": "/root/vllm.rs/AGENTS.md\n<parameter=content>\n# Title\n</parameter>"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
+        assert_eq!(parsed["content"], "# Title");
+    }
+
+    #[test]
+    fn repairs_embedded_parameter_blocks_when_filepath_already_present() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type":"string"},
+                "content": {"type":"string"}
+            },
+            "required": ["filePath", "content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "filePath": "/root/vllm.rs/AGENTS.md",
+            "file": "<parameter=content>\n## Body\n</parameter>"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
+        assert_eq!(parsed["content"], "## Body");
+    }
+
+    #[test]
+    fn repairs_unclosed_parameter_block_for_content() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {"type":"string"}
+            },
+            "required": ["content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "file\n</parameter": "<parameter=content>\n# vLLM.rs - AGENTS.md\n\n## Overview"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["content"], "# vLLM.rs - AGENTS.md\n\n## Overview");
+    }
+
+    #[test]
+    fn repairs_unclosed_content_when_filepath_exists() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type":"string"},
+                "content": {"type":"string"}
+            },
+            "required": ["filePath", "content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "filePath": "/root/vllm.rs/AGENTS.md",
+            "file\n</parameter": "<parameter=content>\n# vLLM.rs - AGENTS.md\n\n## Overview"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
+        assert_eq!(parsed["content"], "# vLLM.rs - AGENTS.md\n\n## Overview");
+    }
+
+    #[test]
+    fn normalizes_malformed_file_key_to_filepath() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type":"string"},
+                "content": {"type":"string"}
+            },
+            "required": ["filePath", "content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "file\n</parameter": "/root/vllm.rs/AGENTS.md",
+            "content": "hello"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
+        assert_eq!(parsed["content"], "hello");
+    }
+
+    #[test]
+    fn repairs_spaced_parameter_start_tag() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "filePath": {"type":"string"},
+                "content": {"type":"string"}
+            },
+            "required": ["filePath", "content"]
+        });
+        let schemas = HashMap::from([("write".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "filePath": "/root/vllm.rs/AGENTS.md",
+            "file": "<parameter = content>\nhello world"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "write", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let args = valid[0].function.arguments.as_ref().unwrap();
+        let parsed: Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
+        assert_eq!(parsed["content"], "hello world");
     }
 }

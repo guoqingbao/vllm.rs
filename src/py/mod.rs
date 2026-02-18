@@ -265,7 +265,7 @@ impl EngineConfig {
         max_num_seqs=Some(32), config_model_len=None, max_model_len=Some(1024), max_tokens=None,
         isq=None, num_shards=Some(1), device_ids=None,
         generation_cfg=None, seed=None, prefix_cache=None, prefix_cache_max_tokens=None,
-        fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, pd_config=None,
+        fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, mamba_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         tool_prompt_template=None,
         pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None))]
@@ -291,10 +291,11 @@ impl EngineConfig {
         server_mode: Option<bool>,
         cpu_mem_fold: Option<f32>,
         kv_fraction: Option<f32>,
+        mamba_fraction: Option<f32>,
         pd_config: Option<PdConfig>,
         mcp_command: Option<String>,
         mcp_config: Option<String>,
-        mcp_args: Option<String>,
+        mcp_args: Option<Vec<String>>,
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
@@ -303,12 +304,6 @@ impl EngineConfig {
         if device_ids.is_empty() {
             device_ids.push(0);
         }
-
-        let mcp_args = if let Some(mcp_args) = mcp_args {
-            Some(mcp_args.split(',').map(|s| s.to_string()).collect())
-        } else {
-            None
-        };
 
         Self {
             model_id,
@@ -319,8 +314,12 @@ impl EngineConfig {
             enforce_parser,
             num_blocks: 128, //placeholder
             kv_fraction,
+            mamba_fraction,
             cpu_mem_fold,
             kvcache_memory_bytes: 0, //placeholder
+            mamba_memory_bytes: 0,
+            mamba_slot_bytes: 0,
+            mamba_cache_capacity: None,
             block_size: 64,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
