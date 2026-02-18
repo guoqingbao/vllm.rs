@@ -544,6 +544,18 @@ impl StreamToolParser {
             }
         }
 
+        // Final fallback: attempt generic JSON tool-call extraction on the full text.
+        // This recovers cases where streaming start-tag detection misses but the final
+        // output still contains a `{name, arguments}` tool-call object.
+        if parsed_calls.is_empty() {
+            let factory = ParserFactory::new();
+            if let Some(json_parser) = factory.registry().create_parser("json") {
+                if let Ok((_normal_text, calls)) = json_parser.parse_complete(text).await {
+                    parsed_calls = calls;
+                }
+            }
+        }
+
         parsed_calls
             .into_iter()
             .map(crate::tools::tool_call_from_parser)

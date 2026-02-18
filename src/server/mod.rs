@@ -1215,4 +1215,19 @@ mod tests {
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"prompt\":\"Hello, world!\""));
     }
+
+    #[test]
+    fn test_chat_completion_tool_choice_required_parsing() {
+        let json = r#"{
+            "messages": [{"role":"user","content":"hi"}],
+            "tool_choice": "required"
+        }"#;
+        let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            request.tool_choice,
+            Some(crate::tools::ToolChoice::Mode(
+                crate::tools::ToolChoiceMode::Required
+            ))
+        ));
+    }
 }

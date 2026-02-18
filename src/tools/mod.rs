@@ -96,33 +96,49 @@ pub fn function_tool(name: impl Into<String>, description: impl Into<String>) ->
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolChoice {
-    /// Let the model decide
-    Auto(String),
-    /// Force no tool usage
-    None(String),
+    /// String modes: "auto" | "none" | "required"
+    Mode(ToolChoiceMode),
     /// Force a specific tool
     Function {
         #[serde(rename = "type")]
-        choice_type: String,
+        choice_type: ToolChoiceType,
         function: ToolChoiceFunction,
     },
 }
 
 impl ToolChoice {
     pub fn auto() -> Self {
-        ToolChoice::Auto("auto".to_string())
+        ToolChoice::Mode(ToolChoiceMode::Auto)
     }
 
     pub fn none() -> Self {
-        ToolChoice::None("none".to_string())
+        ToolChoice::Mode(ToolChoiceMode::None)
+    }
+
+    pub fn required() -> Self {
+        ToolChoice::Mode(ToolChoiceMode::Required)
     }
 
     pub fn function(name: impl Into<String>) -> Self {
         ToolChoice::Function {
-            choice_type: "function".to_string(),
+            choice_type: ToolChoiceType::Function,
             function: ToolChoiceFunction { name: name.into() },
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoiceMode {
+    Auto,
+    None,
+    Required,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoiceType {
+    Function,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +202,41 @@ impl ToolResult {
             tool_call_id: tool_call_id.into(),
             content: error_message.into(),
             is_error: Some(true),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_choice_deserializes_string_modes() {
+        let auto: ToolChoice = serde_json::from_str(r#""auto""#).unwrap();
+        let none: ToolChoice = serde_json::from_str(r#""none""#).unwrap();
+        let required: ToolChoice = serde_json::from_str(r#""required""#).unwrap();
+
+        assert!(matches!(auto, ToolChoice::Mode(ToolChoiceMode::Auto)));
+        assert!(matches!(none, ToolChoice::Mode(ToolChoiceMode::None)));
+        assert!(matches!(
+            required,
+            ToolChoice::Mode(ToolChoiceMode::Required)
+        ));
+    }
+
+    #[test]
+    fn tool_choice_deserializes_function_mode() {
+        let choice: ToolChoice =
+            serde_json::from_str(r#"{"type":"function","function":{"name":"read_file"}}"#).unwrap();
+        match choice {
+            ToolChoice::Function {
+                choice_type,
+                function,
+            } => {
+                assert_eq!(choice_type, ToolChoiceType::Function);
+                assert_eq!(function.name, "read_file");
+            }
+            _ => panic!("expected function tool choice"),
         }
     }
 }
