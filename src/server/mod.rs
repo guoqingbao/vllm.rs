@@ -809,13 +809,7 @@ fn extract_text_content(content: &MessageContentType) -> String {
 }
 
 fn to_template_tool_call(call: &crate::tools::ToolCall) -> serde_json::Value {
-    let args = call
-        .function
-        .arguments
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
-        .filter(|v| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let args = parse_template_tool_arguments(call.function.arguments.as_deref());
 
     serde_json::json!({
         "id": call.id.clone(),
@@ -825,6 +819,25 @@ fn to_template_tool_call(call: &crate::tools::ToolCall) -> serde_json::Value {
             "arguments": args
         }
     })
+}
+
+fn parse_template_tool_arguments(arguments: Option<&str>) -> serde_json::Value {
+    let Some(raw) = arguments.map(str::trim).filter(|s| !s.is_empty()) else {
+        return serde_json::json!({});
+    };
+
+    match serde_json::from_str::<serde_json::Value>(raw).ok() {
+        Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+        // Some clients double-encode arguments as a JSON string. Handle that
+        // shape so chat templates expecting a mapping still receive one.
+        Some(serde_json::Value::String(inner)) => {
+            match serde_json::from_str::<serde_json::Value>(inner.trim()).ok() {
+                Some(serde_json::Value::Object(obj)) => serde_json::Value::Object(obj),
+                _ => serde_json::json!({}),
+            }
+        }
+        _ => serde_json::json!({}),
+    }
 }
 
 fn append_message_item(
@@ -1214,5 +1227,20 @@ mod tests {
         };
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"prompt\":\"Hello, world!\""));
+    }
+
+    #[test]
+    fn test_chat_completion_tool_choice_required_parsing() {
+        let json = r#"{
+            "messages": [{"role":"user","content":"hi"}],
+            "tool_choice": "required"
+        }"#;
+        let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            request.tool_choice,
+            Some(crate::tools::ToolChoice::Mode(
+                crate::tools::ToolChoiceMode::Required
+            ))
+        ));
     }
 }

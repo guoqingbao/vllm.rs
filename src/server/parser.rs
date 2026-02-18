@@ -534,12 +534,31 @@ impl StreamToolParser {
         if parsed_calls.is_empty()
             && self.config.start_token_str.starts_with('<')
             && self.config.end_token_str.starts_with('<')
+            && (text.contains(&self.config.start_token_str)
+                || text.contains(&self.config.end_token_str))
         {
             let stripped = self.strip_tool_tags(text);
             let factory = ParserFactory::new();
             if let Some(json_parser) = factory.registry().create_parser("json") {
                 if let Ok((_normal_text, calls)) = json_parser.parse_complete(&stripped).await {
                     parsed_calls = calls;
+                }
+            }
+        }
+
+        // Final fallback: only for JSON-native parsing strategy and only when the
+        // completion itself looks like JSON. Avoid scanning arbitrary mixed text
+        // to prevent false positives from example snippets.
+        if parsed_calls.is_empty()
+            && self.parse_strategy == "json"
+            && self.parser.has_tool_markers(text)
+        {
+            let factory = ParserFactory::new();
+            if let Some(json_parser) = factory.registry().create_parser("json") {
+                if let Ok((normal_text, calls)) = json_parser.parse_complete(text).await {
+                    if normal_text.trim().is_empty() {
+                        parsed_calls = calls;
+                    }
                 }
             }
         }

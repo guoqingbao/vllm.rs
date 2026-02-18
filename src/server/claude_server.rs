@@ -410,7 +410,8 @@ impl ClaudeStreamingContext {
 
 fn tool_choice_to_openai(choice: &Option<ClaudeToolChoice>) -> Option<ToolChoice> {
     match choice {
-        Some(ClaudeToolChoice::Auto) | Some(ClaudeToolChoice::Any) => Some(ToolChoice::auto()),
+        Some(ClaudeToolChoice::Auto) => Some(ToolChoice::auto()),
+        Some(ClaudeToolChoice::Any) => Some(ToolChoice::required()),
         Some(ClaudeToolChoice::None) => Some(ToolChoice::none()),
         Some(ClaudeToolChoice::Tool { name }) => Some(ToolChoice::function(name.clone())),
         None => None,
@@ -1505,6 +1506,19 @@ pub async fn messages(
                                         text_block_index,
                                         &buffer,
                                     );
+                                }
+                            }
+                            if pending_tool_calls.is_empty() {
+                                let reparsed = tool_parser
+                                    .parse_complete_with_fallback(tool_parser.accumulated_output())
+                                    .await;
+                                if !reparsed.is_empty() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Recovered {} tool call(s) from full-output fallback parse",
+                                        seq_id,
+                                        reparsed.len()
+                                    );
+                                    pending_tool_calls.extend(reparsed);
                                 }
                             }
                         }

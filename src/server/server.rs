@@ -16,7 +16,7 @@ use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
-use crate::tools::{ToolChoice, ToolFormat};
+use crate::tools::{ToolChoice, ToolChoiceMode, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -134,14 +134,27 @@ pub async fn chat_completion(
     // - None: No tools, ignore </tool_call> detection
     // - Some(true): Tools enabled, finish stream at </tool_call> for external handling
     match request.tool_choice.as_ref() {
-        Some(ToolChoice::None(_)) => {
+        Some(ToolChoice::Mode(ToolChoiceMode::None)) => {
             resolved_tools.clear();
         }
         Some(ToolChoice::Function { function, .. }) => {
             tool_choice_required = true;
             forced_tool_name = Some(function.name.clone());
         }
-        Some(ToolChoice::Auto(_)) | None => {}
+        Some(ToolChoice::Mode(ToolChoiceMode::Required)) => {
+            tool_choice_required = true;
+            tool_choice_instruction = Some(
+                "Tool choice enforced by request: you MUST call one of the provided tools. Do not answer with plain text. Return only a tool call."
+                    .to_string(),
+            );
+        }
+        Some(ToolChoice::Mode(ToolChoiceMode::Auto)) | None => {}
+    }
+
+    if tool_choice_required && resolved_tools.is_empty() {
+        return ChatResponder::ValidationError(
+            "tool_choice requires at least one tool but none were provided".to_string(),
+        );
     }
 
     if let Some(name) = forced_tool_name.clone() {
@@ -416,6 +429,19 @@ pub async fn chat_completion(
                                         buffer.len()
                                     );
                                     stream_ctx.send_token(&buffer);
+                                }
+                            }
+                            if pending_tool_calls.is_empty() {
+                                let reparsed = tool_parser
+                                    .parse_complete_with_fallback(tool_parser.accumulated_output())
+                                    .await;
+                                if !reparsed.is_empty() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Recovered {} tool call(s) from full-output fallback parse",
+                                        current_seq_id,
+                                        reparsed.len()
+                                    );
+                                    pending_tool_calls.extend(reparsed);
                                 }
                             }
                         }
