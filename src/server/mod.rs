@@ -721,50 +721,45 @@ pub fn convert_chat_message(
     let mut prompt = String::new();
     let mut images = Vec::new();
 
-    // Handle tool call messages specially
-    if role == "tool" {
-        if let Some(tool_call_id) = &msg.tool_call_id {
-            if let Some(content) = &msg.content {
-                let mut tool_text = String::new();
-                match content {
-                    MessageContentType::PureText(text) => {
-                        tool_text.push_str(text);
-                    }
-                    MessageContentType::Single(item) => {
-                        if let MessageContent::Text { text } = item {
-                            tool_text.push_str(text);
-                        }
-                    }
-                    MessageContentType::Multi(items) => {
-                        for item in items {
-                            if let MessageContent::Text { text } = item {
-                                tool_text.push_str(text);
-                                tool_text.push(' ');
-                            }
-                        }
-                    }
-                }
-                let tool_text_trimmed = tool_text.trim();
-                if !tool_text_trimmed.is_empty() {
-                    prompt = format!("[Tool Result for {}]: {}", tool_call_id, tool_text_trimmed);
-                }
+    // Keep assistant tool-call turns structured so chat templates can render proper
+    // function-calling transcripts (same as vLLM/OpenAI style history).
+    if role == "assistant" {
+        if let Some(tool_calls) = &msg.tool_calls {
+            let mut content = String::new();
+            if let Some(existing) = &msg.content {
+                content = extract_text_content(existing).trim().to_owned();
             }
+            let template_calls = tool_calls
+                .iter()
+                .map(to_template_tool_call)
+                .collect::<Vec<_>>();
+            return Ok(Message {
+                role,
+                content,
+                num_images: 0,
+                tool_calls: Some(template_calls),
+                tool_call_id: None,
+            });
         }
-        return Ok(Message::new(role, prompt.trim().to_owned(), 0));
     }
 
-    // // Handle assistant messages with tool calls
-    // if msg.tool_calls.is_some() {
-    //     if let Some(tool_calls) = &msg.tool_calls {
-    //         for tc in tool_calls {
-    //             prompt.push_str(&format!(
-    //                 "<tool_call>\n{{\"name\": \"{}\", \"arguments\": {}}}\n</tool_call>\n",
-    //                 tc.function.name, tc.function.arguments
-    //             ));
-    //         }
-    //     }
-    //     return Ok(Message::new(role, prompt.trim().to_owned(), 0));
-    // }
+    // Handle tool result messages specially
+    if role == "tool" {
+        let content = msg
+            .content
+            .as_ref()
+            .map(extract_text_content)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        return Ok(Message {
+            role,
+            content,
+            num_images: 0,
+            tool_calls: None,
+            tool_call_id: msg.tool_call_id.clone(),
+        });
+    }
 
     // Normal message handling
     if let Some(content) = &msg.content {
@@ -793,6 +788,43 @@ pub fn convert_chat_message(
     }
 
     Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
+}
+
+fn extract_text_content(content: &MessageContentType) -> String {
+    match content {
+        MessageContentType::PureText(text) => text.clone(),
+        MessageContentType::Single(item) => match item {
+            MessageContent::Text { text } => text.clone(),
+            _ => String::new(),
+        },
+        MessageContentType::Multi(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                MessageContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn to_template_tool_call(call: &crate::tools::ToolCall) -> serde_json::Value {
+    let args = call
+        .function
+        .arguments
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    serde_json::json!({
+        "id": call.id.clone(),
+        "type": call.tool_type.clone(),
+        "function": {
+            "name": call.function.name.clone(),
+            "arguments": args
+        }
+    })
 }
 
 fn append_message_item(
@@ -1081,6 +1113,42 @@ mod tests {
         let tool_result = ChatMessage::tool_result("call_123", r#"{"result": 42}"#);
         assert_eq!(tool_result.role, "tool");
         assert_eq!(tool_result.tool_call_id, Some("call_123".to_string()));
+    }
+
+    #[test]
+    fn preserves_assistant_tool_calls_in_template_message() {
+        let tool_call =
+            crate::tools::new_tool_call("call_1", "Read", r#"{"file_path":"ReadMe.md"}"#);
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![tool_call]),
+            tool_call_id: None,
+        };
+        let mut processor = None;
+        let mut images = Vec::new();
+        let converted = convert_chat_message(&msg, &mut processor, &mut images).unwrap();
+
+        assert_eq!(converted.role, "assistant");
+        assert_eq!(converted.content, "");
+        assert!(converted.tool_calls.is_some());
+        let calls = converted.tool_calls.unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "Read");
+        assert!(calls[0]["function"]["arguments"].is_object());
+        assert_eq!(calls[0]["function"]["arguments"]["file_path"], "ReadMe.md");
+    }
+
+    #[test]
+    fn preserves_tool_result_metadata_in_template_message() {
+        let msg = ChatMessage::tool_result("call_1", "{\"ok\":true}");
+        let mut processor = None;
+        let mut images = Vec::new();
+        let converted = convert_chat_message(&msg, &mut processor, &mut images).unwrap();
+
+        assert_eq!(converted.role, "tool");
+        assert_eq!(converted.content, "{\"ok\":true}");
+        assert_eq!(converted.tool_call_id, Some("call_1".to_string()));
     }
 
     #[test]

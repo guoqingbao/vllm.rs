@@ -12,6 +12,10 @@ pub struct Message {
     #[pyo3(get)]
     pub content: String,
     pub num_images: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -20,6 +24,10 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub num_images: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -29,6 +37,8 @@ impl Message {
             role,
             content,
             num_images,
+            tool_calls: None,
+            tool_call_id: None,
         }
     }
 }
@@ -91,6 +101,8 @@ impl ChatTemplate {
             role,
             content,
             num_images,
+            tool_calls: None,
+            tool_call_id: None,
         });
     }
 
