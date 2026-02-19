@@ -36,6 +36,13 @@ pub enum StreamResult {
     FlushBuffer(String),
 }
 
+/// Result of finalizing a buffered tool call at end-of-stream.
+#[derive(Debug, Clone)]
+pub enum BufferedFinalizeResult {
+    ToolCalls(Vec<ToolCall>),
+    FlushBuffer(String),
+}
+
 /// Configuration for model-specific tool call detection
 #[derive(Clone, Debug)]
 pub struct ToolConfig {
@@ -217,6 +224,8 @@ pub struct StreamToolParser {
     active_reasoning_end: Option<&'static str>,
     // Code block tracking
     in_code_block: bool,
+    // Set when incremental parsing found ToolCallItem(s) for the latest processed token.
+    saw_buffer_parse_activity: bool,
 }
 
 /// Reasoning marker pairs: (start, end)
@@ -295,6 +304,7 @@ impl StreamToolParser {
             accumulated_output: String::new(),
             active_reasoning_end: None,
             in_code_block: false,
+            saw_buffer_parse_activity: false,
         }
     }
 
@@ -323,9 +333,16 @@ impl StreamToolParser {
         &self.buffer
     }
 
+    /// Returns whether the latest processed token produced incremental tool-parse activity.
+    /// The flag is reset after being read.
+    pub fn take_buffer_parse_activity(&mut self) -> bool {
+        std::mem::take(&mut self.saw_buffer_parse_activity)
+    }
+
     /// Process a single incoming token.
     /// Returns StreamResult indicating what action to take.
     pub async fn process_token(&mut self, token_id: u32, token_text: &str) -> StreamResult {
+        self.saw_buffer_parse_activity = false;
         // Always accumulate
         self.accumulated_output.push_str(token_text);
 
@@ -370,6 +387,9 @@ impl StreamToolParser {
                     self.streaming_calls.clear();
                     if let Ok(result) = self.parser.parse_incremental(token_text, &self.tools).await
                     {
+                        if !result.calls.is_empty() {
+                            self.saw_buffer_parse_activity = true;
+                        }
                         self.apply_streaming_result(&result);
                     }
 
@@ -387,6 +407,7 @@ impl StreamToolParser {
                 self.buffer.push_str(token_text);
                 if let Ok(result) = self.parser.parse_incremental(token_text, &self.tools).await {
                     if !result.calls.is_empty() {
+                        self.saw_buffer_parse_activity = true;
                         crate::log_info!("Stream parsing: {:?}", result.calls);
                     }
                     self.apply_streaming_result(&result);
@@ -401,17 +422,7 @@ impl StreamToolParser {
                         token_id
                     );
 
-                    if let Some(unstreamed) = self.parser.get_unstreamed_tool_args() {
-                        self.apply_stream_items(&unstreamed);
-                    }
-                    let mut tool_calls = self.build_tool_calls_from_streaming();
-                    if tool_calls.is_empty() {
-                        crate::log_info!(
-                            "Fallback to non-stream parsing for buffer: {}",
-                            self.buffer
-                        );
-                        tool_calls = self.parse_complete_with_fallback(&self.buffer).await;
-                    }
+                    let tool_calls = self.build_tool_calls_with_fallback().await;
                     let result = if tool_calls.is_empty() {
                         // Parse failed - return buffered content
                         crate::log_error!("Unable to parse tool call buffer: {}", self.buffer,);
@@ -428,6 +439,35 @@ impl StreamToolParser {
 
                 StreamResult::Buffering
             }
+        }
+    }
+
+    /// Finalize buffered tool-call state at EOS.
+    /// Tries to build tool calls first; if unsuccessful, returns buffered text for flushing.
+    pub async fn finalize_buffered_tool_calls(&mut self) -> Option<BufferedFinalizeResult> {
+        if !matches!(self.state, ParserState::Buffering) {
+            return None;
+        }
+
+        crate::log_warn!("Stream ended while buffering a tool call; attempting final parse");
+
+        let buffered_text = self.buffer.clone();
+        let tool_calls = self.build_tool_calls_with_fallback().await;
+
+        self.parser.reset();
+        self.buffer.clear();
+        self.state = ParserState::Normal;
+        self.streaming_calls.clear();
+
+        if tool_calls.is_empty() {
+            crate::log_warn!("Buffered tool call could not be finalized; flushing buffered text");
+            Some(BufferedFinalizeResult::FlushBuffer(buffered_text))
+        } else {
+            crate::log_warn!(
+                "Recovered {} tool call(s) from buffered state at stream end",
+                tool_calls.len()
+            );
+            Some(BufferedFinalizeResult::ToolCalls(tool_calls))
         }
     }
 
@@ -507,6 +547,18 @@ impl StreamToolParser {
             ));
         }
         calls
+    }
+
+    async fn build_tool_calls_with_fallback(&mut self) -> Vec<ToolCall> {
+        if let Some(unstreamed) = self.parser.get_unstreamed_tool_args() {
+            self.apply_stream_items(&unstreamed);
+        }
+        let mut tool_calls = self.build_tool_calls_from_streaming();
+        if tool_calls.is_empty() {
+            crate::log_info!("Fallback to non-stream parsing for buffer: {}", self.buffer);
+            tool_calls = self.parse_complete_with_fallback(&self.buffer).await;
+        }
+        tool_calls
     }
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
@@ -938,5 +990,72 @@ mod tests {
         assert_eq!(parsed["file_path"], "/tmp/a.rs");
         assert_eq!(parsed["new_string"], "fn a() { let x = vec![1,2,3]; }");
         assert_eq!(parsed["replace_all"], false);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_buffered_tool_calls_recovers_calls_on_eos() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = "<tool_call><function=Write>".to_string();
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("Write".to_string()),
+            arguments: r#"{"file_path":"/tmp/a.rs","content":"abc""#.to_string(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::ToolCalls(calls)) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "Write");
+                let args = calls[0].function.arguments.as_ref().unwrap();
+                let parsed: Value = serde_json::from_str(args).unwrap();
+                assert_eq!(parsed["file_path"], "/tmp/a.rs");
+                assert_eq!(parsed["content"], "abc");
+            }
+            other => panic!("Expected recovered tool calls, got {:?}", other),
+        }
+
+        assert!(matches!(parser.state, ParserState::Normal));
+        assert!(parser.buffer.is_empty());
+        assert!(parser.streaming_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_finalize_buffered_tool_calls_flushes_when_unrecoverable() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = "<tool_call><function=Write><parameter=content>".to_string();
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: None,
+            arguments: String::new(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::FlushBuffer(text)) => {
+                assert_eq!(text, "<tool_call><function=Write><parameter=content>");
+            }
+            other => panic!("Expected FlushBuffer, got {:?}", other),
+        }
+
+        assert!(matches!(parser.state, ParserState::Normal));
+        assert!(parser.buffer.is_empty());
+        assert!(parser.streaming_calls.is_empty());
     }
 }

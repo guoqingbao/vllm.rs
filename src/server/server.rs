@@ -12,7 +12,7 @@ use super::{
     EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
-use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
+use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
@@ -25,7 +25,7 @@ use axum::{
 use base64::Engine;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task;
 use uuid::Uuid;
@@ -96,6 +96,12 @@ pub async fn chat_completion(
     }
 
     let use_stream = request.stream.unwrap_or(false);
+    let tool_buffer_timeout = Duration::from_secs(
+        env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120),
+    );
 
     let model_id = request.model.clone().unwrap_or("default".to_string());
     let max_tokens = request
@@ -298,6 +304,8 @@ pub async fn chat_completion(
             let mut decode_start_time = 0u64;
             let mut total_decoded_tokens = 0usize;
             let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
+            let mut buffering_since: Option<Instant> = None;
+            let mut buffering_cancel_requested = false;
 
             // Create streaming context for clean helper methods
             let stream_ctx =
@@ -348,6 +356,8 @@ pub async fn chat_completion(
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -366,9 +376,36 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::Buffering => {
-                                    // Parser is buffering, don't send anything
+                                    // Parser is buffering, don't send anything to client yet.
+                                    if buffering_since.is_none() {
+                                        buffering_since = Some(Instant::now());
+                                    }
+                                    if tool_parser.take_buffer_parse_activity() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_cancel_requested = false;
+                                    }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&token);
+                                    }
+                                    if !buffering_cancel_requested
+                                        && !tool_buffer_timeout.is_zero()
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= tool_buffer_timeout
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool buffering exceeded {:?}, cancelling sequence for EOS finalization",
+                                            current_seq_id,
+                                            tool_buffer_timeout
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        buffering_cancel_requested = true;
+                                    }
                                 }
                                 StreamResult::FlushBuffer(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -388,6 +425,8 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::ToolCalls(tools) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     pending_tool_calls.extend(tools);
                                 }
                             }
@@ -420,15 +459,23 @@ pub async fn chat_completion(
 
                         // Flush any buffered content at end of stream
                         if should_parse_tools {
-                            if matches!(tool_parser.state(), ParserState::Buffering) {
-                                let buffer = tool_parser.take_buffer();
-                                if !buffer.is_empty() {
-                                    crate::log_warn!(
-                                        "[Seq {}] Tool parse partial, flushing {} chars",
-                                        current_seq_id,
-                                        buffer.len()
-                                    );
-                                    stream_ctx.send_token(&buffer);
+                            if let Some(finalized) =
+                                tool_parser.finalize_buffered_tool_calls().await
+                            {
+                                match finalized {
+                                    BufferedFinalizeResult::ToolCalls(calls) => {
+                                        pending_tool_calls.extend(calls);
+                                    }
+                                    BufferedFinalizeResult::FlushBuffer(buffer) => {
+                                        if !buffer.is_empty() {
+                                            crate::log_warn!(
+                                                "[Seq {}] Tool parse partial, flushing {} chars",
+                                                current_seq_id,
+                                                buffer.len()
+                                            );
+                                            stream_ctx.send_token(&buffer);
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() {

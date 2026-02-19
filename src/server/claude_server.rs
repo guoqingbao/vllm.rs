@@ -4,7 +4,7 @@ use super::{
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
-use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
+use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -26,7 +26,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::task;
 use tokio::time;
@@ -1068,6 +1068,12 @@ pub async fn messages(
     let max_tokens = request
         .max_tokens
         .unwrap_or(data.econfig.max_tokens.unwrap_or(16384));
+    let tool_buffer_timeout = Duration::from_secs(
+        env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120),
+    );
 
     let mut params = SamplingParams::new_with_max_tokens(max_tokens);
     params.temperature = request.temperature;
@@ -1354,6 +1360,8 @@ pub async fn messages(
             let mut text_block_started = false;
             let text_block_index = 0usize;
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+            let mut buffering_since: Option<Instant> = None;
+            let mut buffering_cancel_requested = false;
             let mut tool_parser = StreamToolParser::new_with_config(
                 &stream_model_type,
                 stream_parser_model_id.clone(),
@@ -1399,6 +1407,8 @@ pub async fn messages(
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1427,8 +1437,36 @@ pub async fn messages(
                                         break 'stream;
                                     }
                                 }
-                                StreamResult::Buffering => {}
+                                StreamResult::Buffering => {
+                                    if buffering_since.is_none() {
+                                        buffering_since = Some(Instant::now());
+                                    }
+                                    if tool_parser.take_buffer_parse_activity() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_cancel_requested = false;
+                                    }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&token);
+                                    }
+                                    if !buffering_cancel_requested
+                                        && !tool_buffer_timeout.is_zero()
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= tool_buffer_timeout
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool buffering exceeded {:?}, cancelling sequence for EOS finalization",
+                                            seq_id,
+                                            tool_buffer_timeout
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(seq_id);
+                                        buffering_cancel_requested = true;
+                                    }
+                                }
                                 StreamResult::FlushBuffer(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1458,6 +1496,8 @@ pub async fn messages(
                                     }
                                 }
                                 StreamResult::ToolCalls(calls) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
                                     pending_tool_calls.extend(calls);
                                 }
                             }
@@ -1497,15 +1537,23 @@ pub async fn messages(
                         total_decoded_tokens = final_decoded_length;
 
                         if should_parse_tools {
-                            if matches!(tool_parser.state(), ParserState::Buffering) {
-                                let buffer = tool_parser.take_buffer();
-                                if !buffer.is_empty() {
-                                    let _ = send_text_with_start(
-                                        &stream_ctx,
-                                        &mut text_block_started,
-                                        text_block_index,
-                                        &buffer,
-                                    );
+                            if let Some(finalized) =
+                                tool_parser.finalize_buffered_tool_calls().await
+                            {
+                                match finalized {
+                                    BufferedFinalizeResult::ToolCalls(calls) => {
+                                        pending_tool_calls.extend(calls);
+                                    }
+                                    BufferedFinalizeResult::FlushBuffer(buffer) => {
+                                        if !buffer.is_empty() {
+                                            let _ = send_text_with_start(
+                                                &stream_ctx,
+                                                &mut text_block_started,
+                                                text_block_index,
+                                                &buffer,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() {
