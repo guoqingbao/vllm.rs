@@ -1068,11 +1068,12 @@ pub async fn messages(
     let max_tokens = request
         .max_tokens
         .unwrap_or(data.econfig.max_tokens.unwrap_or(16384));
+    let use_stream = request.stream.unwrap_or(false);
     let tool_buffer_timeout = Duration::from_secs(
         env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120),
+            .unwrap_or(600),
     );
 
     let mut params = SamplingParams::new_with_max_tokens(max_tokens);
@@ -1167,7 +1168,7 @@ pub async fn messages(
     }
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
-    params.mcp_mode = if !resolved_tools.is_empty() {
+    params.mcp_mode = if !use_stream && !resolved_tools.is_empty() {
         Some(true)
     } else {
         None
@@ -1220,7 +1221,6 @@ pub async fn messages(
         }
     };
 
-    let use_stream = request.stream.unwrap_or(false);
     if use_stream {
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
@@ -1247,7 +1247,6 @@ pub async fn messages(
             .unwrap_or(256);
         let (response_tx, client_rx) = flume::bounded(buffer_size);
         let engine_clone = data.engine.clone();
-        let params_clone = params.clone();
         let stream_model_id = model_id.clone();
         let stream_parser_model_id = parser_model_id.clone();
         let stream_model_type = model_type.clone();
@@ -1362,6 +1361,7 @@ pub async fn messages(
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
             let mut buffering_since: Option<Instant> = None;
             let mut buffering_cancel_requested = false;
+            let mut buffering_warned = false;
             let mut tool_parser = StreamToolParser::new_with_config(
                 &stream_model_type,
                 stream_parser_model_id.clone(),
@@ -1369,7 +1369,7 @@ pub async fn messages(
                 stream_tools.clone(),
                 enforce_parser.clone(),
             );
-            let should_parse_tools = params_clone.mcp_mode.is_some();
+            let should_parse_tools = !stream_tools.is_empty();
 
             let mut current_stream = stream;
             'stream: loop {
@@ -1409,6 +1409,7 @@ pub async fn messages(
                                 StreamResult::Content(text) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1440,13 +1441,26 @@ pub async fn messages(
                                 StreamResult::Buffering => {
                                     if buffering_since.is_none() {
                                         buffering_since = Some(Instant::now());
+                                        buffering_warned = false;
                                     }
                                     if tool_parser.take_buffer_parse_activity() {
                                         buffering_since = Some(Instant::now());
                                         buffering_cancel_requested = false;
+                                        buffering_warned = false;
                                     }
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&token);
+                                    }
+                                    if !buffering_warned
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= Duration::from_secs(120)
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool call buffering exceeded 120s; still waiting for completion",
+                                            seq_id
+                                        );
+                                        buffering_warned = true;
                                     }
                                     if !buffering_cancel_requested
                                         && !tool_buffer_timeout.is_zero()
@@ -1467,6 +1481,7 @@ pub async fn messages(
                                 StreamResult::FlushBuffer(text) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1498,6 +1513,7 @@ pub async fn messages(
                                 StreamResult::ToolCalls(calls) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     pending_tool_calls.extend(calls);
                                 }
                             }

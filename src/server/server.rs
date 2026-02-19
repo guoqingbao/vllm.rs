@@ -100,7 +100,7 @@ pub async fn chat_completion(
         env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(120),
+            .unwrap_or(600),
     );
 
     let model_id = request.model.clone().unwrap_or("default".to_string());
@@ -306,6 +306,7 @@ pub async fn chat_completion(
             let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
             let mut buffering_since: Option<Instant> = None;
             let mut buffering_cancel_requested = false;
+            let mut buffering_warned = false;
 
             // Create streaming context for clean helper methods
             let stream_ctx =
@@ -358,6 +359,7 @@ pub async fn chat_completion(
                                 StreamResult::Content(text) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -379,13 +381,26 @@ pub async fn chat_completion(
                                     // Parser is buffering, don't send anything to client yet.
                                     if buffering_since.is_none() {
                                         buffering_since = Some(Instant::now());
+                                        buffering_warned = false;
                                     }
                                     if tool_parser.take_buffer_parse_activity() {
                                         buffering_since = Some(Instant::now());
                                         buffering_cancel_requested = false;
+                                        buffering_warned = false;
                                     }
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&token);
+                                    }
+                                    if !buffering_warned
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= Duration::from_secs(120)
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool call buffering exceeded 120s; still waiting for completion",
+                                            current_seq_id
+                                        );
+                                        buffering_warned = true;
                                     }
                                     if !buffering_cancel_requested
                                         && !tool_buffer_timeout.is_zero()
@@ -406,6 +421,7 @@ pub async fn chat_completion(
                                 StreamResult::FlushBuffer(text) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -427,6 +443,7 @@ pub async fn chat_completion(
                                 StreamResult::ToolCalls(tools) => {
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     pending_tool_calls.extend(tools);
                                 }
                             }
