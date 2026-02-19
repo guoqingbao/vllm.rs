@@ -40,14 +40,27 @@ pub fn filter_tool_calls(
         let mut parsed_args = match serde_json::from_str::<Value>(args_str) {
             Ok(value) => value,
             Err(e) => {
-                crate::log_error!(
-                    "Failed to parse arguments for tool '{}': {}. Args: {}",
-                    call.function.name,
-                    e,
-                    args_str
-                );
-                invalid.push(call.clone());
-                continue;
+                match repair_json_arguments(args_str)
+                    .and_then(|repaired| serde_json::from_str::<Value>(&repaired).ok())
+                {
+                    Some(value) => {
+                        crate::log_warn!(
+                            "Recovered malformed arguments for tool '{}' via structural JSON repair",
+                            call.function.name
+                        );
+                        value
+                    }
+                    None => {
+                        crate::log_error!(
+                            "Failed to parse arguments for tool '{}': {}. Args: {}",
+                            call.function.name,
+                            e,
+                            args_str
+                        );
+                        invalid.push(call.clone());
+                        continue;
+                    }
+                }
             }
         };
 
@@ -79,13 +92,12 @@ pub fn filter_tool_calls(
             Some(schema) => schema,
             None => {
                 if call.function.name == "TodoWrite" {
+                    crate::log_info!(
+                        "Tool 'TodoWrite' not in schema map; attempting TodoWrite -> TaskCreate fallback conversion"
+                    );
                     if let Some(converted_calls) =
                         convert_todowrite_to_task_create_calls(call, args_obj, schemas)
                     {
-                        crate::log_info!(
-                            "Converted TodoWrite into {} TaskCreate call(s)",
-                            converted_calls.len()
-                        );
                         valid.extend(converted_calls);
                         continue;
                     }
@@ -137,20 +149,100 @@ pub fn filter_tool_calls(
     (valid, invalid)
 }
 
+fn repair_json_arguments(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some("{}".to_string());
+    }
+
+    if serde_json::from_str::<Value>(trimmed).is_ok() {
+        return Some(trimmed.to_string());
+    }
+
+    let mut repaired = trimmed.to_string();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut stack: Vec<char> = Vec::new();
+
+    for ch in repaired.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => stack.push(ch),
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        repaired.push('"');
+    }
+
+    while repaired
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_whitespace() || c == ',')
+    {
+        repaired.pop();
+    }
+
+    while let Some(open) = stack.pop() {
+        repaired.push(match open {
+            '{' => '}',
+            '[' => ']',
+            _ => continue,
+        });
+    }
+
+    Some(repaired)
+}
+
 fn convert_todowrite_to_task_create_calls(
     source_call: &ToolCall,
     args_obj: &serde_json::Map<String, Value>,
     schemas: &HashMap<String, Value>,
 ) -> Option<Vec<ToolCall>> {
-    let _task_create_schema = schemas.get("TaskCreate")?;
+    let _task_create_schema = match schemas.get("TaskCreate") {
+        Some(schema) => schema,
+        None => {
+            crate::log_warn!("TodoWrite fallback conversion skipped: TaskCreate schema not found");
+            return None;
+        }
+    };
 
     let mut tasks: Vec<&serde_json::Map<String, Value>> = Vec::new();
+    let mut payload_source = "none";
 
-    if let Some(values) = args_obj
-        .get("tasks")
-        .or_else(|| args_obj.get("todos"))
-        .and_then(Value::as_array)
-    {
+    if let Some(values) = args_obj.get("tasks").and_then(Value::as_array) {
+        payload_source = "tasks";
+        for value in values {
+            if let Some(task) = value.as_object() {
+                tasks.push(task);
+            }
+        }
+    } else if let Some(values) = args_obj.get("todos").and_then(Value::as_array) {
+        payload_source = "todos";
         for value in values {
             if let Some(task) = value.as_object() {
                 tasks.push(task);
@@ -164,10 +256,15 @@ fn convert_todowrite_to_task_create_calls(
             || args_obj.get("content").is_some()
             || args_obj.get("description").is_some())
     {
+        payload_source = "single";
         tasks.push(args_obj);
     }
 
     if tasks.is_empty() {
+        crate::log_warn!(
+            "TodoWrite fallback conversion failed: no tasks/todos array and no single-task fields; keys={:?}",
+            args_obj.keys().collect::<Vec<_>>()
+        );
         return None;
     }
 
@@ -236,8 +333,18 @@ fn convert_todowrite_to_task_create_calls(
     }
 
     if converted.is_empty() {
+        crate::log_warn!(
+            "TodoWrite fallback conversion produced no TaskCreate calls from {} candidate item(s)",
+            tasks.len()
+        );
         None
     } else {
+        crate::log_info!(
+            "Converted TodoWrite payload (source={}, candidates={}) into {} TaskCreate call(s)",
+            payload_source,
+            tasks.len(),
+            converted.len()
+        );
         Some(converted)
     }
 }
@@ -659,6 +766,35 @@ mod tests {
         let (valid, invalid) = filter_tool_calls(&[call], &schemas);
         assert!(valid.is_empty());
         assert_eq!(invalid.len(), 1);
+    }
+
+    #[test]
+    fn repairs_truncated_edit_arguments_with_braces_inside_string() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "file_path": {"type":"string"},
+                "old_string": {"type":"string"},
+                "new_string": {"type":"string"},
+                "replace_all": {"type":"boolean"}
+            },
+            "required": ["file_path", "old_string", "new_string", "replace_all"],
+            "additionalProperties": false
+        });
+        let schemas = HashMap::from([("Edit".to_string(), schema)]);
+
+        let args = r#"{"file_path":"/tmp/a.rs","new_string":"fn a() { let x = vec![1,2,3]; }","old_string":"fn a() {}","replace_all":false"#;
+        let call = crate::tools::new_tool_call("call_1", "Edit", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let parsed: Value =
+            serde_json::from_str(valid[0].function.arguments.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["file_path"], "/tmp/a.rs");
+        assert_eq!(parsed["new_string"], "fn a() { let x = vec![1,2,3]; }");
+        assert_eq!(parsed["replace_all"], false);
     }
 
     #[test]

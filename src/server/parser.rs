@@ -499,11 +499,7 @@ impl StreamToolParser {
         crate::log_info!("Building tool call: {:?}", self.streaming_calls);
         for state in &self.streaming_calls {
             let Some(name) = &state.name else { continue };
-            let args = if state.arguments.trim().is_empty() {
-                "{}".to_string()
-            } else {
-                state.arguments.clone()
-            };
+            let args = self.finalize_streamed_arguments(&state.arguments);
             calls.push(crate::tools::new_tool_call(
                 format!("call_{}", uuid::Uuid::new_v4().simple()),
                 name.clone(),
@@ -567,6 +563,22 @@ impl StreamToolParser {
             .into_iter()
             .map(crate::tools::tool_call_from_parser)
             .collect()
+    }
+
+    fn finalize_streamed_arguments(&self, raw: &str) -> String {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return "{}".to_string();
+        }
+        if serde_json::from_str::<Value>(trimmed).is_ok() {
+            return trimmed.to_string();
+        }
+
+        let repaired = repair_streamed_json_arguments(trimmed);
+        if repaired != trimmed {
+            crate::log_warn!("Applied structural JSON repair to streamed tool arguments");
+        }
+        repaired
     }
 
     fn buffer_has_end_tag(&self) -> bool {
@@ -695,6 +707,70 @@ impl StreamToolParser {
             usage: None,
         }
     }
+}
+
+fn repair_streamed_json_arguments(raw: &str) -> String {
+    let mut repaired = raw.trim().to_string();
+    if repaired.is_empty() {
+        return "{}".to_string();
+    }
+
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut stack: Vec<char> = Vec::new();
+
+    for ch in repaired.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => stack.push(ch),
+            '}' => {
+                if stack.last() == Some(&'{') {
+                    stack.pop();
+                }
+            }
+            ']' => {
+                if stack.last() == Some(&'[') {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if in_string {
+        repaired.push('"');
+    }
+
+    while repaired
+        .chars()
+        .last()
+        .is_some_and(|c| c.is_whitespace() || c == ',')
+    {
+        repaired.pop();
+    }
+
+    while let Some(open) = stack.pop() {
+        repaired.push(match open {
+            '{' => '}',
+            '[' => ']',
+            _ => continue,
+        });
+    }
+
+    repaired
 }
 
 #[derive(Debug, Clone, Default)]
@@ -851,5 +927,16 @@ mod tests {
             StreamResult::Buffering => {}
             _ => panic!("Expected Buffering while inside tool call arguments"),
         }
+    }
+
+    #[test]
+    fn test_repair_streamed_json_arguments_balances_only_structural_tokens() {
+        let raw = r#"{"file_path":"/tmp/a.rs","new_string":"fn a() { let x = vec![1,2,3]; }","replace_all":false"#;
+        let repaired = repair_streamed_json_arguments(raw);
+        assert_ne!(repaired, raw);
+        let parsed: Value = serde_json::from_str(&repaired).expect("repaired JSON should parse");
+        assert_eq!(parsed["file_path"], "/tmp/a.rs");
+        assert_eq!(parsed["new_string"], "fn a() { let x = vec![1,2,3]; }");
+        assert_eq!(parsed["replace_all"], false);
     }
 }
