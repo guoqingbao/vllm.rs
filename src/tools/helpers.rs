@@ -36,24 +36,11 @@ pub fn filter_tool_calls(
     let mut invalid = Vec::new();
 
     for call in tool_calls {
-        let schema = match schemas.get(&call.function.name) {
-            Some(schema) => schema,
-            None => {
-                crate::log_warn!(
-                    "Tool '{}' not found in schema map. Available tools: {:?}",
-                    call.function.name,
-                    schemas.keys().collect::<Vec<_>>()
-                );
-                invalid.push(call.clone());
-                continue;
-            }
-        };
-
         let args_str = call.function.arguments.as_deref().unwrap_or("{}");
         let mut parsed_args = match serde_json::from_str::<Value>(args_str) {
             Ok(value) => value,
             Err(e) => {
-                crate::log_warn!(
+                crate::log_error!(
                     "Failed to parse arguments for tool '{}': {}. Args: {}",
                     call.function.name,
                     e,
@@ -71,7 +58,7 @@ pub fn filter_tool_calls(
         }
 
         if !parsed_args.is_object() {
-            crate::log_warn!(
+            crate::log_error!(
                 "Arguments for tool '{}' must be a JSON object. Got: {:?}",
                 call.function.name,
                 parsed_args
@@ -88,11 +75,42 @@ pub fn filter_tool_calls(
             }
         };
 
+        let schema = match schemas.get(&call.function.name) {
+            Some(schema) => schema,
+            None => {
+                if call.function.name == "TodoWrite" {
+                    if let Some(converted_calls) =
+                        convert_todowrite_to_task_create_calls(call, args_obj, schemas)
+                    {
+                        crate::log_info!(
+                            "Converted TodoWrite into {} TaskCreate call(s)",
+                            converted_calls.len()
+                        );
+                        valid.extend(converted_calls);
+                        continue;
+                    }
+                    crate::log_error!(
+                        "Unable to convert TodoWrite: TaskCreate unavailable or TodoWrite payload malformed. Args: {}",
+                        args_str
+                    );
+                    invalid.push(call.clone());
+                    continue;
+                }
+                crate::log_error!(
+                    "Tool '{}' not found in schema map. Available tools: {:?}",
+                    call.function.name,
+                    schemas.keys().collect::<Vec<_>>()
+                );
+                invalid.push(call.clone());
+                continue;
+            }
+        };
+
         let repaired_args_obj = repair_embedded_parameter_blocks(args_obj, schema);
         let normalized_args_obj = normalize_argument_keys(&repaired_args_obj, schema);
 
         if let Some(missing) = missing_required_keys(&normalized_args_obj, schema) {
-            crate::log_warn!(
+            crate::log_error!(
                 "Missing required argument(s) for tool '{}': {:?}. Args: {}",
                 call.function.name,
                 missing,
@@ -117,6 +135,111 @@ pub fn filter_tool_calls(
     }
 
     (valid, invalid)
+}
+
+fn convert_todowrite_to_task_create_calls(
+    source_call: &ToolCall,
+    args_obj: &serde_json::Map<String, Value>,
+    schemas: &HashMap<String, Value>,
+) -> Option<Vec<ToolCall>> {
+    let _task_create_schema = schemas.get("TaskCreate")?;
+
+    let mut tasks: Vec<&serde_json::Map<String, Value>> = Vec::new();
+
+    if let Some(values) = args_obj
+        .get("tasks")
+        .or_else(|| args_obj.get("todos"))
+        .and_then(Value::as_array)
+    {
+        for value in values {
+            if let Some(task) = value.as_object() {
+                tasks.push(task);
+            }
+        }
+    }
+
+    if tasks.is_empty()
+        && (args_obj.get("title").is_some()
+            || args_obj.get("subject").is_some()
+            || args_obj.get("content").is_some()
+            || args_obj.get("description").is_some())
+    {
+        tasks.push(args_obj);
+    }
+
+    if tasks.is_empty() {
+        return None;
+    }
+
+    let mut converted = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let subject = task
+            .get("subject")
+            .and_then(Value::as_str)
+            .or_else(|| task.get("title").and_then(Value::as_str))
+            .or_else(|| task.get("content").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        let Some(subject) = subject else {
+            continue;
+        };
+
+        let description = task
+            .get("description")
+            .and_then(Value::as_str)
+            .or_else(|| task.get("content").and_then(Value::as_str))
+            .or_else(|| task.get("title").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(subject);
+
+        let active_form = task
+            .get("activeForm")
+            .and_then(Value::as_str)
+            .or_else(|| task.get("active_form").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+
+        let mut mapped = serde_json::Map::new();
+        mapped.insert("subject".to_string(), Value::String(subject.to_string()));
+        mapped.insert(
+            "description".to_string(),
+            Value::String(description.to_string()),
+        );
+        if let Some(active_form) = active_form {
+            mapped.insert(
+                "activeForm".to_string(),
+                Value::String(active_form.to_string()),
+            );
+        }
+        if let Some(metadata) = task.get("metadata").and_then(Value::as_object) {
+            mapped.insert("metadata".to_string(), Value::Object(metadata.clone()));
+        }
+
+        let call_id = if index == 0 {
+            source_call.id.clone()
+        } else {
+            format!("{}_{}", source_call.id, index)
+        };
+
+        let arguments =
+            serde_json::to_string(&Value::Object(mapped)).unwrap_or_else(|_| "{}".to_string());
+        converted.push(ToolCall {
+            id: call_id,
+            tool_type: source_call.tool_type.clone(),
+            function: FunctionCall {
+                name: "TaskCreate".to_string(),
+                arguments: Some(arguments),
+            },
+        });
+    }
+
+    if converted.is_empty() {
+        None
+    } else {
+        Some(converted)
+    }
 }
 
 fn normalize_argument_keys(
@@ -420,6 +543,122 @@ mod tests {
             .build()];
         let map = build_tool_schema_map(&tools);
         assert!(map.contains_key("test"));
+    }
+
+    #[test]
+    fn converts_todowrite_to_taskcreate_calls() {
+        let schemas = HashMap::from([(
+            "TaskCreate".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {"type":"string"},
+                    "description": {"type":"string"},
+                    "activeForm": {"type":"string"}
+                },
+                "required": ["subject", "description"],
+                "additionalProperties": false
+            }),
+        )]);
+        let args = serde_json::json!({
+            "tasks": [
+                {"id": "1", "title": "Do thing", "status": "in_progress", "activeForm": "Doing thing"},
+                {"id": "2", "title": "Do other thing", "status": "pending"}
+            ]
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "TodoWrite", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 2);
+        assert!(valid.iter().all(|call| call.function.name == "TaskCreate"));
+
+        let first_args = valid[0].function.arguments.as_ref().unwrap();
+        let first: Value = serde_json::from_str(first_args).unwrap();
+        assert_eq!(first["subject"], "Do thing");
+        assert_eq!(first["description"], "Do thing");
+        assert_eq!(first["activeForm"], "Doing thing");
+
+        let second_args = valid[1].function.arguments.as_ref().unwrap();
+        let second: Value = serde_json::from_str(second_args).unwrap();
+        assert_eq!(second["subject"], "Do other thing");
+        assert_eq!(second["description"], "Do other thing");
+    }
+
+    #[test]
+    fn converts_todowrite_todos_content_shape_to_taskcreate_calls() {
+        let schemas = HashMap::from([(
+            "TaskCreate".to_string(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {"type":"string"},
+                    "description": {"type":"string"},
+                    "activeForm": {"type":"string"}
+                },
+                "required": ["subject", "description"],
+                "additionalProperties": false
+            }),
+        )]);
+
+        let args = serde_json::json!({
+            "todos": [
+                {
+                    "content": "Fix Bug 1: Add Mistral3 variant to ModelType enum",
+                    "status": "in_progress",
+                    "activeForm": "Adding Mistral3 variant to ModelType enum"
+                },
+                {
+                    "content": "Fix Bug 2: Fix shared_gate weight loading shape in Qwen3DecoderLayer",
+                    "status": "pending",
+                    "activeForm": "Fixing shared_gate weight loading shape"
+                }
+            ]
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "TodoWrite", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 2);
+        assert!(valid.iter().all(|call| call.function.name == "TaskCreate"));
+
+        let first: Value =
+            serde_json::from_str(valid[0].function.arguments.as_ref().unwrap()).unwrap();
+        assert_eq!(
+            first["subject"],
+            "Fix Bug 1: Add Mistral3 variant to ModelType enum"
+        );
+        assert_eq!(
+            first["description"],
+            "Fix Bug 1: Add Mistral3 variant to ModelType enum"
+        );
+        assert_eq!(
+            first["activeForm"],
+            "Adding Mistral3 variant to ModelType enum"
+        );
+    }
+
+    #[test]
+    fn rejects_todowrite_when_taskcreate_not_available() {
+        let schemas = HashMap::new();
+        let call =
+            crate::tools::new_tool_call("call_1", "TodoWrite", r#"{"tasks":[{"title":"x"}]}"#);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(valid.is_empty());
+        assert_eq!(invalid.len(), 1);
+    }
+
+    #[test]
+    fn rejects_unknown_tool_without_schema() {
+        let schemas = HashMap::new();
+        let call = crate::tools::new_tool_call("call_1", "UnknownTool", r#"{"x":1}"#);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(valid.is_empty());
+        assert_eq!(invalid.len(), 1);
     }
 
     #[test]

@@ -1531,28 +1531,14 @@ pub async fn messages(
                                 stream_tool_schemas.as_ref(),
                             );
                             if !invalid.is_empty() {
-                                crate::log_warn!(
+                                crate::log_error!(
                                     "[Seq {}] Found {} invalid tool call(s)",
                                     seq_id,
                                     invalid.len()
                                 );
                             }
-                            let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                .unwrap_or(false);
 
                             if !invalid.is_empty() {
-                                if strict_mode {
-                                    crate::log_warn!(
-                                        "[Seq {}] Strict mode enabled, dropping invalid calls",
-                                        seq_id
-                                    );
-                                } else {
-                                    crate::log_warn!(
-                                        "[Seq {}] Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads",
-                                        seq_id
-                                    );
-                                }
                                 log_tool_calls("Invalid", seq_id, &invalid);
                                 if let Some(ref l) = stream_logger {
                                     l.log_tool_calls("Invalid", &invalid);
@@ -1854,24 +1840,10 @@ pub async fn messages(
             .await;
         let (validated_calls, invalid_calls) =
             filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
-
         if !invalid_calls.is_empty() {
-            crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
+            crate::log_error!("Found {} invalid tool call(s)", invalid_calls.len());
         }
 
-        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !invalid_calls.is_empty() {
-            if strict_mode {
-                crate::log_warn!("Strict mode enabled, dropping invalid calls");
-            } else {
-                crate::log_warn!(
-                    "Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads"
-                );
-            }
-        }
         let valid_calls = validated_calls;
 
         if !valid_calls.is_empty() {
