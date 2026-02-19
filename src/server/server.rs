@@ -187,14 +187,9 @@ pub async fn chat_completion(
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
-    // Streaming tool parsing is handled in the StreamToolParser
-    params.mcp_mode = if !use_stream && has_tools {
-        Some(true)
-    } else {
-        None
-    };
+    params.mcp_mode = if has_tools { Some(true) } else { None };
 
-    if has_tools {
+    if params.mcp_mode.is_some() {
         crate::log_warn!("Tools enabled for request");
     }
 
@@ -282,6 +277,7 @@ pub async fn chat_completion(
 
         // Clone data needed for the async task
         let engine_clone = data.engine.clone();
+        let params_clone = params.clone();
         let _img_cfg_clone = img_cfg.clone();
 
         let tool_config = tool_config.clone();
@@ -314,7 +310,7 @@ pub async fn chat_completion(
 
             // Initialize the stream tool parser (handles all tool call detection internally)
             let mut tool_parser = tool_parser;
-            let should_parse_tools = has_tools.clone();
+            let should_parse_tools = params_clone.mcp_mode.is_some();
 
             let mut current_stream = stream;
             let current_seq_id = seq_id;
