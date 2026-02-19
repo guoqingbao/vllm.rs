@@ -614,19 +614,31 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                     ClaudeContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                        is_error: _,
+                        is_error,
                     } => {
                         flush_content_message(&mut out, role, &mut content_items);
                         flush_tool_call_message(&mut out, &mut tool_calls);
-                        let text = tool_result_content_to_text(content)?;
-                        if !text.trim().is_empty() {
-                            out.push(ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some(MessageContentType::PureText(text)),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_use_id.clone()),
-                            });
-                        }
+                        let raw_text = tool_result_content_to_text(content)?;
+                        let is_error = is_error.unwrap_or(false);
+                        let text = if raw_text.trim().is_empty() {
+                            if is_error {
+                                "<tool_use_error>Tool returned an error with no message.</tool_use_error>"
+                                    .to_string()
+                            } else {
+                                "Tool executed successfully with no textual output.".to_string()
+                            }
+                        } else if is_error && !raw_text.contains("<tool_use_error>") {
+                            format!("<tool_use_error>{}</tool_use_error>", raw_text)
+                        } else {
+                            raw_text
+                        };
+
+                        out.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(MessageContentType::PureText(text)),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_use_id.clone()),
+                        });
                     }
                 }
             }
@@ -2134,6 +2146,53 @@ mod tests {
         let tool_calls = converted[1].tool_calls.clone().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn preserves_empty_success_tool_result_as_ack() {
+        let blocks = vec![ClaudeContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: ClaudeToolResultContent::Text(String::new()),
+            is_error: Some(false),
+        }];
+
+        let message = ClaudeMessage {
+            role: "user".to_string(),
+            content: ClaudeContent::Blocks(blocks),
+        };
+
+        let converted = convert_claude_message(&message).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "tool");
+        assert_eq!(converted[0].tool_call_id.as_deref(), Some("call_1"));
+        let text = match converted[0].content.as_ref() {
+            Some(MessageContentType::PureText(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "Tool executed successfully with no textual output.");
+    }
+
+    #[test]
+    fn wraps_tool_result_when_is_error_true() {
+        let blocks = vec![ClaudeContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: ClaudeToolResultContent::Text("boom".to_string()),
+            is_error: Some(true),
+        }];
+
+        let message = ClaudeMessage {
+            role: "user".to_string(),
+            content: ClaudeContent::Blocks(blocks),
+        };
+
+        let converted = convert_claude_message(&message).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "tool");
+        let text = match converted[0].content.as_ref() {
+            Some(MessageContentType::PureText(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "<tool_use_error>boom</tool_use_error>");
     }
 
     #[test]

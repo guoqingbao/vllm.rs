@@ -39,6 +39,54 @@ struct StreamingContext {
     response_tx: flume::Sender<ChatResponse>,
 }
 
+fn extract_text_from_content(content: Option<&super::MessageContentType>) -> String {
+    match content {
+        Some(super::MessageContentType::PureText(text)) => text.clone(),
+        Some(super::MessageContentType::Single(item)) => match item {
+            super::MessageContent::Text { text } => text.clone(),
+            _ => String::new(),
+        },
+        Some(super::MessageContentType::Multi(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                super::MessageContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => String::new(),
+    }
+}
+
+fn validate_openai_tool_messages(messages: &[ChatMessage]) -> Result<(), String> {
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != "tool" {
+            continue;
+        }
+
+        if msg.tool_calls.is_some() {
+            return Err(format!(
+                "messages[{idx}] role=tool must not include tool_calls"
+            ));
+        }
+
+        let call_id = msg.tool_call_id.as_deref().unwrap_or("").trim();
+        if call_id.is_empty() {
+            return Err(format!(
+                "messages[{idx}] role=tool requires a non-empty tool_call_id"
+            ));
+        }
+
+        let text = extract_text_from_content(msg.content.as_ref());
+        if text.trim().is_empty() {
+            return Err(format!(
+                "messages[{idx}] role=tool requires non-empty content"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl StreamingContext {
     fn new(
         seq_id: usize,
@@ -199,6 +247,9 @@ pub async fn chat_completion(
     }
 
     let mut chat_messages = request.messages.clone();
+    if let Err(err) = validate_openai_tool_messages(&chat_messages) {
+        return ChatResponder::ValidationError(err);
+    }
     let parser_model_id =
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();

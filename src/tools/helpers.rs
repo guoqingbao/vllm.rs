@@ -120,8 +120,10 @@ pub fn filter_tool_calls(
 
         let repaired_args_obj = repair_embedded_parameter_blocks(args_obj, schema);
         let normalized_args_obj = normalize_argument_keys(&repaired_args_obj, schema);
+        let coerced_args_obj =
+            coerce_argument_types(&normalized_args_obj, schema, &call.function.name);
 
-        if let Some(missing) = missing_required_keys(&normalized_args_obj, schema) {
+        if let Some(missing) = missing_required_keys(&coerced_args_obj, schema) {
             crate::log_error!(
                 "Missing required argument(s) for tool '{}': {:?}. Args: {}",
                 call.function.name,
@@ -132,7 +134,7 @@ pub fn filter_tool_calls(
             continue;
         }
 
-        let filtered_args = Value::Object(normalized_args_obj);
+        let filtered_args = Value::Object(coerced_args_obj);
 
         let normalized_args =
             serde_json::to_string(&filtered_args).unwrap_or_else(|_| args_str.to_string());
@@ -317,7 +319,7 @@ fn convert_todowrite_to_task_create_calls(
         let call_id = if index == 0 {
             source_call.id.clone()
         } else {
-            format!("{}_{}", source_call.id, index)
+            super::generate_tool_call_id()
         };
 
         let arguments =
@@ -421,6 +423,53 @@ fn normalized_key_candidates(key: &str) -> Vec<String> {
     }
 
     candidates
+}
+
+fn coerce_argument_types(
+    args_obj: &serde_json::Map<String, Value>,
+    schema: &Value,
+    tool_name: &str,
+) -> serde_json::Map<String, Value> {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return args_obj.clone();
+    };
+
+    let mut coerced = args_obj.clone();
+    for (key, prop_schema) in props {
+        let Some(expected_ty) = prop_schema.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if expected_ty != "string" {
+            continue;
+        }
+
+        let Some(value) = coerced.get_mut(key) else {
+            continue;
+        };
+        match value {
+            Value::Number(n) => {
+                let converted = n.to_string();
+                crate::log_warn!(
+                    "Coerced argument type for tool '{}': '{}' number -> string",
+                    tool_name,
+                    key
+                );
+                *value = Value::String(converted);
+            }
+            Value::Bool(b) => {
+                let converted = b.to_string();
+                crate::log_warn!(
+                    "Coerced argument type for tool '{}': '{}' bool -> string",
+                    tool_name,
+                    key
+                );
+                *value = Value::String(converted);
+            }
+            _ => {}
+        }
+    }
+
+    coerced
 }
 
 fn strip_parameter_artifacts(key: &str) -> &str {
@@ -965,5 +1014,37 @@ mod tests {
         let parsed: Value = serde_json::from_str(args).unwrap();
         assert_eq!(parsed["filePath"], "/root/vllm.rs/AGENTS.md");
         assert_eq!(parsed["content"], "hello world");
+    }
+
+    #[test]
+    fn coerces_numeric_task_id_to_string_for_taskupdate() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "taskId": {"type":"string"},
+                "status": {"type":"string"},
+                "activeForm": {"type":"string"}
+            },
+            "required": ["taskId", "status"],
+            "additionalProperties": false
+        });
+        let schemas = HashMap::from([("TaskUpdate".to_string(), schema)]);
+
+        let args = serde_json::json!({
+            "taskId": 1,
+            "status": "in_progress",
+            "activeForm": "Fixing issue"
+        })
+        .to_string();
+        let call = crate::tools::new_tool_call("call_1", "TaskUpdate", args);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+
+        let parsed: Value =
+            serde_json::from_str(valid[0].function.arguments.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["taskId"], "1");
+        assert_eq!(parsed["status"], "in_progress");
     }
 }

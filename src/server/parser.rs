@@ -504,6 +504,7 @@ impl StreamToolParser {
         crate::log_warn!("Stream ended while buffering a tool call; attempting final parse");
 
         let buffered_text = self.buffer.clone();
+        let strict_complete = self.has_strict_complete_tool_call().await;
         let tool_calls = self.build_tool_calls_with_fallback().await;
 
         self.parser.reset();
@@ -512,7 +513,7 @@ impl StreamToolParser {
         self.streaming_calls.clear();
         self.pending_end_marker_candidate = false;
 
-        if tool_calls.is_empty() {
+        if tool_calls.is_empty() || !strict_complete {
             crate::log_warn!("Buffered tool call could not be finalized; flushing buffered text");
             Some(BufferedFinalizeResult::FlushBuffer(buffered_text))
         } else {
@@ -595,7 +596,7 @@ impl StreamToolParser {
             let Some(name) = &state.name else { continue };
             let args = self.finalize_streamed_arguments(&state.arguments);
             calls.push(crate::tools::new_tool_call(
-                format!("call_{}", uuid::Uuid::new_v4().simple()),
+                crate::tools::generate_tool_call_id(),
                 name.clone(),
                 args,
             ));
@@ -618,6 +619,9 @@ impl StreamToolParser {
     }
 
     async fn has_strict_complete_tool_call(&self) -> bool {
+        if !self.has_complete_tool_envelope() {
+            return false;
+        }
         if self.streaming_calls.iter().any(|call| call.name.is_none()) {
             return false;
         }
@@ -642,6 +646,60 @@ impl StreamToolParser {
             .parse_complete_with_fallback(&self.buffer)
             .await
             .is_empty()
+    }
+
+    fn has_complete_tool_envelope(&self) -> bool {
+        // Non-XML formats should not be gated by XML envelope checks.
+        if !self.config.start_token_str.starts_with('<')
+            || !self.config.end_token_str.starts_with('<')
+        {
+            return true;
+        }
+
+        let Some(start_idx) = self.buffer.rfind(&self.config.start_token_str) else {
+            // If no explicit start marker is present, keep existing behavior.
+            return true;
+        };
+
+        let section = &self.buffer[start_idx..];
+        let Some(end_rel) = section.rfind(&self.config.end_token_str) else {
+            return false;
+        };
+        let end_idx = start_idx + end_rel + self.config.end_token_str.len();
+        if end_idx <= start_idx {
+            return false;
+        }
+
+        let block = &self.buffer[start_idx..end_idx];
+        let inner_start = start_idx + self.config.start_token_str.len();
+        let inner_end = end_idx - self.config.end_token_str.len();
+        if inner_end < inner_start {
+            return false;
+        }
+        let inner = self.buffer[inner_start..inner_end].trim();
+
+        // Qwen-coder XML style: <tool_call><function=...><parameter=...>...</parameter></function></tool_call>
+        if block.contains("<function=") || block.contains("<parameter=") {
+            if !block.contains("<function=") || !block.contains("</function>") {
+                return false;
+            }
+
+            // If any <parameter=...> started, require at least as many </parameter> closers.
+            // This prevents treating fake </tool_call> text inside content as a real end marker.
+            let open_params = block.match_indices("<parameter=").count();
+            let close_params = block.match_indices("</parameter>").count();
+            if close_params < open_params {
+                return false;
+            }
+            return true;
+        }
+
+        // Qwen JSON style: <tool_call>{"name":"...","arguments":{...}}</tool_call>
+        // Accept only if the inner payload is complete JSON at this point.
+        if inner.is_empty() {
+            return false;
+        }
+        serde_json::from_str::<Value>(inner).is_ok()
     }
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
@@ -1235,6 +1293,61 @@ mod tests {
         assert!(matches!(parser.state, ParserState::Normal));
         assert!(parser.buffer.is_empty());
         assert!(parser.streaming_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_fake_end_marker_inside_parameter_keeps_buffering() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = "<tool_call>\n<function=Write>\n<parameter=file_path>\n/tmp/a.md\n</parameter>\n<parameter=content>\n- Qwen format (`<tool_call>..."
+            .to_string();
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("Write".to_string()),
+            arguments: r#"{"file_path":"/tmp/a.md","content":"- Qwen format (`<tool_call>..."}"#
+                .to_string(),
+        }];
+
+        let result = parser.process_token(151658, "</tool_call>").await;
+        assert!(matches!(result, StreamResult::Buffering));
+        assert!(matches!(parser.state, ParserState::Buffering));
+        assert!(parser.pending_end_marker_candidate);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_rejects_incomplete_xml_envelope_even_if_args_parse() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = "<tool_call>\n<function=Write>\n<parameter=file_path>\n/tmp/a.md\n</parameter>\n<parameter=content>\n- Qwen format (`<tool_call>...</tool_call>"
+            .to_string();
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("Write".to_string()),
+            arguments: r#"{"file_path":"/tmp/a.md","content":"- Qwen format (`<tool_call>...</tool_call>"}"#.to_string(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::FlushBuffer(text)) => {
+                assert!(text.contains("<parameter=content>"));
+                assert!(text.contains("</tool_call>"));
+            }
+            other => panic!("Expected FlushBuffer, got {:?}", other),
+        }
     }
 
     #[tokio::test]
