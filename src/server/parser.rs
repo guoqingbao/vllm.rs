@@ -680,15 +680,21 @@ impl StreamToolParser {
 
         // Qwen-coder XML style: <tool_call><function=...><parameter=...>...</parameter></function></tool_call>
         if block.contains("<function=") || block.contains("<parameter=") {
-            if !block.contains("<function=") || !block.contains("</function>") {
+            let Some(function_start) = block.find("<function=") else {
                 return false;
-            }
+            };
+            let function_section = &block[function_start..];
+            let Some(function_end_rel) = function_section.find("</function>") else {
+                return false;
+            };
+            let function_end = function_start + function_end_rel + "</function>".len();
+            let function_block = &block[function_start..function_end];
 
-            // If any <parameter=...> started, require at least as many </parameter> closers.
-            // This prevents treating fake </tool_call> text inside content as a real end marker.
-            let open_params = block.match_indices("<parameter=").count();
-            let close_params = block.match_indices("</parameter>").count();
-            if close_params < open_params {
+            // Validate parameter pairing in order and ignore unmatched closing tags.
+            // This tolerates malformed tails like:
+            //   </function>\n</parameter>\n</function>
+            // which should not invalidate an otherwise complete function payload.
+            if !Self::has_balanced_parameter_tags(function_block) {
                 return false;
             }
             return true;
@@ -700,6 +706,46 @@ impl StreamToolParser {
             return false;
         }
         serde_json::from_str::<Value>(inner).is_ok()
+    }
+
+    fn has_balanced_parameter_tags(function_block: &str) -> bool {
+        let mut idx = 0usize;
+        let mut open_count = 0usize;
+        const OPEN: &str = "<parameter=";
+        const CLOSE: &str = "</parameter>";
+
+        while idx < function_block.len() {
+            let open_pos = function_block[idx..].find(OPEN).map(|p| idx + p);
+            let close_pos = function_block[idx..].find(CLOSE).map(|p| idx + p);
+
+            match (open_pos, close_pos) {
+                (None, None) => break,
+                (Some(op), None) => {
+                    open_count += 1;
+                    idx = op + OPEN.len();
+                }
+                (None, Some(cp)) => {
+                    // Ignore unmatched closing parameter tags.
+                    if open_count > 0 {
+                        open_count -= 1;
+                    }
+                    idx = cp + CLOSE.len();
+                }
+                (Some(op), Some(cp)) => {
+                    if op < cp {
+                        open_count += 1;
+                        idx = op + OPEN.len();
+                    } else {
+                        if open_count > 0 {
+                            open_count -= 1;
+                        }
+                        idx = cp + CLOSE.len();
+                    }
+                }
+            }
+        }
+
+        open_count == 0
     }
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
@@ -1348,6 +1394,63 @@ mod tests {
             }
             other => panic!("Expected FlushBuffer, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_envelope_accepts_stray_parameter_closer_after_function() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.buffer = r#"<tool_call>
+<function=edit>
+<parameter=filePath>
+/root/vllm.rs/src/models/qwen3_5_moe.rs
+</parameter>
+<parameter=newString>
+abc
+</parameter>
+<parameter=oldString>
+def
+</parameter>
+</function>
+
+</parameter>
+</function>
+</tool_call>"#
+            .to_string();
+
+        assert!(parser.has_complete_tool_envelope());
+    }
+
+    #[test]
+    fn test_envelope_rejects_unclosed_parameter() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.buffer = r#"<tool_call>
+<function=edit>
+<parameter=filePath>
+/root/vllm.rs/src/models/qwen3_5_moe.rs
+</parameter>
+<parameter=newString>
+abc
+</function>
+</tool_call>"#
+            .to_string();
+
+        assert!(!parser.has_complete_tool_envelope());
     }
 
     #[tokio::test]
