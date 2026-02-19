@@ -162,10 +162,17 @@ pub fn new_tool_call(
     }
 }
 
+/// Generate a compact tool call ID with required `call_` prefix.
+/// Uses 16 hex chars (64 bits) from UUIDv4 for low collision risk and shorter payloads.
+pub fn generate_tool_call_id() -> String {
+    let raw = Uuid::new_v4().simple().to_string();
+    format!("call_{}", &raw[..16])
+}
+
 /// Convert a parsed tool call into an OpenAI-compatible ToolCall.
 pub fn tool_call_from_parser(parsed: tool_parser::ToolCall) -> ToolCall {
     ToolCall {
-        id: format!("call_{}", Uuid::new_v4().simple()),
+        id: generate_tool_call_id(),
         tool_type: "function".to_string(),
         function: FunctionCall {
             name: parsed.function.name,

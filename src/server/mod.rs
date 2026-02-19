@@ -662,7 +662,7 @@ pub async fn execute_mcp_tool_calls_async(
                     call.function.name,
                     elapsed.as_secs_f32()
                 );
-                let content = result
+                let mut content = result
                     .content
                     .iter()
                     .filter_map(|c| match c {
@@ -672,6 +672,9 @@ pub async fn execute_mcp_tool_calls_async(
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
+                if content.trim().is_empty() {
+                    content = "Tool executed successfully with no textual output.".to_string();
+                }
                 ChatMessage::tool_result(call_id, content)
             }
             Ok(Ok(Err(err))) => {
@@ -683,7 +686,10 @@ pub async fn execute_mcp_tool_calls_async(
                     elapsed.as_secs_f32(),
                     err
                 );
-                ChatMessage::tool_result(call_id, format!("Tool execution failed: {err}"))
+                ChatMessage::tool_result(
+                    call_id,
+                    format!("<tool_use_error>Tool execution failed: {err}</tool_use_error>"),
+                )
             }
             Ok(Err(join_err)) => {
                 // spawn_blocking panicked
@@ -692,7 +698,10 @@ pub async fn execute_mcp_tool_calls_async(
                     call.function.name,
                     join_err
                 );
-                ChatMessage::tool_result(call_id, format!("Tool execution panicked: {join_err}"))
+                ChatMessage::tool_result(
+                    call_id,
+                    format!("<tool_use_error>Tool execution panicked: {join_err}</tool_use_error>"),
+                )
             }
             Err(_timeout_err) => {
                 // Timeout occurred
@@ -703,7 +712,10 @@ pub async fn execute_mcp_tool_calls_async(
                 );
                 ChatMessage::tool_result(
                     call_id,
-                    format!("Tool execution timed out after {}s", TOOL_CALL_TIMEOUT_SECS),
+                    format!(
+                        "<tool_use_error>Tool execution timed out after {}s</tool_use_error>",
+                        TOOL_CALL_TIMEOUT_SECS
+                    ),
                 )
             }
         };

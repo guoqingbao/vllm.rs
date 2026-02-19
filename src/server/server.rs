@@ -12,7 +12,7 @@ use super::{
     EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
-use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
+use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
 };
@@ -25,7 +25,7 @@ use axum::{
 use base64::Engine;
 use std::env;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task;
 use uuid::Uuid;
@@ -37,6 +37,54 @@ struct StreamingContext {
     model_id: String,
     created: u64,
     response_tx: flume::Sender<ChatResponse>,
+}
+
+fn extract_text_from_content(content: Option<&super::MessageContentType>) -> String {
+    match content {
+        Some(super::MessageContentType::PureText(text)) => text.clone(),
+        Some(super::MessageContentType::Single(item)) => match item {
+            super::MessageContent::Text { text } => text.clone(),
+            _ => String::new(),
+        },
+        Some(super::MessageContentType::Multi(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                super::MessageContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        None => String::new(),
+    }
+}
+
+fn validate_openai_tool_messages(messages: &[ChatMessage]) -> Result<(), String> {
+    for (idx, msg) in messages.iter().enumerate() {
+        if msg.role != "tool" {
+            continue;
+        }
+
+        if msg.tool_calls.is_some() {
+            return Err(format!(
+                "messages[{idx}] role=tool must not include tool_calls"
+            ));
+        }
+
+        let call_id = msg.tool_call_id.as_deref().unwrap_or("").trim();
+        if call_id.is_empty() {
+            return Err(format!(
+                "messages[{idx}] role=tool requires a non-empty tool_call_id"
+            ));
+        }
+
+        let text = extract_text_from_content(msg.content.as_ref());
+        if text.trim().is_empty() {
+            return Err(format!(
+                "messages[{idx}] role=tool requires non-empty content"
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl StreamingContext {
@@ -96,6 +144,12 @@ pub async fn chat_completion(
     }
 
     let use_stream = request.stream.unwrap_or(false);
+    let tool_buffer_timeout = Duration::from_secs(
+        env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600),
+    );
 
     let model_id = request.model.clone().unwrap_or("default".to_string());
     let max_tokens = request
@@ -193,6 +247,9 @@ pub async fn chat_completion(
     }
 
     let mut chat_messages = request.messages.clone();
+    if let Err(err) = validate_openai_tool_messages(&chat_messages) {
+        return ChatResponder::ValidationError(err);
+    }
     let parser_model_id =
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();
@@ -298,6 +355,9 @@ pub async fn chat_completion(
             let mut decode_start_time = 0u64;
             let mut total_decoded_tokens = 0usize;
             let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
+            let mut buffering_since: Option<Instant> = None;
+            let mut buffering_cancel_requested = false;
+            let mut buffering_warned = false;
 
             // Create streaming context for clean helper methods
             let stream_ctx =
@@ -348,6 +408,9 @@ pub async fn chat_completion(
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -366,9 +429,50 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::Buffering => {
-                                    // Parser is buffering, don't send anything
+                                    // Parser is buffering, don't send anything to client yet.
+                                    if buffering_since.is_none() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_warned = false;
+                                    }
+                                    if tool_parser.take_buffer_parse_activity() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_cancel_requested = false;
+                                        buffering_warned = false;
+                                    }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&token);
+                                    }
+                                    if !buffering_warned
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= Duration::from_secs(120)
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool call buffering exceeded 120s; still waiting for completion",
+                                            current_seq_id
+                                        );
+                                        buffering_warned = true;
+                                    }
+                                    if !buffering_cancel_requested
+                                        && !tool_buffer_timeout.is_zero()
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= tool_buffer_timeout
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool buffering exceeded {:?}, cancelling sequence for EOS finalization",
+                                            current_seq_id,
+                                            tool_buffer_timeout
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        buffering_cancel_requested = true;
+                                    }
                                 }
                                 StreamResult::FlushBuffer(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -388,6 +492,9 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::ToolCalls(tools) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     pending_tool_calls.extend(tools);
                                 }
                             }
@@ -420,15 +527,23 @@ pub async fn chat_completion(
 
                         // Flush any buffered content at end of stream
                         if should_parse_tools {
-                            if matches!(tool_parser.state(), ParserState::Buffering) {
-                                let buffer = tool_parser.take_buffer();
-                                if !buffer.is_empty() {
-                                    crate::log_warn!(
-                                        "[Seq {}] Tool parse partial, flushing {} chars",
-                                        current_seq_id,
-                                        buffer.len()
-                                    );
-                                    stream_ctx.send_token(&buffer);
+                            if let Some(finalized) =
+                                tool_parser.finalize_buffered_tool_calls().await
+                            {
+                                match finalized {
+                                    BufferedFinalizeResult::ToolCalls(calls) => {
+                                        pending_tool_calls.extend(calls);
+                                    }
+                                    BufferedFinalizeResult::FlushBuffer(buffer) => {
+                                        if !buffer.is_empty() {
+                                            crate::log_warn!(
+                                                "[Seq {}] Tool parse partial, flushing {} chars",
+                                                current_seq_id,
+                                                buffer.len()
+                                            );
+                                            stream_ctx.send_token(&buffer);
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() {
@@ -464,7 +579,7 @@ pub async fn chat_completion(
                             filter_tool_calls(&pending_tool_calls, stream_tool_schemas.as_ref());
 
                         if !invalid_calls.is_empty() {
-                            crate::log_warn!(
+                            crate::log_error!(
                                 "[Seq {}] Found {} invalid tool call(s)",
                                 current_seq_id,
                                 invalid_calls.len()
@@ -725,18 +840,6 @@ pub async fn chat_completion(
                     log_tool_calls("Invalid", &invalid_calls);
                 }
 
-                let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                if !invalid_calls.is_empty() {
-                    if strict_mode {
-                        crate::log_warn!("Strict mode enabled, dropping invalid calls");
-                    } else {
-                        crate::log_warn!(
-                            "Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads"
-                        );
-                    }
-                }
                 let valid_calls = validated_calls;
                 if valid_calls.is_empty() {
                     if tool_choice_required {

@@ -4,7 +4,7 @@ use super::{
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
-use crate::server::parser::{ParserState, StreamResult, StreamToolParser};
+use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -26,7 +26,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::task;
 use tokio::time;
@@ -614,19 +614,31 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                     ClaudeContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                        is_error: _,
+                        is_error,
                     } => {
                         flush_content_message(&mut out, role, &mut content_items);
                         flush_tool_call_message(&mut out, &mut tool_calls);
-                        let text = tool_result_content_to_text(content)?;
-                        if !text.trim().is_empty() {
-                            out.push(ChatMessage {
-                                role: "tool".to_string(),
-                                content: Some(MessageContentType::PureText(text)),
-                                tool_calls: None,
-                                tool_call_id: Some(tool_use_id.clone()),
-                            });
-                        }
+                        let raw_text = tool_result_content_to_text(content)?;
+                        let is_error = is_error.unwrap_or(false);
+                        let text = if raw_text.trim().is_empty() {
+                            if is_error {
+                                "<tool_use_error>Tool returned an error with no message.</tool_use_error>"
+                                    .to_string()
+                            } else {
+                                "Tool executed successfully with no textual output.".to_string()
+                            }
+                        } else if is_error && !raw_text.contains("<tool_use_error>") {
+                            format!("<tool_use_error>{}</tool_use_error>", raw_text)
+                        } else {
+                            raw_text
+                        };
+
+                        out.push(ChatMessage {
+                            role: "tool".to_string(),
+                            content: Some(MessageContentType::PureText(text)),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_use_id.clone()),
+                        });
                     }
                 }
             }
@@ -1068,6 +1080,13 @@ pub async fn messages(
     let max_tokens = request
         .max_tokens
         .unwrap_or(data.econfig.max_tokens.unwrap_or(16384));
+    let use_stream = request.stream.unwrap_or(false);
+    let tool_buffer_timeout = Duration::from_secs(
+        env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(600),
+    );
 
     let mut params = SamplingParams::new_with_max_tokens(max_tokens);
     params.temperature = request.temperature;
@@ -1161,7 +1180,7 @@ pub async fn messages(
     }
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
-    params.mcp_mode = if !resolved_tools.is_empty() {
+    params.mcp_mode = if !use_stream && !resolved_tools.is_empty() {
         Some(true)
     } else {
         None
@@ -1214,7 +1233,6 @@ pub async fn messages(
         }
     };
 
-    let use_stream = request.stream.unwrap_or(false);
     if use_stream {
         let (seq_id, prompt_length, stream) = {
             let mut e = data.engine.write();
@@ -1241,7 +1259,6 @@ pub async fn messages(
             .unwrap_or(256);
         let (response_tx, client_rx) = flume::bounded(buffer_size);
         let engine_clone = data.engine.clone();
-        let params_clone = params.clone();
         let stream_model_id = model_id.clone();
         let stream_parser_model_id = parser_model_id.clone();
         let stream_model_type = model_type.clone();
@@ -1354,6 +1371,9 @@ pub async fn messages(
             let mut text_block_started = false;
             let text_block_index = 0usize;
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+            let mut buffering_since: Option<Instant> = None;
+            let mut buffering_cancel_requested = false;
+            let mut buffering_warned = false;
             let mut tool_parser = StreamToolParser::new_with_config(
                 &stream_model_type,
                 stream_parser_model_id.clone(),
@@ -1361,7 +1381,7 @@ pub async fn messages(
                 stream_tools.clone(),
                 enforce_parser.clone(),
             );
-            let should_parse_tools = params_clone.mcp_mode.is_some();
+            let should_parse_tools = !stream_tools.is_empty();
 
             let mut current_stream = stream;
             'stream: loop {
@@ -1399,6 +1419,9 @@ pub async fn messages(
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
                                 StreamResult::Content(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1427,8 +1450,50 @@ pub async fn messages(
                                         break 'stream;
                                     }
                                 }
-                                StreamResult::Buffering => {}
+                                StreamResult::Buffering => {
+                                    if buffering_since.is_none() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_warned = false;
+                                    }
+                                    if tool_parser.take_buffer_parse_activity() {
+                                        buffering_since = Some(Instant::now());
+                                        buffering_cancel_requested = false;
+                                        buffering_warned = false;
+                                    }
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&token);
+                                    }
+                                    if !buffering_warned
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= Duration::from_secs(120)
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool call buffering exceeded 120s; still waiting for completion",
+                                            seq_id
+                                        );
+                                        buffering_warned = true;
+                                    }
+                                    if !buffering_cancel_requested
+                                        && !tool_buffer_timeout.is_zero()
+                                        && buffering_since.is_some_and(|since| {
+                                            since.elapsed() >= tool_buffer_timeout
+                                        })
+                                    {
+                                        crate::log_warn!(
+                                            "[Seq {}] Tool buffering exceeded {:?}, cancelling sequence for EOS finalization",
+                                            seq_id,
+                                            tool_buffer_timeout
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(seq_id);
+                                        buffering_cancel_requested = true;
+                                    }
+                                }
                                 StreamResult::FlushBuffer(text) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     if text.is_empty() {
                                         continue;
                                     }
@@ -1458,6 +1523,9 @@ pub async fn messages(
                                     }
                                 }
                                 StreamResult::ToolCalls(calls) => {
+                                    buffering_since = None;
+                                    buffering_cancel_requested = false;
+                                    buffering_warned = false;
                                     pending_tool_calls.extend(calls);
                                 }
                             }
@@ -1497,15 +1565,23 @@ pub async fn messages(
                         total_decoded_tokens = final_decoded_length;
 
                         if should_parse_tools {
-                            if matches!(tool_parser.state(), ParserState::Buffering) {
-                                let buffer = tool_parser.take_buffer();
-                                if !buffer.is_empty() {
-                                    let _ = send_text_with_start(
-                                        &stream_ctx,
-                                        &mut text_block_started,
-                                        text_block_index,
-                                        &buffer,
-                                    );
+                            if let Some(finalized) =
+                                tool_parser.finalize_buffered_tool_calls().await
+                            {
+                                match finalized {
+                                    BufferedFinalizeResult::ToolCalls(calls) => {
+                                        pending_tool_calls.extend(calls);
+                                    }
+                                    BufferedFinalizeResult::FlushBuffer(buffer) => {
+                                        if !buffer.is_empty() {
+                                            let _ = send_text_with_start(
+                                                &stream_ctx,
+                                                &mut text_block_started,
+                                                text_block_index,
+                                                &buffer,
+                                            );
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() {
@@ -1531,28 +1607,14 @@ pub async fn messages(
                                 stream_tool_schemas.as_ref(),
                             );
                             if !invalid.is_empty() {
-                                crate::log_warn!(
+                                crate::log_error!(
                                     "[Seq {}] Found {} invalid tool call(s)",
                                     seq_id,
                                     invalid.len()
                                 );
                             }
-                            let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-                                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                                .unwrap_or(false);
 
                             if !invalid.is_empty() {
-                                if strict_mode {
-                                    crate::log_warn!(
-                                        "[Seq {}] Strict mode enabled, dropping invalid calls",
-                                        seq_id
-                                    );
-                                } else {
-                                    crate::log_warn!(
-                                        "[Seq {}] Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads",
-                                        seq_id
-                                    );
-                                }
                                 log_tool_calls("Invalid", seq_id, &invalid);
                                 if let Some(ref l) = stream_logger {
                                     l.log_tool_calls("Invalid", &invalid);
@@ -1854,24 +1916,10 @@ pub async fn messages(
             .await;
         let (validated_calls, invalid_calls) =
             filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
-
         if !invalid_calls.is_empty() {
-            crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
+            crate::log_error!("Found {} invalid tool call(s)", invalid_calls.len());
         }
 
-        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        if !invalid_calls.is_empty() {
-            if strict_mode {
-                crate::log_warn!("Strict mode enabled, dropping invalid calls");
-            } else {
-                crate::log_warn!(
-                    "Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads"
-                );
-            }
-        }
         let valid_calls = validated_calls;
 
         if !valid_calls.is_empty() {
@@ -2098,6 +2146,53 @@ mod tests {
         let tool_calls = converted[1].tool_calls.clone().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn preserves_empty_success_tool_result_as_ack() {
+        let blocks = vec![ClaudeContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: ClaudeToolResultContent::Text(String::new()),
+            is_error: Some(false),
+        }];
+
+        let message = ClaudeMessage {
+            role: "user".to_string(),
+            content: ClaudeContent::Blocks(blocks),
+        };
+
+        let converted = convert_claude_message(&message).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "tool");
+        assert_eq!(converted[0].tool_call_id.as_deref(), Some("call_1"));
+        let text = match converted[0].content.as_ref() {
+            Some(MessageContentType::PureText(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "Tool executed successfully with no textual output.");
+    }
+
+    #[test]
+    fn wraps_tool_result_when_is_error_true() {
+        let blocks = vec![ClaudeContentBlock::ToolResult {
+            tool_use_id: "call_1".to_string(),
+            content: ClaudeToolResultContent::Text("boom".to_string()),
+            is_error: Some(true),
+        }];
+
+        let message = ClaudeMessage {
+            role: "user".to_string(),
+            content: ClaudeContent::Blocks(blocks),
+        };
+
+        let converted = convert_claude_message(&message).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, "tool");
+        let text = match converted[0].content.as_ref() {
+            Some(MessageContentType::PureText(text)) => text.clone(),
+            _ => String::new(),
+        };
+        assert_eq!(text, "<tool_use_error>boom</tool_use_error>");
     }
 
     #[test]

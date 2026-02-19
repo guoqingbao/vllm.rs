@@ -227,7 +227,7 @@ impl ToolParser {
 
         *call_id += 1;
         Some(new_tool_call(
-            format!("call_{}", call_id),
+            super::generate_tool_call_id(),
             name.to_string(),
             args_str,
         ))
