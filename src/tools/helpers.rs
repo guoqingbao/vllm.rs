@@ -23,8 +23,78 @@ pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<
 pub fn build_tool_schema_map(tools: &[Tool]) -> HashMap<String, Value> {
     tools
         .iter()
-        .map(|tool| (tool.function.name.clone(), tool.function.parameters.clone()))
+        .map(|tool| {
+            let mut schema = tool.function.parameters.clone();
+            if tool.function.strict == Some(false) {
+                if let Some(obj) = schema.as_object_mut() {
+                    obj.insert("x-vllm-rs-lenient".to_string(), Value::Bool(true));
+                }
+            }
+            (tool.function.name.clone(), schema)
+        })
         .collect()
+}
+
+/// Enforce `tool_choice=function` by retaining only calls that match `forced_tool_name`.
+/// Returns the number of dropped calls.
+pub fn retain_tool_calls_forced_name(
+    tool_calls: &mut Vec<ToolCall>,
+    forced_tool_name: Option<&str>,
+) -> usize {
+    let Some(forced_name) = forced_tool_name else {
+        return 0;
+    };
+
+    let before = tool_calls.len();
+    tool_calls.retain(|call| call.function.name == forced_name);
+    before - tool_calls.len()
+}
+
+/// Build a model-facing fallback message when tool calls were parsed but rejected.
+pub fn build_invalid_tool_call_feedback(
+    invalid_calls: &[ToolCall],
+    schemas: &HashMap<String, Value>,
+    forced_tool_name: Option<&str>,
+) -> Option<String> {
+    if invalid_calls.is_empty() {
+        return None;
+    }
+
+    let mut rejected_tools: Vec<String> = invalid_calls
+        .iter()
+        .map(|call| call.function.name.trim())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    rejected_tools.sort();
+    rejected_tools.dedup();
+
+    let mut allowed_tools: Vec<String> = schemas.keys().cloned().collect();
+    allowed_tools.sort();
+
+    let rejected_summary = if rejected_tools.is_empty() {
+        "Rejected tool call(s).".to_string()
+    } else {
+        format!("Rejected tool call(s): {}.", rejected_tools.join(", "))
+    };
+
+    let mut parts = vec![rejected_summary];
+    if let Some(name) = forced_tool_name {
+        if !name.trim().is_empty() {
+            parts.push(format!("Required tool_choice is '{}'.", name));
+        }
+    }
+    if allowed_tools.is_empty() {
+        parts.push("No callable tools are available for this turn.".to_string());
+    } else {
+        parts.push(format!("Allowed tools: {}.", allowed_tools.join(", ")));
+    }
+    parts.push(
+        "Retry with one valid tool call using a JSON object that matches the tool schema."
+            .to_string(),
+    );
+
+    Some(parts.join(" "))
 }
 
 /// Filter tool calls into valid and invalid based on schema validation
@@ -124,14 +194,22 @@ pub fn filter_tool_calls(
             coerce_argument_types(&normalized_args_obj, schema, &call.function.name);
 
         if let Some(missing) = missing_required_keys(&coerced_args_obj, schema) {
-            crate::log_error!(
-                "Missing required argument(s) for tool '{}': {:?}. Args: {}",
-                call.function.name,
-                missing,
-                args_str
-            );
-            invalid.push(call.clone());
-            continue;
+            if is_lenient_schema(schema) {
+                crate::log_warn!(
+                    "Missing required argument(s) for lenient tool '{}': {:?}. Continuing with partial args.",
+                    call.function.name,
+                    missing
+                );
+            } else {
+                crate::log_error!(
+                    "Missing required argument(s) for tool '{}': {:?}. Args: {}",
+                    call.function.name,
+                    missing,
+                    args_str
+                );
+                invalid.push(call.clone());
+                continue;
+            }
         }
 
         let filtered_args = Value::Object(coerced_args_obj);
@@ -516,6 +594,17 @@ fn missing_required_keys(
     }
 }
 
+fn is_lenient_schema(schema: &Value) -> bool {
+    schema
+        .get("x-vllm-rs-lenient")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || schema
+            .get("x-vllm-rs-whitelist")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn qwen_parameter_block_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -699,6 +788,57 @@ mod tests {
             .build()];
         let map = build_tool_schema_map(&tools);
         assert!(map.contains_key("test"));
+    }
+
+    #[test]
+    fn marks_lenient_schema_when_tool_strict_is_false() {
+        let tools = vec![crate::tools::function_tool("lenient_tool", "desc")
+            .strict(false)
+            .param("arg1", "string", "desc", true)
+            .build()];
+        let map = build_tool_schema_map(&tools);
+        assert_eq!(
+            map.get("lenient_tool")
+                .and_then(|schema| schema.get("x-vllm-rs-lenient"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn retains_only_forced_tool_name() {
+        let mut calls = vec![
+            crate::tools::new_tool_call("call_1", "Read", r#"{"path":"a"}"#),
+            crate::tools::new_tool_call("call_2", "Write", r#"{"path":"b"}"#),
+        ];
+        let dropped = retain_tool_calls_forced_name(&mut calls, Some("Write"));
+        assert_eq!(dropped, 1);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "Write");
+    }
+
+    #[test]
+    fn builds_invalid_tool_call_feedback_with_allowed_tools_and_forced_name() {
+        let schemas = HashMap::from([
+            ("Read".to_string(), serde_json::json!({"type":"object"})),
+            ("Write".to_string(), serde_json::json!({"type":"object"})),
+        ]);
+        let invalid = vec![crate::tools::new_tool_call(
+            "call_1",
+            "run",
+            r#"{"command":"ls"}"#,
+        )];
+
+        let feedback = build_invalid_tool_call_feedback(&invalid, &schemas, Some("Write")).unwrap();
+        assert!(feedback.contains("Rejected tool call(s): run."));
+        assert!(feedback.contains("Required tool_choice is 'Write'."));
+        assert!(feedback.contains("Allowed tools: Read, Write."));
+    }
+
+    #[test]
+    fn no_invalid_tool_call_feedback_when_no_invalid_calls() {
+        let schemas = HashMap::new();
+        assert!(build_invalid_tool_call_feedback(&[], &schemas, None).is_none());
     }
 
     #[test]
@@ -1046,5 +1186,28 @@ mod tests {
             serde_json::from_str(valid[0].function.arguments.as_ref().unwrap()).unwrap();
         assert_eq!(parsed["taskId"], "1");
         assert_eq!(parsed["status"], "in_progress");
+    }
+
+    #[test]
+    fn lenient_tool_allows_missing_required_arguments() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "x-vllm-rs-lenient": true,
+            "properties": {
+                "path": {"type":"string"},
+                "query": {"type":"string"}
+            },
+            "required": ["path", "query"]
+        });
+        let schemas = HashMap::from([("search".to_string(), schema)]);
+        let call = crate::tools::new_tool_call("call_1", "search", r#"{"query":"rust"}"#);
+
+        let (valid, invalid) = filter_tool_calls(&[call], &schemas);
+        assert!(invalid.is_empty());
+        assert_eq!(valid.len(), 1);
+        let parsed: Value =
+            serde_json::from_str(valid[0].function.arguments.as_ref().unwrap()).unwrap();
+        assert_eq!(parsed["query"], "rust");
+        assert!(parsed.get("path").is_none());
     }
 }

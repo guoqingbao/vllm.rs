@@ -14,7 +14,8 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
-    build_tool_schema_map, filter_tool_calls, log_tool_calls, resolve_tools,
+    build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
+    resolve_tools, retain_tool_calls_forced_name,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode, ToolFormat};
 use crate::utils::config::SamplingParams;
@@ -23,6 +24,7 @@ use axum::{
     response::{sse::KeepAlive, Sse},
 };
 use base64::Engine;
+use std::collections::HashSet;
 use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -59,32 +61,127 @@ fn extract_text_from_content(content: Option<&super::MessageContentType>) -> Str
 }
 
 fn validate_openai_tool_messages(messages: &[ChatMessage]) -> Result<(), String> {
+    let mut assistant_tool_call_ids: HashSet<String> = HashSet::new();
+    let mut tool_result_ids_seen: HashSet<String> = HashSet::new();
+    let mut pending_tool_results: Option<HashSet<String>> = None;
+
     for (idx, msg) in messages.iter().enumerate() {
-        if msg.role != "tool" {
+        if let Some(expected_results) = pending_tool_results.as_mut() {
+            if msg.role != "tool" {
+                let mut pending_ids = expected_results.iter().cloned().collect::<Vec<_>>();
+                pending_ids.sort();
+                return Err(format!(
+                    "messages[{idx}] must be role=tool to answer pending assistant tool_calls {:?}",
+                    pending_ids
+                ));
+            }
+            if msg.tool_calls.is_some() {
+                return Err(format!(
+                    "messages[{idx}] role=tool must not include tool_calls"
+                ));
+            }
+
+            let call_id = msg.tool_call_id.as_deref().unwrap_or("").trim();
+            if call_id.is_empty() {
+                return Err(format!(
+                    "messages[{idx}] role=tool requires a non-empty tool_call_id"
+                ));
+            }
+            if !tool_result_ids_seen.insert(call_id.to_string()) {
+                return Err(format!(
+                    "messages[{idx}] role=tool has duplicate tool_call_id '{}'",
+                    call_id
+                ));
+            }
+            if !expected_results.remove(call_id) {
+                let mut pending_ids = expected_results.iter().cloned().collect::<Vec<_>>();
+                pending_ids.sort();
+                return Err(format!(
+                    "messages[{idx}] role=tool references unexpected tool_call_id '{}'. pending ids: {:?}",
+                    call_id, pending_ids
+                ));
+            }
+
+            let text = extract_text_from_content(msg.content.as_ref());
+            if text.trim().is_empty() {
+                return Err(format!(
+                    "messages[{idx}] role=tool requires non-empty content"
+                ));
+            }
+            if expected_results.is_empty() {
+                pending_tool_results = None;
+            }
             continue;
         }
 
-        if msg.tool_calls.is_some() {
-            return Err(format!(
-                "messages[{idx}] role=tool must not include tool_calls"
-            ));
-        }
-
-        let call_id = msg.tool_call_id.as_deref().unwrap_or("").trim();
-        if call_id.is_empty() {
-            return Err(format!(
-                "messages[{idx}] role=tool requires a non-empty tool_call_id"
-            ));
-        }
-
-        let text = extract_text_from_content(msg.content.as_ref());
-        if text.trim().is_empty() {
-            return Err(format!(
-                "messages[{idx}] role=tool requires non-empty content"
-            ));
+        match msg.role.as_str() {
+            "assistant" => {
+                if let Some(tool_calls) = &msg.tool_calls {
+                    if tool_calls.is_empty() {
+                        continue;
+                    }
+                    let mut expected_results = HashSet::new();
+                    for (tool_idx, call) in tool_calls.iter().enumerate() {
+                        let call_id = call.id.trim();
+                        if call_id.is_empty() {
+                            return Err(format!(
+                                "messages[{idx}] assistant tool_calls[{tool_idx}] requires a non-empty id"
+                            ));
+                        }
+                        if !expected_results.insert(call_id.to_string()) {
+                            return Err(format!(
+                                "messages[{idx}] assistant tool_call id '{}' is duplicated",
+                                call_id
+                            ));
+                        }
+                        if !assistant_tool_call_ids.insert(call_id.to_string()) {
+                            return Err(format!(
+                                "messages[{idx}] assistant tool_call id '{}' is duplicated",
+                                call_id
+                            ));
+                        }
+                    }
+                    pending_tool_results = Some(expected_results);
+                }
+            }
+            "tool" => {
+                let call_id = msg.tool_call_id.as_deref().unwrap_or("").trim();
+                if !call_id.is_empty() && tool_result_ids_seen.contains(call_id) {
+                    return Err(format!(
+                        "messages[{idx}] role=tool has duplicate tool_call_id '{}'",
+                        call_id
+                    ));
+                }
+                return Err(format!(
+                    "messages[{idx}] role=tool has no preceding assistant tool_calls to answer"
+                ));
+            }
+            _ => {}
         }
     }
+
+    if let Some(pending) = pending_tool_results {
+        let mut pending_ids = pending.into_iter().collect::<Vec<_>>();
+        pending_ids.sort();
+        return Err(format!(
+            "Missing role=tool results for assistant tool_call ids: {:?}",
+            pending_ids
+        ));
+    }
+
     Ok(())
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 impl StreamingContext {
@@ -112,7 +209,32 @@ impl StreamingContext {
             choices: vec![ChatChoiceChunk {
                 index: 0,
                 delta: Delta {
+                    role: None,
                     content: Some(token.to_string()),
+                    tool_calls: None,
+                },
+                finish_reason: None,
+                error: None,
+            }],
+            usage: None,
+        };
+        self.response_tx
+            .try_send(ChatResponse::Chunk(chunk))
+            .is_ok()
+    }
+
+    /// Send initial assistant role delta chunk for OpenAI streaming compatibility.
+    fn send_role_start(&self) -> bool {
+        let chunk = ChatCompletionChunk {
+            id: format!("seq-{}", self.seq_id),
+            object: "chat.completion.chunk",
+            created: self.created,
+            model: self.model_id.clone(),
+            choices: vec![ChatChoiceChunk {
+                index: 0,
+                delta: Delta {
+                    role: Some("assistant".to_string()),
+                    content: None,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -235,12 +357,20 @@ pub async fn chat_completion(
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
-    // Streaming tool parsing is handled in the StreamToolParser
-    params.mcp_mode = if !use_stream && has_tools {
+    // Keep parser-driven handling as default. Engine early-stop is opt-in because it
+    // may truncate multi-tool outputs for some models.
+    let enable_engine_tool_early_stop =
+        env_flag("VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP") && !use_stream && has_tools;
+    params.mcp_mode = if enable_engine_tool_early_stop {
         Some(true)
     } else {
         None
     };
+    if enable_engine_tool_early_stop {
+        crate::log_warn!(
+            "Engine tool early-stop is enabled via VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP=true"
+        );
+    }
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");
@@ -363,6 +493,12 @@ pub async fn chat_completion(
             // Create streaming context for clean helper methods
             let stream_ctx =
                 StreamingContext::new(seq_id, model_id.to_string(), created, response_tx.clone());
+            if !stream_ctx.send_role_start() {
+                let mut e = engine_clone.write();
+                e.cancel(seq_id);
+                let _ = response_tx.try_send(ChatResponse::Done);
+                return;
+            }
 
             // Initialize the stream tool parser (handles all tool call detection internally)
             let mut tool_parser = tool_parser;
@@ -425,6 +561,9 @@ pub async fn chat_completion(
                                         continue;
                                     }
                                     if !pending_tool_calls.is_empty() {
+                                        if text.trim().is_empty() {
+                                            continue;
+                                        }
                                         crate::log_warn!(
                                             "[Seq {}] Dropping {} trailing text chars after tool call emission",
                                             current_seq_id,
@@ -504,6 +643,9 @@ pub async fn chat_completion(
                                         continue;
                                     }
                                     if !pending_tool_calls.is_empty() {
+                                        if text.trim().is_empty() {
+                                            continue;
+                                        }
                                         crate::log_warn!(
                                             "[Seq {}] Dropping {} buffered chars after tool call emission",
                                             current_seq_id,
@@ -565,6 +707,7 @@ pub async fn chat_completion(
                         decode_start_time_done,
                         decode_finish_time,
                         final_decoded_length,
+                        _stop_sequence,
                     )) => {
                         total_decoded_tokens += final_decoded_length;
 
@@ -586,30 +729,28 @@ pub async fn chat_completion(
                                                     current_seq_id,
                                                     buffer.len()
                                                 );
-                                                continue;
-                                            }
-                                            if !pending_tool_calls.is_empty() {
+                                            } else if !pending_tool_calls.is_empty() {
                                                 crate::log_warn!(
                                                     "[Seq {}] Dropping {} buffered chars because tool calls were already parsed",
                                                     current_seq_id,
                                                     buffer.len()
                                                 );
-                                                continue;
-                                            }
-                                            let safe_buffer = tool_parser
-                                                .sanitize_tool_markup_for_display(&buffer);
-                                            if safe_buffer != buffer {
+                                            } else {
+                                                let safe_buffer = tool_parser
+                                                    .sanitize_tool_markup_for_display(&buffer);
+                                                if safe_buffer != buffer {
+                                                    crate::log_warn!(
+                                                        "[Seq {}] Sanitized leaked tool markup in partial buffer",
+                                                        current_seq_id
+                                                    );
+                                                }
                                                 crate::log_warn!(
-                                                    "[Seq {}] Sanitized leaked tool markup in partial buffer",
-                                                    current_seq_id
+                                                    "[Seq {}] Tool parse partial, flushing {} chars",
+                                                    current_seq_id,
+                                                    safe_buffer.len()
                                                 );
+                                                stream_ctx.send_token(&safe_buffer);
                                             }
-                                            crate::log_warn!(
-                                                "[Seq {}] Tool parse partial, flushing {} chars",
-                                                current_seq_id,
-                                                safe_buffer.len()
-                                            );
-                                            stream_ctx.send_token(&safe_buffer);
                                         }
                                     }
                                 }
@@ -654,18 +795,16 @@ pub async fn chat_completion(
                             }
                         }
 
-                        if let Some(ref forced_name) = forced_tool_name {
-                            let before = pending_tool_calls.len();
-                            pending_tool_calls.retain(|call| call.function.name == *forced_name);
-                            let dropped = before - pending_tool_calls.len();
-                            if dropped > 0 {
-                                crate::log_warn!(
-                                    "[Seq {}] Dropped {} tool call(s) that did not match tool_choice '{}'",
-                                    current_seq_id,
-                                    dropped,
-                                    forced_name
-                                );
-                            }
+                        let dropped = retain_tool_calls_forced_name(
+                            &mut pending_tool_calls,
+                            forced_tool_name.as_deref(),
+                        );
+                        if dropped > 0 {
+                            crate::log_warn!(
+                                "[Seq {}] Dropped {} tool call(s) that did not match forced tool_choice",
+                                current_seq_id,
+                                dropped
+                            );
                         }
 
                         let (validated_calls, invalid_calls) =
@@ -682,27 +821,69 @@ pub async fn chat_completion(
                                 l.log_tool_calls("Invalid", &invalid_calls);
                             }
                         }
+                        let invalid_feedback = build_invalid_tool_call_feedback(
+                            &invalid_calls,
+                            stream_tool_schemas.as_ref(),
+                            forced_tool_name.as_deref(),
+                        );
 
                         let valid_calls = validated_calls;
 
-                        let tool_calls = if valid_calls.is_empty() {
-                            None
-                        } else {
-                            log_tool_calls("Valid", &valid_calls);
-                            Some(
-                                valid_calls
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, tc)| crate::server::PublicToolCall {
-                                        index: Some(i),
-                                        id: tc.id,
-                                        type_: tc.tool_type,
-                                        function: tc.function,
-                                    })
-                                    .collect(),
-                            )
-                        };
+                        let tool_calls: Option<Vec<crate::server::PublicToolCall>> =
+                            if valid_calls.is_empty() {
+                                None
+                            } else {
+                                log_tool_calls("Valid", &valid_calls);
+                                Some(
+                                    valid_calls
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(i, tc)| crate::server::PublicToolCall {
+                                            index: Some(i),
+                                            id: tc.id,
+                                            type_: tc.tool_type,
+                                            function: tc.function,
+                                        })
+                                        .collect(),
+                                )
+                            };
                         let has_any_tool_calls = tool_calls.is_some();
+                        if let Some(ref streamed_tool_calls) = tool_calls {
+                            let tool_chunk = ChatCompletionChunk {
+                                id: format!("seq-{}", current_seq_id),
+                                object: "chat.completion.chunk",
+                                created,
+                                model: model_id.to_string(),
+                                choices: vec![ChatChoiceChunk {
+                                    index: 0,
+                                    delta: Delta {
+                                        role: None,
+                                        content: None,
+                                        tool_calls: Some(streamed_tool_calls.clone()),
+                                    },
+                                    finish_reason: None,
+                                    error: None,
+                                }],
+                                usage: None,
+                            };
+                            let _ = response_tx.try_send(ChatResponse::Chunk(tool_chunk));
+                        }
+                        if !has_any_tool_calls {
+                            if let Some(feedback) = invalid_feedback {
+                                if let Some(ref l) = stream_logger {
+                                    l.log_stream_token(&feedback);
+                                }
+                                if !stream_ctx.send_token(&feedback) {
+                                    crate::log_error!(
+                                        "[Seq {}] Stream send error (disconnected)",
+                                        current_seq_id
+                                    );
+                                    let mut e = engine_clone.write();
+                                    e.cancel(current_seq_id);
+                                    break;
+                                }
+                            }
+                        }
                         if tool_choice_required && !has_any_tool_calls {
                             crate::log_warn!(
                                 "[Seq {}] Tool choice required but no tool calls were produced",
@@ -718,8 +899,9 @@ pub async fn chat_completion(
                             choices: vec![ChatChoiceChunk {
                                 index: 0,
                                 delta: Delta {
+                                    role: None,
                                     content: None,
-                                    tool_calls,
+                                    tool_calls: None,
                                 },
                                 finish_reason: if has_any_tool_calls {
                                     Some("tool_calls".to_string())
@@ -738,7 +920,10 @@ pub async fn chat_completion(
                         };
 
                         if has_any_tool_calls {
-                            crate::log_info!("Final chunk with tool calls: {:?}", final_chunk);
+                            crate::log_info!(
+                                "Final chunk emitted after tool-call delta chunk(s): {:?}",
+                                final_chunk
+                            );
                         }
                         if let Some(ref l) = stream_logger {
                             l.log_stream_end(&final_chunk);
@@ -793,6 +978,7 @@ pub async fn chat_completion(
                             choices: vec![ChatChoiceChunk {
                                 index: 0,
                                 delta: Delta {
+                                    role: None,
                                     content: None,
                                     tool_calls: None,
                                 },
@@ -897,17 +1083,13 @@ pub async fn chat_completion(
                 let mut parsed_calls = tool_parser
                     .parse_complete_with_fallback(&output.decode_output)
                     .await;
-                if let Some(ref forced_name) = forced_tool_name {
-                    let before = parsed_calls.len();
-                    parsed_calls.retain(|call| call.function.name == *forced_name);
-                    let dropped = before - parsed_calls.len();
-                    if dropped > 0 {
-                        crate::log_warn!(
-                            "Dropped {} tool call(s) that did not match tool_choice '{}'",
-                            dropped,
-                            forced_name
-                        );
-                    }
+                let dropped =
+                    retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
+                if dropped > 0 {
+                    crate::log_warn!(
+                        "Dropped {} tool call(s) that did not match forced tool_choice",
+                        dropped
+                    );
                 }
                 let (validated_calls, invalid_calls) =
                     filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
@@ -916,18 +1098,27 @@ pub async fn chat_completion(
                     crate::log_warn!("Found {} invalid tool call(s)", invalid_calls.len());
                     log_tool_calls("Invalid", &invalid_calls);
                 }
+                let invalid_feedback = build_invalid_tool_call_feedback(
+                    &invalid_calls,
+                    tool_schemas.as_ref(),
+                    forced_tool_name.as_deref(),
+                );
 
                 let valid_calls = validated_calls;
                 if valid_calls.is_empty() {
                     if tool_choice_required {
                         crate::log_warn!("Tool choice required but no tool calls were produced");
                     }
-                    let safe_text = if tool_parser.contains_tool_markup(&output.decode_output) {
-                        tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+                    let fallback_text = if let Some(feedback) = invalid_feedback {
+                        feedback
                     } else {
-                        output.decode_output.clone()
+                        if tool_parser.contains_tool_markup(&output.decode_output) {
+                            tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+                        } else {
+                            output.decode_output.clone()
+                        }
                     };
-                    (Some(safe_text), None)
+                    (Some(fallback_text), None)
                 } else {
                     log_tool_calls("Valid", &valid_calls);
                     let public_calls = valid_calls
@@ -1210,4 +1401,93 @@ pub async fn detokenize(
     );
 
     ChatResponder::Detokenize(DetokenizeResponse { prompt })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_openai_tool_messages_with_known_tool_call_id() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
+                tool_call_id: None,
+            },
+            ChatMessage::tool_result("call_1", "{\"ok\":true}"),
+        ];
+
+        assert!(validate_openai_tool_messages(&messages).is_ok());
+    }
+
+    #[test]
+    fn rejects_openai_tool_message_with_unknown_tool_call_id() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
+                tool_call_id: None,
+            },
+            ChatMessage::tool_result("call_unknown", "{\"ok\":true}"),
+        ];
+
+        let err = validate_openai_tool_messages(&messages).unwrap_err();
+        assert!(err.contains("unexpected tool_call_id"));
+    }
+
+    #[test]
+    fn rejects_duplicate_openai_tool_result_ids() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
+                tool_call_id: None,
+            },
+            ChatMessage::tool_result("call_1", "{\"ok\":true}"),
+            ChatMessage::tool_result("call_1", "{\"ok\":false}"),
+        ];
+
+        let err = validate_openai_tool_messages(&messages).unwrap_err();
+        assert!(err.contains("duplicate tool_call_id"));
+    }
+
+    #[test]
+    fn rejects_non_adjacent_openai_tool_result_response() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
+                tool_call_id: None,
+            },
+            ChatMessage::text("user", "let us skip the tool result"),
+        ];
+
+        let err = validate_openai_tool_messages(&messages).unwrap_err();
+        assert!(err.contains("must be role=tool"));
+    }
+
+    #[test]
+    fn validates_openai_multiple_tool_results_in_order() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(vec![
+                    crate::tools::new_tool_call("call_1", "lookup", "{}"),
+                    crate::tools::new_tool_call("call_2", "lookup", "{}"),
+                ]),
+                tool_call_id: None,
+            },
+            ChatMessage::tool_result("call_1", "{\"ok\":true}"),
+            ChatMessage::tool_result("call_2", "{\"ok\":true}"),
+            ChatMessage::text("assistant", "done"),
+        ];
+
+        assert!(validate_openai_tool_messages(&messages).is_ok());
+    }
 }

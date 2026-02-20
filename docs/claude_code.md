@@ -11,13 +11,16 @@ Claude Code -> vLLM.rs (Anthropic-compatible)
 
 ```bash
 # Rust
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1 --prefix-cache
+
+# or
 ./run.sh --features cuda,nccl,graph,flashinfer,cutlass,graph --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1 --prefix-cache
 
 # Different model
-./run.sh --features cuda,nccl,graph,flash-attn,flash-context --release --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --server --prefix-cache
+./run.sh --features cuda,nccl,graph,flash-attn,flash-context,graph --release --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --server --prefix-cache
 
 # Python
-python3 -m vllm_rs.server --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-Next-FP8 --d 0,1 --prefix-cache
 ```
 
 ## 2) Configure Claude Code
@@ -26,6 +29,11 @@ Install claude code
 
 ```shell
 npm install -g @anthropic-ai/claude-code
+```
+
+or
+```shell
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 Export config

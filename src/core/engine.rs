@@ -64,10 +64,10 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
 
 #[derive(Debug, Clone)]
 pub enum StreamItem {
-    Token(String, u32),                          //streaming: (text, token_id)
-    TokenID(u32),                                //completion
-    Completion((usize, usize, usize, Vec<u32>)), //completion
-    Done((usize, usize, usize, usize)),          //streaming end
+    Token(String, u32), //streaming: (text, token_id)
+    TokenID(u32),       //completion
+    Completion((usize, usize, usize, Vec<u32>, Option<String>)), //completion
+    Done((usize, usize, usize, usize, Option<String>)), //streaming end
     Error(String),
 }
 
@@ -516,6 +516,7 @@ impl LLMEngine {
 
         if let Some(stop_sequences) = &params.stop_sequences {
             let mut stop_token_ids = Vec::new();
+            let mut resolved_stop_sequences = Vec::new();
             for sequence in stop_sequences {
                 if sequence.is_empty() {
                     continue;
@@ -525,6 +526,7 @@ impl LLMEngine {
                         let ids = encoding.get_ids();
                         if !ids.is_empty() {
                             stop_token_ids.push(ids.to_vec());
+                            resolved_stop_sequences.push(sequence.clone());
                         }
                     }
                     Err(err) => {
@@ -538,6 +540,7 @@ impl LLMEngine {
             }
             if !stop_token_ids.is_empty() {
                 params.stop_token_ids = Some(stop_token_ids);
+                params.stop_sequences = Some(resolved_stop_sequences);
             }
         }
         let seq = Sequence::new(
@@ -788,6 +791,7 @@ impl LLMEngine {
                                     decode_start_time,
                                     decode_finish_time,
                                     s.output_ids.len(),
+                                    s.stop_sequence.clone(),
                                 )));
                             } else {
                                 let _ = sender.try_send(StreamItem::Completion((
@@ -795,6 +799,7 @@ impl LLMEngine {
                                     decode_start_time,
                                     decode_finish_time,
                                     s.output_ids.clone(),
+                                    s.stop_sequence.clone(),
                                 )));
                             }
                         }
@@ -1183,6 +1188,7 @@ impl LLMEngine {
                                 decode_start,
                                 decode_finish,
                                 decoded_ids,
+                                stop_sequence,
                             )) => {
                                 let decoded_len = decoded_ids.len();
                                 let decode_output = tokenizer
@@ -1197,6 +1203,7 @@ impl LLMEngine {
                                     decode_finish_time: decode_finish,
                                     decoded_length: decoded_len,
                                     decode_output,
+                                    stop_sequence,
                                 });
                                 break;
                             }

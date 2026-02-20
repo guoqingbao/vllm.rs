@@ -5,7 +5,10 @@ use super::{
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
-use crate::tools::helpers::{build_tool_schema_map, filter_tool_calls};
+use crate::tools::helpers::{
+    build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls,
+    retain_tool_calls_forced_name,
+};
 use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
 use crate::utils::config::SamplingParams;
 use axum::{
@@ -21,7 +24,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     pin::Pin,
     sync::Arc,
@@ -553,6 +556,161 @@ fn flush_tool_call_message(out: &mut Vec<ChatMessage>, calls: &mut Vec<ToolCall>
     }
 }
 
+fn validate_claude_tool_result_protocol(messages: &[ClaudeMessage]) -> Result<(), String> {
+    let mut known_tool_use_ids: HashSet<String> = HashSet::new();
+    let mut awaiting_tool_results: Option<HashSet<String>> = None;
+
+    for (idx, message) in messages.iter().enumerate() {
+        let role = message.role.as_str();
+        if role != "user" && role != "assistant" {
+            return Err(format!(
+                "unsupported role at messages[{idx}]: {}",
+                message.role
+            ));
+        }
+        let mut consumed_expected_results = false;
+
+        if let Some(expected) = awaiting_tool_results.take() {
+            if role != "user" {
+                return Err(format!(
+                    "messages[{idx}] must be a user message with tool_result blocks after assistant tool_use"
+                ));
+            }
+
+            let ClaudeContent::Blocks(blocks) = &message.content else {
+                return Err(format!(
+                    "messages[{idx}] must provide tool_result blocks (plain text is not valid here)"
+                ));
+            };
+
+            let mut provided: HashSet<String> = HashSet::new();
+            let mut seen_non_tool_result = false;
+            for (block_idx, block) in blocks.iter().enumerate() {
+                match block {
+                    ClaudeContentBlock::ToolResult { tool_use_id, .. } => {
+                        if seen_non_tool_result {
+                            return Err(format!(
+                                "messages[{idx}].content[{block_idx}] tool_result blocks must appear before text/image blocks"
+                            ));
+                        }
+                        let id = tool_use_id.trim();
+                        if id.is_empty() {
+                            return Err(format!(
+                                "messages[{idx}].content[{block_idx}] tool_result requires non-empty tool_use_id"
+                            ));
+                        }
+                        if !provided.insert(id.to_string()) {
+                            return Err(format!(
+                                "messages[{idx}] contains duplicate tool_result for tool_use_id '{}'",
+                                id
+                            ));
+                        }
+                    }
+                    _ => seen_non_tool_result = true,
+                }
+            }
+
+            if provided.is_empty() {
+                return Err(format!(
+                    "messages[{idx}] must start with tool_result blocks for pending tool_use ids"
+                ));
+            }
+
+            if provided != expected {
+                let mut expected_ids = expected.into_iter().collect::<Vec<_>>();
+                expected_ids.sort();
+                let mut provided_ids = provided.into_iter().collect::<Vec<_>>();
+                provided_ids.sort();
+                return Err(format!(
+                    "messages[{idx}] tool_result ids do not match pending assistant tool_use ids. expected={:?}, provided={:?}",
+                    expected_ids, provided_ids
+                ));
+            }
+            consumed_expected_results = true;
+        }
+
+        let ClaudeContent::Blocks(blocks) = &message.content else {
+            continue;
+        };
+
+        let mut message_tool_use_ids: HashSet<String> = HashSet::new();
+        let mut has_tool_use = false;
+        let mut has_tool_result = false;
+        let mut seen_non_tool_result = false;
+
+        for (block_idx, block) in blocks.iter().enumerate() {
+            match block {
+                ClaudeContentBlock::ToolUse { id, .. } => {
+                    if role != "assistant" {
+                        return Err(format!(
+                            "messages[{idx}].content[{block_idx}] tool_use blocks must be in assistant messages"
+                        ));
+                    }
+                    let call_id = id.trim();
+                    if call_id.is_empty() {
+                        return Err(format!(
+                            "messages[{idx}].content[{block_idx}] tool_use requires non-empty id"
+                        ));
+                    }
+                    if !known_tool_use_ids.insert(call_id.to_string()) {
+                        return Err(format!(
+                            "messages[{idx}] duplicates tool_use id '{}' from a prior message",
+                            call_id
+                        ));
+                    }
+                    message_tool_use_ids.insert(call_id.to_string());
+                    has_tool_use = true;
+                }
+                ClaudeContentBlock::ToolResult { tool_use_id, .. } => {
+                    if role != "user" {
+                        return Err(format!(
+                            "messages[{idx}].content[{block_idx}] tool_result blocks must be in user messages"
+                        ));
+                    }
+                    if seen_non_tool_result {
+                        return Err(format!(
+                            "messages[{idx}].content[{block_idx}] tool_result blocks must appear before text/image blocks"
+                        ));
+                    }
+                    let result_id = tool_use_id.trim();
+                    if result_id.is_empty() {
+                        return Err(format!(
+                            "messages[{idx}].content[{block_idx}] tool_result requires non-empty tool_use_id"
+                        ));
+                    }
+                    has_tool_result = true;
+                }
+                _ => {
+                    if role == "user" {
+                        seen_non_tool_result = true;
+                    }
+                }
+            }
+        }
+
+        if has_tool_use {
+            if !message_tool_use_ids.is_empty() {
+                awaiting_tool_results = Some(message_tool_use_ids);
+            }
+        } else if has_tool_result && !consumed_expected_results {
+            return Err(format!(
+                "messages[{idx}] contains tool_result blocks without a preceding assistant tool_use message"
+            ));
+        }
+    }
+
+    if let Some(pending) = awaiting_tool_results {
+        let mut ids = pending.into_iter().collect::<Vec<_>>();
+        ids.sort();
+        return Err(format!(
+            "Missing tool_result response for assistant tool_use ids: {:?}",
+            ids
+        ));
+    }
+
+    Ok(())
+}
+
 fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, String> {
     let role = message.role.as_str();
     if role != "user" && role != "assistant" {
@@ -616,6 +774,9 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         content,
                         is_error,
                     } => {
+                        if role != "user" {
+                            return Err("tool_result blocks must be in user messages".to_string());
+                        }
                         flush_content_message(&mut out, role, &mut content_items);
                         flush_tool_call_message(&mut out, &mut tool_calls);
                         let raw_text = tool_result_content_to_text(content)?;
@@ -651,6 +812,8 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
 }
 
 fn build_chat_messages(request: &ClaudeMessageRequest) -> Result<Vec<ChatMessage>, String> {
+    validate_claude_tool_result_protocol(&request.messages)?;
+
     let mut messages = Vec::new();
     if let Some(system) = &request.system {
         messages.push(system_to_chat_message(system)?);
@@ -696,11 +859,14 @@ fn stop_reason_from_decoding(
     has_tool_calls: bool,
     decoded_tokens: usize,
     max_tokens: usize,
+    stop_sequence: Option<&str>,
 ) -> String {
     if has_tool_calls {
         "tool_use".to_string()
     } else if decoded_tokens >= max_tokens {
         "max_tokens".to_string()
+    } else if stop_sequence.is_some() {
+        "stop_sequence".to_string()
     } else {
         "end_turn".to_string()
     }
@@ -1046,6 +1212,18 @@ fn thinking_to_bool(thinking: &Option<ClaudeThinking>) -> Option<bool> {
     }
 }
 
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 pub async fn messages(
     State(data): State<Arc<ServerData>>,
     request: Json<ClaudeMessageRequest>,
@@ -1093,7 +1271,6 @@ pub async fn messages(
     params.top_k = request.top_k.map(|v| v as isize);
     params.top_p = request.top_p;
     params.thinking = thinking_to_bool(&request.thinking);
-    params.mcp_mode = None;
     if let Some(stop_sequences) = &request.stop_sequences {
         if !stop_sequences.is_empty() {
             params.stop_sequences = Some(stop_sequences.clone());
@@ -1180,11 +1357,21 @@ pub async fn messages(
     }
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
-    params.mcp_mode = if !use_stream && !resolved_tools.is_empty() {
+    // Keep parser-driven handling as default. Engine early-stop is opt-in because it
+    // may truncate multi-tool outputs for some models.
+    let enable_engine_tool_early_stop = env_flag("VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP")
+        && !use_stream
+        && !resolved_tools.is_empty();
+    params.mcp_mode = if enable_engine_tool_early_stop {
         Some(true)
     } else {
         None
     };
+    if enable_engine_tool_early_stop {
+        crate::log_warn!(
+            "Engine tool early-stop is enabled via VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP=true"
+        );
+    }
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
     let (model_type, tool_config, engine_config) = {
@@ -1436,6 +1623,9 @@ pub async fn messages(
                                         continue;
                                     }
                                     if !pending_tool_calls.is_empty() {
+                                        if text.trim().is_empty() {
+                                            continue;
+                                        }
                                         crate::log_warn!(
                                             "[Seq {}] Dropping {} trailing text chars after tool call emission",
                                             seq_id,
@@ -1525,6 +1715,9 @@ pub async fn messages(
                                         continue;
                                     }
                                     if !pending_tool_calls.is_empty() {
+                                        if text.trim().is_empty() {
+                                            continue;
+                                        }
                                         crate::log_warn!(
                                             "[Seq {}] Dropping {} buffered chars after tool call emission",
                                             seq_id,
@@ -1604,6 +1797,7 @@ pub async fn messages(
                         decode_start_time,
                         decode_finish_time,
                         final_decoded_length,
+                        stop_sequence,
                     )) => {
                         total_decoded_tokens = final_decoded_length;
 
@@ -1624,30 +1818,28 @@ pub async fn messages(
                                                     seq_id,
                                                     buffer.len()
                                                 );
-                                                continue;
-                                            }
-                                            if !pending_tool_calls.is_empty() {
+                                            } else if !pending_tool_calls.is_empty() {
                                                 crate::log_warn!(
                                                     "[Seq {}] Dropping {} buffered chars because tool calls were already parsed",
                                                     seq_id,
                                                     buffer.len()
                                                 );
-                                                continue;
-                                            }
-                                            let safe_buffer = tool_parser
-                                                .sanitize_tool_markup_for_display(&buffer);
-                                            if safe_buffer != buffer {
-                                                crate::log_warn!(
-                                                    "[Seq {}] Sanitized leaked tool markup in partial buffer",
-                                                    seq_id
+                                            } else {
+                                                let safe_buffer = tool_parser
+                                                    .sanitize_tool_markup_for_display(&buffer);
+                                                if safe_buffer != buffer {
+                                                    crate::log_warn!(
+                                                        "[Seq {}] Sanitized leaked tool markup in partial buffer",
+                                                        seq_id
+                                                    );
+                                                }
+                                                let _ = send_text_with_start(
+                                                    &stream_ctx,
+                                                    &mut text_block_started,
+                                                    text_block_index,
+                                                    &safe_buffer,
                                                 );
                                             }
-                                            let _ = send_text_with_start(
-                                                &stream_ctx,
-                                                &mut text_block_started,
-                                                text_block_index,
-                                                &safe_buffer,
-                                            );
                                         }
                                     }
                                 }
@@ -1693,39 +1885,57 @@ pub async fn messages(
                             }
                         }
 
-                        let (tool_calls, has_tool_calls) = if pending_tool_calls.is_empty() {
-                            (Vec::new(), false)
-                        } else {
-                            let (validated_calls, invalid) = filter_tool_calls(
-                                &pending_tool_calls,
-                                stream_tool_schemas.as_ref(),
+                        let dropped = retain_tool_calls_forced_name(
+                            &mut pending_tool_calls,
+                            forced_tool_name.as_deref(),
+                        );
+                        if dropped > 0 {
+                            crate::log_warn!(
+                                "[Seq {}] Dropped {} tool call(s) that did not match forced tool_choice",
+                                seq_id,
+                                dropped
                             );
-                            if !invalid.is_empty() {
-                                crate::log_error!(
-                                    "[Seq {}] Found {} invalid tool call(s)",
-                                    seq_id,
-                                    invalid.len()
-                                );
-                            }
+                        }
 
-                            if !invalid.is_empty() {
-                                log_tool_calls("Invalid", seq_id, &invalid);
-                                if let Some(ref l) = stream_logger {
-                                    l.log_tool_calls("Invalid", &invalid);
-                                }
-                            }
-                            let final_tool_calls = validated_calls;
-
-                            if final_tool_calls.is_empty() {
-                                (Vec::new(), false)
+                        let (tool_calls, has_tool_calls, invalid_feedback) =
+                            if pending_tool_calls.is_empty() {
+                                (Vec::new(), false, None)
                             } else {
-                                log_tool_calls("Valid", seq_id, &final_tool_calls);
-                                if let Some(ref l) = stream_logger {
-                                    l.log_tool_calls("Valid", &final_tool_calls);
+                                let (validated_calls, invalid) = filter_tool_calls(
+                                    &pending_tool_calls,
+                                    stream_tool_schemas.as_ref(),
+                                );
+                                if !invalid.is_empty() {
+                                    crate::log_error!(
+                                        "[Seq {}] Found {} invalid tool call(s)",
+                                        seq_id,
+                                        invalid.len()
+                                    );
                                 }
-                                (final_tool_calls, true)
-                            }
-                        };
+
+                                if !invalid.is_empty() {
+                                    log_tool_calls("Invalid", seq_id, &invalid);
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_tool_calls("Invalid", &invalid);
+                                    }
+                                }
+                                let invalid_feedback = build_invalid_tool_call_feedback(
+                                    &invalid,
+                                    stream_tool_schemas.as_ref(),
+                                    forced_tool_name.as_deref(),
+                                );
+                                let final_tool_calls = validated_calls;
+
+                                if final_tool_calls.is_empty() {
+                                    (Vec::new(), false, invalid_feedback)
+                                } else {
+                                    log_tool_calls("Valid", seq_id, &final_tool_calls);
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_tool_calls("Valid", &final_tool_calls);
+                                    }
+                                    (final_tool_calls, true, invalid_feedback)
+                                }
+                            };
 
                         if tool_choice_required && !has_tool_calls {
                             if let Some(ref name) = forced_tool_name {
@@ -1746,7 +1956,37 @@ pub async fn messages(
                             has_tool_calls,
                             total_decoded_tokens,
                             max_tokens,
+                            stop_sequence.as_deref(),
                         );
+
+                        if !has_tool_calls {
+                            if let Some(feedback) = invalid_feedback.as_deref() {
+                                if let Some(ref l) = stream_logger {
+                                    l.log_stream_token(feedback);
+                                }
+                                if let Err(err) = send_text_with_start(
+                                    &stream_ctx,
+                                    &mut text_block_started,
+                                    text_block_index,
+                                    feedback,
+                                ) {
+                                    handle_stream_send_error(
+                                        err,
+                                        seq_id,
+                                        &response_tx,
+                                        text_block_started,
+                                        text_block_index,
+                                        total_decoded_tokens,
+                                        true,
+                                    )
+                                    .await;
+                                    let mut e = engine_clone.write();
+                                    e.cancel(seq_id);
+                                    stream_finished = true;
+                                    break 'stream;
+                                }
+                            }
+                        }
 
                         let mut next_block_index = 0usize;
                         if text_block_started {
@@ -1814,7 +2054,7 @@ pub async fn messages(
                             event_type: "message_delta",
                             delta: ClaudeMessageDelta {
                                 stop_reason: Some(stop_reason),
-                                stop_sequence: None,
+                                stop_sequence: stop_sequence.clone(),
                             },
                             usage: ClaudeUsageDelta {
                                 output_tokens: total_decoded_tokens,
@@ -2005,14 +2245,27 @@ pub async fn messages(
             resolved_tools.clone(),
             enforce_parser.clone(),
         );
-        let parsed_calls = tool_parser
+        let mut parsed_calls = tool_parser
             .parse_complete_with_fallback(&output.decode_output)
             .await;
+        let dropped = retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
+        if dropped > 0 {
+            crate::log_warn!(
+                "[Seq {}] Dropped {} tool call(s) that did not match forced tool_choice",
+                output.seq_id,
+                dropped
+            );
+        }
         let (validated_calls, invalid_calls) =
             filter_tool_calls(&parsed_calls, tool_schemas.as_ref());
         if !invalid_calls.is_empty() {
             crate::log_error!("Found {} invalid tool call(s)", invalid_calls.len());
         }
+        let invalid_feedback = build_invalid_tool_call_feedback(
+            &invalid_calls,
+            tool_schemas.as_ref(),
+            forced_tool_name.as_deref(),
+        );
 
         let valid_calls = validated_calls;
 
@@ -2040,10 +2293,14 @@ pub async fn messages(
         let content = if has_tool_calls {
             tool_calls_to_blocks(&valid_calls)
         } else {
-            let safe_text = if tool_parser.contains_tool_markup(&output.decode_output) {
-                tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+            let safe_text = if let Some(feedback) = invalid_feedback {
+                feedback
             } else {
-                output.decode_output.clone()
+                if tool_parser.contains_tool_markup(&output.decode_output) {
+                    tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+                } else {
+                    output.decode_output.clone()
+                }
             };
             vec![ClaudeContentBlockOut::Text { text: safe_text }]
         };
@@ -2058,8 +2315,9 @@ pub async fn messages(
                 has_tool_calls,
                 output.decoded_length,
                 max_tokens,
+                output.stop_sequence.as_deref(),
             )),
-            stop_sequence: None,
+            stop_sequence: output.stop_sequence.clone(),
             usage: ClaudeUsage {
                 input_tokens: output.prompt_length,
                 output_tokens: output.decoded_length,
@@ -2214,35 +2472,119 @@ mod tests {
 
     #[test]
     fn converts_tool_use_and_result_blocks() {
-        let blocks = vec![
-            ClaudeContentBlock::Text {
-                text: "run tool".to_string(),
-            },
-            ClaudeContentBlock::ToolUse {
-                id: "call_1".to_string(),
-                name: "get_weather".to_string(),
-                input: json!({"city": "tokyo"}),
-            },
-            ClaudeContentBlock::ToolResult {
-                tool_use_id: "call_1".to_string(),
-                content: ClaudeToolResultContent::Text("ok".to_string()),
-                is_error: None,
-            },
-        ];
-
-        let message = ClaudeMessage {
-            role: "assistant".to_string(),
-            content: ClaudeContent::Blocks(blocks),
+        let request = ClaudeMessageRequest {
+            model: "default".to_string(),
+            messages: vec![
+                ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: ClaudeContent::Blocks(vec![
+                        ClaudeContentBlock::Text {
+                            text: "run tool".to_string(),
+                        },
+                        ClaudeContentBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            input: json!({"city": "tokyo"}),
+                        },
+                    ]),
+                },
+                ClaudeMessage {
+                    role: "user".to_string(),
+                    content: ClaudeContent::Blocks(vec![ClaudeContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: ClaudeToolResultContent::Text("ok".to_string()),
+                        is_error: None,
+                    }]),
+                },
+            ],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stream: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            extra: HashMap::new(),
         };
 
-        let converted = convert_claude_message(&message).unwrap();
+        let converted = build_chat_messages(&request).unwrap();
         assert_eq!(converted.len(), 3);
         assert_eq!(converted[0].role, "assistant");
         assert_eq!(converted[1].role, "assistant");
         assert_eq!(converted[2].role, "tool");
-        let tool_calls = converted[1].tool_calls.clone().unwrap();
+        let tool_calls = converted[1]
+            .tool_calls
+            .clone()
+            .expect("assistant tool_calls expected");
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
+    }
+
+    #[test]
+    fn rejects_assistant_tool_result_blocks() {
+        let request = ClaudeMessageRequest {
+            model: "default".to_string(),
+            messages: vec![ClaudeMessage {
+                role: "assistant".to_string(),
+                content: ClaudeContent::Blocks(vec![ClaudeContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: ClaudeToolResultContent::Text("bad".to_string()),
+                    is_error: None,
+                }]),
+            }],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stream: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            extra: HashMap::new(),
+        };
+
+        let err = build_chat_messages(&request).unwrap_err();
+        assert!(err.contains("tool_result blocks must be in user messages"));
+    }
+
+    #[test]
+    fn rejects_non_adjacent_tool_result_response() {
+        let request = ClaudeMessageRequest {
+            model: "default".to_string(),
+            messages: vec![
+                ClaudeMessage {
+                    role: "assistant".to_string(),
+                    content: ClaudeContent::Blocks(vec![ClaudeContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        input: json!({"city": "tokyo"}),
+                    }]),
+                },
+                ClaudeMessage {
+                    role: "user".to_string(),
+                    content: ClaudeContent::Text("plain text first".to_string()),
+                },
+            ],
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stream: None,
+            stop_sequences: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            extra: HashMap::new(),
+        };
+
+        let err = build_chat_messages(&request).unwrap_err();
+        assert!(err.contains("must provide tool_result blocks"));
     }
 
     #[test]
