@@ -172,18 +172,6 @@ fn validate_openai_tool_messages(messages: &[ChatMessage]) -> Result<(), String>
     Ok(())
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        env::var(name)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
 impl StreamingContext {
     fn new(
         seq_id: usize,
@@ -357,20 +345,7 @@ pub async fn chat_completion(
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
-    // Keep parser-driven handling as default. Engine early-stop is opt-in because it
-    // may truncate multi-tool outputs for some models.
-    let enable_engine_tool_early_stop =
-        env_flag("VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP") && !use_stream && has_tools;
-    params.mcp_mode = if enable_engine_tool_early_stop {
-        Some(true)
-    } else {
-        None
-    };
-    if enable_engine_tool_early_stop {
-        crate::log_warn!(
-            "Engine tool early-stop is enabled via VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP=true"
-        );
-    }
+    params.mcp_mode = if has_tools { Some(true) } else { None };
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");

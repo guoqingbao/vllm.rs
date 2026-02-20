@@ -1212,18 +1212,6 @@ fn thinking_to_bool(thinking: &Option<ClaudeThinking>) -> Option<bool> {
     }
 }
 
-fn env_flag(name: &str) -> bool {
-    matches!(
-        env::var(name)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
 pub async fn messages(
     State(data): State<Arc<ServerData>>,
     request: Json<ClaudeMessageRequest>,
@@ -1357,21 +1345,11 @@ pub async fn messages(
     }
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
-    // Keep parser-driven handling as default. Engine early-stop is opt-in because it
-    // may truncate multi-tool outputs for some models.
-    let enable_engine_tool_early_stop = env_flag("VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP")
-        && !use_stream
-        && !resolved_tools.is_empty();
-    params.mcp_mode = if enable_engine_tool_early_stop {
+    params.mcp_mode = if !resolved_tools.is_empty() {
         Some(true)
     } else {
         None
     };
-    if enable_engine_tool_early_stop {
-        crate::log_warn!(
-            "Engine tool early-stop is enabled via VLLM_RS_ENABLE_ENGINE_TOOL_EARLY_STOP=true"
-        );
-    }
     let _tool_choice = tool_choice_to_openai(&request.tool_choice);
 
     let (model_type, tool_config, engine_config) = {
