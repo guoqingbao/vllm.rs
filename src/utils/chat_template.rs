@@ -54,12 +54,29 @@ pub enum ApplyChatTemplateError {
     RenderTemplateError(#[source] minijinja::Error),
 }
 
-fn escape_special_tokens_in_text(content: &str, escape_tokens: &[String]) -> String {
+fn escape_special_tokens_in_text(
+    content: &str,
+    escape_tokens: &[String],
+    preserve_tokens: &[String],
+) -> String {
     if escape_tokens.is_empty() || content.is_empty() {
         return content.to_string();
     }
 
-    let mut escaped = content.to_string();
+    // Protect model-required markers (e.g. multimodal image markers) from
+    // escaping by swapping them to temporary sentinels first.
+    let mut protected = content.to_string();
+    let mut sentinels: Vec<(String, String)> = Vec::new();
+    for (idx, token) in preserve_tokens.iter().enumerate() {
+        if token.is_empty() || !protected.contains(token) {
+            continue;
+        }
+        let sentinel = format!("__VLLM_RS_PRESERVE_TOKEN_{}__", idx);
+        protected = protected.replace(token, &sentinel);
+        sentinels.push((sentinel, token.clone()));
+    }
+
+    let mut escaped = protected;
     for token in escape_tokens {
         if token.is_empty() {
             continue;
@@ -73,6 +90,11 @@ fn escape_special_tokens_in_text(content: &str, escape_tokens: &[String]) -> Str
         };
         escaped = escaped.replace(token, &escaped_token);
     }
+
+    for (sentinel, token) in sentinels {
+        escaped = escaped.replace(&sentinel, &token);
+    }
+
     escaped
 }
 
@@ -86,6 +108,12 @@ fn should_escape_marker(token: &str) -> bool {
     matches!(first, '<' | '[' | '{' | '(') || token.contains('|')
 }
 
+fn should_escape_nested_xml_tool_markers(tool_markers: &[&str]) -> bool {
+    tool_markers
+        .iter()
+        .any(|marker| marker.starts_with('<') && marker.contains("tool_call"))
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatTemplate {
     system_message: Option<String>,
@@ -94,6 +122,7 @@ pub struct ChatTemplate {
     eos_token: Option<String>,
     messages: Vec<Message>,
     escape_tokens: Vec<String>,
+    preserve_tokens: Vec<String>,
     add_generation_prompt: bool,
     enable_thinking: bool,
 }
@@ -111,6 +140,14 @@ impl ChatTemplate {
             if should_escape_marker(marker) {
                 tokens.push((*marker).to_string());
             }
+        }
+
+        if should_escape_nested_xml_tool_markers(tool_markers) {
+            tokens.extend(
+                ["<function=", "</function>", "<parameter=", "</parameter>"]
+                    .into_iter()
+                    .map(|s| s.to_string()),
+            );
         }
 
         // Escape longest markers first to avoid partial replacement ordering issues.
@@ -135,6 +172,7 @@ impl ChatTemplate {
             eos_token,
             messages: Vec::new(),
             escape_tokens: Vec::new(),
+            preserve_tokens: Vec::new(),
             add_generation_prompt,
             enable_thinking,
         };
@@ -177,8 +215,15 @@ impl ChatTemplate {
         self.escape_tokens = tokens;
     }
 
+    pub fn set_preserve_tokens(&mut self, mut tokens: Vec<String>) {
+        tokens.retain(|token| !token.is_empty());
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+        tokens.dedup();
+        self.preserve_tokens = tokens;
+    }
+
     pub fn escape_text(&self, content: &str) -> String {
-        escape_special_tokens_in_text(content, &self.escape_tokens)
+        escape_special_tokens_in_text(content, &self.escape_tokens, &self.preserve_tokens)
     }
 
     #[allow(dead_code)]

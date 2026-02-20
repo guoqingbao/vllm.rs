@@ -428,6 +428,9 @@ impl LLMEngine {
         template.set_escape_tokens(escaped_special_tokens);
 
         let img_cfg = get_image_config(model_type.clone(), &config)?;
+        if let Some(cfg) = img_cfg.as_ref() {
+            template.set_preserve_tokens(cfg.prompt_marker_tokens());
+        }
 
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()

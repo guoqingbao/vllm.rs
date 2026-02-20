@@ -318,6 +318,29 @@ impl ImageProcessConfig {
             image_token_id: None,
         }
     }
+
+    pub fn prompt_marker_tokens(&self) -> Vec<String> {
+        let mut tokens = Vec::new();
+        if let Some(start) = &self.image_start_token {
+            if !start.is_empty() {
+                tokens.push(start.clone());
+            }
+        }
+        if !self.image_token.is_empty() {
+            tokens.push(self.image_token.clone());
+        }
+        if let Some(brk) = &self.image_break_token {
+            if !brk.is_empty() {
+                tokens.push(brk.clone());
+            }
+        }
+        if !self.image_end_token.is_empty() {
+            tokens.push(self.image_end_token.clone());
+        }
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+        tokens.dedup();
+        tokens
+    }
 }
 
 pub trait ImageProcessTrait: Send {
