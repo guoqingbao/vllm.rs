@@ -380,7 +380,18 @@ impl LLMEngine {
         // Initialize tool call end tokens for detection based on model type.
         let mut tool_config = ToolConfig::for_model_type(&model_type);
         tool_config.validate_with_tokenizer(&tokenizer, &model_type);
+        let tool_call_start_ids = tool_config.tool_call_start_ids(&tokenizer);
         let tool_call_end_ids = tool_config.tool_call_end_ids(&tokenizer);
+
+        if !tool_call_start_ids.is_empty() {
+            scheduler.set_tool_call_start_tokens(tool_call_start_ids.clone());
+            log_info!(
+                "Tool call start token IDs set to: {:?}",
+                tool_call_start_ids
+            );
+        } else {
+            log_info!("Tool call start token IDs not set (no reliable start token)");
+        }
 
         if !tool_call_end_ids.is_empty() {
             scheduler.set_tool_call_end_tokens(tool_call_end_ids.clone());
@@ -401,7 +412,7 @@ impl LLMEngine {
         );
         log_warn!("Model loaded.\n");
 
-        let template = ChatTemplate::new(
+        let mut template = ChatTemplate::new(
             None,
             config_tokenizer.chat_template.clone(),
             config_tokenizer.bos_token.clone(),
@@ -410,8 +421,16 @@ impl LLMEngine {
             true,
             true,
         );
+        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(
+            &tokenizer,
+            &[&tool_config.start_token_str, &tool_config.end_token_str],
+        );
+        template.set_escape_tokens(escaped_special_tokens);
 
         let img_cfg = get_image_config(model_type.clone(), &config)?;
+        if let Some(cfg) = img_cfg.as_ref() {
+            template.set_preserve_tokens(cfg.prompt_marker_tokens());
+        }
 
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()
@@ -1011,7 +1030,6 @@ impl LLMEngine {
         // Apply user's thinking preference - default to false if not specified
         let enable_thinking = params.thinking.unwrap_or(false);
         prompt_template.set_enable_thinking(enable_thinking);
-
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template
@@ -1030,7 +1048,8 @@ impl LLMEngine {
             let mut prompt = "".to_string();
             for message in messages {
                 if message.role == "user" {
-                    prompt += &self.default_chat_template.replace("{}", &message.content);
+                    let escaped = prompt_template.escape_text(&message.content);
+                    prompt += &self.default_chat_template.replace("{}", &escaped);
                     prompt += "\n";
                 }
             }

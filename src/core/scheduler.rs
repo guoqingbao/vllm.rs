@@ -24,6 +24,8 @@ pub struct Scheduler {
     eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
+    /// Token IDs that represent the start of a tool call (used to avoid false end matches)
+    tool_call_start_token_ids: Vec<u32>,
     /// Token ID for } character (used for JSON tool call detection)
     json_end_token_id: Option<u32>,
     /// Tokenizer for decoding output to check JSON tool call patterns
@@ -138,6 +140,7 @@ impl Scheduler {
             },
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
+            tool_call_start_token_ids: Vec::new(),
             json_end_token_id: None,
             tokenizer: None,
             // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
@@ -152,6 +155,11 @@ impl Scheduler {
     /// Set tool call end token IDs (called by engine after tokenizer is available)
     pub fn set_tool_call_end_tokens(&mut self, token_ids: Vec<u32>) {
         self.tool_call_end_token_ids = token_ids;
+    }
+
+    /// Set tool call start token IDs (called by engine after tokenizer is available)
+    pub fn set_tool_call_start_tokens(&mut self, token_ids: Vec<u32>) {
+        self.tool_call_start_token_ids = token_ids;
     }
 
     /// Set tokenizer for JSON tool call detection (called by engine after initialization)
@@ -1120,6 +1128,17 @@ impl Scheduler {
     pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
         // 1. Check for explicit tool call end tokens (XML style)
         if self.tool_call_end_token_ids.contains(&token) {
+            // If we know start token IDs for this model, only treat end markers as structural
+            // when a start marker has already appeared in generated output.
+            if !self.tool_call_start_token_ids.is_empty() {
+                let has_start = self.running[idx]
+                    .output_ids
+                    .iter()
+                    .any(|id| self.tool_call_start_token_ids.contains(id));
+                if !has_start {
+                    return false;
+                }
+            }
             return true;
         }
 
