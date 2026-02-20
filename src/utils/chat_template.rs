@@ -239,7 +239,12 @@ impl ChatTemplate {
             .iter()
             .map(|message| {
                 let mut escaped = message.clone();
-                escaped.content = self.escape_text(&escaped.content);
+                // System/developer prompts can include engine-defined structural
+                // tool-call instructions that must remain exact (e.g. <tool_call>).
+                // Escape only user/assistant/tool payloads.
+                if !matches!(escaped.role.as_str(), "system" | "developer") {
+                    escaped.content = self.escape_text(&escaped.content);
+                }
                 escaped
             })
             .collect()

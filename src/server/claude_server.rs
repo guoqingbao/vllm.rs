@@ -1371,6 +1371,7 @@ pub async fn messages(
             let mut text_block_started = false;
             let text_block_index = 0usize;
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
+            let mut suppressed_tool_markup: String = String::new();
             let mut buffering_since: Option<Instant> = None;
             let mut buffering_cancel_requested = false;
             let mut buffering_warned = false;
@@ -1423,6 +1424,23 @@ pub async fn messages(
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
                                     if text.is_empty() {
+                                        continue;
+                                    }
+                                    if tool_parser.contains_tool_markup(&text) {
+                                        suppressed_tool_markup.push_str(&text);
+                                        crate::log_warn!(
+                                            "[Seq {}] Suppressing {} tool-markup chars pending final tool parsing",
+                                            seq_id,
+                                            text.len()
+                                        );
+                                        continue;
+                                    }
+                                    if !pending_tool_calls.is_empty() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Dropping {} trailing text chars after tool call emission",
+                                            seq_id,
+                                            text.len()
+                                        );
                                         continue;
                                     }
                                     if let Some(ref l) = stream_logger {
@@ -1495,6 +1513,23 @@ pub async fn messages(
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
                                     if text.is_empty() {
+                                        continue;
+                                    }
+                                    if tool_parser.contains_tool_markup(&text) {
+                                        suppressed_tool_markup.push_str(&text);
+                                        crate::log_warn!(
+                                            "[Seq {}] Suppressing {} buffered tool-markup chars pending final tool parsing",
+                                            seq_id,
+                                            text.len()
+                                        );
+                                        continue;
+                                    }
+                                    if !pending_tool_calls.is_empty() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Dropping {} buffered chars after tool call emission",
+                                            seq_id,
+                                            text.len()
+                                        );
                                         continue;
                                     }
                                     let safe_text =
@@ -1582,6 +1617,23 @@ pub async fn messages(
                                     }
                                     BufferedFinalizeResult::FlushBuffer(buffer) => {
                                         if !buffer.is_empty() {
+                                            if tool_parser.contains_tool_markup(&buffer) {
+                                                suppressed_tool_markup.push_str(&buffer);
+                                                crate::log_warn!(
+                                                    "[Seq {}] Suppressing {} buffered tool-markup chars at stream end",
+                                                    seq_id,
+                                                    buffer.len()
+                                                );
+                                                continue;
+                                            }
+                                            if !pending_tool_calls.is_empty() {
+                                                crate::log_warn!(
+                                                    "[Seq {}] Dropping {} buffered chars because tool calls were already parsed",
+                                                    seq_id,
+                                                    buffer.len()
+                                                );
+                                                continue;
+                                            }
                                             let safe_buffer = tool_parser
                                                 .sanitize_tool_markup_for_display(&buffer);
                                             if safe_buffer != buffer {
@@ -1612,6 +1664,32 @@ pub async fn messages(
                                     );
                                     pending_tool_calls.extend(reparsed);
                                 }
+                            }
+                            if pending_tool_calls.is_empty() && !suppressed_tool_markup.is_empty() {
+                                let safe_suppressed = tool_parser
+                                    .sanitize_tool_markup_for_display(&suppressed_tool_markup);
+                                crate::log_warn!(
+                                    "[Seq {}] Releasing {} suppressed tool-markup chars as sanitized text (no tool calls recovered)",
+                                    seq_id,
+                                    safe_suppressed.len()
+                                );
+                                if let Some(ref l) = stream_logger {
+                                    l.log_stream_token(&safe_suppressed);
+                                }
+                                let _ = send_text_with_start(
+                                    &stream_ctx,
+                                    &mut text_block_started,
+                                    text_block_index,
+                                    &safe_suppressed,
+                                );
+                            } else if !pending_tool_calls.is_empty()
+                                && !suppressed_tool_markup.is_empty()
+                            {
+                                crate::log_warn!(
+                                    "[Seq {}] Dropping {} suppressed tool-markup chars because tool calls were recovered",
+                                    seq_id,
+                                    suppressed_tool_markup.len()
+                                );
                             }
                         }
 
