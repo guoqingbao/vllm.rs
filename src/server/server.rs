@@ -590,22 +590,6 @@ pub async fn chat_completion(
                             }
                         }
 
-                        let strict_mode = std::env::var("VLLM_RS_STRICT_TOOL_CALL")
-                            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                            .unwrap_or(false);
-                        if !invalid_calls.is_empty() {
-                            if strict_mode {
-                                crate::log_warn!(
-                                    "[Seq {}] Strict mode enabled, dropping invalid calls",
-                                    current_seq_id
-                                );
-                            } else {
-                                crate::log_warn!(
-                                    "[Seq {}] Strict mode disabled, but still dropping invalid calls to avoid malformed tool payloads",
-                                    current_seq_id
-                                );
-                            }
-                        }
                         let valid_calls = validated_calls;
 
                         let tool_calls = if valid_calls.is_empty() {

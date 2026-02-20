@@ -695,7 +695,7 @@ impl StreamToolParser {
             return true;
         }
 
-        let Some(start_idx) = self.buffer.rfind(&self.config.start_token_str) else {
+        let Some(start_idx) = self.buffer.find(&self.config.start_token_str) else {
             // If no explicit start marker is present, keep existing behavior.
             return true;
         };
@@ -723,7 +723,10 @@ impl StreamToolParser {
                 return false;
             };
             let function_section = &block[function_start..];
-            let Some(function_end_rel) = function_section.find("</function>") else {
+            // Use the last function closer inside the current tool-call block so
+            // literal `</function>` text inside parameter content does not
+            // truncate the structural envelope check.
+            let Some(function_end_rel) = function_section.rfind("</function>") else {
                 return false;
             };
             let function_end = function_start + function_end_rel + "</function>".len();

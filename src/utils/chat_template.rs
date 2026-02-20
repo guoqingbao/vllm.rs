@@ -2,6 +2,7 @@ use crate::tools::Tool;
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+use tokenizers::Tokenizer;
 
 #[cfg(feature = "python")]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -53,6 +54,38 @@ pub enum ApplyChatTemplateError {
     RenderTemplateError(#[source] minijinja::Error),
 }
 
+fn escape_special_tokens_in_text(content: &str, escape_tokens: &[String]) -> String {
+    if escape_tokens.is_empty() || content.is_empty() {
+        return content.to_string();
+    }
+
+    let mut escaped = content.to_string();
+    for token in escape_tokens {
+        if token.is_empty() {
+            continue;
+        }
+        // Insert ZWNJ after '<' so textual tags remain visible but cannot be
+        // recognized as tokenizer special/added-token spans.
+        let escaped_token = if let Some(rest) = token.strip_prefix('<') {
+            format!("<\u{200C}{}", rest)
+        } else {
+            format!("{}\u{200C}", token)
+        };
+        escaped = escaped.replace(token, &escaped_token);
+    }
+    escaped
+}
+
+fn should_escape_marker(token: &str) -> bool {
+    if token.is_empty() || token.len() < 3 {
+        return false;
+    }
+    let Some(first) = token.chars().next() else {
+        return false;
+    };
+    matches!(first, '<' | '[' | '{' | '(') || token.contains('|')
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatTemplate {
     system_message: Option<String>,
@@ -60,11 +93,32 @@ pub struct ChatTemplate {
     bos_token: Option<String>,
     eos_token: Option<String>,
     messages: Vec<Message>,
+    escape_tokens: Vec<String>,
     add_generation_prompt: bool,
     enable_thinking: bool,
 }
 
 impl ChatTemplate {
+    pub fn collect_escape_tokens(tokenizer: &Tokenizer, tool_markers: &[&str]) -> Vec<String> {
+        let mut tokens = tokenizer
+            .get_added_tokens_decoder()
+            .into_values()
+            .filter(|added| added.special)
+            .map(|added| added.content)
+            .collect::<Vec<_>>();
+
+        for marker in tool_markers {
+            if should_escape_marker(marker) {
+                tokens.push((*marker).to_string());
+            }
+        }
+
+        // Escape longest markers first to avoid partial replacement ordering issues.
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+        tokens.dedup();
+        tokens
+    }
+
     pub fn new(
         system_message: Option<String>,
         chat_template: Option<String>,
@@ -80,6 +134,7 @@ impl ChatTemplate {
             bos_token,
             eos_token,
             messages: Vec::new(),
+            escape_tokens: Vec::new(),
             add_generation_prompt,
             enable_thinking,
         };
@@ -115,9 +170,34 @@ impl ChatTemplate {
         self.enable_thinking = enable;
     }
 
+    pub fn set_escape_tokens(&mut self, mut tokens: Vec<String>) {
+        tokens.retain(|token| !token.is_empty());
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
+        tokens.dedup();
+        self.escape_tokens = tokens;
+    }
+
+    pub fn escape_text(&self, content: &str) -> String {
+        escape_special_tokens_in_text(content, &self.escape_tokens)
+    }
+
     #[allow(dead_code)]
     fn clear_message(&mut self) {
         self.messages.clear()
+    }
+
+    fn escaped_messages_for_render(&self) -> Vec<Message> {
+        if self.escape_tokens.is_empty() {
+            return self.messages.clone();
+        }
+        self.messages
+            .iter()
+            .map(|message| {
+                let mut escaped = message.clone();
+                escaped.content = self.escape_text(&escaped.content);
+                escaped
+            })
+            .collect()
     }
 
     pub fn apply_chat_template(
@@ -146,12 +226,13 @@ impl ChatTemplate {
             .get_template("vllm.rs")
             .map_err(ApplyChatTemplateError::GetTemplateError)?;
 
+        let render_messages = self.escaped_messages_for_render();
         if log {
-            tracing::info!("messages {:?}", self.messages);
+            tracing::info!("messages {:?}", render_messages);
         }
         template
             .render(context! {
-              messages => self.messages,
+              messages => render_messages,
               add_generation_prompt => self.add_generation_prompt,
               bos_token => self.bos_token,
               eos_token => self.eos_token,

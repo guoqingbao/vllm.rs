@@ -62,42 +62,6 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to build global Tokio runtime")
 });
 
-fn collect_special_tokens_for_escaping(tokenizer: &Tokenizer) -> Vec<String> {
-    let mut tokens = tokenizer
-        .get_added_tokens_decoder()
-        .into_values()
-        .filter(|added| added.special)
-        .map(|added| added.content)
-        .collect::<Vec<_>>();
-
-    // Escape longest markers first to avoid partial replacement ordering issues.
-    tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
-    tokens.dedup();
-    tokens
-}
-
-fn escape_special_tokens_in_text(content: &str, special_tokens: &[String]) -> String {
-    if special_tokens.is_empty() || content.is_empty() {
-        return content.to_string();
-    }
-
-    let mut escaped = content.to_string();
-    for token in special_tokens {
-        if token.is_empty() {
-            continue;
-        }
-        // Insert ZWNJ after '<' so textual tags remain visible but cannot be
-        // recognized as tokenizer special-token spans.
-        let escaped_token = if let Some(rest) = token.strip_prefix('<') {
-            format!("<\u{200C}{}", rest)
-        } else {
-            format!("{}\u{200C}", token)
-        };
-        escaped = escaped.replace(token, &escaped_token);
-    }
-    escaped
-}
-
 #[derive(Debug, Clone)]
 pub enum StreamItem {
     Token(String, u32),                          //streaming: (text, token_id)
@@ -132,7 +96,6 @@ pub struct LLMEngine {
     stop_flag: Arc<AtomicBool>,
     has_vision: bool,
     model_name: String,
-    escaped_special_tokens: Vec<String>,
     pub model_type: ModelType,
     pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
@@ -449,7 +412,7 @@ impl LLMEngine {
         );
         log_warn!("Model loaded.\n");
 
-        let template = ChatTemplate::new(
+        let mut template = ChatTemplate::new(
             None,
             config_tokenizer.chat_template.clone(),
             config_tokenizer.bos_token.clone(),
@@ -458,6 +421,11 @@ impl LLMEngine {
             true,
             true,
         );
+        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(
+            &tokenizer,
+            &[&tool_config.start_token_str, &tool_config.end_token_str],
+        );
+        template.set_escape_tokens(escaped_special_tokens);
 
         let img_cfg = get_image_config(model_type.clone(), &config)?;
 
@@ -466,8 +434,6 @@ impl LLMEngine {
         } else {
             "default".to_string()
         };
-
-        let escaped_special_tokens = collect_special_tokens_for_escaping(&tokenizer);
 
         let engine = Arc::new(RwLock::new(Self {
             runners,
@@ -487,7 +453,6 @@ impl LLMEngine {
             stop_flag: stop_flag.clone(),
             has_vision: config.is_multi_model.unwrap_or(false),
             model_type,
-            escaped_special_tokens,
             tool_config,
             img_cfg,
             model_name,
@@ -1062,9 +1027,7 @@ impl LLMEngine {
         // Apply user's thinking preference - default to false if not specified
         let enable_thinking = params.thinking.unwrap_or(false);
         prompt_template.set_enable_thinking(enable_thinking);
-
-        let escaped_messages = self.escape_message_special_tags(messages);
-        prompt_template.set_messages(&escaped_messages);
+        prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template
             .apply_chat_template(tools, log)
@@ -1082,7 +1045,7 @@ impl LLMEngine {
             let mut prompt = "".to_string();
             for message in messages {
                 if message.role == "user" {
-                    let escaped = self.escape_special_tokens_in_text(&message.content);
+                    let escaped = prompt_template.escape_text(&message.content);
                     prompt += &self.default_chat_template.replace("{}", &escaped);
                     prompt += "\n";
                 }
@@ -1097,21 +1060,6 @@ impl LLMEngine {
             );
         }
         (prompt, image_idx)
-    }
-
-    fn escape_message_special_tags(&self, messages: &Vec<Message>) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|message| {
-                let mut escaped = message.clone();
-                escaped.content = self.escape_special_tokens_in_text(&escaped.content);
-                escaped
-            })
-            .collect()
-    }
-
-    fn escape_special_tokens_in_text(&self, content: &str) -> String {
-        escape_special_tokens_in_text(content, &self.escaped_special_tokens)
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1600,36 +1548,5 @@ impl LLMEngine {
     /// Get a clone of the chat template for external use (e.g., tokenization without generation)
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{collect_special_tokens_for_escaping, escape_special_tokens_in_text};
-
-    #[test]
-    fn escapes_special_tag_text_without_removing_readability() {
-        let escaped = escape_special_tokens_in_text(
-            "prefix <tool_call>{\"name\":\"x\"}</tool_call> suffix",
-            &["<tool_call>".to_string(), "</tool_call>".to_string()],
-        );
-
-        assert!(escaped.contains("<\u{200C}tool_call>"));
-        assert!(escaped.contains("<\u{200C}/tool_call>"));
-        assert!(escaped.contains("prefix"));
-        assert!(escaped.contains("suffix"));
-    }
-
-    #[test]
-    fn prefers_longer_special_tokens_first() {
-        let mut tokenizer = tokenizers::Tokenizer::new(tokenizers::models::bpe::BPE::default());
-        tokenizer.add_special_tokens(&[
-            tokenizers::AddedToken::from("<tool>", true),
-            tokenizers::AddedToken::from("<tool_call>", true),
-        ]);
-
-        let tokens = collect_special_tokens_for_escaping(&tokenizer);
-        assert_eq!(tokens[0], "<tool_call>");
-        assert!(tokens.contains(&"<tool>".to_string()));
     }
 }
