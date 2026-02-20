@@ -194,6 +194,45 @@ impl ToolConfig {
         tool_call_end_ids
     }
 
+    /// Resolve tool call start token IDs using tokenizer and the validated config.
+    pub fn tool_call_start_ids(&self, tokenizer: &Tokenizer) -> Vec<u32> {
+        let mut tool_call_start_ids: Vec<u32> = Vec::new();
+
+        let mut used_special = false;
+        if self.has_start_tokens() {
+            let mut use_special = true;
+            if !self.start_token_str.is_empty() {
+                if let Ok(encoded) = tokenizer.encode(self.start_token_str.as_str(), false) {
+                    let ids = encoded.get_ids();
+                    if ids.len() != 1 || !self.start_token_ids.contains(&ids[0]) {
+                        use_special = false;
+                    }
+                } else {
+                    use_special = false;
+                }
+            }
+            if use_special {
+                tool_call_start_ids.extend(self.start_token_ids.iter().copied());
+                used_special = true;
+            }
+        }
+
+        if !used_special
+            && !self.start_token_str.is_empty()
+            && self.start_token_str.starts_with('<')
+        {
+            // Only use text tags that look like explicit tool markers to avoid false positives.
+            if let Ok(encoded) = tokenizer.encode(self.start_token_str.as_str(), false) {
+                let ids = encoded.get_ids();
+                if ids.len() == 1 {
+                    tool_call_start_ids.push(ids[0]);
+                }
+            }
+        }
+
+        tool_call_start_ids
+    }
+
     fn matches_single_token(tokenizer: &Tokenizer, text: &str, token_ids: &HashSet<u32>) -> bool {
         if text.is_empty() {
             return false;
