@@ -1497,14 +1497,22 @@ pub async fn messages(
                                     if text.is_empty() {
                                         continue;
                                     }
+                                    let safe_text =
+                                        tool_parser.sanitize_tool_markup_for_display(&text);
+                                    if safe_text != text {
+                                        crate::log_warn!(
+                                            "[Seq {}] Sanitized leaked tool markup in flushed text",
+                                            seq_id
+                                        );
+                                    }
                                     if let Some(ref l) = stream_logger {
-                                        l.log_stream_token(&text);
+                                        l.log_stream_token(&safe_text);
                                     }
                                     if let Err(err) = send_text_with_start(
                                         &stream_ctx,
                                         &mut text_block_started,
                                         text_block_index,
-                                        &text,
+                                        &safe_text,
                                     ) {
                                         handle_stream_send_error(
                                             err,
@@ -1574,11 +1582,19 @@ pub async fn messages(
                                     }
                                     BufferedFinalizeResult::FlushBuffer(buffer) => {
                                         if !buffer.is_empty() {
+                                            let safe_buffer = tool_parser
+                                                .sanitize_tool_markup_for_display(&buffer);
+                                            if safe_buffer != buffer {
+                                                crate::log_warn!(
+                                                    "[Seq {}] Sanitized leaked tool markup in partial buffer",
+                                                    seq_id
+                                                );
+                                            }
                                             let _ = send_text_with_start(
                                                 &stream_ctx,
                                                 &mut text_block_started,
                                                 text_block_index,
-                                                &buffer,
+                                                &safe_buffer,
                                             );
                                         }
                                     }
@@ -1946,9 +1962,12 @@ pub async fn messages(
         let content = if has_tool_calls {
             tool_calls_to_blocks(&valid_calls)
         } else {
-            vec![ClaudeContentBlockOut::Text {
-                text: output.decode_output.clone(),
-            }]
+            let safe_text = if tool_parser.contains_tool_markup(&output.decode_output) {
+                tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+            } else {
+                output.decode_output.clone()
+            };
+            vec![ClaudeContentBlockOut::Text { text: safe_text }]
         };
 
         let response = ClaudeMessageResponse {

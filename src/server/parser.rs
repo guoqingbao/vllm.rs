@@ -375,6 +375,46 @@ impl StreamToolParser {
         &self.buffer
     }
 
+    /// Returns true if text contains tool-structure markup that should not be
+    /// emitted verbatim as normal assistant text.
+    pub fn contains_tool_markup(&self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        for marker in self.display_escape_markers() {
+            if text.contains(&marker) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Escapes tool-structure markers in plain text so leaked tool payloads do
+    /// not become executable-looking tags in later model turns.
+    pub fn sanitize_tool_markup_for_display(&self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+
+        let mut out = text.to_string();
+        let mut markers = self.display_escape_markers();
+        markers.sort_by_key(|m| std::cmp::Reverse(m.len()));
+        markers.dedup();
+
+        for marker in markers {
+            if marker.is_empty() {
+                continue;
+            }
+            let escaped = if let Some(rest) = marker.strip_prefix('<') {
+                format!("<\u{200C}{}", rest)
+            } else {
+                format!("{}\u{200C}", marker)
+            };
+            out = out.replace(&marker, &escaped);
+        }
+        out
+    }
+
     /// Returns whether the latest processed token produced incremental tool-parse activity.
     /// The flag is reset after being read.
     pub fn take_buffer_parse_activity(&mut self) -> bool {
@@ -928,6 +968,36 @@ impl StreamToolParser {
         }
         // Default minimum for tags without underscore.
         start_tag.find('>').map_or(6, |idx| idx).clamp(2, 6)
+    }
+
+    fn should_escape_marker_for_display(marker: &str) -> bool {
+        if marker.is_empty() || marker.len() < 3 {
+            return false;
+        }
+        let Some(first) = marker.chars().next() else {
+            return false;
+        };
+        matches!(first, '<' | '[' | '{' | '(') || marker.contains('|')
+    }
+
+    fn display_escape_markers(&self) -> Vec<String> {
+        let mut markers = Vec::new();
+        for marker in [&self.config.start_token_str, &self.config.end_token_str] {
+            if Self::should_escape_marker_for_display(marker) {
+                markers.push(marker.to_string());
+            }
+        }
+        // XML-style nested tool markers commonly appear in qwen-coder payloads.
+        if self.config.start_token_str.contains("tool_call")
+            && self.config.end_token_str.contains("tool_call")
+        {
+            markers.extend(
+                ["<function=", "</function>", "<parameter=", "</parameter>"]
+                    .into_iter()
+                    .map(|s| s.to_string()),
+            );
+        }
+        markers
     }
 
     fn recover_streaming_arguments_from_buffer(&mut self) {
@@ -1571,5 +1641,43 @@ abc
             }
             other => panic!("Expected recovered tool calls, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_sanitize_tool_markup_for_display_escapes_xml_tool_payload() {
+        let tools = vec![crate::tools::function_tool("write", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        let raw = "<tool_call><function=write><parameter=filePath>/tmp/a.md</parameter></function></tool_call>";
+        assert!(parser.contains_tool_markup(raw));
+
+        let safe = parser.sanitize_tool_markup_for_display(raw);
+        assert!(safe.contains("<\u{200C}tool_call>"));
+        assert!(safe.contains("<\u{200C}function=write>"));
+        assert!(safe.contains("<\u{200C}parameter=filePath>"));
+        assert!(!parser.contains_tool_markup(&safe));
+    }
+
+    #[test]
+    fn test_sanitize_tool_markup_for_display_keeps_non_xml_models_simple() {
+        let tools = vec![crate::tools::function_tool("write", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Mistral,
+            "mistral".to_string(),
+            ToolConfig::for_model_type(&ModelType::Mistral),
+            tools,
+            None,
+        );
+
+        let raw = "[TOOL_CALLS]";
+        assert!(parser.contains_tool_markup(raw));
+        let safe = parser.sanitize_tool_markup_for_display(raw);
+        assert_eq!(safe, "[TOOL_CALLS]\u{200C}");
     }
 }

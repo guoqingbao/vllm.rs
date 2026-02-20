@@ -476,16 +476,24 @@ pub async fn chat_completion(
                                     if text.is_empty() {
                                         continue;
                                     }
+                                    let safe_text =
+                                        tool_parser.sanitize_tool_markup_for_display(&text);
+                                    if safe_text != text {
+                                        crate::log_warn!(
+                                            "[Seq {}] Sanitized leaked tool markup in flushed text",
+                                            current_seq_id
+                                        );
+                                    }
                                     // False positive - flush buffered content as text
                                     crate::log_info!(
                                         "[Seq {}] Flushing {} chars (false positive)",
                                         current_seq_id,
-                                        text.len()
+                                        safe_text.len()
                                     );
                                     if let Some(ref l) = stream_logger {
-                                        l.log_stream_token(&text);
+                                        l.log_stream_token(&safe_text);
                                     }
-                                    if !stream_ctx.send_token(&text) {
+                                    if !stream_ctx.send_token(&safe_text) {
                                         let mut e = engine_clone.write();
                                         e.cancel(current_seq_id);
                                         break;
@@ -536,12 +544,20 @@ pub async fn chat_completion(
                                     }
                                     BufferedFinalizeResult::FlushBuffer(buffer) => {
                                         if !buffer.is_empty() {
+                                            let safe_buffer = tool_parser
+                                                .sanitize_tool_markup_for_display(&buffer);
+                                            if safe_buffer != buffer {
+                                                crate::log_warn!(
+                                                    "[Seq {}] Sanitized leaked tool markup in partial buffer",
+                                                    current_seq_id
+                                                );
+                                            }
                                             crate::log_warn!(
                                                 "[Seq {}] Tool parse partial, flushing {} chars",
                                                 current_seq_id,
-                                                buffer.len()
+                                                safe_buffer.len()
                                             );
-                                            stream_ctx.send_token(&buffer);
+                                            stream_ctx.send_token(&safe_buffer);
                                         }
                                     }
                                 }
@@ -829,7 +845,12 @@ pub async fn chat_completion(
                     if tool_choice_required {
                         crate::log_warn!("Tool choice required but no tool calls were produced");
                     }
-                    (Some(output.decode_output), None)
+                    let safe_text = if tool_parser.contains_tool_markup(&output.decode_output) {
+                        tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
+                    } else {
+                        output.decode_output.clone()
+                    };
+                    (Some(safe_text), None)
                 } else {
                     log_tool_calls("Valid", &valid_calls);
                     let public_calls = valid_calls
