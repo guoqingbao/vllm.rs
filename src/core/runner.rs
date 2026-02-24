@@ -34,11 +34,13 @@ use attention_rs::FlashInferMetadata;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
+use llguidance::api::TopLevelGrammar;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use toktrie::TokTrie;
+use tokenizers::Tokenizer;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -165,6 +167,7 @@ impl ModelRunner {
         transfer: Option<Arc<Transfer>>,
         toktrie: Option<Arc<TokTrie>>,
         stream: Option<LocalStream>,
+        tokenizer: Option<Tokenizer>,
     ) -> Result<Self> {
         let model = crate::build_model!(
             model_type,
@@ -395,6 +398,26 @@ impl ModelRunner {
             );
         }
 
+        let guidance_states = match tokenizer {
+             Some(t) => {
+                if let Ok(fac) = GuidanceState::new_from_tokenizer(t) {
+                    let mut map = HashMap::new();
+                    map.insert(usize::MAX, fac);
+                    crate::log_debug!("[llg] Runner GuidanceStage created");
+                    RwLock::new(map)
+                } else {
+                    let  map: HashMap<usize, GuidanceState> = HashMap::new();
+                    crate::log_debug!("[llg] Runner could not build GuidanceState");
+                    RwLock::new(map)
+                }
+             }
+             None => {
+                let  map: HashMap<usize, GuidanceState> = HashMap::new();
+                crate::log_debug!("[llg] No tokenizer found for runner");
+                RwLock::new(map)
+             }
+        };
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -417,7 +440,7 @@ impl ModelRunner {
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             restored_prefix_sequences: RwLock::new(HashSet::new()),
-            guidance_states: RwLock::new(HashMap::new()),
+            guidance_states,
             transfer,
             is_first_rank: comm.rank() == 0,
             model_type,
@@ -1066,11 +1089,133 @@ impl ModelRunner {
         Ok((input_ids, positions, input_metadata))
     }
 
+    fn apply_grammar_constraints(
+        &self,
+        seqs: &[&Sequence],
+        tokens: Vec<u32>,
+        logits: &Tensor,
+    ) -> Result<Vec<u32>> {
+        let mut tokens = tokens.clone();
+
+        for (seq_idx, seq) in seqs.iter().enumerate() {
+            let seq_id = seq.id();
+            crate::log_debug!("[llg] Processing seq {} (idx {})", seq_id, seq_idx);
+
+            let guidance_states = self.guidance_states.read();
+
+            if let Some(guidance) = guidance_states.get(&seq_id) {
+                crate::log_debug!("[llg] Found guidance state for seq {}", seq_id);
+
+                let mut guidance_clone = guidance.clone();
+                drop(guidance_states);  // Release the lock
+
+                let token = tokens[seq_idx];
+                crate::log_debug!("[llg] Validating token {} for seq {}", token, seq_id);
+
+                if !guidance_clone.matcher_is_stopped() {
+                    let valid = guidance_clone.validate_token(token);
+                    crate::log_debug!("[llg] Token {} validation result: {}", token, valid);
+
+                    if valid {
+                        crate::log_debug!("[llg] Token {} is valid, consuming for seq {}", token, seq_id);
+                        let _ = guidance_clone.consume_token(token);
+                    } else {
+                        crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
+                        let mask = guidance_clone.compute_mask_or_eos().unwrap();
+
+                        crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
+
+                        let batch_size = logits.layout().dims()[0];
+                        let vocab_size = logits.layout().dims()[1];
+
+                        // Convert logits to 2D vector
+                        let mut biased_logits: Vec<Vec<f32>> = logits.to_vec2()?;
+
+                        // Ensure we have the correct number of rows
+                        if biased_logits.len() != batch_size {
+                            crate::log_warn!("[llg] biased_logits has {} rows, expected {}", biased_logits.len(), batch_size);
+                        }
+
+                        let logit_len = biased_logits[seq_idx].len();
+                        let mut acc = vec![f32::NEG_INFINITY; logit_len];
+
+                        mask.iter_set_entries(|idx| {
+                            if idx < acc.len() {
+                                acc[idx] = 0.0;
+                            }
+                        });
+
+                        for i in 0..logit_len {
+                            biased_logits[seq_idx][i] += acc[i];
+                        }
+
+                        crate::log_debug!("[llg] Re-sampling with biased logits for seq {}", seq_id);
+
+                        // Create a 2D tensor with shape (num_seqs_being_resampled... which is one at a time, vocab_size)
+                        // Use vocab_size directly since logit_len should equal vocab_size
+                        let biased_tensor = Tensor::from_vec(biased_logits[seq_idx].clone(), (1, vocab_size), logits.device())?;
+
+                        tokens[seq_idx] = self.logit_processor.sample(&biased_tensor, &None)?[0];
+
+                        crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
+                        let _ = guidance_clone.consume_token(tokens[seq_idx]);
+                        continue // to next seq
+                    }
+                } else {
+                    crate::log_debug!("[llg] Matcher is stopped for seq {}, skipping validation", seq_id);
+                }
+            } else {
+                crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
+            }
+        }
+
+        crate::log_debug!("[llg] apply_grammar_constraints: completed, returning {} tokens", tokens.len());
+        Ok(tokens)
+    }
+
+
+
     fn sample(&self, logits: &Tensor, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
         let seq_ids: Vec<usize> = match &seqs {
             Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.id()).collect(),
             Seqs::DecodeVec(v) => v.iter().map(|s| s.id()).collect(),
         };
+
+        let grammars: Vec<Option<TopLevelGrammar>> = match &seqs {
+            Seqs::SeqRefs(seqs) => seqs.iter().map(|s| s.sampling_params.grammar.clone()).collect(),
+            Seqs::DecodeVec(v) => v.iter().map(|s| s.sampling_params.grammar.clone()).collect(),
+        };
+
+        for (sid, gram) in seq_ids.iter().zip(grammars.iter()) {
+            let current_state = {
+                let map = self.guidance_states.read();
+                map.get(&sid).cloned()
+            };
+            if current_state.is_some() {
+                continue;
+            }
+            if let Some(grammar) = gram {
+                crate::log_debug!("[llg] Found grammar constraint for seq {}", &sid);
+                let guidance_state = {
+                    let map = self.guidance_states.read();
+                    map.get(&usize::MAX).cloned()
+                };
+
+                let new_gs = if let Some(gs) = guidance_state {
+                    GuidanceState::new(gs.factory.clone(), grammar.clone()).ok()
+                } else {
+                    None
+                };
+
+                if let Some(gs) = new_gs {
+                    {
+                        let mut map = self.guidance_states.write();
+                        map.insert(sid.clone(), gs);
+                    }
+                    crate::log_debug!("[llg] Built grammar constraint for seq {}", &sid);
+                }
+            }
+        }
 
         // Get the batch size for deciding whether to use parallel sampling
         let batch_size = match seqs {
@@ -1088,7 +1233,6 @@ impl ModelRunner {
                         cfg.temperature.is_some() && (cfg.top_k.is_some() || cfg.top_p.is_some())
                     });
                 let user_params = &seqs[0].sampling_params;
-
                 // Log thinking parameter only from first rank to avoid duplicate logs in multi-GPU
                 if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
                     crate::log_info!(
@@ -1218,6 +1362,12 @@ impl ModelRunner {
         let tokens = self
             .logit_processor
             .sample_with_strategy(&logits, &cached_params.sampling)?;
+
+        let tokens = if let Seqs::SeqRefs(seqs_ref) = &seqs {
+            self.apply_grammar_constraints(seqs_ref, tokens, &logits)?
+        } else {
+            tokens
+        };
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {

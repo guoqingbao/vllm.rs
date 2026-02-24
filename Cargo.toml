@@ -21,11 +21,12 @@ itertools = "0.13.0"
 akin = "0.4.0"
 indicatif = "0.17.11"
 serde_json = "1.0.108"
-llguidance = "0.6"
-toktrie = "1.4"
+llguidance = { version = "1.5", default-features = false, features = ["lark"] }
+toktrie_hf_tokenizers = "1.5"
+toktrie = "1.5"
 half = { version = "2.5.0", features = ["num-traits", "use-intrinsics", "rand_distr"] }
 tokio = { version = "1.38.0", features = ["sync"] }
-tracing = "0.1.40"
+tracing = { version = "0.1.40", features = ["release_max_level_debug"] }
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 either = { version = "1.13.0", features = ["serde"] }
 minijinja = { version = "2.10.2", features = ["builtins", "json"] }
@@ -33,7 +34,6 @@ minijinja-contrib = { version = "2.10.2", features = ["pycompat"] }
 lazy_static = {version = "1.4.0"}
 interprocess = "2.2.2"
 serde-big-array = "0.5.1"
-bincode = { version = "1.3.1" }
 twox-hash = "2.1.1"
 rand = "0.9.0"
 rayon="1.10.0"
@@ -69,6 +69,7 @@ local-ip-address = "0.6.5"
 url = "2.5.7"
 tool-parser = "1.0"
 openai-protocol = "1.0"
+rmp-serde = "1.3.1"
 
 [lib]
 name = "vllm_rs"

@@ -61,6 +61,42 @@ macro_rules! log_info {
 }
 
 #[macro_export]
+macro_rules! log_debug {
+    ($($arg:tt)*) => {
+        {
+            #[cfg(feature = "python")]
+            {
+                use colored::Colorize;
+                let s = format!($($arg)*);
+                println!("{}", String::from(s).truecolor(100, 100, 100));
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                tracing::debug!($($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! log_trace {
+    ($($arg:tt)*) => {
+        {
+            #[cfg(feature = "python")]
+            {
+                use colored::Colorize;
+                let s = format!($($arg)*);
+                println!("{}", String::from(s).truecolor(50, 50, 50));
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                tracing::trace!($($arg)*);
+            }
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! log_warn {
     ($($arg:tt)*) => {
         {

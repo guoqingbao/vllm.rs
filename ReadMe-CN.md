@@ -455,6 +455,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
 | `--prefix-cache`   | 启用前缀缓存，用于多轮对话 |
 | `--prefix-cache-max-tokens`   | 限制前缀缓存大小（按 block size 向下取整） |
+| `--allow-constraint-api`      | 允许通过HTTP API提交客户端约束（默认：false） |
 
 ### MCP配置参数
 

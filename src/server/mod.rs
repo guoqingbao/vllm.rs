@@ -31,26 +31,33 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct ChatCompletionRequest {
-    pub messages: Vec<ChatMessage>,
-    pub model: Option<String>,
-    pub temperature: Option<f32>,
-    pub max_tokens: Option<usize>,
-    pub top_k: Option<isize>,
-    pub top_p: Option<f32>,
-    pub frequency_penalty: Option<f32>,
-    pub presence_penalty: Option<f32>,
-    #[serde(alias = "enable_thinking")]
-    pub thinking: Option<bool>,
-    pub stream: Option<bool>,
-    pub session_id: Option<String>,
-    /// Tools available for the model to call
-    #[serde(default)]
-    pub tools: Option<Vec<crate::tools::Tool>>,
-    /// How the model should choose which tool to call
-    #[serde(default)]
-    pub tool_choice: Option<crate::tools::ToolChoice>,
-}
+    pub struct ChatCompletionRequest {
+        pub messages: Vec<ChatMessage>,
+        pub model: Option<String>,
+        pub temperature: Option<f32>,
+        pub max_tokens: Option<usize>,
+        pub top_k: Option<isize>,
+        pub top_p: Option<f32>,
+        pub frequency_penalty: Option<f32>,
+        pub presence_penalty: Option<f32>,
+        #[serde(alias = "enable_thinking")]
+        pub thinking: Option<bool>,
+        pub stream: Option<bool>,
+        pub session_id: Option<String>,
+        /// Tools available for the model to call
+        #[serde(default)]
+        pub tools: Option<Vec<crate::tools::Tool>>,
+        /// How the model should choose which tool to call
+        #[serde(default)]
+        pub tool_choice: Option<crate::tools::ToolChoice>,
+        /// Grammar constraint for guided decoding (llguidance)
+        /// Supports both 'constraint' and 'grammar' fields for compatibility
+        #[serde(alias = "grammar", default)]
+        pub constraint: Option<String>,
+        /// Type of constraint: "regex", "lark", "json_schema"
+        #[serde(default)]
+        pub constraint_type: Option<String>,
+    }
 
 pub fn resolve_engine_model_id(econfig: &EngineConfig) -> Option<String> {
     if let Some(model_id) = &econfig.model_id {
@@ -602,6 +609,14 @@ pub struct Args {
     /// MCP server arguments (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = None)]
     pub mcp_args: Option<Vec<String>>,
+
+    /// Allow client-submitted constraints via HTTP API
+    #[arg(long, default_value = "false")]
+    pub allow_constraint_api: bool,
+
+    /// Whether to automatically build LLG grammar from tools
+    #[arg(long, default_value = "false")]
+    pub enable_tool_grammar: bool,
 }
 
 /// Result of executing tool calls via MCP

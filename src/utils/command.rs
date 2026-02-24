@@ -1,5 +1,5 @@
 use crate::runner::MessageType;
-use bincode;
+use rmp_serde;
 use interprocess::local_socket::traits::{Listener, Stream};
 use interprocess::local_socket::{GenericNamespaced, Name, ToNsName};
 use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
@@ -41,7 +41,7 @@ impl CommandManager {
         streams: &mut Vec<LocalStream>,
         message: &MessageType,
     ) -> std::io::Result<()> {
-        let serialized = bincode::serialize(message).expect("Serialization failed");
+        let serialized = rmp_serde::to_vec(message).expect("Serialization failed");
         for stream in streams.iter_mut() {
             stream.write_all(&(serialized.len() as u32).to_le_bytes())?;
             stream.write_all(&serialized)?;
@@ -74,7 +74,7 @@ impl CommandManager {
         let mut serialized = vec![0u8; length];
         stream.read_exact(&mut serialized)?;
         let message: MessageType =
-            bincode::deserialize(&serialized).expect("Deserialization failed");
+            rmp_serde::from_slice(&serialized).expect("Deserialization failed");
         // Send acknowledgment
         stream.write_all(&[1])?;
         stream.flush()?;

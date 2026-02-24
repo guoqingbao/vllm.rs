@@ -518,6 +518,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
 | `--prefix-cache-max-tokens`   | Cap prefix cache size in tokens (rounded down to block size) |
+| `--allow-constraint-api`      | Allow client-submitted constraints via HTTP API (default: false) |
 
 ### MCP Configuration
 
