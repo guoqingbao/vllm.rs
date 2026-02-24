@@ -265,6 +265,8 @@ pub struct StreamToolParser {
     in_code_block: bool,
     // Set when incremental parsing found ToolCallItem(s) for the latest processed token.
     saw_buffer_parse_activity: bool,
+    // Set when any parsing activity occurs during the current buffering window.
+    buffer_had_parse_activity: bool,
     // Candidate end marker seen while buffering; used to avoid false end hits inside content.
     pending_end_marker_candidate: bool,
 }
@@ -346,6 +348,7 @@ impl StreamToolParser {
             active_reasoning_end: None,
             in_code_block: false,
             saw_buffer_parse_activity: false,
+            buffer_had_parse_activity: false,
             pending_end_marker_candidate: false,
         }
     }
@@ -382,7 +385,7 @@ impl StreamToolParser {
             return false;
         }
         for marker in self.display_escape_markers() {
-            if text.contains(&marker) {
+            if text.contains(&marker) || Self::contains_partial_marker_fragment(text, &marker) {
                 return true;
             }
         }
@@ -405,12 +408,8 @@ impl StreamToolParser {
             if marker.is_empty() {
                 continue;
             }
-            let escaped = if let Some(rest) = marker.strip_prefix('<') {
-                format!("<\u{200C}{}", rest)
-            } else {
-                format!("{}\u{200C}", marker)
-            };
-            out = out.replace(&marker, &escaped);
+            out = out.replace(&marker, &Self::escape_marker_for_display(&marker));
+            out = Self::escape_partial_marker_fragments(&out, &marker);
         }
         out
     }
@@ -467,11 +466,13 @@ impl StreamToolParser {
                     self.buffer.clear();
                     self.buffer.push_str(token_text);
                     self.streaming_calls.clear();
+                    self.buffer_had_parse_activity = false;
                     self.pending_end_marker_candidate = false;
                     match self.parser.parse_incremental(token_text, &self.tools).await {
                         Ok(result) => {
                             if !result.calls.is_empty() {
                                 self.saw_buffer_parse_activity = true;
+                                self.buffer_had_parse_activity = true;
                             }
                             self.apply_streaming_result(&result);
                         }
@@ -507,7 +508,8 @@ impl StreamToolParser {
                         Ok(result) => {
                             if !result.calls.is_empty() {
                                 self.saw_buffer_parse_activity = true;
-                                crate::log_info!("Stream parsing: {:?}", result.calls);
+                                self.buffer_had_parse_activity = true;
+                                // crate::log_info!("Stream parsing: {:?}", result.calls);
                             }
                             self.apply_streaming_result(&result);
                         }
@@ -564,6 +566,7 @@ impl StreamToolParser {
                     self.buffer.clear();
                     self.state = ParserState::Normal;
                     self.streaming_calls.clear();
+                    self.buffer_had_parse_activity = false;
                     self.pending_end_marker_candidate = false;
                     return result;
                 }
@@ -585,17 +588,27 @@ impl StreamToolParser {
         let buffered_text = self.buffer.clone();
         let strict_complete = self.has_strict_complete_tool_call().await;
         let tool_calls = self.build_tool_calls_with_fallback().await;
+        let recoverable_incomplete = !strict_complete
+            && !tool_calls.is_empty()
+            && self.can_recover_incomplete_buffered_tool_calls()
+            && !self.has_ambiguous_incomplete_end_marker();
 
         self.parser.reset();
         self.buffer.clear();
         self.state = ParserState::Normal;
         self.streaming_calls.clear();
+        self.buffer_had_parse_activity = false;
         self.pending_end_marker_candidate = false;
 
-        if tool_calls.is_empty() || !strict_complete {
+        if tool_calls.is_empty() || (!strict_complete && !recoverable_incomplete) {
             crate::log_warn!("Buffered tool call could not be finalized; flushing buffered text");
             Some(BufferedFinalizeResult::FlushBuffer(buffered_text))
         } else {
+            if recoverable_incomplete {
+                crate::log_warn!(
+                    "Recovered buffered tool call(s) from partial envelope using incremental parse state"
+                );
+            }
             crate::log_warn!(
                 "Recovered {} tool call(s) from buffered state at stream end",
                 tool_calls.len()
@@ -607,6 +620,7 @@ impl StreamToolParser {
     /// Drain the buffer and reset parser state.
     pub fn take_buffer(&mut self) -> String {
         self.state = ParserState::Normal;
+        self.buffer_had_parse_activity = false;
         self.pending_end_marker_candidate = false;
         std::mem::take(&mut self.buffer)
     }
@@ -653,6 +667,9 @@ impl StreamToolParser {
     }
 
     fn apply_stream_items(&mut self, items: &[ToolCallItem]) {
+        if !items.is_empty() {
+            self.buffer_had_parse_activity = true;
+        }
         for item in items {
             if self.streaming_calls.len() <= item.tool_index {
                 self.streaming_calls
@@ -725,6 +742,39 @@ impl StreamToolParser {
             .parse_complete_with_fallback(&self.buffer)
             .await
             .is_empty()
+    }
+
+    fn can_recover_incomplete_buffered_tool_calls(&self) -> bool {
+        if self.streaming_calls.is_empty() {
+            return false;
+        }
+
+        if !self.buffer_had_parse_activity
+            && self
+                .streaming_calls
+                .iter()
+                .all(|call| call.arguments.trim().is_empty())
+        {
+            return false;
+        }
+
+        if self.streaming_calls.iter().any(|call| call.name.is_none()) {
+            return false;
+        }
+
+        self.streaming_calls.iter().all(|call| {
+            let args = call.arguments.trim();
+            args.is_empty()
+                || serde_json::from_str::<Value>(&self.finalize_streamed_arguments(args)).is_ok()
+        })
+    }
+
+    fn has_ambiguous_incomplete_end_marker(&self) -> bool {
+        if self.config.end_token_str.is_empty() || !self.config.end_token_str.starts_with('<') {
+            return false;
+        }
+
+        self.buffer.contains(&self.config.end_token_str) && !self.has_complete_tool_envelope()
     }
 
     fn has_complete_tool_envelope(&self) -> bool {
@@ -970,6 +1020,66 @@ impl StreamToolParser {
         start_tag.find('>').map_or(6, |idx| idx).clamp(2, 6)
     }
 
+    fn escape_marker_for_display(marker: &str) -> String {
+        if let Some(rest) = marker.strip_prefix('<') {
+            format!("<\u{200C}{}", rest)
+        } else {
+            format!("{}\u{200C}", marker)
+        }
+    }
+
+    fn contains_partial_marker_fragment(text: &str, marker: &str) -> bool {
+        if marker.is_empty()
+            || !Self::should_escape_marker_for_display(marker)
+            || !marker.starts_with('<')
+        {
+            return false;
+        }
+
+        let marker_len = marker.len();
+        if marker_len < 4 {
+            return false;
+        }
+
+        let min_prefix_len =
+            Self::safe_partial_prefix_len(marker).min(marker_len.saturating_sub(1));
+        if min_prefix_len >= marker_len {
+            return false;
+        }
+
+        (min_prefix_len..marker_len).rev().any(|len| {
+            let prefix = &marker[..len];
+            text.contains(prefix)
+        })
+    }
+
+    fn escape_partial_marker_fragments(text: &str, marker: &str) -> String {
+        if marker.is_empty()
+            || !Self::should_escape_marker_for_display(marker)
+            || !marker.starts_with('<')
+        {
+            return text.to_string();
+        }
+
+        let marker_len = marker.len();
+        if marker_len < 4 {
+            return text.to_string();
+        }
+
+        let min_prefix_len =
+            Self::safe_partial_prefix_len(marker).min(marker_len.saturating_sub(1));
+        if min_prefix_len >= marker_len {
+            return text.to_string();
+        }
+
+        let mut out = text.to_string();
+        for len in (min_prefix_len..marker_len).rev() {
+            let prefix = &marker[..len];
+            out = out.replace(prefix, &Self::escape_marker_for_display(prefix));
+        }
+        out
+    }
+
     fn should_escape_marker_for_display(marker: &str) -> bool {
         if marker.is_empty() || marker.len() < 3 {
             return false;
@@ -1110,6 +1220,7 @@ impl StreamToolParser {
             choices: vec![ChatChoiceChunk {
                 index: 0,
                 delta: Delta {
+                    role: None,
                     content: Some(content.to_string()),
                     tool_calls: None,
                 },
@@ -1133,6 +1244,7 @@ impl StreamToolParser {
             choices: vec![ChatChoiceChunk {
                 index: 0,
                 delta: Delta {
+                    role: None,
                     content: None,
                     tool_calls: Some(
                         tools
@@ -1679,5 +1791,36 @@ abc
         assert!(parser.contains_tool_markup(raw));
         let safe = parser.sanitize_tool_markup_for_display(raw);
         assert_eq!(safe, "[TOOL_CALLS]\u{200C}");
+    }
+
+    #[test]
+    fn test_contains_tool_markup_detects_partial_xml_marker() {
+        let tools = vec![crate::tools::function_tool("write", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        assert!(parser.contains_tool_markup("example <tool_ca"));
+    }
+
+    #[test]
+    fn test_sanitize_tool_markup_for_display_escapes_partial_xml_marker() {
+        let tools = vec![crate::tools::function_tool("write", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3-coder".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        let raw = "example <tool_ca";
+        let safe = parser.sanitize_tool_markup_for_display(raw);
+        assert!(safe.contains("<\u{200C}tool_ca"));
+        assert!(!parser.contains_tool_markup(&safe));
     }
 }

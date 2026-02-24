@@ -87,16 +87,8 @@ impl ToolParser {
             "</reasoning>", // Reasoning tag
         ];
 
-        // Find the last occurrence of any reasoning end marker
-        let mut last_end_pos = None;
-        for marker in &reasoning_end_markers {
-            if let Some(pos) = text.rfind(marker) {
-                let end_pos = pos + marker.len();
-                if last_end_pos.is_none() || end_pos > last_end_pos.unwrap() {
-                    last_end_pos = Some(end_pos);
-                }
-            }
-        }
+        // Find the last occurrence of any reasoning end marker outside JSON/string literals.
+        let last_end_pos = Self::last_unquoted_marker_end(text, &reasoning_end_markers);
 
         // Return content after the last reasoning end marker, or full text if none found
         if let Some(pos) = last_end_pos {
@@ -104,6 +96,43 @@ impl ToolParser {
         } else {
             text.to_string()
         }
+    }
+
+    fn last_unquoted_marker_end(text: &str, markers: &[&str]) -> Option<usize> {
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut last_end_pos = None;
+
+        for (idx, ch) in text.char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+
+            if ch == '"' {
+                in_string = true;
+                continue;
+            }
+
+            for marker in markers {
+                if marker.is_empty() {
+                    continue;
+                }
+                if text[idx..].starts_with(marker) {
+                    last_end_pos = Some(idx + marker.len());
+                }
+            }
+        }
+
+        last_end_pos
     }
 
     /// Parse XML-wrapped tool call formats (<tool_call>)
@@ -237,8 +266,13 @@ impl ToolParser {
     /// Note: Raw JSON patterns are NOT checked to avoid false positives in reasoning
     pub fn has_tool_calls(&self, text: &str) -> bool {
         let final_answer = Self::extract_final_answer(text);
-        // Only check for explicit XML-wrapped tool calls
-        final_answer.contains("<tool_call>")
+        if final_answer.contains("<tool_call>") {
+            return true;
+        }
+
+        let mut call_id = 0usize;
+        self.parse_json_format(&final_answer, &mut call_id)
+            .is_some()
     }
 
     /// Check if text contains a complete, parseable tool call

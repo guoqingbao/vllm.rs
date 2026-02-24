@@ -25,6 +25,8 @@ pub struct GenerationOutput {
     pub decoded_length: usize,
     #[pyo3(get)]
     pub decode_output: String,
+    #[pyo3(get)]
+    pub stop_sequence: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -37,6 +39,7 @@ pub struct GenerationOutput {
     pub decode_finish_time: usize,
     pub decoded_length: usize,
     pub decode_output: String,
+    pub stop_sequence: Option<String>,
 }
 
 #[macro_export]

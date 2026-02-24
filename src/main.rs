@@ -362,6 +362,7 @@ async fn main() -> Result<()> {
                                     decode_start_time,
                                     decode_finish_time,
                                     length,
+                                    _stop_sequence,
                                 )) => {
                                     tickets = (
                                         prompt_start_time,
@@ -404,6 +405,7 @@ async fn main() -> Result<()> {
                     decode_finish_time,
                     decoded_length,
                     decode_output,
+                    stop_sequence: None,
                 }]
             } else {
                 vllm_rs::log_warn!("Starting the inference...");
@@ -438,6 +440,7 @@ async fn main() -> Result<()> {
                 decode_finish_time,
                 decoded_length,
                 decode_output,
+                stop_sequence: _,
             },
         ) in outputs.iter().enumerate()
         {

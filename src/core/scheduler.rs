@@ -535,7 +535,9 @@ impl Scheduler {
                 }
             }
 
-            let hit_stop_sequence = self.is_stop_sequence_end(token, &self.running[idx]);
+            let matched_stop_sequence_idx =
+                self.stop_sequence_match_index(token, &self.running[idx]);
+            let hit_stop_sequence = matched_stop_sequence_idx.is_some();
             let seq = &mut self.running[idx];
 
             if hit_stop_sequence
@@ -549,6 +551,14 @@ impl Scheduler {
                         seq_id,
                         token
                     );
+                    seq.hit_stop_sequence = true;
+                    seq.stop_sequence = matched_stop_sequence_idx.and_then(|stop_idx| {
+                        seq.sampling_params
+                            .stop_sequences
+                            .as_ref()
+                            .and_then(|stops| stops.get(stop_idx))
+                            .cloned()
+                    });
                 }
                 seq.status = SequenceStatus::Finished;
                 self.block_manager
@@ -1163,21 +1173,21 @@ impl Scheduler {
         false
     }
 
-    fn is_stop_sequence_end(&self, token: u32, seq: &Sequence) -> bool {
+    fn stop_sequence_match_index(&self, token: u32, seq: &Sequence) -> Option<usize> {
         let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
-            return false;
+            return None;
         };
         if stop_sequences.is_empty() {
-            return false;
+            return None;
         }
 
-        for stop in stop_sequences {
+        for (idx, stop) in stop_sequences.iter().enumerate() {
             if stop.is_empty() {
                 continue;
             }
             if stop.len() == 1 {
                 if stop[0] == token {
-                    return true;
+                    return Some(idx);
                 }
                 continue;
             }
@@ -1190,10 +1200,10 @@ impl Scheduler {
             if seq.output_ids[start_idx..] == stop[..stop.len() - 1]
                 && stop[stop.len() - 1] == token
             {
-                return true;
+                return Some(idx);
             }
         }
 
-        false
+        None
     }
 }
