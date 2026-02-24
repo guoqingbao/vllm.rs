@@ -17,7 +17,7 @@ use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
     resolve_tools, retain_tool_calls_forced_name,
 };
-use crate::tools::{ToolChoice, ToolChoiceMode, ToolFormat};
+use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -291,7 +291,6 @@ pub async fn chat_completion(
         .unwrap_or_default();
     let mut resolved_tools = resolve_tools(request.tools.as_deref(), &mcp_tools);
     let mut forced_tool_name: Option<String> = None;
-    let mut tool_choice_instruction: Option<String> = None;
     let mut tool_choice_required = false;
 
     // Set tool mode for streaming tool call handling:
@@ -307,10 +306,6 @@ pub async fn chat_completion(
         }
         Some(ToolChoice::Mode(ToolChoiceMode::Required)) => {
             tool_choice_required = true;
-            tool_choice_instruction = Some(
-                "Tool choice enforced by request: you MUST call one of the provided tools. Do not answer with plain text. Return only a tool call."
-                    .to_string(),
-            );
         }
         Some(ToolChoice::Mode(ToolChoiceMode::Auto)) | None => {}
     }
@@ -329,10 +324,6 @@ pub async fn chat_completion(
         match selected {
             Some(tool) => {
                 resolved_tools = vec![tool];
-                tool_choice_instruction = Some(format!(
-                    "Tool choice enforced: you MUST call the `{}` tool. Do not answer with plain text. Return only a tool call.",
-                    name
-                ));
             }
             None => {
                 return ChatResponder::ValidationError(format!(
@@ -351,54 +342,13 @@ pub async fn chat_completion(
         crate::log_warn!("Tools enabled for request");
     }
 
-    let mut chat_messages = request.messages.clone();
+    let chat_messages = request.messages.clone();
     if let Err(err) = validate_openai_tool_messages(&chat_messages) {
         return ChatResponder::ValidationError(err);
     }
     let parser_model_id =
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();
-    if has_tools {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
-        };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
-        }
-
-        // Merge with existing system prompt if present, otherwise insert new one
-        if !chat_messages.is_empty() && chat_messages[0].role == "system" {
-            // Merge: tool prompt + newline + existing system content
-            if let Some(ref content) = chat_messages[0].content {
-                let existing_content = match content {
-                    super::MessageContentType::PureText(text) => text.clone(),
-                    super::MessageContentType::Single(item) => match item {
-                        super::MessageContent::Text { text } => text.clone(),
-                        _ => String::new(),
-                    },
-                    super::MessageContentType::Multi(items) => items
-                        .iter()
-                        .filter_map(|item| match item {
-                            super::MessageContent::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                };
-                let merged = format!("{}\n\n{}", existing_content, tool_prompt);
-                chat_messages[0] = ChatMessage::text("system", merged);
-            } else {
-                // System message exists but has no content, just use tool prompt
-                chat_messages[0] = ChatMessage::text("system", tool_prompt);
-            }
-        } else {
-            // No existing system prompt, insert tool prompt as first message
-            chat_messages.insert(0, ChatMessage::text("system", tool_prompt));
-        }
-    }
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,

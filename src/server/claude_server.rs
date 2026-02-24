@@ -9,7 +9,7 @@ use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls,
     retain_tool_calls_forced_name,
 };
-use crate::tools::{Tool, ToolCall, ToolChoice, ToolFormat};
+use crate::tools::{Tool, ToolCall, ToolChoice};
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, State},
@@ -21,6 +21,8 @@ use axum::{
 };
 use flume::{Receiver, TrySendError};
 use futures::Stream;
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -34,6 +36,22 @@ use std::{
 use tokio::task;
 use tokio::time;
 use uuid::Uuid;
+
+const STABLE_CLAUDE_SETTINGS_FILENAME: &str =
+    "claude-settings-00000000-0000-0000-0000-000000000000.json";
+const STABLE_ANTHROPIC_CCH: &str = "00000";
+
+static CLAUDE_SETTINGS_UUID_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"claude-settings-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.json",
+    )
+    .expect("valid claude-settings UUID regex")
+});
+
+static ANTHROPIC_BILLING_CCH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(x-anthropic-billing-header:[^\n]*\bcch=)[^;\s]+")
+        .expect("valid anthropic billing cch regex")
+});
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -419,6 +437,90 @@ fn tool_choice_to_openai(choice: &Option<ClaudeToolChoice>) -> Option<ToolChoice
         Some(ClaudeToolChoice::Tool { name }) => Some(ToolChoice::function(name.clone())),
         None => None,
     }
+}
+
+fn normalize_claude_volatile_text(text: &mut String) -> usize {
+    let mut occurrences = CLAUDE_SETTINGS_UUID_RE.find_iter(text.as_str()).count();
+    if occurrences > 0 {
+        *text = CLAUDE_SETTINGS_UUID_RE
+            .replace_all(text.as_str(), STABLE_CLAUDE_SETTINGS_FILENAME)
+            .into_owned();
+    }
+
+    let cch_occurrences = ANTHROPIC_BILLING_CCH_RE
+        .captures_iter(text.as_str())
+        .count();
+    if cch_occurrences > 0 {
+        *text = ANTHROPIC_BILLING_CCH_RE
+            .replace_all(text.as_str(), format!("${{1}}{STABLE_ANTHROPIC_CCH}"))
+            .into_owned();
+    }
+    occurrences += cch_occurrences;
+    occurrences
+}
+
+fn normalize_json_strings(value: &mut Value) -> usize {
+    match value {
+        Value::String(text) => normalize_claude_volatile_text(text),
+        Value::Array(items) => items.iter_mut().map(normalize_json_strings).sum(),
+        Value::Object(map) => map.values_mut().map(normalize_json_strings).sum(),
+        _ => 0,
+    }
+}
+
+fn normalize_tool_result_content(content: &mut ClaudeToolResultContent) -> usize {
+    match content {
+        ClaudeToolResultContent::Text(text) => normalize_claude_volatile_text(text),
+        ClaudeToolResultContent::Blocks(blocks) => normalize_content_blocks(blocks),
+    }
+}
+
+fn normalize_content_blocks(blocks: &mut [ClaudeContentBlock]) -> usize {
+    let mut normalized = 0usize;
+    for block in blocks {
+        normalized += match block {
+            ClaudeContentBlock::Text { text } => normalize_claude_volatile_text(text),
+            ClaudeContentBlock::ToolUse { input, .. } => normalize_json_strings(input),
+            ClaudeContentBlock::ToolResult { content, .. } => {
+                normalize_tool_result_content(content)
+            }
+            ClaudeContentBlock::Image { .. } => 0,
+        };
+    }
+    normalized
+}
+
+fn normalize_claude_content(content: &mut ClaudeContent) -> usize {
+    match content {
+        ClaudeContent::Text(text) => normalize_claude_volatile_text(text),
+        ClaudeContent::Blocks(blocks) => normalize_content_blocks(blocks),
+    }
+}
+
+fn normalize_claude_system(system: &mut ClaudeSystem) -> usize {
+    match system {
+        ClaudeSystem::Text(text) => normalize_claude_volatile_text(text),
+        ClaudeSystem::Blocks(blocks) => normalize_content_blocks(blocks),
+    }
+}
+
+fn normalize_claude_request_for_prefix_cache(request: &mut ClaudeMessageRequest) -> usize {
+    let mut normalized = 0usize;
+    if let Some(system) = request.system.as_mut() {
+        normalized += normalize_claude_system(system);
+    }
+    for message in &mut request.messages {
+        normalized += normalize_claude_content(&mut message.content);
+    }
+    if let Some(tools) = request.tools.as_mut() {
+        for tool in tools {
+            if let Some(description) = tool.description.as_mut() {
+                normalized += normalize_claude_volatile_text(description);
+            }
+            normalized += normalize_json_strings(&mut tool.input_schema);
+        }
+    }
+    normalized
 }
 
 fn claude_tools_to_tools(tools: &[ClaudeTool]) -> Vec<Tool> {
@@ -827,34 +929,6 @@ fn build_chat_messages(request: &ClaudeMessageRequest) -> Result<Vec<ChatMessage
     Ok(messages)
 }
 
-fn inject_tool_prompt(chat_messages: &mut Vec<ChatMessage>, tool_prompt: &str) {
-    if !chat_messages.is_empty() && chat_messages[0].role == "system" {
-        if let Some(ref content) = chat_messages[0].content {
-            let existing_content = match content {
-                MessageContentType::PureText(text) => text.clone(),
-                MessageContentType::Single(item) => match item {
-                    MessageContent::Text { text } => text.clone(),
-                    _ => String::new(),
-                },
-                MessageContentType::Multi(items) => items
-                    .iter()
-                    .filter_map(|item| match item {
-                        MessageContent::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" "),
-            };
-            let merged = format!("{}\n\n{}", existing_content, tool_prompt);
-            chat_messages[0] = ChatMessage::text("system", merged);
-        } else {
-            chat_messages[0] = ChatMessage::text("system", tool_prompt.to_string());
-        }
-    } else {
-        chat_messages.insert(0, ChatMessage::text("system", tool_prompt.to_string()));
-    }
-}
-
 fn stop_reason_from_decoding(
     has_tool_calls: bool,
     decoded_tokens: usize,
@@ -1221,8 +1295,16 @@ pub async fn messages(
     if let Some(ref l) = logger {
         l.log_raw_request(&*request);
     }
+    let mut request = request.0;
+    let normalized = normalize_claude_request_for_prefix_cache(&mut request);
+    if normalized > 0 {
+        crate::log_info!(
+            "Normalized {} volatile Claude prompt token(s) for prefix cache stability.",
+            normalized
+        );
+    }
 
-    let mut chat_messages = match build_chat_messages(&request) {
+    let chat_messages = match build_chat_messages(&request) {
         Ok(messages) => messages,
         Err(err) => {
             return ClaudeResponder::Error(
@@ -1277,7 +1359,6 @@ pub async fn messages(
     } else {
         mcp_tools.clone()
     };
-    let mut tool_choice_instruction: Option<String> = None;
     let mut forced_tool_name: Option<String> = None;
     let mut tool_choice_required = false;
 
@@ -1291,10 +1372,6 @@ pub async fn messages(
         }
         Some(ClaudeToolChoice::Any) => {
             tool_choice_required = true;
-            tool_choice_instruction = Some(
-                "Tool choice enforced: you MUST call one of the provided tools. Do not answer with plain text. Return only a tool call."
-                    .to_string(),
-            );
         }
         Some(ClaudeToolChoice::Auto) | None => {}
     }
@@ -1307,10 +1384,6 @@ pub async fn messages(
         match selected {
             Some(tool) => {
                 resolved_tools = vec![tool];
-                tool_choice_instruction = Some(format!(
-                    "Tool choice enforced: you MUST call the `{}` tool. Do not answer with plain text. Return only a tool call.",
-                    name
-                ));
             }
             None => {
                 return ClaudeResponder::Error(
@@ -1363,19 +1436,6 @@ pub async fn messages(
     let parser_model_id =
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();
-
-    if !resolved_tools.is_empty() {
-        let tool_prompt_template = data.engine.read().econfig.tool_prompt_template.clone();
-        let mut tool_prompt = if let Some(template) = tool_prompt_template {
-            template
-        } else {
-            ToolFormat::get_tool_prompt(&model_type)
-        };
-        if let Some(instruction) = tool_choice_instruction.as_ref() {
-            tool_prompt = format!("{tool_prompt}\n\n{instruction}");
-        }
-        inject_tool_prompt(&mut chat_messages, &tool_prompt);
-    }
 
     let img_cfg = {
         let e = data.engine.read();
@@ -2322,7 +2382,8 @@ pub async fn count_tokens(
     State(data): State<Arc<ServerData>>,
     request: Json<ClaudeTokenCountRequest>,
 ) -> ClaudeResponder {
-    let message_request = ClaudeMessageRequest {
+    let request = request.0;
+    let mut message_request = ClaudeMessageRequest {
         model: request.model.clone(),
         messages: request.messages.clone(),
         system: request.system.clone(),
@@ -2337,6 +2398,13 @@ pub async fn count_tokens(
         thinking: None,
         extra: request.extra.clone(),
     };
+    let normalized = normalize_claude_request_for_prefix_cache(&mut message_request);
+    if normalized > 0 {
+        crate::log_info!(
+            "Normalized {} volatile Claude prompt token(s) for prefix cache stability (count_tokens).",
+            normalized
+        );
+    }
 
     let chat_messages = match build_chat_messages(&message_request) {
         Ok(messages) => messages,
@@ -2675,5 +2743,79 @@ mod tests {
         assert_eq!(valid.len(), 1);
         assert_eq!(invalid.len(), 1);
         assert_eq!(valid[0].function.name, "list_files");
+    }
+
+    #[test]
+    fn normalizes_claude_settings_uuid_for_prefix_cache_stability() {
+        let mut request = ClaudeMessageRequest {
+            model: "default".to_string(),
+            messages: vec![ClaudeMessage {
+                role: "user".to_string(),
+                content: ClaudeContent::Blocks(vec![
+                    ClaudeContentBlock::Text {
+                        text: "open /tmp/claude-settings-20fc829c-5ec4-43a6-93f9-62663f5517b1.json"
+                            .to_string(),
+                    },
+                    ClaudeContentBlock::ToolUse {
+                        id: "call_1".to_string(),
+                        name: "Read".to_string(),
+                        input: json!({
+                            "file_path": "/tmp/claude-settings-90a7db64-23ee-477b-b8f3-e97eb1ba1d1f.json"
+                        }),
+                    },
+                    ClaudeContentBlock::ToolResult {
+                        tool_use_id: "call_1".to_string(),
+                        content: ClaudeToolResultContent::Text(
+                            "result from /tmp/claude-settings-d6d53ae3-d79a-4df0-adde-80d87aa3e471.json"
+                                .to_string(),
+                        ),
+                        is_error: None,
+                    },
+                ]),
+            }],
+            system: Some(ClaudeSystem::Text(
+                "x-anthropic-billing-header: cc_version=2.1.52.7f8; cc_entrypoint=cli; cch=abcde; sandbox deny /tmp/claude-settings-aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb.json"
+                    .to_string(),
+            )),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stream: None,
+            stop_sequences: None,
+            tools: Some(vec![ClaudeTool {
+                name: "Bash".to_string(),
+                description: Some(
+                    "denyWithinAllow /tmp/claude-settings-ffffffff-ffff-ffff-ffff-ffffffffffff.json"
+                        .to_string(),
+                ),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "restriction": {
+                            "type": "string",
+                            "description": "Use /tmp/claude-settings-12345678-1234-1234-1234-123456789abc.json"
+                        }
+                    }
+                }),
+            }]),
+            tool_choice: None,
+            thinking: None,
+            extra: HashMap::new(),
+        };
+
+        let normalized = normalize_claude_request_for_prefix_cache(&mut request);
+        assert_eq!(normalized, 7);
+
+        let serialized = serde_json::to_string(&request).unwrap();
+        assert!(serialized.contains(STABLE_CLAUDE_SETTINGS_FILENAME));
+        assert!(serialized.contains("cch=00000"));
+        assert!(!serialized.contains("cch=abcde"));
+        assert!(!serialized.contains("20fc829c-5ec4-43a6-93f9-62663f5517b1"));
+        assert!(!serialized.contains("90a7db64-23ee-477b-b8f3-e97eb1ba1d1f"));
+        assert!(!serialized.contains("d6d53ae3-d79a-4df0-adde-80d87aa3e471"));
+        assert!(!serialized.contains("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"));
+        assert!(!serialized.contains("ffffffff-ffff-ffff-ffff-ffffffffffff"));
+        assert!(!serialized.contains("12345678-1234-1234-1234-123456789abc"));
     }
 }
