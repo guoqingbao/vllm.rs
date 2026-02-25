@@ -37,7 +37,6 @@ pub struct GatedDeltaNet {
     dt_bias: Tensor,
     gdn_norm_weight: Tensor,
     gdn_norm_bias: Option<Tensor>,
-    gdn_norm_per_head: bool,
     num_k_heads: usize,
     num_v_heads: usize,
     head_k_dim: usize,
@@ -348,9 +347,7 @@ impl GatedDeltaNet {
 
         // GDN output norm (gated RMSNorm)
         // Qwen3.5 checkpoints typically store [value_dim], while Qwen3Next can store per-head [head_v_dim].
-        let (gdn_norm_weight, gdn_norm_bias, gdn_norm_per_head) = match vb
-            .get((value_dim_global,), "norm.weight")
-        {
+        let (gdn_norm_weight, gdn_norm_bias) = match vb.get((value_dim_global,), "norm.weight") {
             Ok(weight) => {
                 let weight = weight
                     .narrow(0, rank * value_dim, value_dim)?
@@ -363,12 +360,12 @@ impl GatedDeltaNet {
                             .and_then(|x| x.contiguous())
                     })
                     .transpose()?;
-                (weight, bias, false)
+                (weight, bias)
             }
             Err(full_err) => match vb.get((head_v_dim,), "norm.weight") {
                 Ok(weight) => {
                     let bias = vb.get((head_v_dim,), "norm.bias").ok();
-                    (weight, bias, true)
+                    (weight, bias)
                 }
                 Err(head_err) => {
                     candle_core::bail!(
@@ -387,7 +384,6 @@ impl GatedDeltaNet {
             dt_bias,
             gdn_norm_weight,
             gdn_norm_bias,
-            gdn_norm_per_head,
             num_k_heads,
             num_v_heads,
             head_k_dim,
@@ -529,11 +525,7 @@ impl GatedDeltaNet {
             &self.gdn_norm_weight,
             self.gdn_norm_bias.as_ref(),
             self.rms_norm_eps,
-            if self.gdn_norm_per_head {
-                self.head_v_dim
-            } else {
-                self.value_dim
-            },
+            self.head_v_dim,
         )?;
 
         // Output projection
