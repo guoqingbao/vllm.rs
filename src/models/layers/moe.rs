@@ -16,6 +16,47 @@ use either::Either;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug)]
+enum PackedGateUpLayout {
+    // [experts, hidden, 2*intermediate]
+    HiddenPacked,
+    // [experts, 2*intermediate, hidden]
+    InterPacked,
+}
+
+fn resolve_packed_gate_up_layout(cfg: &Config) -> Result<PackedGateUpLayout> {
+    let arch = cfg
+        .architectures
+        .as_ref()
+        .and_then(|a| a.first())
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    // Qwen3.5 MoE / Qwen3Next checkpoints store gate_up as [experts, 2*intermediate, hidden].
+    if matches!(
+        arch,
+        "Qwen3_5MoeForCausalLM"
+            | "Qwen3_5MoeForConditionalGeneration"
+            | "Qwen3NextForCausalLM"
+            | "Qwen3NextForConditionalGeneration"
+    ) {
+        return Ok(PackedGateUpLayout::InterPacked);
+    }
+
+    let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+    if cfg.hidden_size == moe_cfg.moe_intermediate_size * 2 {
+        candle_core::bail!(
+            "Ambiguous packed gate_up_proj layout for arch {:?}: hidden_size ({}) == 2 * moe_intermediate_size ({}). \
+Please add an architecture-specific layout mapping.",
+            arch,
+            cfg.hidden_size,
+            moe_cfg.moe_intermediate_size
+        );
+    }
+
+    Ok(PackedGateUpLayout::HiddenPacked)
+}
+
 #[allow(dead_code)]
 pub struct FusedMoe {
     gate: Linear,
@@ -46,43 +87,89 @@ impl FusedMoe {
         let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
             match &experts_vb.0 {
                 Either::Left(vb) => {
-                    // Qwen3 VL MoE non-standard naming approach
-                    let gate_expert = vb
-                        .get_with_hints(
-                            (
-                                num_experts,
-                                cfg.hidden_size,
-                                moe_cfg.moe_intermediate_size * 2,
-                            ),
-                            "gate_up_proj",
-                            shard(2, comm.rank(), comm.world_size() * 2),
-                        )?
-                        .t()?
-                        .contiguous()?;
+                    let gate_up_layout = resolve_packed_gate_up_layout(cfg)?;
+                    let (gate_expert, up_expert) = match gate_up_layout {
+                        // [experts, hidden, 2*intermediate]
+                        PackedGateUpLayout::HiddenPacked => {
+                            let gate = vb
+                                .get_with_hints(
+                                    (
+                                        num_experts,
+                                        cfg.hidden_size,
+                                        moe_cfg.moe_intermediate_size * 2,
+                                    ),
+                                    "gate_up_proj",
+                                    shard(2, comm.rank(), comm.world_size() * 2),
+                                )?
+                                .t()?
+                                .contiguous()?;
 
-                    let up_expert = vb
-                        .get_with_hints(
-                            (
-                                num_experts,
-                                cfg.hidden_size,
-                                moe_cfg.moe_intermediate_size * 2,
-                            ),
-                            "gate_up_proj",
-                            shard(2, comm.rank() + comm.world_size(), comm.world_size() * 2),
-                        )?
-                        .t()?
-                        .contiguous()?;
-                    (
-                        gate_expert,
-                        up_expert,
-                        vb.get_with_hints(
-                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                            "down_proj",
-                            shard(1, comm.rank(), comm.world_size()),
-                        )?
-                        .t()?
-                        .contiguous()?,
-                    )
+                            let up = vb
+                                .get_with_hints(
+                                    (
+                                        num_experts,
+                                        cfg.hidden_size,
+                                        moe_cfg.moe_intermediate_size * 2,
+                                    ),
+                                    "gate_up_proj",
+                                    shard(
+                                        2,
+                                        comm.rank() + comm.world_size(),
+                                        comm.world_size() * 2,
+                                    ),
+                                )?
+                                .t()?
+                                .contiguous()?;
+                            (gate, up)
+                        }
+                        // [experts, 2*intermediate, hidden]
+                        PackedGateUpLayout::InterPacked => {
+                            let gate = vb
+                                .get_with_hints(
+                                    (
+                                        num_experts,
+                                        moe_cfg.moe_intermediate_size * 2,
+                                        cfg.hidden_size,
+                                    ),
+                                    "gate_up_proj",
+                                    shard(1, comm.rank(), comm.world_size() * 2),
+                                )?
+                                .contiguous()?;
+                            let up = vb
+                                .get_with_hints(
+                                    (
+                                        num_experts,
+                                        moe_cfg.moe_intermediate_size * 2,
+                                        cfg.hidden_size,
+                                    ),
+                                    "gate_up_proj",
+                                    shard(
+                                        1,
+                                        comm.rank() + comm.world_size(),
+                                        comm.world_size() * 2,
+                                    ),
+                                )?
+                                .contiguous()?;
+                            (gate, up)
+                        }
+                    };
+                    let down_expert = match vb.get_with_hints(
+                        (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                        "down_proj",
+                        shard(1, comm.rank(), comm.world_size()),
+                    ) {
+                        // Layout A: [experts, intermediate, hidden] -> transpose to [experts, hidden, intermediate]
+                        Ok(w) => w.t()?.contiguous()?,
+                        // Layout B: [experts, hidden, intermediate] -> already in expected GEMM layout.
+                        Err(_) => vb
+                            .get_with_hints(
+                                (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                                "down_proj",
+                                shard(2, comm.rank(), comm.world_size()),
+                            )?
+                            .contiguous()?,
+                    };
+                    (gate_expert, up_expert, down_expert)
                 }
                 _ => candle_core::bail!("invalid varbuild or quant config!"),
             }
@@ -557,41 +644,80 @@ impl FusedMoeISQ {
             let (gate_experts, up_experts, down_experts) = if experts_vb.has_key("gate_up_proj") {
                 match &experts_vb.0 {
                     Either::Left(vb) => {
-                        // Qwen3 VL MoE non-standard naming approach
-                        let gate_expert = vb
-                            .get_with_hints(
-                                (
-                                    num_experts,
-                                    cfg.hidden_size,
-                                    moe_cfg.moe_intermediate_size * 2,
-                                ),
-                                "gate_up_proj",
-                                shard(2, 0, 2),
-                            )?
-                            .t()?
-                            .contiguous()?;
+                        let gate_up_layout = resolve_packed_gate_up_layout(cfg)?;
+                        let (gate_expert, up_expert) = match gate_up_layout {
+                            // [experts, hidden, 2*intermediate]
+                            PackedGateUpLayout::HiddenPacked => {
+                                let gate = vb
+                                    .get_with_hints(
+                                        (
+                                            num_experts,
+                                            cfg.hidden_size,
+                                            moe_cfg.moe_intermediate_size * 2,
+                                        ),
+                                        "gate_up_proj",
+                                        shard(2, 0, 2),
+                                    )?
+                                    .t()?
+                                    .contiguous()?;
+                                let up = vb
+                                    .get_with_hints(
+                                        (
+                                            num_experts,
+                                            cfg.hidden_size,
+                                            moe_cfg.moe_intermediate_size * 2,
+                                        ),
+                                        "gate_up_proj",
+                                        shard(2, 1, 2),
+                                    )?
+                                    .t()?
+                                    .contiguous()?;
+                                (gate, up)
+                            }
+                            // [experts, 2*intermediate, hidden]
+                            PackedGateUpLayout::InterPacked => {
+                                let gate = vb
+                                    .get_with_hints(
+                                        (
+                                            num_experts,
+                                            moe_cfg.moe_intermediate_size * 2,
+                                            cfg.hidden_size,
+                                        ),
+                                        "gate_up_proj",
+                                        shard(1, 0, 2),
+                                    )?
+                                    .contiguous()?;
+                                let up = vb
+                                    .get_with_hints(
+                                        (
+                                            num_experts,
+                                            moe_cfg.moe_intermediate_size * 2,
+                                            cfg.hidden_size,
+                                        ),
+                                        "gate_up_proj",
+                                        shard(1, 1, 2),
+                                    )?
+                                    .contiguous()?;
+                                (gate, up)
+                            }
+                        };
 
-                        let up_expert = vb
-                            .get_with_hints(
-                                (
-                                    num_experts,
-                                    cfg.hidden_size,
-                                    moe_cfg.moe_intermediate_size * 2,
-                                ),
-                                "gate_up_proj",
-                                shard(2, 1, 2),
-                            )?
-                            .t()?
-                            .contiguous()?;
-
-                        let down_expert = vb
-                            .get_with_hints(
-                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                                "down_proj",
-                                Shard::default(),
-                            )?
-                            .t()?
-                            .contiguous()?;
+                        let down_expert = match vb.get_with_hints(
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "down_proj",
+                            Shard::default(),
+                        ) {
+                            // Layout A: [experts, intermediate, hidden] -> transpose to [experts, hidden, intermediate]
+                            Ok(w) => w.t()?.contiguous()?,
+                            // Layout B: [experts, hidden, intermediate] -> already in expected GEMM layout.
+                            Err(_) => vb
+                                .get_with_hints(
+                                    (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                                    "down_proj",
+                                    Shard::default(),
+                                )?
+                                .contiguous()?,
+                        };
                         (gate_expert, up_expert, down_expert)
                     }
                     Either::Right(_) => panic!("invalid varbuild!"),

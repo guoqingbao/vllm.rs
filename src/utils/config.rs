@@ -174,6 +174,7 @@ pub struct Config {
     pub hidden_size: usize,
     pub num_hidden_layers: usize,
     pub max_model_len: Option<usize>,
+    #[serde(default, alias = "ffn_hidden_size", alias = "feed_forward_length")]
     pub intermediate_size: usize,
     pub rms_norm_eps: f64,
     pub vocab_size: Option<usize>,

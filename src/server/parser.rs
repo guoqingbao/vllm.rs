@@ -140,21 +140,45 @@ impl ToolConfig {
         if self.has_start_tokens()
             && !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
         {
-            crate::log_warn!(
-                "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                model_type
-            );
-            self.start_token_ids.clear();
+            if Self::try_rebind_single_token_id(
+                tokenizer,
+                &self.start_token_str,
+                &mut self.start_token_ids,
+            ) {
+                crate::log_warn!(
+                    "Tool start token IDs corrected from tokenizer for model {:?}: {:?}",
+                    model_type,
+                    self.start_token_ids
+                );
+            } else {
+                crate::log_warn!(
+                    "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                    model_type
+                );
+                self.start_token_ids.clear();
+            }
         }
 
         if self.has_end_tokens()
             && !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids)
         {
-            crate::log_error!(
-                "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                model_type
-            );
-            self.end_token_ids.clear();
+            if Self::try_rebind_single_token_id(
+                tokenizer,
+                &self.end_token_str,
+                &mut self.end_token_ids,
+            ) {
+                crate::log_warn!(
+                    "Tool end token IDs corrected from tokenizer for model {:?}: {:?}",
+                    model_type,
+                    self.end_token_ids
+                );
+            } else {
+                crate::log_warn!(
+                    "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                    model_type
+                );
+                self.end_token_ids.clear();
+            }
         }
     }
 
@@ -244,6 +268,33 @@ impl ToolConfig {
             }
             Err(_) => false,
         }
+    }
+
+    fn try_rebind_single_token_id(
+        tokenizer: &Tokenizer,
+        text: &str,
+        token_ids: &mut HashSet<u32>,
+    ) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+
+        if let Ok(encoded) = tokenizer.encode(text, false) {
+            let ids = encoded.get_ids();
+            if ids.len() == 1 {
+                token_ids.clear();
+                token_ids.insert(ids[0]);
+                return true;
+            }
+        }
+
+        if let Some(id) = tokenizer.get_vocab(true).get(text).copied() {
+            token_ids.clear();
+            token_ids.insert(id);
+            return true;
+        }
+
+        false
     }
 }
 

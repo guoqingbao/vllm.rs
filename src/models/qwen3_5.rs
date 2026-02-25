@@ -192,7 +192,11 @@ pub struct Qwen3_5ForCausalLM {
 }
 
 impl Qwen3_5ForCausalLM {
-    fn resolve_seq_slots(input_metadata: &InputMetadata, token_count: usize) -> Result<Tensor> {
+    fn resolve_seq_slots(
+        &self,
+        input_metadata: &InputMetadata,
+        token_count: usize,
+    ) -> Result<Tensor> {
         if let Some(slot_mapping) = &input_metadata.mamba_slot_mapping {
             if slot_mapping.dtype() != DType::I64 {
                 candle_core::bail!(
@@ -213,7 +217,34 @@ impl Qwen3_5ForCausalLM {
             }
             return Ok(slot_mapping.clone());
         }
-        candle_core::bail!("Qwen3.5 requires input_metadata.mamba_slot_mapping")
+
+        let sequence_ids = input_metadata
+            .sequence_ids
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("Qwen3.5 requires sequence_ids".into()))?;
+        if sequence_ids.is_empty() {
+            candle_core::bail!("Qwen3.5 received empty sequence_ids");
+        }
+
+        let slots = if input_metadata.is_prefill {
+            self.ensure_mamba_slots_for_sequences(sequence_ids)?
+        } else {
+            self.get_mamba_slots_for_sequences(sequence_ids)?
+        };
+        if slots.is_empty() {
+            candle_core::bail!("Qwen3.5 resolved empty mamba slots from sequence_ids");
+        }
+        if !input_metadata.is_prefill && slots.len() != token_count {
+            candle_core::bail!(
+                "Qwen3.5 decode mamba slot count mismatch: slots={} tokens={}",
+                slots.len(),
+                token_count
+            );
+        }
+
+        let slots_i64 = slots.into_iter().map(|s| s as i64).collect::<Vec<_>>();
+        let len = slots_i64.len();
+        Tensor::from_vec(slots_i64, (len,), &self.device)
     }
 
     pub fn new(
@@ -464,8 +495,8 @@ impl Qwen3_5ForCausalLM {
         };
 
         let mut kv_cache_idx = 0usize;
+        let seq_slots = self.resolve_seq_slots(input_metadata, xs.dim(0)?)?;
         let mut mamba_cache = self.mamba_cache.write();
-        let seq_slots = Self::resolve_seq_slots(input_metadata, xs.dim(0)?)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = if layer.is_full_attention() {
