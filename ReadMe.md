@@ -62,7 +62,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8，SM90+)
 * ✅ Qwen2/Qwen3 Moe (+Hardware FP8, SM90+)
 * ✅ Qwen3 Next (+Hardware FP8，SM90+)
-* ✅ Qwen3.5 Dense/Moe (Test TBD)
+* ✅ Qwen3.5 Dense/Moe (27B, 35B, 122B, 397B, Multimodal model)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -91,6 +91,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
+- [Qwen3.5 vs Qwen3-Next Implementation](docs/qwen3_5_architecture.md)
 
 
 ## 📘 Usage in Python

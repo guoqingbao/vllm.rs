@@ -1,8 +1,14 @@
 [package]
 name = "vllm-rs"
-version = "0.9.5"
+version = "0.9.6"
 edition = "2021"
 default-run = "vllm-rs"
+description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
+repository = "https://github.com/guoqingbao/vllm.rs"
+homepage = "https://github.com/guoqingbao/vllm.rs"
+keywords = ["llm", "inference", "candle", "qwen", "moe", "rust", "vllm"]
+categories = ["algorithms", "hardware-support", "science"]
+license = "MIT"
 
 [dependencies]
 candle-core = { git = "https://github.com/guoqingbao/candle.git", version = "0.8.3", rev = "1e9d1a9" }
