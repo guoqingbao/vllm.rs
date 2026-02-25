@@ -663,13 +663,6 @@ pub fn init_config_tokenizer(
                 }
             }
         }
-        if config.intermediate_size == 0 {
-            if let Some(moe_cfg) = &config.moe_cfg {
-                config.intermediate_size = moe_cfg
-                    .shared_expert_intermediate_size
-                    .unwrap_or(moe_cfg.moe_intermediate_size);
-            }
-        }
 
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();

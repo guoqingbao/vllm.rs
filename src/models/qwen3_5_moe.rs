@@ -162,7 +162,15 @@ impl Qwen3_5MoEDecoderLayer {
                 },
                 comm.clone(),
                 config.hidden_size,
-                config.intermediate_size,
+                if config.intermediate_size > 0 {
+                    config.intermediate_size
+                } else {
+                    config
+                        .moe_cfg
+                        .as_ref()
+                        .map(|m| m.moe_intermediate_size)
+                        .unwrap_or(0)
+                },
                 &config.hidden_act,
                 &config.quantization_config,
                 &config.quant,
