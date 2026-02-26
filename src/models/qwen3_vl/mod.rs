@@ -1,4 +1,5 @@
 use parking_lot::RwLock;
+use parking_lot::RwLockWriteGuard;
 use std::rc::Rc;
 use std::sync::Arc;
 pub mod config;
@@ -13,6 +14,7 @@ use crate::models::qwen3_moe::Qwen3MoEForCausalLM;
 use crate::utils::config::Config;
 use crate::utils::progress::ProgressLike;
 use crate::{models::layers::distributed::Comm, utils::image::ImageData};
+use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use config::Qwen3VLConfig;
@@ -337,6 +339,101 @@ impl Qwen3VLForConditionalGeneration {
             Qwen3TextModel::MoE(m) => m.get_vocab_size(),
             Qwen3TextModel::Dense35(m) => m.get_vocab_size(),
             Qwen3TextModel::MoE35(m) => m.get_vocab_size(),
+        }
+    }
+
+    pub fn uses_hybrid_mamba_text_model(&self) -> bool {
+        matches!(
+            &self.text_model,
+            Qwen3TextModel::Dense35(_) | Qwen3TextModel::MoE35(_)
+        )
+    }
+
+    pub fn release_sequence_state(&self, sequence_id: usize) {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.release_sequence_state(sequence_id),
+            Qwen3TextModel::MoE35(m) => m.release_sequence_state(sequence_id),
+            _ => {}
+        }
+    }
+
+    pub fn ensure_mamba_slots_for_sequences(
+        &self,
+        sequence_ids: &[usize],
+    ) -> Result<Option<Vec<usize>>> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => {
+                Ok(Some(m.ensure_mamba_slots_for_sequences(sequence_ids)?))
+            }
+            Qwen3TextModel::MoE35(m) => Ok(Some(m.ensure_mamba_slots_for_sequences(sequence_ids)?)),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn get_mamba_slots_for_sequences(
+        &self,
+        sequence_ids: &[usize],
+    ) -> Result<Option<Vec<usize>>> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => Ok(Some(m.get_mamba_slots_for_sequences(sequence_ids)?)),
+            Qwen3TextModel::MoE35(m) => Ok(Some(m.get_mamba_slots_for_sequences(sequence_ids)?)),
+            _ => Ok(None),
+        }
+    }
+
+    pub fn lock_mamba_cache_for_graph(&self) -> Option<RwLockWriteGuard<'_, MambaCache>> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => Some(m.lock_mamba_cache_for_graph()),
+            Qwen3TextModel::MoE35(m) => Some(m.lock_mamba_cache_for_graph()),
+            _ => None,
+        }
+    }
+
+    pub fn preallocate_mamba_cache(&self, max_num_seqs: usize) -> Result<()> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.preallocate_mamba_cache(max_num_seqs),
+            Qwen3TextModel::MoE35(m) => m.preallocate_mamba_cache(max_num_seqs),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn set_mamba_prefix_cache_capacity(&self, capacity: usize) {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.set_mamba_prefix_cache_capacity(capacity),
+            Qwen3TextModel::MoE35(m) => m.set_mamba_prefix_cache_capacity(capacity),
+            _ => {}
+        }
+    }
+
+    pub fn capture_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.capture_mamba_prefix_state(seq_id, hash),
+            Qwen3TextModel::MoE35(m) => m.capture_mamba_prefix_state(seq_id, hash),
+            _ => Ok(true),
+        }
+    }
+
+    pub fn has_mamba_prefix_state(&self, hash: u64) -> bool {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.has_mamba_prefix_state(hash),
+            Qwen3TextModel::MoE35(m) => m.has_mamba_prefix_state(hash),
+            _ => true,
+        }
+    }
+
+    pub fn restore_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.restore_mamba_prefix_state(seq_id, hash),
+            Qwen3TextModel::MoE35(m) => m.restore_mamba_prefix_state(seq_id, hash),
+            _ => Ok(true),
+        }
+    }
+
+    pub fn reset_mamba_cache(&self) -> Result<()> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.reset_mamba_cache(),
+            Qwen3TextModel::MoE35(m) => m.reset_mamba_cache(),
+            _ => Ok(()),
         }
     }
 }

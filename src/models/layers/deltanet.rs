@@ -221,9 +221,13 @@ impl GatedDeltaNet {
                 in_proj_a,
             } => {
                 let proj_qkv = in_proj_qkv.forward(xs)?;
-                let q = proj_qkv.narrow(1, 0, self.key_dim)?;
-                let k = proj_qkv.narrow(1, self.key_dim, self.key_dim)?;
-                let v = proj_qkv.narrow(1, self.key_dim * 2, self.value_dim)?;
+                let q = proj_qkv.narrow(1, 0, self.key_dim)?.contiguous()?;
+                let k = proj_qkv
+                    .narrow(1, self.key_dim, self.key_dim)?
+                    .contiguous()?;
+                let v = proj_qkv
+                    .narrow(1, self.key_dim * 2, self.value_dim)?
+                    .contiguous()?;
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
                 let a = in_proj_a.forward(xs)?;
@@ -345,35 +349,13 @@ impl GatedDeltaNet {
             dtype,
         )?;
 
-        // GDN output norm (gated RMSNorm)
-        // Qwen3.5 checkpoints typically store [value_dim], while Qwen3Next can store per-head [head_v_dim].
-        let (gdn_norm_weight, gdn_norm_bias) = match vb.get((value_dim_global,), "norm.weight") {
-            Ok(weight) => {
-                let weight = weight
-                    .narrow(0, rank * value_dim, value_dim)?
-                    .contiguous()?;
-                let bias = vb
-                    .get((value_dim_global,), "norm.bias")
-                    .ok()
-                    .map(|b| {
-                        b.narrow(0, rank * value_dim, value_dim)
-                            .and_then(|x| x.contiguous())
-                    })
-                    .transpose()?;
-                (weight, bias)
-            }
-            Err(full_err) => match vb.get((head_v_dim,), "norm.weight") {
-                Ok(weight) => {
-                    let bias = vb.get((head_v_dim,), "norm.bias").ok();
-                    (weight, bias)
-                }
-                Err(head_err) => {
-                    candle_core::bail!(
-                            "Unable to load linear_attn.norm.weight: expected [{value_dim_global}] or [{head_v_dim}], full={full_err}, per_head={head_err}"
-                        )
-                }
-            },
-        };
+        // GDN output norm (gated RMSNorm): both Qwen3.5 and Qwen3Next use per-head params.
+        let gdn_norm_weight = vb.get((head_v_dim,), "norm.weight").map_err(|err| {
+            candle_core::Error::Msg(format!(
+                "Unable to load linear_attn.norm.weight as per-head [{head_v_dim}]: {err}"
+            ))
+        })?;
+        let gdn_norm_bias = vb.get((head_v_dim,), "norm.bias").ok();
 
         Ok(Self {
             projection,
