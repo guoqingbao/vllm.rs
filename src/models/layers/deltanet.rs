@@ -86,8 +86,8 @@ impl GatedDeltaNet {
             false,
             vb.pp("in_proj_ba"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            &None,
+            &None,
             dtype,
         );
 
@@ -128,8 +128,8 @@ impl GatedDeltaNet {
                 false,
                 vb.pp("in_proj_b"),
                 comm.clone(),
-                &config.quantization_config,
-                &config.quant,
+                &None,
+                &None,
                 dtype,
             )
         });
@@ -139,8 +139,8 @@ impl GatedDeltaNet {
             false,
             vb.pp("in_proj_a"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            &None,
+            &None,
             dtype,
         );
 
