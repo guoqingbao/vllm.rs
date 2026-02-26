@@ -2,7 +2,7 @@
 // Shared Qwen3.5/Qwen3Next GatedDeltaNet linear-attention layer.
 
 use crate::models::layers::distributed::{
-    Comm, TensorParallelColumnLinear, TensorParallelRowLinear,
+    Comm, MergedParallelColumnLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
@@ -20,8 +20,15 @@ enum GdnProjection {
         in_proj_ba: TensorParallelColumnLinear,
     },
     // Qwen3.5: in_proj_qkv + in_proj_z + in_proj_ba + in_proj_a
-    SplitQkvZa {
+    SplitQkvZaLegacy {
         in_proj_qkv: TensorParallelColumnLinear,
+        in_proj_z: TensorParallelColumnLinear,
+        in_proj_b: TensorParallelColumnLinear,
+        in_proj_a: TensorParallelColumnLinear,
+    },
+    // Qwen3.5 TP-safe split for packed in_proj_qkv [q|k|v].
+    SplitQkvZaMerged {
+        in_proj_qkv: MergedParallelColumnLinear,
         in_proj_z: TensorParallelColumnLinear,
         in_proj_b: TensorParallelColumnLinear,
         in_proj_a: TensorParallelColumnLinear,
@@ -59,10 +66,6 @@ impl GatedDeltaNet {
         config: &Config,
         dtype: DType,
     ) -> Result<GdnProjection> {
-        // linear_attn.in_proj_qkvz(2)
-        // linear_attn.in_proj_qkvz.weight	[12 288, 2 048]	F8_E4M3
-        // linear_attn.in_proj_qkvz.weight_scale_inv	[96, 16] BF16
-
         // Qwen3Next format: fused qkvz + fused ba
         let projection_size_qkvz = key_dim_global * 2 + value_dim_global * 2;
         let projection_size_ba = num_v_heads_global * 2;
@@ -97,17 +100,6 @@ impl GatedDeltaNet {
         };
 
         // Qwen3.5 format: split qkv, z, b, a
-        let split_qkv = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            key_dim_global * 2 + value_dim_global,
-            false,
-            vb.pp("in_proj_qkv"),
-            comm.clone(),
-            &config.quantization_config,
-            &config.quant,
-            dtype,
-        );
-
         let split_z = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             value_dim_global,
@@ -152,15 +144,53 @@ impl GatedDeltaNet {
             dtype,
         );
 
-        if let (Ok(in_proj_qkv), Ok(in_proj_z), Ok(in_proj_b), Ok(in_proj_a)) =
-            (split_qkv, split_z, split_b, split_a)
-        {
-            return Ok(GdnProjection::SplitQkvZa {
-                in_proj_qkv,
-                in_proj_z,
-                in_proj_b,
-                in_proj_a,
-            });
+        if let (Ok(in_proj_z), Ok(in_proj_b), Ok(in_proj_a)) = (split_z, split_b, split_a) {
+            if comm.world_size() > 1 {
+                // TP-safe path for packed in_proj_qkv [q|k|v]:
+                // shard each semantic chunk independently (q, k, v), not as one contiguous block.
+                let split_qkv_merged = MergedParallelColumnLinear::load_merged_chunks(
+                    hidden_size,
+                    key_dim_global * 2 + value_dim_global,
+                    0,
+                    vec![key_dim_global, key_dim_global, value_dim_global],
+                    None,
+                    vb.pp("in_proj_qkv"),
+                    comm.clone(),
+                    &config.quantization_config,
+                    &config.quant,
+                    dtype,
+                );
+
+                if let Ok(in_proj_qkv) = split_qkv_merged {
+                    return Ok(GdnProjection::SplitQkvZaMerged {
+                        in_proj_qkv,
+                        in_proj_z,
+                        in_proj_b,
+                        in_proj_a,
+                    });
+                }
+            }
+
+            // Single GPU (or fallback): use legacy split loader.
+            let split_qkv_legacy = TensorParallelColumnLinear::load_with_hints(
+                hidden_size,
+                key_dim_global * 2 + value_dim_global,
+                false,
+                vb.pp("in_proj_qkv"),
+                comm.clone(),
+                &config.quantization_config,
+                &config.quant,
+                dtype,
+            );
+
+            if let Ok(in_proj_qkv) = split_qkv_legacy {
+                return Ok(GdnProjection::SplitQkvZaLegacy {
+                    in_proj_qkv,
+                    in_proj_z,
+                    in_proj_b,
+                    in_proj_a,
+                });
+            }
         }
 
         candle_core::bail!("Unable to load Qwen3.5/Qwen3Next linear attention projection weights",)
@@ -214,7 +244,7 @@ impl GatedDeltaNet {
                 let mixed_ba = in_proj_ba.forward(xs)?;
                 self.fix_qwen3next_projection_order(&mixed_qkvz, &mixed_ba)
             }
-            GdnProjection::SplitQkvZa {
+            GdnProjection::SplitQkvZaLegacy {
                 in_proj_qkv,
                 in_proj_z,
                 in_proj_b,
@@ -228,6 +258,28 @@ impl GatedDeltaNet {
                 let v = proj_qkv
                     .narrow(1, self.key_dim * 2, self.value_dim)?
                     .contiguous()?;
+                let z = in_proj_z.forward(xs)?;
+                let b = in_proj_b.forward(xs)?;
+                let a = in_proj_a.forward(xs)?;
+                Ok((q, k, v, z, b, a))
+            }
+            GdnProjection::SplitQkvZaMerged {
+                in_proj_qkv,
+                in_proj_z,
+                in_proj_b,
+                in_proj_a,
+            } => {
+                let qkv = in_proj_qkv.forward(xs)?;
+                if qkv.len() != 3 {
+                    candle_core::bail!(
+                        "Expected 3 chunks from merged in_proj_qkv, got {}",
+                        qkv.len()
+                    );
+                }
+                let q = qkv[0].clone();
+                let k = qkv[1].clone();
+                let v = qkv[2].clone();
+                // z/b/a are projected from the original hidden states, not q/k/v chunks.
                 let z = in_proj_z.forward(xs)?;
                 let b = in_proj_b.forward(xs)?;
                 let a = in_proj_a.forward(xs)?;

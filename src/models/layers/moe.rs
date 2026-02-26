@@ -24,6 +24,14 @@ enum PackedGateUpLayout {
     InterPacked,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PackedDownLayout {
+    // [experts, intermediate, hidden] -> transpose to [experts, hidden, intermediate]
+    InterHidden,
+    // [experts, hidden, intermediate] -> already in expected GEMM layout.
+    HiddenInter,
+}
+
 fn resolve_packed_gate_up_layout(cfg: &Config) -> Result<PackedGateUpLayout> {
     let arch = cfg
         .architectures
@@ -55,6 +63,28 @@ Please add an architecture-specific layout mapping.",
     }
 
     Ok(PackedGateUpLayout::HiddenPacked)
+}
+
+fn resolve_packed_down_layout(cfg: &Config) -> PackedDownLayout {
+    let arch = cfg
+        .architectures
+        .as_ref()
+        .and_then(|a| a.first())
+        .map(|s| s.as_str())
+        .unwrap_or("");
+
+    // Qwen3.5 MoE / Qwen3Next checkpoints store down_proj as [experts, hidden, intermediate].
+    if matches!(
+        arch,
+        "Qwen3_5MoeForCausalLM"
+            | "Qwen3_5MoeForConditionalGeneration"
+            | "Qwen3NextForCausalLM"
+            | "Qwen3NextForConditionalGeneration"
+    ) {
+        PackedDownLayout::HiddenInter
+    } else {
+        PackedDownLayout::InterHidden
+    }
 }
 
 #[allow(dead_code)]
@@ -153,15 +183,17 @@ impl FusedMoe {
                             (gate, up)
                         }
                     };
-                    let down_expert = match vb.get_with_hints(
-                        (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "down_proj",
-                        shard(1, comm.rank(), comm.world_size()),
-                    ) {
-                        // Layout A: [experts, intermediate, hidden] -> transpose to [experts, hidden, intermediate]
-                        Ok(w) => w.t()?.contiguous()?,
-                        // Layout B: [experts, hidden, intermediate] -> already in expected GEMM layout.
-                        Err(_) => vb
+                    let down_layout = resolve_packed_down_layout(cfg);
+                    let down_expert = match down_layout {
+                        PackedDownLayout::InterHidden => vb
+                            .get_with_hints(
+                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "down_proj",
+                                shard(1, comm.rank(), comm.world_size()),
+                            )?
+                            .t()?
+                            .contiguous()?,
+                        PackedDownLayout::HiddenInter => vb
                             .get_with_hints(
                                 (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
                                 "down_proj",
@@ -169,6 +201,25 @@ impl FusedMoe {
                             )?
                             .contiguous()?,
                     };
+                    let (_, gate_n, gate_k) = gate_expert.dims3()?;
+                    let (_, up_n, up_k) = up_expert.dims3()?;
+                    let (_, down_n, down_k) = down_expert.dims3()?;
+                    if gate_n != up_n
+                        || gate_k != up_k
+                        || gate_k != cfg.hidden_size
+                        || down_n != cfg.hidden_size
+                        || down_k != gate_n
+                    {
+                        candle_core::bail!(
+                            "Invalid packed MoE tensor shapes after loading: gate={:?}, up={:?}, down={:?}, hidden_size={}, arch={:?}. \
+This usually means packed down_proj / gate_up_proj layout was interpreted incorrectly.",
+                            gate_expert.shape(),
+                            up_expert.shape(),
+                            down_expert.shape(),
+                            cfg.hidden_size,
+                            cfg.architectures
+                        );
+                    }
                     (gate_expert, up_expert, down_expert)
                 }
                 _ => candle_core::bail!("invalid varbuild or quant config!"),
