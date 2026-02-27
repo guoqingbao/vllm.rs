@@ -65,7 +65,13 @@ impl GatedDeltaNet {
         comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
+        is_fp8_quant: bool,
     ) -> Result<GdnProjection> {
+        let (quantization_config, quant) = if is_fp8_quant {
+            (config.quantization_config.clone(), config.quant.clone())
+        } else {
+            (None, None)
+        };
         // Qwen3Next format: fused qkvz + fused ba
         let projection_size_qkvz = key_dim_global * 2 + value_dim_global * 2;
         let projection_size_ba = num_v_heads_global * 2;
@@ -75,8 +81,8 @@ impl GatedDeltaNet {
             false,
             vb.pp("in_proj_qkvz"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            &quantization_config,
+            &quant,
             dtype,
         );
 
@@ -106,8 +112,8 @@ impl GatedDeltaNet {
             false,
             vb.pp("in_proj_z"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            &quantization_config,
+            &quant,
             dtype,
         );
 
@@ -115,24 +121,12 @@ impl GatedDeltaNet {
             hidden_size,
             num_v_heads_global,
             false,
-            vb.pp("in_proj_ba"),
+            vb.pp("in_proj_b"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            &None,
+            &None,
             dtype,
-        )
-        .or_else(|_| {
-            TensorParallelColumnLinear::load_with_hints(
-                hidden_size,
-                num_v_heads_global,
-                false,
-                vb.pp("in_proj_b"),
-                comm.clone(),
-                &None,
-                &None,
-                dtype,
-            )
-        });
+        );
         let split_a = TensorParallelColumnLinear::load_with_hints(
             hidden_size,
             num_v_heads_global,
@@ -156,8 +150,8 @@ impl GatedDeltaNet {
                     None,
                     vb.pp("in_proj_qkv"),
                     comm.clone(),
-                    &config.quantization_config,
-                    &config.quant,
+                    &quantization_config,
+                    &quant,
                     dtype,
                 );
 
@@ -178,8 +172,8 @@ impl GatedDeltaNet {
                 false,
                 vb.pp("in_proj_qkv"),
                 comm.clone(),
-                &config.quantization_config,
-                &config.quant,
+                &quantization_config,
+                &quant,
                 dtype,
             );
 
@@ -337,6 +331,12 @@ impl GatedDeltaNet {
             );
         }
 
+        let is_fp8_quant = if let Some(cfg) = config.quantization_config.as_ref() {
+            cfg.quant_method == "fp8"
+        } else {
+            false
+        };
+
         let num_v_heads = num_v_heads_global / world_size;
         let num_k_heads = num_k_heads_global / world_size;
         let head_k_dim = hybrid.key_head_dim;
@@ -368,6 +368,7 @@ impl GatedDeltaNet {
             comm.clone(),
             config,
             dtype,
+            is_fp8_quant,
         )?;
 
         // Conv1D weights are stored global; slice rank-local q/k/v channel blocks.
@@ -396,8 +397,12 @@ impl GatedDeltaNet {
             hidden_size,
             vb.pp("out_proj"),
             comm.clone(),
-            &config.quantization_config,
-            &config.quant,
+            if is_fp8_quant {
+                &None
+            } else {
+                &config.quantization_config
+            },
+            if is_fp8_quant { &None } else { &config.quant },
             dtype,
         )?;
 

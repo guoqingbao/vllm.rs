@@ -68,6 +68,7 @@ pub struct Qwen3_5MoEDecoderLayer {
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
+    dtype: DType,
 }
 
 impl Qwen3_5MoEDecoderLayer {
@@ -181,46 +182,51 @@ impl Qwen3_5MoEDecoderLayer {
         };
 
         // Shared experts (Qwen2 MoE style)
-        let (shared_gate, shared_expert) =
-            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
-                if intermediate_size > 0 {
-                    let ws = match &vb.0 {
-                        Either::Left(vb) => vb
-                            .pp("mlp.shared_expert_gate")
-                            .get((1, config.hidden_size), "weight")?,
-                        Either::Right(vb) => {
-                            let ws = vb
-                                .pp("ffn_gate_inp_shexp")
-                                .get((config.hidden_size,), "weight")?;
-                            ws.dequantize(&vb.device())?
-                                .reshape((1, config.hidden_size))?
-                        }
+        let (shared_gate, shared_expert) = if let Some(intermediate_size) =
+            moe_cfg.shared_expert_intermediate_size
+        {
+            if intermediate_size > 0 {
+                let ws = match &vb.0 {
+                    Either::Left(vb) => vb
+                        .pp("mlp.shared_expert_gate")
+                        .get((1, config.hidden_size), "weight")?,
+                    Either::Right(vb) => {
+                        let ws = vb
+                            .pp("ffn_gate_inp_shexp")
+                            .get((config.hidden_size,), "weight")?;
+                        ws.dequantize(&vb.device())?
+                            .reshape((1, config.hidden_size))?
                     }
-                    .to_dtype(dtype)?;
-                    let shared_gate = Linear::new(ws, None, &None)?;
-                    let mlp = MLP::new(
-                        if is_qvar_builder {
-                            vb.clone()
-                        } else {
-                            vb.pp("mlp.shared_expert").clone()
-                        },
-                        comm.clone(),
-                        config.hidden_size,
-                        intermediate_size,
-                        &config.hidden_act,
-                        &config.quantization_config,
-                        &config.quant,
-                        false,
-                        dtype,
-                        if is_qvar_builder { "_shexp" } else { "" },
-                    )?;
-                    (Some(shared_gate), Some(mlp))
-                } else {
-                    (None, None)
                 }
+                .to_dtype(if is_qvar_builder || config.quant.is_some() {
+                    DType::F32
+                } else {
+                    dtype
+                })?;
+                let shared_gate = Linear::new(ws, None, &None)?;
+                let mlp = MLP::new(
+                    if is_qvar_builder {
+                        vb.clone()
+                    } else {
+                        vb.pp("mlp.shared_expert").clone()
+                    },
+                    comm.clone(),
+                    config.hidden_size,
+                    intermediate_size,
+                    &config.hidden_act,
+                    &config.quantization_config,
+                    &config.quant,
+                    false,
+                    dtype,
+                    if is_qvar_builder { "_shexp" } else { "" },
+                )?;
+                (Some(shared_gate), Some(mlp))
             } else {
                 (None, None)
-            };
+            }
+        } else {
+            (None, None)
+        };
 
         let input_layernorm = rms_norm(
             config.hidden_size,
@@ -260,6 +266,7 @@ impl Qwen3_5MoEDecoderLayer {
             input_layernorm,
             post_attention_layernorm,
             rotary_emb: rotary,
+            dtype,
         })
     }
 
@@ -289,7 +296,17 @@ impl Qwen3_5MoEDecoderLayer {
                 )?
             }
             Qwen3_5MoEAttnType::LinearAttention(gdn) => {
-                gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                if xs.dtype() != self.dtype {
+                    gdn.forward(
+                        &xs.to_dtype(self.dtype)?,
+                        mamba_cache,
+                        input_metadata,
+                        seq_slots,
+                    )?
+                    .to_dtype(xs.dtype())?
+                } else {
+                    gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                }
             }
         };
 

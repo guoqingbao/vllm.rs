@@ -35,6 +35,7 @@ pub struct Qwen3_5DecoderLayer {
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
+    dtype: DType,
 }
 
 impl Qwen3_5DecoderLayer {
@@ -129,6 +130,7 @@ impl Qwen3_5DecoderLayer {
             input_layernorm,
             post_attention_layernorm,
             rotary_emb: rotary,
+            dtype,
         })
     }
 
@@ -158,7 +160,17 @@ impl Qwen3_5DecoderLayer {
                 )?
             }
             Qwen3_5AttnType::LinearAttention(gdn) => {
-                gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                if xs.dtype() != self.dtype {
+                    gdn.forward(
+                        &xs.to_dtype(self.dtype)?,
+                        mamba_cache,
+                        input_metadata,
+                        seq_slots,
+                    )?
+                    .to_dtype(xs.dtype())?
+                } else {
+                    gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                }
             }
         };
 
