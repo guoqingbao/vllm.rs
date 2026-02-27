@@ -169,9 +169,9 @@ impl ScalingRotaryEmbedding {
             } else if let Some(factor) = rope_scaling.get("factor").and_then(|v| v.as_f64()) {
                 cfg.max_position_embeddings as f64 / factor
             } else {
-                crate::log_warn!(
-                    "original_max_position_embeddings not found in rope_scaling or cfg"
-                );
+                // crate::log_warn!(
+                //     "original_max_position_embeddings not found in rope_scaling or cfg"
+                // );
                 cfg.max_position_embeddings as f64
             };
 

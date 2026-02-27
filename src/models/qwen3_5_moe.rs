@@ -32,13 +32,11 @@ enum MoeOrMlp {
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
     FusedMoeFp8(FusedMoeFp8),
-    Mlp(MLP),
 }
 
 impl MoeOrMlp {
     fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         match self {
-            Self::Mlp(m) => m.forward(xs),
             Self::FusedMoe(m) => m.forward(xs, is_prefill),
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
@@ -68,6 +66,7 @@ pub struct Qwen3_5MoEDecoderLayer {
     input_layernorm: NormX,
     post_attention_layernorm: NormX,
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
+    dtype: DType,
 }
 
 impl Qwen3_5MoEDecoderLayer {
@@ -77,7 +76,6 @@ impl Qwen3_5MoEDecoderLayer {
         rotary_emb: Arc<ScalingRotaryEmbedding>,
         config: &Config,
         layer_type: &str,
-        layer_idx: usize,
         gdn_layer_idx: usize,
         dtype: DType,
     ) -> Result<Self> {
@@ -111,108 +109,87 @@ impl Qwen3_5MoEDecoderLayer {
             )?)
         };
 
-        // MoE or MLP dispatch
         let moe_cfg = config
             .moe_cfg
             .as_ref()
             .expect("MoE config is not available!");
-        let mlp = if !moe_cfg
-            .mlp_only_layers
-            .as_ref()
-            .unwrap_or(&Vec::<usize>::new())
-            .contains(&layer_idx)
-            && (moe_cfg.num_experts.unwrap_or(0) > 0
-                && (layer_idx + 1) % moe_cfg.decoder_sparse_step.unwrap_or(1) == 0)
-        {
-            if is_qvar_builder {
-                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
-            } else if let Some(quant_config) = &config.quantization_config {
-                if quant_config.quant_method == "fp8" {
-                    MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
-                        config,
-                        vb.pp("mlp").clone(),
-                        comm.clone(),
-                        dtype,
-                        quant_config,
-                    )?)
-                } else {
-                    panic!("Unsupported quant method for MoE (use unquantized, gguf or fp8)!");
-                }
-            } else if config.quant.is_some() {
-                MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
+        // MoE layers (No pure MLP layers in Qwen3.5 and Qwen3-Next)
+        let mlp = if is_qvar_builder {
+            MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
+        } else if let Some(quant_config) = &config.quantization_config {
+            if quant_config.quant_method == "fp8" {
+                MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
                     config,
                     vb.pp("mlp").clone(),
                     comm.clone(),
                     dtype,
+                    quant_config,
                 )?)
             } else {
-                MoeOrMlp::FusedMoe(FusedMoe::new(
-                    config,
-                    vb.pp("mlp").clone(),
-                    comm.clone(),
-                    dtype,
-                )?)
+                panic!("Unsupported quant method for MoE (use unquantized, gguf or fp8)!");
             }
-        } else {
-            MoeOrMlp::Mlp(MLP::new(
-                if is_qvar_builder {
-                    vb.clone()
-                } else {
-                    vb.pp("mlp").clone()
-                },
+        } else if config.quant.is_some() {
+            MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
+                config,
+                vb.pp("mlp").clone(),
                 comm.clone(),
-                config.hidden_size,
-                config.intermediate_size,
-                &config.hidden_act,
-                &config.quantization_config,
-                &config.quant,
-                false,
                 dtype,
-                "",
+            )?)
+        } else {
+            MoeOrMlp::FusedMoe(FusedMoe::new(
+                config,
+                vb.pp("mlp").clone(),
+                comm.clone(),
+                dtype,
             )?)
         };
 
         // Shared experts (Qwen2 MoE style)
-        let (shared_gate, shared_expert) =
-            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
-                if intermediate_size > 0 {
-                    let ws = match &vb.0 {
-                        Either::Left(vb) => vb
-                            .pp("mlp.shared_expert_gate")
-                            .get((1, config.hidden_size), "weight")?,
-                        Either::Right(vb) => {
-                            let ws = vb
-                                .pp("ffn_gate_inp_shexp")
-                                .get((config.hidden_size,), "weight")?;
-                            ws.dequantize(&vb.device())?
-                                .reshape((1, config.hidden_size))?
-                        }
+        let (shared_gate, shared_expert) = if let Some(intermediate_size) =
+            moe_cfg.shared_expert_intermediate_size
+        {
+            if intermediate_size > 0 {
+                let ws = match &vb.0 {
+                    Either::Left(vb) => vb
+                        .pp("mlp.shared_expert_gate")
+                        .get((1, config.hidden_size), "weight")?,
+                    Either::Right(vb) => {
+                        let ws = vb
+                            .pp("ffn_gate_inp_shexp")
+                            .get((config.hidden_size,), "weight")?;
+                        ws.dequantize(&vb.device())?
+                            .reshape((1, config.hidden_size))?
                     }
-                    .to_dtype(dtype)?;
-                    let shared_gate = Linear::new(ws, None, &None)?;
-                    let mlp = MLP::new(
-                        if is_qvar_builder {
-                            vb.clone()
-                        } else {
-                            vb.pp("mlp.shared_expert").clone()
-                        },
-                        comm.clone(),
-                        config.hidden_size,
-                        intermediate_size,
-                        &config.hidden_act,
-                        &config.quantization_config,
-                        &config.quant,
-                        false,
-                        dtype,
-                        if is_qvar_builder { "_shexp" } else { "" },
-                    )?;
-                    (Some(shared_gate), Some(mlp))
-                } else {
-                    (None, None)
                 }
+                .to_dtype(if is_qvar_builder || config.quant.is_some() {
+                    DType::F32
+                } else {
+                    dtype
+                })?;
+                let shared_gate = Linear::new(ws, None, &None)?;
+                let mlp = MLP::new(
+                    if is_qvar_builder {
+                        vb.clone()
+                    } else {
+                        vb.pp("mlp.shared_expert").clone()
+                    },
+                    comm.clone(),
+                    config.hidden_size,
+                    intermediate_size,
+                    &config.hidden_act,
+                    &config.quantization_config,
+                    &config.quant,
+                    false,
+                    dtype,
+                    if is_qvar_builder { "_shexp" } else { "" },
+                )?;
+                (Some(shared_gate), Some(mlp))
             } else {
                 (None, None)
-            };
+            }
+        } else {
+            (None, None)
+        };
 
         let input_layernorm = rms_norm(
             config.hidden_size,
@@ -252,6 +229,7 @@ impl Qwen3_5MoEDecoderLayer {
             input_layernorm,
             post_attention_layernorm,
             rotary_emb: rotary,
+            dtype,
         })
     }
 
@@ -281,7 +259,17 @@ impl Qwen3_5MoEDecoderLayer {
                 )?
             }
             Qwen3_5MoEAttnType::LinearAttention(gdn) => {
-                gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                if xs.dtype() != self.dtype {
+                    gdn.forward(
+                        &xs.to_dtype(self.dtype)?,
+                        mamba_cache,
+                        input_metadata,
+                        seq_slots,
+                    )?
+                    .to_dtype(xs.dtype())?
+                } else {
+                    gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                }
             }
         };
 
@@ -330,7 +318,11 @@ pub struct Qwen3_5MoEForCausalLM {
 }
 
 impl Qwen3_5MoEForCausalLM {
-    fn resolve_seq_slots(input_metadata: &InputMetadata, token_count: usize) -> Result<Tensor> {
+    fn resolve_seq_slots(
+        &self,
+        input_metadata: &InputMetadata,
+        token_count: usize,
+    ) -> Result<Tensor> {
         if let Some(slot_mapping) = &input_metadata.mamba_slot_mapping {
             if slot_mapping.dtype() != DType::I64 {
                 candle_core::bail!(
@@ -351,7 +343,34 @@ impl Qwen3_5MoEForCausalLM {
             }
             return Ok(slot_mapping.clone());
         }
-        candle_core::bail!("Qwen3.5 MoE requires input_metadata.mamba_slot_mapping")
+
+        let sequence_ids = input_metadata
+            .sequence_ids
+            .as_ref()
+            .ok_or_else(|| candle_core::Error::Msg("Qwen3.5 MoE requires sequence_ids".into()))?;
+        if sequence_ids.is_empty() {
+            candle_core::bail!("Qwen3.5 MoE received empty sequence_ids");
+        }
+
+        let slots = if input_metadata.is_prefill {
+            self.ensure_mamba_slots_for_sequences(sequence_ids)?
+        } else {
+            self.get_mamba_slots_for_sequences(sequence_ids)?
+        };
+        if slots.is_empty() {
+            candle_core::bail!("Qwen3.5 MoE resolved empty mamba slots from sequence_ids");
+        }
+        if !input_metadata.is_prefill && slots.len() != token_count {
+            candle_core::bail!(
+                "Qwen3.5 MoE decode mamba slot count mismatch: slots={} tokens={}",
+                slots.len(),
+                token_count
+            );
+        }
+
+        let slots_i64 = slots.into_iter().map(|s| s as i64).collect::<Vec<_>>();
+        let len = slots_i64.len();
+        Tensor::from_vec(slots_i64, (len,), &self.device)
     }
 
     pub fn new(
@@ -472,7 +491,6 @@ impl Qwen3_5MoEForCausalLM {
                 rotary_emb.clone(),
                 config,
                 layer_type,
-                i,
                 current_gdn_idx,
                 dtype,
             )?;
@@ -599,8 +617,8 @@ impl Qwen3_5MoEForCausalLM {
         };
 
         let mut kv_cache_idx = 0usize;
+        let seq_slots = self.resolve_seq_slots(input_metadata, xs.dim(0)?)?;
         let mut mamba_cache = self.mamba_cache.write();
-        let seq_slots = Self::resolve_seq_slots(input_metadata, xs.dim(0)?)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             let cache = if layer.is_full_attention() {

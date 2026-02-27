@@ -34,11 +34,11 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Ministral-3-3B (Multimodal) | ISQ (BF16->Q4K) | 3B | **171.92** tokens/s |
 | Qwen3-VL-8B-Instruct (**Multimodal**) | Q8_0 | 8B | **105.31** tokens/s |
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **120.74** tokens/s |
-| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **126.89** tokens/s |
 | DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **124.87** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
+| **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -62,7 +62,8 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8，SM90+)
 * ✅ Qwen2/Qwen3 Moe (+Hardware FP8, SM90+)
 * ✅ Qwen3 Next (+Hardware FP8，SM90+)
-* ✅ Qwen3.5 Dense/Moe (Test TBD)
+* ✅ Qwen3.5 Dense (27B, Multimodal model)
+* ✅ Qwen3.5 Moe (35B, 122B, 397B, Multimodal model, **TBD**)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -91,6 +92,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
+- [Qwen3.5 vs Qwen3-Next Implementation](docs/qwen3_5_architecture.md)
 
 
 ## 📘 Usage in Python

@@ -122,6 +122,13 @@ impl ModelRunner {
             } else {
                 model.get_mamba_slots_for_sequences(sequence_ids)?
             }),
+            Model::Qwen3VL(model) => {
+                if is_prefill {
+                    model.ensure_mamba_slots_for_sequences(sequence_ids)?
+                } else {
+                    model.get_mamba_slots_for_sequences(sequence_ids)?
+                }
+            }
             _ => None,
         };
         if let Some(slots) = slots {
@@ -242,7 +249,11 @@ impl ModelRunner {
             max_num_batched_tokens: econfig.max_num_batched_tokens,
         };
 
-        let is_hybrid_mamba_model = matches!(model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_));
+        let is_hybrid_mamba_model = match &model {
+            Model::Qwen3_5(_) | Model::Qwen3_5MoE(_) => true,
+            Model::Qwen3VL(m) => m.uses_hybrid_mamba_text_model(),
+            _ => false,
+        };
         let mamba_cache_capacity = if is_hybrid_mamba_model {
             econfig
                 .mamba_cache_capacity
@@ -306,6 +317,10 @@ impl ModelRunner {
                 model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
             }
             Model::Qwen3_5MoE(model) => {
+                model.preallocate_mamba_cache(mamba_cache_capacity)?;
+                model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
+            }
+            Model::Qwen3VL(model) => {
                 model.preallocate_mamba_cache(mamba_cache_capacity)?;
                 model.set_mamba_prefix_cache_capacity(mamba_prefix_capacity);
             }
@@ -427,35 +442,7 @@ impl ModelRunner {
 
     fn restore_mamba_prefix_states_for_prefill(&self, seqs: &[&Sequence]) -> Result<()> {
         match &self.model {
-            Model::Qwen3_5(_) => {
-                for seq in seqs {
-                    if seq.num_cached_tokens == 0 {
-                        continue;
-                    }
-                    let Some(hash) = seq.mamba_prefix_hash else {
-                        continue;
-                    };
-                    if self.restored_prefix_sequences.read().contains(&seq.id) {
-                        continue;
-                    }
-                    let restored = self.restore_mamba_prefix_state(seq.id, hash)?;
-                    if !restored {
-                        candle_core::bail!(
-                            "Missing mamba prefix snapshot for seq {} hash {}",
-                            seq.id,
-                            hash
-                        );
-                    }
-                    self.restored_prefix_sequences.write().insert(seq.id);
-                    crate::log_info!(
-                        "Restored mamba prefix state for seq {} (cached {} tokens)",
-                        seq.id,
-                        seq.num_cached_tokens
-                    );
-                }
-                Ok(())
-            }
-            Model::Qwen3_5MoE(_) => {
+            Model::Qwen3_5(_) | Model::Qwen3_5MoE(_) | Model::Qwen3VL(_) => {
                 for seq in seqs {
                     if seq.num_cached_tokens == 0 {
                         continue;
@@ -491,6 +478,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3_5(model) => model.restore_mamba_prefix_state(seq_id, hash),
             Model::Qwen3_5MoE(model) => model.restore_mamba_prefix_state(seq_id, hash),
+            Model::Qwen3VL(model) => model.restore_mamba_prefix_state(seq_id, hash),
             _ => Ok(true),
         }
     }
@@ -499,6 +487,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3_5(model) => model.capture_mamba_prefix_state(seq_id, hash),
             Model::Qwen3_5MoE(model) => model.capture_mamba_prefix_state(seq_id, hash),
+            Model::Qwen3VL(model) => model.capture_mamba_prefix_state(seq_id, hash),
             _ => return Ok(true),
         }
     }
@@ -507,6 +496,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3_5(model) => Ok(model.has_mamba_prefix_state(hash)),
             Model::Qwen3_5MoE(model) => Ok(model.has_mamba_prefix_state(hash)),
+            Model::Qwen3VL(model) => Ok(model.has_mamba_prefix_state(hash)),
             _ => Ok(true),
         }
     }
@@ -555,6 +545,15 @@ impl ModelRunner {
                         let _guard = model.lock_mamba_cache_for_graph();
                         self.capturer
                             .replay(&input_ids, &positions, &input_metadata)?
+                    }
+                    Model::Qwen3VL(model) => {
+                        if let Some(_guard) = model.lock_mamba_cache_for_graph() {
+                            self.capturer
+                                .replay(&input_ids, &positions, &input_metadata)?
+                        } else {
+                            self.capturer
+                                .replay(&input_ids, &positions, &input_metadata)?
+                        }
                     }
                     _ => self
                         .capturer
@@ -1240,6 +1239,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3_5(model) => model.release_sequence_state(id),
             Model::Qwen3_5MoE(model) => model.release_sequence_state(id),
+            Model::Qwen3VL(model) => model.release_sequence_state(id),
             _ => {}
         }
     }
@@ -1267,6 +1267,7 @@ impl ModelRunner {
         match &self.model {
             Model::Qwen3_5(model) => model.reset_mamba_cache()?,
             Model::Qwen3_5MoE(model) => model.reset_mamba_cache()?,
+            Model::Qwen3VL(model) => model.reset_mamba_cache()?,
             _ => {}
         }
         self.restored_prefix_sequences.write().clear();

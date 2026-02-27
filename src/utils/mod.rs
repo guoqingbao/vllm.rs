@@ -545,6 +545,40 @@ fn require_model_penalty(arch: String) -> bool {
     )
 }
 
+fn apply_qwen35_next_moe_norm_topk_default(config: &mut Config) {
+    let arch = config
+        .architectures
+        .as_ref()
+        .and_then(|a| a.first())
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    if !matches!(
+        arch,
+        "Qwen3_5MoeForCausalLM"
+            | "Qwen3_5MoeForConditionalGeneration"
+            | "Qwen3NextForCausalLM"
+            | "Qwen3NextForConditionalGeneration"
+    ) {
+        return;
+    }
+
+    let Some(moe_cfg) = config.moe_cfg.as_mut() else {
+        return;
+    };
+
+    let Some(raw) = config.extra_config_json.as_ref() else {
+        return;
+    };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return;
+    };
+    let cfg_root = root.get("text_config").unwrap_or(&root);
+
+    if cfg_root.get("norm_topk_prob").is_none() {
+        moe_cfg.norm_topk_prob = true;
+    }
+}
+
 pub fn init_config_tokenizer(
     econfig: &EngineConfig,
 ) -> Result<(
@@ -603,6 +637,12 @@ pub fn init_config_tokenizer(
                 if let Some(scaling) = &config.rope_scaling {
                     if let Some(v) = scaling.get("rope_theta").and_then(|v| v.as_f64()) {
                         config.rope_theta = Some(v);
+                    }
+                    if let Some(v) = scaling
+                        .get("partial_rotary_factor")
+                        .and_then(|v| v.as_f64())
+                    {
+                        config.partial_rotary_factor = Some(v as f32);
                     }
                 }
                 config
@@ -663,6 +703,7 @@ pub fn init_config_tokenizer(
                 }
             }
         }
+        apply_qwen35_next_moe_norm_topk_default(&mut config);
 
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
