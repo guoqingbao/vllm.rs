@@ -32,13 +32,11 @@ enum MoeOrMlp {
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
     FusedMoeFp8(FusedMoeFp8),
-    Mlp(MLP),
 }
 
 impl MoeOrMlp {
     fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         match self {
-            Self::Mlp(m) => m.forward(xs),
             Self::FusedMoe(m) => m.forward(xs, is_prefill),
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
@@ -78,7 +76,6 @@ impl Qwen3_5MoEDecoderLayer {
         rotary_emb: Arc<ScalingRotaryEmbedding>,
         config: &Config,
         layer_type: &str,
-        layer_idx: usize,
         gdn_layer_idx: usize,
         dtype: DType,
     ) -> Result<Self> {
@@ -494,7 +491,6 @@ impl Qwen3_5MoEForCausalLM {
                 rotary_emb.clone(),
                 config,
                 layer_type,
-                i,
                 current_gdn_idx,
                 dtype,
             )?;
