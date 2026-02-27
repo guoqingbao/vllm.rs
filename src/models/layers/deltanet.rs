@@ -53,6 +53,7 @@ pub struct GatedDeltaNet {
     kv_group_size: usize,
     gdn_layer_idx: usize,
     rms_norm_eps: f64,
+    scale: f64,
 }
 
 impl GatedDeltaNet {
@@ -297,10 +298,6 @@ impl GatedDeltaNet {
             .reshape((seq_len, self.num_v_heads, self.head_k_dim))
     }
 
-    fn l2_norm_last_dim(x: &Tensor, eps: f64) -> Result<Tensor> {
-        gdn::l2_norm_last_dim(x, eps)
-    }
-
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
@@ -398,11 +395,11 @@ impl GatedDeltaNet {
             vb.pp("out_proj"),
             comm.clone(),
             if is_fp8_quant {
-                &None
-            } else {
                 &config.quantization_config
+            } else {
+                &None
             },
-            if is_fp8_quant { &None } else { &config.quant },
+            if is_fp8_quant { &config.quant } else { &None },
             dtype,
         )?;
 
@@ -413,7 +410,7 @@ impl GatedDeltaNet {
             ))
         })?;
         let gdn_norm_bias = vb.get((head_v_dim,), "norm.bias").ok();
-
+        let scale = 1.0f64 / (head_k_dim as f64).sqrt();
         Ok(Self {
             projection,
             out_proj,
@@ -432,6 +429,7 @@ impl GatedDeltaNet {
             kv_group_size,
             gdn_layer_idx,
             rms_norm_eps: config.rms_norm_eps,
+            scale,
         })
     }
 
@@ -496,25 +494,21 @@ impl GatedDeltaNet {
         let v_conv = kv_conv.narrow(1, self.key_dim * 2, self.value_dim)?;
 
         // Fused GDN gating
-        let a_expanded = a.unsqueeze(0)?; // [1, seq_len, num_heads]
-        let b_expanded = b.unsqueeze(0)?;
+        let (a_expanded, b_expanded) = (a.unsqueeze(0)?, b.unsqueeze(0)?); // [1, seq_len, num_heads]
         let (g, beta) =
             gdn::fused_gdn_gating(&self.a_log, &a_expanded, &b_expanded, &self.dt_bias)?;
-        let g = g.squeeze(0)?;
-        let beta = beta.squeeze(0)?;
+        let (g, beta) = (g.squeeze(0)?, beta.squeeze(0)?);
 
         let q = q_conv.reshape((token_count, self.num_k_heads, self.head_k_dim))?;
         let k = k_conv.reshape((token_count, self.num_k_heads, self.head_k_dim))?;
         let v = v_conv.reshape((token_count, self.num_v_heads, self.head_v_dim))?;
-        let q = Self::l2_norm_last_dim(&q, 1e-6)?;
-        let k = Self::l2_norm_last_dim(&k, 1e-6)?;
-        let q = self.repeat_kv_heads(q)?;
-        let k = self.repeat_kv_heads(k)?;
+        let q = gdn::l2_norm_last_dim(&q, 1e-6)?;
+        let k = gdn::l2_norm_last_dim(&k, 1e-6)?;
+        let (q, k) = (self.repeat_kv_heads(q)?, self.repeat_kv_heads(k)?);
 
         let output = if is_prefill {
             // S1: Use batched varlen recurrence — one CUDA launch for all sequences
-            let scale = 1.0f64 / (self.head_k_dim as f64).sqrt();
-            let q_scaled = (&q * scale)?;
+            let q_scaled = (&q * self.scale)?;
 
             let cu_seqlens = input_metadata
                 .cu_seqlens_q
@@ -536,8 +530,7 @@ impl GatedDeltaNet {
             )?
         } else {
             let batch = slot_count;
-            let scale = 1.0f64 / (self.head_k_dim as f64).sqrt();
-            let q_b = (q.reshape((batch, self.num_v_heads, self.head_k_dim))? * scale)?;
+            let q_b = (q.reshape((batch, self.num_v_heads, self.head_k_dim))? * self.scale)?;
             let k_b = k.reshape((batch, self.num_v_heads, self.head_k_dim))?;
             let v_b = v.reshape((batch, self.num_v_heads, self.head_v_dim))?;
             let g_b = g.reshape((batch, self.num_v_heads))?;

@@ -112,72 +112,38 @@ impl Qwen3_5MoEDecoderLayer {
             )?)
         };
 
-        // MoE or MLP dispatch
         let moe_cfg = config
             .moe_cfg
             .as_ref()
             .expect("MoE config is not available!");
-        let mlp = if !moe_cfg
-            .mlp_only_layers
-            .as_ref()
-            .unwrap_or(&Vec::<usize>::new())
-            .contains(&layer_idx)
-            && (moe_cfg.num_experts.unwrap_or(0) > 0
-                && (layer_idx + 1) % moe_cfg.decoder_sparse_step.unwrap_or(1) == 0)
-        {
-            if is_qvar_builder {
-                MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
-            } else if let Some(quant_config) = &config.quantization_config {
-                if quant_config.quant_method == "fp8" {
-                    MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
-                        config,
-                        vb.pp("mlp").clone(),
-                        comm.clone(),
-                        dtype,
-                        quant_config,
-                    )?)
-                } else {
-                    panic!("Unsupported quant method for MoE (use unquantized, gguf or fp8)!");
-                }
-            } else if config.quant.is_some() {
-                MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
+        // MoE layers (No pure MLP layers in Qwen3.5 and Qwen3-Next)
+        let mlp = if is_qvar_builder {
+            MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
+        } else if let Some(quant_config) = &config.quantization_config {
+            if quant_config.quant_method == "fp8" {
+                MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
                     config,
                     vb.pp("mlp").clone(),
                     comm.clone(),
                     dtype,
+                    quant_config,
                 )?)
             } else {
-                MoeOrMlp::FusedMoe(FusedMoe::new(
-                    config,
-                    vb.pp("mlp").clone(),
-                    comm.clone(),
-                    dtype,
-                )?)
+                panic!("Unsupported quant method for MoE (use unquantized, gguf or fp8)!");
             }
-        } else {
-            MoeOrMlp::Mlp(MLP::new(
-                if is_qvar_builder {
-                    vb.clone()
-                } else {
-                    vb.pp("mlp").clone()
-                },
+        } else if config.quant.is_some() {
+            MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
+                config,
+                vb.pp("mlp").clone(),
                 comm.clone(),
-                config.hidden_size,
-                if config.intermediate_size > 0 {
-                    config.intermediate_size
-                } else {
-                    config
-                        .moe_cfg
-                        .as_ref()
-                        .map(|m| m.moe_intermediate_size)
-                        .unwrap_or(0)
-                },
-                &config.hidden_act,
-                &config.quantization_config,
-                &config.quant,
-                false,
                 dtype,
-                "",
+            )?)
+        } else {
+            MoeOrMlp::FusedMoe(FusedMoe::new(
+                config,
+                vb.pp("mlp").clone(),
+                comm.clone(),
+                dtype,
             )?)
         };
 

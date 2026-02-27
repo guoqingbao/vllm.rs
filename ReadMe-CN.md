@@ -34,11 +34,11 @@
 | Ministral-3-3B (Multimodal) | ISQ (BF16->Q4K) | 3B | **171.92** tokens/s |
 | Qwen3-VL-8B-Instruct (**Multimodal**) | Q8_0 | 8B | **105.31** tokens/s |
 | Llama-3.1-8B | ISQ (BF16->Q4K) | 8B | **120.74** tokens/s |
-| DeepSeek-R1-Distill-Llama-8B | Q2_K | 8B | **126.89** tokens/s |
 | DeepSeek-R1-0528-Qwen3-8B | Q4_K_M | 8B | **124.87** tokens/s |
 | GLM-4-9B-0414 | Q4_K_M | 9B | **70.38** tokens/s |
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
+| **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -60,8 +60,9 @@
 * ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）（支持硬件FP8加速，SM90+）
 * ✅ Qwen2/Qwen3 Moe 系列（支持硬件FP8加速，SM90+）
-* ✅ Qwen3 Next 系列（支持硬件FP8加速，SM90+）
-* ✅ Qwen3.5 系列（27B, 35B, 122B, 397B, 多模态）
+* ✅ Qwen3-Next 系列（支持硬件FP8加速，SM90+）
+* ✅ Qwen3.5 Dense（27B, 多模态）
+* ✅ Qwen3.5 MoE 系列（35B, 122B, 397B, 多模态，**待测试**）
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
