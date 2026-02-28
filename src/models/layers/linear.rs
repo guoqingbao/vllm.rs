@@ -770,81 +770,6 @@ fn load_ln_fp8_with_hints(
     quant_cfg: &QuantConfig,
     load_bias: bool,
 ) -> Result<LnFp8> {
-    fn normalize_sharded_2d(
-        t: Tensor,
-        shard: Shard,
-        global_dim0: usize,
-        global_dim1: usize,
-        name: &str,
-    ) -> Result<Tensor> {
-        if shard.world_size <= 1 {
-            return Ok(t);
-        }
-        if shard.dim > 1 {
-            candle_core::bail!("LnFp8: unsupported shard dim {} for {}", shard.dim, name);
-        }
-        let (d0, d1) = t.dims2()?;
-        if shard.dim == 0 {
-            let local = global_dim0 / shard.world_size;
-            if d0 == local {
-                return Ok(t);
-            }
-            if d0 == global_dim0 {
-                return t.narrow(0, shard.rank * local, local)?.contiguous();
-            }
-            candle_core::bail!(
-                "LnFp8: unexpected {} shape ({}, {}), shard dim 0 expects local {} or global {}",
-                name,
-                d0,
-                d1,
-                local,
-                global_dim0
-            )
-        } else {
-            let local = global_dim1 / shard.world_size;
-            if d1 == local {
-                return Ok(t);
-            }
-            if d1 == global_dim1 {
-                return t.narrow(1, shard.rank * local, local)?.contiguous();
-            }
-            candle_core::bail!(
-                "LnFp8: unexpected {} shape ({}, {}), shard dim 1 expects local {} or global {}",
-                name,
-                d0,
-                d1,
-                local,
-                global_dim1
-            )
-        }
-    }
-
-    fn normalize_sharded_1d(
-        t: Tensor,
-        shard: Shard,
-        global_dim: usize,
-        name: &str,
-    ) -> Result<Tensor> {
-        if shard.world_size <= 1 {
-            return Ok(t);
-        }
-        let d0 = t.dim(0)?;
-        let local = global_dim / shard.world_size;
-        if d0 == local {
-            return Ok(t);
-        }
-        if d0 == global_dim {
-            return t.narrow(0, shard.rank * local, local)?.contiguous();
-        }
-        candle_core::bail!(
-            "LnFp8: unexpected {} shape ({}), expects local {} or global {}",
-            name,
-            d0,
-            local,
-            global_dim
-        )
-    }
-
     let block_size = quant_cfg
         .weight_block_size
         .clone()
@@ -858,33 +783,93 @@ fn load_ln_fp8_with_hints(
     let scale_dim0 = (out_dim + by - 1) / by;
     let scale_dim1 = (in_dim + bx - 1) / bx;
 
-    let weight = vb.get_with_hints_dtype((out_dim, in_dim), "weight", shard, DType::U8)?;
-    let weight = normalize_sharded_2d(weight, shard, out_dim, in_dim, "weight")?;
-    let weight_scale = match vb.get_with_hints_dtype(
-        (scale_dim0, scale_dim1),
-        "weight_scale",
-        shard,
-        DType::F32,
-    ) {
-        Ok(s) => s,
-        Err(_) => vb
-            .get_with_hints_dtype(
-                (scale_dim0, scale_dim1),
-                "weight_scale_inv",
-                shard,
-                DType::F32,
-            )
-            .map_err(|_| {
+    // For multi-GPU FP8, we must ensure weight shard boundaries are aligned to
+    // block_size so that CUTLASS block-scale GEMM reads the correct scale entries.
+    // Load full tensors and manually narrow with aligned offsets.
+    let (weight, weight_scale, bias) = if shard.world_size > 1 {
+        // Compute block-aligned boundaries for the sharded dimension
+        let (w_start, w_len, s_start, s_len) = if shard.dim == 0 {
+            // Column-parallel: split out_dim (dim 0 of weight [out_dim, in_dim])
+            let base = out_dim / shard.world_size;
+            let chunk = if base % by != 0 { ((base + by - 1) / by) * by } else { base };
+            let start = shard.rank * chunk;
+            let len = if start + chunk < out_dim { chunk } else { out_dim - start };
+            let s_start = start / by;
+            let s_len = (len + by - 1) / by;
+            (start, len, s_start, s_len)
+        } else {
+            // Row-parallel: split in_dim (dim 1 of weight [out_dim, in_dim])
+            let base = in_dim / shard.world_size;
+            let chunk = if base % bx != 0 { ((base + bx - 1) / bx) * bx } else { base };
+            let start = shard.rank * chunk;
+            let len = if start + chunk < in_dim { chunk } else { in_dim - start };
+            let s_start = start / bx;
+            let s_len = (len + bx - 1) / bx;
+            (start, len, s_start, s_len)
+        };
+
+        // Load full weight and narrow
+        let full_weight = vb.get_with_hints_dtype(
+            (out_dim, in_dim), "weight", Shard::default(), DType::U8,
+        )?;
+        let weight = full_weight
+            .narrow(shard.dim, w_start, w_len)?
+            .contiguous()?;
+
+        // Load full scale and narrow at block granularity
+        let full_scale = match vb.get_with_hints_dtype(
+            (scale_dim0, scale_dim1), "weight_scale", Shard::default(), DType::F32,
+        ) {
+            Ok(s) => s,
+            Err(_) => vb.get_with_hints_dtype(
+                (scale_dim0, scale_dim1), "weight_scale_inv", Shard::default(), DType::F32,
+            ).map_err(|_| {
                 candle_core::Error::Msg("LnFp8: Missing weight_scale or weight_scale_inv".into())
             })?,
+        };
+        let weight_scale = full_scale
+            .narrow(shard.dim, s_start, s_len)?
+            .contiguous()?;
+
+        // Load bias (split along out_dim for column-parallel)
+        let bias = if load_bias {
+            match vb.get_with_hints_dtype((out_dim,), "bias", Shard::default(), DType::F32) {
+                Ok(b) => {
+                    if shard.dim == 0 {
+                        Some(b.narrow(0, w_start, w_len)?.contiguous()?)
+                    } else {
+                        Some(b)
+                    }
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        (weight, weight_scale, bias)
+    } else {
+        // Single GPU: load directly
+        let weight = vb.get_with_hints_dtype(
+            (out_dim, in_dim), "weight", Shard::default(), DType::U8,
+        )?;
+        let weight_scale = match vb.get_with_hints_dtype(
+            (scale_dim0, scale_dim1), "weight_scale", Shard::default(), DType::F32,
+        ) {
+            Ok(s) => s,
+            Err(_) => vb.get_with_hints_dtype(
+                (scale_dim0, scale_dim1), "weight_scale_inv", Shard::default(), DType::F32,
+            ).map_err(|_| {
+                candle_core::Error::Msg("LnFp8: Missing weight_scale or weight_scale_inv".into())
+            })?,
+        };
+        let bias = if load_bias {
+            vb.get_with_hints_dtype((out_dim,), "bias", Shard::default(), DType::F32).ok()
+        } else {
+            None
+        };
+        (weight, weight_scale, bias)
     };
-    let weight_scale = normalize_sharded_2d(
-        weight_scale,
-        shard,
-        scale_dim0,
-        scale_dim1,
-        "weight_scale(_inv)",
-    )?;
 
     #[cfg(feature = "cuda")]
     let sm_version =
@@ -900,15 +885,6 @@ fn load_ln_fp8_with_hints(
         weight_scale.t()?.contiguous()?
     } else {
         weight_scale
-    };
-
-    let bias = if load_bias {
-        vb.get_with_hints_dtype((out_dim,), "bias", shard, DType::F32)
-            .ok()
-            .map(|b| normalize_sharded_1d(b, shard, out_dim, "bias"))
-            .transpose()?
-    } else {
-        None
     };
 
     Ok(LnFp8 {
