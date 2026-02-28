@@ -990,39 +990,57 @@ impl FusedMoeFp8 {
             down_experts,
             down_experts_scale,
         ) = if experts_vb.has_key("gate_up_proj") {
-            // Qwen3 VL approach.
+            // Qwen3 VL approach — packed gate_up_proj with block-aligned sharding.
             match &experts_vb.0 {
                 Either::Left(vb) => {
-                    let gate_weight = vb
-                        .get_with_hints_dtype(
-                            (
-                                num_experts,
-                                cfg.hidden_size,
-                                moe_cfg.moe_intermediate_size * 2,
-                            ),
-                            "gate_up_proj",
-                            shard(2, comm.rank(), comm.world_size() * 2),
-                            DType::U8,
-                        )?
-                        .t()?
-                        .contiguous()?;
+                    let inter = moe_cfg.moe_intermediate_size;
 
-                    let up_weight = vb
-                        .get_with_hints_dtype(
-                            (
-                                num_experts,
-                                cfg.hidden_size,
-                                moe_cfg.moe_intermediate_size * 2,
-                            ),
-                            "gate_up_proj",
-                            shard(2, comm.rank() + comm.world_size(), comm.world_size() * 2),
-                            DType::U8,
-                        )?
-                        .t()?
-                        .contiguous()?;
+                    // Block-aligned chunk for gate/up along the intermediate dim
+                    let gate_up_chunk = if comm.world_size() > 1 {
+                        let base = inter / comm.world_size();
+                        if base % bx != 0 { ((base + bx - 1) / bx) * bx } else { base }
+                    } else {
+                        inter
+                    };
+                    let gu_start = comm.rank() * gate_up_chunk;
+                    let gu_len = if gu_start + gate_up_chunk < inter {
+                        gate_up_chunk
+                    } else {
+                        inter - gu_start
+                    };
+
+                    // Load full gate_up_proj: [experts, hidden, inter*2]
+                    let full_gate_up = vb.get_with_hints_dtype(
+                        (num_experts, cfg.hidden_size, inter * 2),
+                        "gate_up_proj",
+                        Shard::default(),
+                        DType::U8,
+                    )?;
+
+                    // gate = first half of dim 2, then narrow to our aligned chunk
+                    let gate_weight = {
+                        let gate_full = full_gate_up.narrow(2, 0, inter)?;
+                        let g = if comm.world_size() > 1 {
+                            gate_full.narrow(2, gu_start, gu_len)?
+                        } else {
+                            gate_full
+                        };
+                        g.t()?.contiguous()?
+                    };
+                    // up = second half of dim 2, same aligned chunk
+                    let up_weight = {
+                        let up_full = full_gate_up.narrow(2, inter, inter)?;
+                        let u = if comm.world_size() > 1 {
+                            up_full.narrow(2, gu_start, gu_len)?
+                        } else {
+                            up_full
+                        };
+                        u.t()?.contiguous()?
+                    };
 
                     let scale_n = (cfg.hidden_size + by - 1) / by;
-                    let scale_k = (moe_cfg.moe_intermediate_size * 2 + bx - 1) / bx;
+                    let scale_k = (inter * 2 + bx - 1) / bx;
+                    let inter_blocks = (inter + bx - 1) / bx;
 
                     let gate_up_scale = vb.get_with_hints_dtype(
                         (num_experts, scale_n, scale_k),
@@ -1031,9 +1049,9 @@ impl FusedMoeFp8 {
                         DType::F32,
                     )?;
 
-                    let inter_blocks = moe_cfg.moe_intermediate_size / bx;
-                    let local_inter_blocks = inter_blocks / comm.world_size();
-                    let start_blocks = comm.rank() * local_inter_blocks;
+                    // Block-aligned scale slice
+                    let scale_start = gu_start / bx;
+                    let scale_len = (gu_len + bx - 1) / bx;
 
                     let gate_s_t = gate_up_scale.narrow(2, 0, inter_blocks)?.contiguous()?;
                     let up_s_t = gate_up_scale
@@ -1041,39 +1059,112 @@ impl FusedMoeFp8 {
                         .contiguous()?;
 
                     let gate_s = gate_s_t
-                        .narrow(2, start_blocks, local_inter_blocks)?
+                        .narrow(2, scale_start, scale_len)?
                         .t()?
                         .contiguous()?;
                     let up_s = up_s_t
-                        .narrow(2, start_blocks, local_inter_blocks)?
+                        .narrow(2, scale_start, scale_len)?
                         .t()?
                         .contiguous()?;
 
-                    let down_weight = vb
-                        .get_with_hints_dtype(
-                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                    // down_proj: [experts, inter, hidden], split dim 1 with alignment
+                    let down_chunk = if comm.world_size() > 1 {
+                        let base = inter / comm.world_size();
+                        if base % by != 0 { ((base + by - 1) / by) * by } else { base }
+                    } else {
+                        inter
+                    };
+                    let down_start = comm.rank() * down_chunk;
+                    let down_len = if down_start + down_chunk < inter {
+                        down_chunk
+                    } else {
+                        inter - down_start
+                    };
+
+                    let down_weight = {
+                        let full = vb.get_with_hints_dtype(
+                            (num_experts, inter, cfg.hidden_size),
                             "down_proj",
-                            shard(1, comm.rank(), comm.world_size()),
+                            Shard::default(),
                             DType::U8,
-                        )?
-                        .t()?
-                        .contiguous()?;
+                        )?;
+                        let d = if comm.world_size() > 1 {
+                            full.narrow(1, down_start, down_len)?
+                        } else {
+                            full
+                        };
+                        d.t()?.contiguous()?
+                    };
 
-                    let down_s = vb
-                        .get_with_hints_dtype(
-                            (num_experts, scale_k / 2, scale_n),
+                    let down_full_sk = (inter + bx - 1) / bx;
+                    let down_scale_start = down_start / by;
+                    let down_scale_len = (down_len + by - 1) / by;
+                    let down_s = {
+                        let full_s = vb.get_with_hints_dtype(
+                            (num_experts, down_full_sk, scale_n),
                             "down_proj_scale_inv",
-                            shard(1, comm.rank(), comm.world_size()),
+                            Shard::default(),
                             DType::F32,
-                        )?
-                        .t()?
-                        .contiguous()?;
+                        )?;
+                        let s = if comm.world_size() > 1 {
+                            full_s.narrow(1, down_scale_start, down_scale_len)?
+                        } else {
+                            full_s
+                        };
+                        s.t()?.contiguous()?
+                    };
                     (gate_weight, gate_s, up_weight, up_s, down_weight, down_s)
                 }
                 _ => candle_core::bail!("FusedMoeFp8: Invalid varbuilder for packed loading"),
             }
         } else {
-            // Per-expert loading
+            // Per-expert loading with block-aligned sharding.
+            // FP8 block-scaled GEMM requires weight shard boundaries to be
+            // multiples of the block size (by/bx). Naive integer division
+            // (shard()) can place boundaries mid-block, corrupting scales.
+            // We load full tensors and manually narrow with aligned offsets,
+            // following the same pattern used by FusedMoeISQ / FusedMoeGGUF.
+
+            // --- gate/up: weight [inter, hidden], split dim 0 (inter) ---
+            let inter = moe_cfg.moe_intermediate_size;
+            let gate_up_chunk = if comm.world_size() > 1 {
+                let base = inter / comm.world_size();
+                if base % by != 0 { ((base + by - 1) / by) * by } else { base }
+            } else {
+                inter
+            };
+            let gate_up_start = comm.rank() * gate_up_chunk;
+            let gate_up_len = if gate_up_start + gate_up_chunk < inter {
+                gate_up_chunk
+            } else {
+                inter - gate_up_start
+            };
+
+            // --- down: weight [hidden, inter], split dim 1 (inter) ---
+            let down_chunk = if comm.world_size() > 1 {
+                let base = inter / comm.world_size();
+                if base % bx != 0 { ((base + bx - 1) / bx) * bx } else { base }
+            } else {
+                inter
+            };
+            let down_start = comm.rank() * down_chunk;
+            let down_len = if down_start + down_chunk < inter {
+                down_chunk
+            } else {
+                inter - down_start
+            };
+
+            let full_sn_gate = (inter + by - 1) / by;
+            let sk_gate = (cfg.hidden_size + bx - 1) / bx;
+            let full_sn_down = (cfg.hidden_size + by - 1) / by;
+            let full_sk_down = (inter + bx - 1) / bx;
+
+            // Scale block ranges
+            let gate_up_scale_start = gate_up_start / by;
+            let gate_up_scale_len = (gate_up_len + by - 1) / by;
+            let down_scale_start = down_start / bx;
+            let down_scale_len = (down_len + bx - 1) / bx;
+
             let mut gate_experts = Vec::with_capacity(num_experts);
             let mut gate_experts_scale = Vec::with_capacity(num_experts);
             let mut up_experts = Vec::with_capacity(num_experts);
@@ -1082,73 +1173,116 @@ impl FusedMoeFp8 {
             let mut down_experts_scale = Vec::with_capacity(num_experts);
             for i in 0..num_experts {
                 let expert_vb = experts_vb.pp(format!("{}", i).as_str());
-                let gate_weight = expert_vb.pp("gate_proj").get_with_hints_dtype(
-                    (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                    "weight",
-                    shard(0, comm.rank(), comm.world_size()),
-                    DType::U8,
-                )?;
-                let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
-                let sk = (cfg.hidden_size + bx - 1) / bx;
-                let gate_s = match expert_vb.pp("gate_proj").get_with_hints_dtype(
-                    (sn, sk),
-                    "weight_scale",
-                    shard(0, comm.rank(), comm.world_size()),
-                    DType::F32,
-                ) {
-                    Ok(s) => s,
-                    Err(_) => expert_vb.pp("gate_proj").get_with_hints_dtype(
-                        (sn, sk),
-                        "weight_scale_inv",
-                        shard(0, comm.rank(), comm.world_size()),
+
+                // gate_proj weight: load full, narrow aligned
+                let gate_weight = {
+                    let full = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                        (inter, cfg.hidden_size),
+                        "weight",
+                        Shard::default(),
+                        DType::U8,
+                    )?;
+                    if comm.world_size() > 1 {
+                        full.narrow(0, gate_up_start, gate_up_len)?.contiguous()?
+                    } else {
+                        full
+                    }
+                };
+                // gate_proj scale: load full, narrow at block granularity
+                let gate_s = {
+                    let full_s = match expert_vb.pp("gate_proj").get_with_hints_dtype(
+                        (full_sn_gate, sk_gate),
+                        "weight_scale",
+                        Shard::default(),
                         DType::F32,
-                    )?,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => expert_vb.pp("gate_proj").get_with_hints_dtype(
+                            (full_sn_gate, sk_gate),
+                            "weight_scale_inv",
+                            Shard::default(),
+                            DType::F32,
+                        )?,
+                    };
+                    if comm.world_size() > 1 {
+                        full_s.narrow(0, gate_up_scale_start, gate_up_scale_len)?.contiguous()?
+                    } else {
+                        full_s
+                    }
                 };
 
-                let up_weight = expert_vb.pp("up_proj").get_with_hints_dtype(
-                    (moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                    "weight",
-                    shard(0, comm.rank(), comm.world_size()),
-                    DType::U8,
-                )?;
-                let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
-                let sk = (cfg.hidden_size + bx - 1) / bx;
-                let up_s = match expert_vb.pp("up_proj").get_with_hints_dtype(
-                    (sn, sk),
-                    "weight_scale",
-                    shard(0, comm.rank(), comm.world_size()),
-                    DType::F32,
-                ) {
-                    Ok(s) => s,
-                    Err(_) => expert_vb.pp("up_proj").get_with_hints_dtype(
-                        (sn, sk),
-                        "weight_scale_inv",
-                        shard(0, comm.rank(), comm.world_size()),
+                // up_proj weight: load full, narrow aligned
+                let up_weight = {
+                    let full = expert_vb.pp("up_proj").get_with_hints_dtype(
+                        (inter, cfg.hidden_size),
+                        "weight",
+                        Shard::default(),
+                        DType::U8,
+                    )?;
+                    if comm.world_size() > 1 {
+                        full.narrow(0, gate_up_start, gate_up_len)?.contiguous()?
+                    } else {
+                        full
+                    }
+                };
+                // up_proj scale: load full, narrow at block granularity
+                let up_s = {
+                    let full_s = match expert_vb.pp("up_proj").get_with_hints_dtype(
+                        (full_sn_gate, sk_gate),
+                        "weight_scale",
+                        Shard::default(),
                         DType::F32,
-                    )?,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => expert_vb.pp("up_proj").get_with_hints_dtype(
+                            (full_sn_gate, sk_gate),
+                            "weight_scale_inv",
+                            Shard::default(),
+                            DType::F32,
+                        )?,
+                    };
+                    if comm.world_size() > 1 {
+                        full_s.narrow(0, gate_up_scale_start, gate_up_scale_len)?.contiguous()?
+                    } else {
+                        full_s
+                    }
                 };
 
-                let down_weight = expert_vb.pp("down_proj").get_with_hints_dtype(
-                    (cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                    "weight",
-                    shard(1, comm.rank(), comm.world_size()),
-                    DType::U8,
-                )?;
-                let sn = (cfg.hidden_size + by - 1) / by;
-                let sk = (moe_cfg.moe_intermediate_size + bx - 1) / bx;
-                let down_s = match expert_vb.pp("down_proj").get_with_hints_dtype(
-                    (sn, sk),
-                    "weight_scale",
-                    shard(1, comm.rank(), comm.world_size()),
-                    DType::F32,
-                ) {
-                    Ok(s) => s,
-                    Err(_) => expert_vb.pp("down_proj").get_with_hints_dtype(
-                        (sn, sk),
-                        "weight_scale_inv",
-                        shard(1, comm.rank(), comm.world_size()),
+                // down_proj weight: [hidden, inter], split dim 1
+                let down_weight = {
+                    let full = expert_vb.pp("down_proj").get_with_hints_dtype(
+                        (cfg.hidden_size, inter),
+                        "weight",
+                        Shard::default(),
+                        DType::U8,
+                    )?;
+                    if comm.world_size() > 1 {
+                        full.narrow(1, down_start, down_len)?.contiguous()?
+                    } else {
+                        full
+                    }
+                };
+                // down_proj scale: [ceil(hidden/by), ceil(inter/bx)], split dim 1
+                let down_s = {
+                    let full_s = match expert_vb.pp("down_proj").get_with_hints_dtype(
+                        (full_sn_down, full_sk_down),
+                        "weight_scale",
+                        Shard::default(),
                         DType::F32,
-                    )?,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => expert_vb.pp("down_proj").get_with_hints_dtype(
+                            (full_sn_down, full_sk_down),
+                            "weight_scale_inv",
+                            Shard::default(),
+                            DType::F32,
+                        )?,
+                    };
+                    if comm.world_size() > 1 {
+                        full_s.narrow(1, down_scale_start, down_scale_len)?.contiguous()?
+                    } else {
+                        full_s
+                    }
                 };
 
                 gate_experts.push(gate_weight);
