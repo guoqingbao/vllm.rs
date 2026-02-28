@@ -253,7 +253,7 @@ pub fn send_local(
     let serialized = if use_json {
         serde_json::to_vec(message).expect("JSON serialization failed")
     } else {
-        bincode::serialize(message).expect("Bincode serialization failed")
+        rmp_serde::to_vec(message).expect("Serialization failed")
     };
 
     for stream in streams.iter_mut() {
@@ -285,7 +285,7 @@ pub fn receive_local(stream: &mut LocalStream, use_json: bool) -> std::io::Resul
     let message: MessageType = if use_json {
         serde_json::from_slice(&serialized).expect("JSON deserialization failed")
     } else {
-        bincode::deserialize(&serialized).expect("Bincode deserialization failed")
+        rmp_serde::from_slice(&serialized).expect("Deserialization failed")
     };
 
     // Send acknowledgment

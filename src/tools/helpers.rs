@@ -72,6 +72,82 @@ pub fn build_invalid_tool_call_feedback(
     let mut allowed_tools: Vec<String> = schemas.keys().cloned().collect();
     allowed_tools.sort();
 
+    // Extract rejection reasons from each invalid call
+    let mut rejection_reasons: Vec<String> = Vec::new();
+    for call in invalid_calls {
+        let args_str = call.function.arguments.as_deref().unwrap_or("{}");
+
+        // Check if tool is in schema map
+        if !schemas.contains_key(&call.function.name) {
+            rejection_reasons.push(format!(
+                "Tool '{}' not found in available tools. Available tools: {}.",
+                call.function.name,
+                allowed_tools.join(", ")
+            ));
+            continue;
+        }
+
+        // Parse arguments and check for errors
+        let args_obj = match serde_json::from_str::<Value>(args_str) {
+            Ok(obj) => obj,
+            Err(e) => {
+                rejection_reasons.push(format!(
+                    "Failed to parse arguments for tool '{}': {}",
+                    call.function.name, e
+                ));
+                continue;
+            }
+        };
+
+        // Check if arguments is a valid object
+        if !args_obj.is_object() {
+            rejection_reasons.push(format!(
+                "Arguments for tool '{}' must be a JSON object. Got: {}",
+                call.function.name, args_obj
+            ));
+            continue;
+        }
+
+        let args_obj = args_obj.as_object().unwrap();
+        let schema = schemas.get(&call.function.name).unwrap();
+
+        // Check for missing required arguments
+        if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+            let mut missing: Vec<String> = Vec::new();
+            for key in required {
+                if let Some(name) = key.as_str() {
+                    if !args_obj.contains_key(name) {
+                        missing.push(name.to_string());
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                rejection_reasons.push(format!(
+                    "Missing required argument(s) for tool '{}': {:?}",
+                    call.function.name, missing
+                ));
+            }
+        }
+
+        // Check for additional validation errors
+        if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+            for (key, value) in args_obj {
+                if let Some(prop) = properties.get(key) {
+                    if let Some(prop_type) = prop.get("type").and_then(|t| t.as_str()) {
+                        if prop_type == "string" {
+                            if let Value::Number(n) = value {
+                                rejection_reasons.push(format!(
+                                    "Argument '{}' for tool '{}' should be a string, got number: {}",
+                                    key, call.function.name, n
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let rejected_summary = if rejected_tools.is_empty() {
         "Rejected tool call(s).".to_string()
     } else {
@@ -79,6 +155,12 @@ pub fn build_invalid_tool_call_feedback(
     };
 
     let mut parts = vec![rejected_summary];
+
+    // Add rejection reasons if any
+    if !rejection_reasons.is_empty() {
+        parts.extend(rejection_reasons);
+    }
+
     if let Some(name) = forced_tool_name {
         if !name.trim().is_empty() {
             parts.push(format!("Required tool_choice is '{}'.", name));
@@ -227,6 +309,34 @@ pub fn filter_tool_calls(
     }
 
     (valid, invalid)
+}
+
+/// Extract rejection reasons from invalid tool calls
+pub fn extract_rejection_reasons(invalid_calls: &[ToolCall], schemas: &HashMap<String, Value>) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+
+    for call in invalid_calls {
+        let args_str = call.function.arguments.as_deref().unwrap_or("{}");
+        let schema = schemas.get(&call.function.name);
+
+        if let Some(schema) = schema {
+            if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+                let mut missing: Vec<String> = Vec::new();
+                for key in required {
+                    if let Some(name) = key.as_str() {
+                        if !args_str.contains(&format!("\"{}\":", name)) && !args_str.contains(&format!("'{}':", name)) {
+                            missing.push(name.to_string());
+                        }
+                    }
+                }
+                if !missing.is_empty() {
+                    reasons.push(format!("Missing required argument(s) for tool '{}': {:?}.", call.function.name, missing));
+                }
+            }
+        }
+    }
+
+    reasons
 }
 
 fn repair_json_arguments(raw: &str) -> Option<String> {

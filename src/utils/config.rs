@@ -1,6 +1,8 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
 #[cfg(feature = "python")]
+use llguidance::api::TopLevelGrammar;
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
@@ -263,6 +265,8 @@ pub struct EngineConfig {
     pub tool_prompt_template: Option<String>,
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    pub allow_constraint_api: bool,
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(feature = "python")]
@@ -340,6 +344,10 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    #[pyo3(get, set)]
+    pub allow_constraint_api: bool,
+    #[pyo3(get, set)]
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -374,6 +382,9 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
+
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -424,6 +435,8 @@ impl EngineConfig {
             tool_prompt_template,
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }
@@ -459,6 +472,8 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for serialization across process boundaries
+    pub grammar: Option<llguidance::api::TopLevelGrammar>,
 }
 
 #[cfg(feature = "python")]
@@ -493,6 +508,13 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for internal use
+    /// The Python API uses grammar_json for serialization
+    #[serde(skip)]
+    pub grammar: Option<TopLevelGrammar>,
+    /// Grammar constraint as JSON string for Python API
+    #[pyo3(get, set)]
+    pub grammar_json: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -521,6 +543,7 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking,
+            grammar: None,
         }
     }
 
@@ -538,10 +561,12 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
         }
     }
 }
 
+#[cfg(not(feature = "python"))]
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
@@ -557,6 +582,29 @@ impl Default for SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
+        }
+    }
+}
+
+#[cfg(feature = "python")]
+impl Default for SamplingParams {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            max_tokens: Some(16384),
+            ignore_eos: false,
+            top_k: None,
+            top_p: None,
+            session_id: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            thinking: None,
+            grammar: None,
+            grammar_json: None,
         }
     }
 }

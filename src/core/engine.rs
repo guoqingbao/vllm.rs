@@ -187,30 +187,31 @@ impl LLMEngine {
             };
 
             let mut model_runner = ModelRunner::new(
-                model_type.clone(),
-                &vb,
-                #[cfg(not(feature = "nccl"))]
-                Rc::new(Comm::default()),
-                #[cfg(feature = "nccl")]
-                Rc::new(
-                    Comm::from_rank(
-                        device.as_cuda_device().unwrap().cuda_device(),
-                        0,
-                        1,
-                        Id::new().unwrap(),
-                    )
-                    .unwrap(),
-                ),
-                &mut econfig,
-                &config,
-                dtype,
-                is_rope_i,
-                device.clone(),
-                reporter,
-                transfer,
-                toktrie.clone(),
-                None,
-            )?;
+                 model_type.clone(),
+                 &vb,
+                 #[cfg(not(feature = "nccl"))]
+                 Rc::new(Comm::default()),
+                 #[cfg(feature = "nccl")]
+                 Rc::new(
+                     Comm::from_rank(
+                         device.as_cuda_device().unwrap().cuda_device(),
+                         0,
+                         1,
+                         Id::new().unwrap(),
+                     )
+                     .unwrap(),
+                 ),
+                 &mut econfig,
+                 &config,
+                 dtype,
+                 is_rope_i,
+                 device.clone(),
+                 reporter,
+                 transfer,
+                 toktrie.clone(),
+                 None,
+                 Some(tokenizer.clone()),
+             )?;
 
             if !is_pd_server {
                 //No graph capture for PD server
@@ -542,6 +543,9 @@ impl LLMEngine {
                 params.stop_token_ids = Some(stop_token_ids);
                 params.stop_sequences = Some(resolved_stop_sequences);
             }
+        }
+        if let Some(grammar) = &params.grammar {
+            crate::log_debug!("[llg] Creating constraint on sequence with grammar {:?}", &grammar);
         }
         let seq = Sequence::new(
             token_ids,

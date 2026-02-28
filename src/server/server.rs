@@ -19,6 +19,8 @@ use crate::tools::helpers::{
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
+use crate::utils::guidance::{build_lark_outer_envelope, build_tool_schema};
+use llguidance::api::TopLevelGrammar;
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -274,6 +276,46 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
+
+    // Check if client-submitted constraints are allowed
+    let allow_client_constraints = data.econfig.allow_constraint_api;
+
+    // Parse constraint based on type
+    let constraint_type = request.constraint_type.as_deref().unwrap_or("unknown");
+    if let Some(grammar) = &request.constraint {
+        if !allow_client_constraints {
+            crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+            // Return error or ignore constraint
+            params.grammar = None;
+        } else {
+            crate::log_info!("[llg] HTTP API constraint received: {} bytes (type: {})", &grammar.len(), constraint_type);
+            match constraint_type {
+                "regex" => {
+                    params.grammar = Some(TopLevelGrammar::from_regex(&grammar));
+                }
+                "lark" => {
+                    params.grammar = Some(TopLevelGrammar::from_lark(grammar.clone()));
+                }
+                "json_schema" | "json"=> {
+                    match serde_json::from_str(&grammar) {
+                        Ok(val) => {
+                            let gram = TopLevelGrammar::from_json_schema(val);
+                            crate::log_debug!("[llg] Assigning grammar: {:?}", &gram);
+                            params.grammar = Some(gram);
+                        },
+                        Err(_) => {
+                            crate::log_debug!("[llg] Frailed to build JSON grammar from: {:?}", &grammar);
+                        }
+                    }
+                }
+                _ => {
+                    crate::log_warn!("[llg] Unknown constraint type '{}'", constraint_type);
+                }
+            }
+            crate::log_debug!("[llg] Assigned grammar: {:?}", &params.grammar);
+        }
+    }
+
     let (img_cfg, model_type, tool_config, engine_config) = {
         let e = data.engine.read();
         (
@@ -335,6 +377,31 @@ pub async fn chat_completion(
     }
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
+
+    // Build grammar from tools when no explicit constraint is provided
+    // This enables guided decoding for tool calls without requiring client-provided grammars
+    if params.grammar.is_none() && !resolved_tools.is_empty() && engine_config.enable_tool_grammar {
+        crate::log_info!("[llg] Building JSON Schema from {} tool(s) for guidance", resolved_tools.len());
+
+        // Use the build_tool_schema function to create a schema from tools,
+        // then convert it to TopLevelGrammar via llguidance's from_json_schema
+
+        // let json_value = build_tool_schema(&resolved_tools);
+        // let json_grammar = TopLevelGrammar::from_json_schema(json_value.clone());
+        // params.grammar = Some(json_grammar);
+        let lark_string = build_lark_outer_envelope(&resolved_tools);
+        crate::log_debug!("Using lark envelope:\n{}", &lark_string);
+        let lark_grammar = TopLevelGrammar::from_lark(lark_string);
+        params.grammar = Some(lark_grammar);
+        crate::log_debug!("[llg] Built grammar from tools: {:?}", &params.grammar);
+    } else if resolved_tools.is_empty() && params.grammar.is_none() {
+        crate::log_debug!("[llg] No tools or grammar provided, skipping guidance setup");
+    }
+
+    if let Some(ref mut grammar) = params.grammar {
+        grammar.max_tokens = Some(max_tokens);
+    }
+
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
 

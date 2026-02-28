@@ -13,6 +13,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+#[cfg(feature = "python")]
+use llguidance::api::TopLevelGrammar;
 
 /// Python wrapper
 #[pyclass]
@@ -268,7 +270,8 @@ impl EngineConfig {
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, mamba_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         tool_prompt_template=None,
-        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None))]
+        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None,
+        allow_constraint_api=false, enable_tool_grammar=false,))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -299,6 +302,8 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -342,6 +347,8 @@ impl EngineConfig {
             tool_prompt_template,
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }
@@ -351,7 +358,8 @@ impl SamplingParams {
     #[new]
     #[pyo3(signature = (temperature=None, max_tokens=None,
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
-        frequency_penalty=None, presence_penalty=None, thinking=None))]
+        frequency_penalty=None, presence_penalty=None, thinking=None,
+        grammar_json=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
@@ -362,7 +370,13 @@ impl SamplingParams {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
         thinking: Option<bool>,
+        grammar_json: Option<String>,
     ) -> Self {
+        // Convert grammar_json to TopLevelGrammar if present
+        let grammar = grammar_json.as_ref().and_then(|s| {
+            serde_json::from_str::<TopLevelGrammar>(s).ok()
+        });
+        
         Self {
             temperature,
             max_tokens,
@@ -376,6 +390,8 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking,
+            grammar_json,
+            grammar,
         }
     }
 
@@ -394,6 +410,24 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar_json: None,
+            grammar: None,
+        }
+    }
+
+    #[getter]
+    fn grammar_json(&self) -> Option<String> {
+        self.grammar.as_ref().and_then(|g| serde_json::to_string(g).ok())
+    }
+
+    #[setter]
+    fn set_grammar_json(&mut self, value: Option<String>) {
+        self.grammar_json = value.clone();
+        // Also update grammar from JSON if provided
+        if let Some(ref s) = value {
+            self.grammar = serde_json::from_str::<TopLevelGrammar>(s).ok();
+        } else {
+            self.grammar = None;
         }
     }
 }

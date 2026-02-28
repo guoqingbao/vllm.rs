@@ -7,6 +7,7 @@ use std::io::Write;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokenizers::Tokenizer;
 use vllm_rs::core::runner::{ModelRunner, Seqs};
 use vllm_rs::models::layers::distributed::Comm;
 use vllm_rs::models::layers::VarBuilderX;
@@ -136,6 +137,7 @@ fn main() -> anyhow::Result<()> {
             let mut econfig = init_req.econfig.clone();
             let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
                 .map(Arc::new);
+            let tokenizer = Tokenizer::from_file(init_req.model_pathes.get_tokenizer_filename()).map_err(|e| anyhow::anyhow!(e.to_string()))?;
             #[allow(unused_mut)]
             let mut runner = ModelRunner::new(
                 init_req.model_type,
@@ -150,6 +152,7 @@ fn main() -> anyhow::Result<()> {
                 transfer,
                 toktrie,
                 stream_kv,
+                Some(tokenizer)
             )?;
 
             vllm_rs::log_info!(
