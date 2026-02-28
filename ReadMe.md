@@ -59,11 +59,10 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 ## 🧠 Supported Architectures
 
 * ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
-* ✅ Qwen (Qwen2, Qwen3) (+Hardware FP8，SM90+)
-* ✅ Qwen2/Qwen3 Moe (+Hardware FP8, SM90+)
-* ✅ Qwen3 Next (+Hardware FP8，SM90+)
-* ✅ Qwen3.5 Dense (27B, Multimodal model)
-* ✅ Qwen3.5 Moe (35B, 122B, 397B, Multimodal model, **TBD**)
+* ✅ Qwen (Qwen2, Qwen3)
+* ✅ Qwen2/Qwen3 Moe
+* ✅ Qwen3 Next
+* ✅ Qwen3.5 Dense/MoE (27B, 35B, 122B, 397B, Multimodal model)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
@@ -73,7 +72,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Qwen3-VL (Dense, Multimodal model)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
-Supports both **Safetensor** (including GPTQ and AWQ formats) and **GGUF** formats.
+Supports both **Safetensor** (including GPTQ, AWQ and FP8-blockwise formats) and **GGUF** formats.
 
 All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flash-context`).
 
@@ -92,8 +91,6 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
-- [Qwen3.5 vs Qwen3-Next Implementation](docs/qwen3_5_architecture.md)
-
 
 ## 📘 Usage in Python
 

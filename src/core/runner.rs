@@ -958,10 +958,17 @@ impl ModelRunner {
 
         let flashinfer_metadata = if cfg!(feature = "flashinfer") {
             #[cfg(all(feature = "cuda", feature = "graph"))]
-            let use_cuda_graph = if matches!(self.model, Model::Qwen3_5(_) | Model::Qwen3_5MoE(_)) {
-                self.capturer.is_exact_captured(seq_refs.len())
-            } else {
-                self.capturer.is_captured(seq_refs.len())
+            let use_cuda_graph = {
+                let require_exact_graph = match &self.model {
+                    Model::Qwen3_5(_) | Model::Qwen3_5MoE(_) => true,
+                    Model::Qwen3VL(model) => model.uses_hybrid_mamba_text_model(),
+                    _ => false,
+                };
+                if require_exact_graph {
+                    self.capturer.is_exact_captured(seq_refs.len())
+                } else {
+                    self.capturer.is_captured(seq_refs.len())
+                }
             };
             #[cfg(not(all(feature = "cuda", feature = "graph")))]
             let use_cuda_graph = false;

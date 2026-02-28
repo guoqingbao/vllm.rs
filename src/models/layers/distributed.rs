@@ -78,8 +78,10 @@ impl MergedParallelColumnLinear {
         let mut xss = Vec::<Tensor>::new();
         for i in 0..self.linears.len() {
             let mut xs = self.linears[i].forward(x)?;
-            if let Some(bias) = &self.biases[i] {
-                xs = xs.broadcast_add(bias)?;
+            if self.biases.len() > 0 && i < self.biases.len() {
+                if let Some(bias) = &self.biases[i] {
+                    xs = xs.broadcast_add(bias)?;
+                }
             }
             xss.push(xs);
         }
@@ -390,6 +392,12 @@ impl MergedParallelColumnLinear {
         quant: &Option<String>,
         dtype: DType,
     ) -> Result<Self> {
+        let is_fp8_quant = if let Some(cfg) = quant_cfg {
+            cfg.quant_method == "fp8"
+        } else {
+            false
+        };
+
         if quant_cfg.is_some() || vb.is_qvar_builder() {
             candle_core::bail!(
                 "Merged quantized weight is not supported at the moment, using ISQ instead!"
@@ -405,60 +413,74 @@ impl MergedParallelColumnLinear {
             }
         }
         let mut vec_linear = Vec::<TensorParallelColumnLinear>::new();
+        use crate::models::layers::linear::{LinearX, LnFp8, QLinear};
         match vb.0 {
             Either::Left(v) => {
-                let weight = v.get((out_dim, in_dim), "weight")?;
-                let weight = if weight.dtype() != dtype {
-                    weight.to_dtype(dtype)?
+                if is_fp8_quant {
+                    for chunk_idx in 0..chunks.len() {
+                        let linear = LinearX::LnFp8(LnFp8::new(
+                            in_dim,
+                            out_dim,
+                            v.clone(),
+                            shard(0, chunk_idx, chunks.len()),
+                            quant_cfg.as_ref().unwrap(),
+                        )?);
+                        let ln = TensorParallelColumnLinear { linear };
+                        vec_linear.push(ln);
+                    }
                 } else {
-                    weight
-                };
-                let mut chunk_start = 0;
-                use crate::models::layers::linear::{LinearX, QLinear};
-                for chunk_idx in 0..chunks.len() {
-                    let chunk_size = chunks[chunk_idx];
-                    let ws = weight.narrow(chunk_dim, chunk_start, chunk_size)?;
-                    let ws_chunk = if let Some(chunk_shards) = &chunk_shards {
-                        let chunk_shard = &chunk_shards[chunk_idx];
-                        if ws.dim(0)? % chunk_shard.world_size != 0 {
-                            candle_core::bail!(
-                                "merged chunk {} dim {} is not divisible by shard world_size {}",
-                                chunk_idx,
-                                ws.dim(0)?,
-                                chunk_shard.world_size
-                            );
-                        }
-                        let c_chunk_size = ws.dim(0)? / chunk_shard.world_size;
-                        ws.narrow(0, chunk_shard.rank * c_chunk_size, c_chunk_size)?
-                            .contiguous()?
+                    let weight = v.get((out_dim, in_dim), "weight")?;
+                    let weight = if weight.dtype() != dtype {
+                        weight.to_dtype(dtype)?
                     } else {
-                        if ws.dim(0)? % comm.world_size() != 0 {
-                            candle_core::bail!(
-                                "merged chunk {} dim {} is not divisible by comm world_size {}",
-                                chunk_idx,
-                                ws.dim(0)?,
-                                comm.world_size()
-                            );
-                        }
-                        let c_chunk_size = ws.dim(0)? / comm.world_size();
-                        ws.narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
-                            .contiguous()?
+                        weight
                     };
-                    chunk_start += chunk_size;
-
-                    let ln = crate::models::layers::linear::Linear::new(ws_chunk, None);
-                    let linear = if let Some(quantized_type) = quant {
-                        let quantized_type = if chunk_idx == chunks.len() - 1 {
-                            "q8_0".to_string()
+                    let mut chunk_start = 0;
+                    for chunk_idx in 0..chunks.len() {
+                        let chunk_size = chunks[chunk_idx];
+                        let ws = weight.narrow(chunk_dim, chunk_start, chunk_size)?;
+                        let ws_chunk = if let Some(chunk_shards) = &chunk_shards {
+                            let chunk_shard = &chunk_shards[chunk_idx];
+                            if ws.dim(0)? % chunk_shard.world_size != 0 {
+                                candle_core::bail!(
+                                    "merged chunk {} dim {} is not divisible by shard world_size {}",
+                                    chunk_idx,
+                                    ws.dim(0)?,
+                                    chunk_shard.world_size
+                                );
+                            }
+                            let c_chunk_size = ws.dim(0)? / chunk_shard.world_size;
+                            ws.narrow(0, chunk_shard.rank * c_chunk_size, c_chunk_size)?
+                                .contiguous()?
                         } else {
-                            quantized_type.clone()
+                            if ws.dim(0)? % comm.world_size() != 0 {
+                                candle_core::bail!(
+                                    "merged chunk {} dim {} is not divisible by comm world_size {}",
+                                    chunk_idx,
+                                    ws.dim(0)?,
+                                    comm.world_size()
+                                );
+                            }
+                            let c_chunk_size = ws.dim(0)? / comm.world_size();
+                            ws.narrow(0, comm.rank() * c_chunk_size, c_chunk_size)?
+                                .contiguous()?
                         };
-                        LinearX::QLinear(QLinear::from_linear_x(ln, quantized_type, dtype)?)
-                    } else {
-                        LinearX::Linear(ln)
-                    };
-                    let ln = TensorParallelColumnLinear { linear };
-                    vec_linear.push(ln);
+                        chunk_start += chunk_size;
+
+                        let ln = crate::models::layers::linear::Linear::new(ws_chunk, None);
+                        let linear = if let Some(quantized_type) = quant {
+                            let quantized_type = if chunk_idx == chunks.len() - 1 {
+                                "q8_0".to_string()
+                            } else {
+                                quantized_type.clone()
+                            };
+                            LinearX::QLinear(QLinear::from_linear_x(ln, quantized_type, dtype)?)
+                        } else {
+                            LinearX::Linear(ln)
+                        };
+                        let ln = TensorParallelColumnLinear { linear };
+                        vec_linear.push(ln);
+                    }
                 }
             }
             _ => {

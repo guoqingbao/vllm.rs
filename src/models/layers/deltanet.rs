@@ -2,7 +2,7 @@
 // Shared Qwen3.5/Qwen3Next GatedDeltaNet linear-attention layer.
 
 use crate::models::layers::distributed::{
-    Comm, MergedParallelColumnLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    shard, Comm, MergedParallelColumnLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
@@ -11,6 +11,7 @@ use attention_rs::gdn;
 use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Result, Tensor};
+use candle_nn::var_builder::Shard;
 use std::rc::Rc;
 
 enum GdnProjection {
@@ -347,14 +348,10 @@ impl GatedDeltaNet {
         let conv_dim_global = key_dim_global * 2 + value_dim_global;
 
         // Learned GDN parameters
-        let a_log = vb
-            .get((num_v_heads_global,), "A_log")?
-            .narrow(0, rank * num_v_heads, num_v_heads)?
-            .contiguous()?;
-        let dt_bias = vb
-            .get((num_v_heads_global,), "dt_bias")?
-            .narrow(0, rank * num_v_heads, num_v_heads)?
-            .contiguous()?;
+        let sd = shard(0, comm.rank(), comm.world_size());
+        let a_log = vb.get_with_hints_dtype((num_v_heads_global,), "A_log", sd, DType::F32)?;
+
+        let dt_bias = vb.get_with_hints_dtype((num_v_heads_global,), "dt_bias", sd, dtype)?;
 
         let projection = Self::load_projection(
             &vb,
@@ -404,12 +401,16 @@ impl GatedDeltaNet {
         )?;
 
         // GDN output norm (gated RMSNorm): both Qwen3.5 and Qwen3Next use per-head params.
-        let gdn_norm_weight = vb.get((head_v_dim,), "norm.weight").map_err(|err| {
-            candle_core::Error::Msg(format!(
-                "Unable to load linear_attn.norm.weight as per-head [{head_v_dim}]: {err}"
-            ))
-        })?;
-        let gdn_norm_bias = vb.get((head_v_dim,), "norm.bias").ok();
+        let gdn_norm_weight = vb
+            .get_with_hints_dtype((head_v_dim,), "norm.weight", Shard::default(), DType::F32)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!(
+                    "Unable to load linear_attn.norm.weight as per-head [{head_v_dim}]: {err}"
+                ))
+            })?;
+        let gdn_norm_bias = vb
+            .get_with_hints_dtype((head_v_dim,), "norm.bias", Shard::default(), DType::F32)
+            .ok();
         let scale = 1.0f64 / (head_k_dim as f64).sqrt();
         Ok(Self {
             projection,

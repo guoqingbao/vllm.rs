@@ -1097,23 +1097,12 @@ impl FusedMoeFp8 {
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb
-                        .pp("gate_proj")
-                        .get_with_hints_dtype(
-                            (sn, sk),
-                            "weight_scale_inv",
-                            shard(0, comm.rank(), comm.world_size()),
-                            DType::F32,
-                        )
-                        .map_err(|_| {
-                            candle_core::Error::Msg(
-                                format!(
-                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} gate_proj",
-                                    i
-                                )
-                                .into(),
-                            )
-                        })?,
+                    Err(_) => expert_vb.pp("gate_proj").get_with_hints_dtype(
+                        (sn, sk),
+                        "weight_scale_inv",
+                        shard(0, comm.rank(), comm.world_size()),
+                        DType::F32,
+                    )?,
                 };
 
                 let up_weight = expert_vb.pp("up_proj").get_with_hints_dtype(
@@ -1131,23 +1120,12 @@ impl FusedMoeFp8 {
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb
-                        .pp("up_proj")
-                        .get_with_hints_dtype(
-                            (sn, sk),
-                            "weight_scale_inv",
-                            shard(0, comm.rank(), comm.world_size()),
-                            DType::F32,
-                        )
-                        .map_err(|_| {
-                            candle_core::Error::Msg(
-                                format!(
-                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} up_proj",
-                                    i
-                                )
-                                .into(),
-                            )
-                        })?,
+                    Err(_) => expert_vb.pp("up_proj").get_with_hints_dtype(
+                        (sn, sk),
+                        "weight_scale_inv",
+                        shard(0, comm.rank(), comm.world_size()),
+                        DType::F32,
+                    )?,
                 };
 
                 let down_weight = expert_vb.pp("down_proj").get_with_hints_dtype(
@@ -1165,23 +1143,12 @@ impl FusedMoeFp8 {
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb
-                        .pp("down_proj")
-                        .get_with_hints_dtype(
-                            (sn, sk),
-                            "weight_scale_inv",
-                            shard(1, comm.rank(), comm.world_size()),
-                            DType::F32,
-                        )
-                        .map_err(|_| {
-                            candle_core::Error::Msg(
-                                format!(
-                                    "FusedMoeFp8: Missing weight_scale/inv for expert {} down_proj",
-                                    i
-                                )
-                                .into(),
-                            )
-                        })?,
+                    Err(_) => expert_vb.pp("down_proj").get_with_hints_dtype(
+                        (sn, sk),
+                        "weight_scale_inv",
+                        shard(1, comm.rank(), comm.world_size()),
+                        DType::F32,
+                    )?,
                 };
 
                 gate_experts.push(gate_weight);

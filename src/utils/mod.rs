@@ -406,6 +406,45 @@ fn is_multi_model(config_path: &PathBuf) -> Result<DummyMultiModelConfig> {
     Ok(config)
 }
 
+fn merge_multimodal_top_level_config(
+    config: &mut Config,
+    raw_root: &serde_json::Value,
+) -> Result<()> {
+    if let Some(qcfg) = raw_root.get("quantization_config") {
+        if !qcfg.is_null() {
+            config.quantization_config = Some(
+                serde_json::from_value::<QuantConfig>(qcfg.clone())
+                    .map_err(candle_core::Error::wrap)?,
+            );
+        }
+    }
+
+    if let Some(v) = raw_root
+        .get("tie_word_embeddings")
+        .and_then(|v| v.as_bool())
+    {
+        config.tie_word_embeddings = Some(v);
+    }
+
+    if let Some(bos) = raw_root.get("bos_token_id") {
+        if !bos.is_null() {
+            if let Ok(bos_id) = serde_json::from_value::<usize>(bos.clone()) {
+                config.bos_token_id = Some(bos_id);
+            }
+        }
+    }
+
+    if let Some(eos) = raw_root.get("eos_token_id") {
+        if !eos.is_null() {
+            if let Ok(eos_token_id) = serde_json::from_value::<EosTokenId>(eos.clone()) {
+                config.eos_token_id = Some(eos_token_id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct Qwen3HybridRawConfig {
     #[serde(alias = "layer_types")]
@@ -601,16 +640,17 @@ pub fn init_config_tokenizer(
         let mut config: Config = if let Ok(cfg) = is_multi_model(&config_path) {
             if cfg.text_config.is_some() && cfg.vision_config.is_some() {
                 crate::log_warn!("Multimodel model {:?} detected!", cfg.architectures);
+                let raw_config = std::fs::read(&config_path).map_err(candle_core::Error::wrap)?;
+                let raw_config_json: serde_json::Value =
+                    serde_json::from_slice(&raw_config).map_err(candle_core::Error::wrap)?;
                 let Some(mut config_value) = cfg.text_config else {
                     panic!("Not supported model type {:?}", cfg.architectures);
                 };
 
                 let mut config: Config = match cfg.architectures.as_ref().unwrap()[0].as_str() {
                     "Gemma3ForConditionalGeneration" => {
-                        let gemma3_cfg: Gemma3Config = serde_json::from_slice(
-                            &std::fs::read(&config_path).map_err(candle_core::Error::wrap)?,
-                        )
-                        .map_err(candle_core::Error::wrap)?;
+                        let gemma3_cfg: Gemma3Config = serde_json::from_slice(&raw_config)
+                            .map_err(candle_core::Error::wrap)?;
                         config_value = serde_json::to_value(&gemma3_cfg.text_config)
                             .map_err(candle_core::Error::wrap)?;
                         let mut config: Config = serde_json::from_value(config_value)
@@ -631,8 +671,9 @@ pub fn init_config_tokenizer(
 
                 config.architectures = cfg.architectures.clone();
                 config.is_multi_model = Some(true);
+                merge_multimodal_top_level_config(&mut config, &raw_config_json)?;
                 config.extra_config_json =
-                    Some(std::fs::read_to_string(&config_path).map_err(candle_core::Error::wrap)?);
+                    Some(String::from_utf8(raw_config).map_err(candle_core::Error::wrap)?);
                 // Remap rope_theta in rope_scaling to config file
                 if let Some(scaling) = &config.rope_scaling {
                     if let Some(v) = scaling.get("rope_theta").and_then(|v| v.as_f64()) {

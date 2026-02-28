@@ -58,11 +58,10 @@
 ## 🧠 支持的模型架构
 
 * ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
-* ✅ Qwen 系列（Qwen2、Qwen3）（支持硬件FP8加速，SM90+）
-* ✅ Qwen2/Qwen3 Moe 系列（支持硬件FP8加速，SM90+）
-* ✅ Qwen3-Next 系列（支持硬件FP8加速，SM90+）
-* ✅ Qwen3.5 Dense（27B, 多模态）
-* ✅ Qwen3.5 MoE 系列（35B, 122B, 397B, 多模态，**待测试**）
+* ✅ Qwen 系列（Qwen2、Qwen3）
+* ✅ Qwen2/Qwen3 Moe 系列
+* ✅ Qwen3-Next 系列
+* ✅ Qwen3.5 Dense/MoE 系列（27B, 35B, 122B, 397B, 多模态）
 * ✅ Mistral v1, v2
 * ✅ Mistral-3 VL Reasoning (3B, 8B, 14B, 多模态)
 * ✅ GLM4 (0414版本, **非ChatGLM**)
@@ -72,7 +71,7 @@
 * ✅ Qwen3-VL (Dense, 多模态)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
-支持 **Safetensor** (包含GPTQ, AWQ量化格式) 和 **GGUF** 格式。
+支持 **Safetensor** (包含GPTQ, AWQ, FP8-blockwise 量化格式) 和 **GGUF** 格式。
 
 所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flash-context`特性）。
 
@@ -91,7 +90,6 @@
 - [Rust库](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [性能测试](docs/performance.md)
-- [Qwen3.5与Qwen3-Next实现对比](docs/qwen3_5_architecture.md)
 
 ## 📘 使用方法（Python）
 ### 📦 使用 pip 安装
