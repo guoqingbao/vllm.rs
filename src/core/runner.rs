@@ -18,6 +18,7 @@ use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
     models::glm4::GLM4ForCausalLM,
     models::glm4_moe::GLM4MoEForCausalLM,
+    models::glm4_vl::Glm4VForConditionalGeneration,
     models::llama::LLaMaForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::phi4::Phi4ForCausalLM,
@@ -65,6 +66,7 @@ pub enum Model {
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
+    GLM4VL(Arc<Glm4VForConditionalGeneration>),
     // Gemma(GemmaForCausalLM),
     // Phi(PhiForCausalLM),
     // Mistral(MistralForCausalLM),
@@ -187,6 +189,7 @@ impl ModelRunner {
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
+                GLM4VL => Glm4VForConditionalGeneration,
             }
         )?;
 
@@ -206,6 +209,7 @@ impl ModelRunner {
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
                 Qwen3VL => NoneArg,
+                GLM4VL => NoneArg,
             }
         );
 
@@ -627,6 +631,7 @@ impl ModelRunner {
                 Mistral3VL => images,
                 Gemma3 => images,
                 Qwen3VL => images,
+                GLM4VL => images,
             }
         )?;
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
@@ -1257,6 +1262,7 @@ impl ModelRunner {
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),
+            Model::GLM4VL(model) => model.get_vocab_size(),
         }
     }
 

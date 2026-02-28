@@ -574,6 +574,7 @@ pub enum ModelType {
     Phi4,
     Mistral,
     GLM4,
+    GLM4VL,
     GLM4MoE,
     Yi,
     StableLM,

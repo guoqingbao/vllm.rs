@@ -535,6 +535,7 @@ fn require_model_penalty(arch: String) -> bool {
         arch.as_str(),
         "Glm4ForCausalLM"
             | "Glm4ForConditionalGeneration"
+            // | "Glm4vForConditionalGeneration"
             | "glm4"
             | "Phi3ForCausalLM"
             | "Phi4ForCausalLM"
@@ -734,7 +735,12 @@ pub fn init_config_tokenizer(
             && Path::new(&generation_config_path).exists()
         {
             let str_cfg: Option<String> = std::fs::read_to_string(generation_config_path).ok();
-            let cfg: GenerationConfig = serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
+            let mut cfg: GenerationConfig =
+                serde_json::from_str(str_cfg.unwrap().as_str()).unwrap();
+            if require_model_penalty(architectures[0].clone()) {
+                cfg.frequency_penalty = Some(1.2);
+                cfg.presence_penalty = Some(1.2);
+            }
             Some(cfg)
         } else {
             if require_model_penalty(arch_name.clone()) {
@@ -1055,6 +1061,7 @@ pub fn get_arch_rope(
         ("LlamaForConditionalGeneration", false),
         ("IQuestCoderForCausalLM", false),
         ("Glm4ForCausalLM", true),
+        ("Glm4vForConditionalGeneration", true),
         ("glm4", true),
         ("qwen2", false),
         ("qwen3", false),
@@ -1143,6 +1150,10 @@ pub fn get_arch_rope(
         }
         "Glm4ForCausalLM" | "Glm4ForConditionalGeneration" | "glm4" => (
             ModelType::GLM4,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "Glm4vForConditionalGeneration" | "glm4v" => (
+            ModelType::GLM4VL,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
         "Glm4MoeForCausalLM" | "glm4moe" => (
