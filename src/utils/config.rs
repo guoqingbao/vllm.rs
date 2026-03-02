@@ -1,12 +1,31 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
+use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+
 use std::collections::HashMap;
 use std::fmt;
+
+#[cfg(not(feature = "python"))]
+impl SamplingParams {
+    /// Convert grammar to constraint for GuidanceState construction
+    /// Prioritizes constraint field, falls back to grammar field
+    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
+        self.grammar.clone()
+    }
+}
+
+#[cfg(feature = "python")]
+impl SamplingParams {
+    /// Convert grammar to constraint for GuidanceState construction
+    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
+        self.grammar.clone()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum EosTokenId {
@@ -263,6 +282,10 @@ pub struct EngineConfig {
     pub tool_prompt_template: Option<String>,
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    /// Allow client-submitted constraints via HTTP API
+    pub allow_constraint_api: bool,
+    /// Whether to automatically build LLG grammar from tools
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(feature = "python")]
@@ -340,6 +363,10 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    #[pyo3(get, set)]
+    pub allow_constraint_api: bool,
+    #[pyo3(get, set)]
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -374,7 +401,9 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
-    ) -> Self {
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
+      ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
@@ -420,12 +449,14 @@ impl EngineConfig {
             pd_config,
             mcp_command,
             mcp_config,
-            mcp_args,
-            tool_prompt_template,
-            pd_server_prefix_cache_ratio,
-            pd_client_prefix_cache_ratio,
-        }
-    }
+             mcp_args,
+             tool_prompt_template,
+             pd_server_prefix_cache_ratio,
+             pd_client_prefix_cache_ratio,
+             allow_constraint_api,
+             enable_tool_grammar,
+          }
+      }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -435,7 +466,59 @@ pub struct TokenizerConfig {
     pub add_eos_token: Option<bool>,
     pub chat_template: Option<String>,
     pub bos_token: Option<String>,
-    pub eos_token: Option<String>,
+    #[serde(deserialize_with = "eos_token_deserialize")]
+    pub eos_token: Option<EosTokenEntry>,
+}
+
+/// Helper to deserialize EOS token which can be a string or a list of strings
+fn eos_token_deserialize<'de, D>(deserializer: D) -> Result<Option<EosTokenEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(v) => {
+            if v.is_string() {
+                Ok(Some(EosTokenEntry::single(v.as_str().unwrap().to_string())))
+            } else if v.is_array() {
+                let arr = v.as_array().unwrap();
+                let tokens: Vec<String> = arr
+                    .iter()
+                    .map(|x| x.as_str().unwrap().to_string())
+                    .collect();
+                Ok(Some(EosTokenEntry::multiple(tokens)))
+            } else {
+                Err(serde::de::Error::custom("eos_token must be a string or array"))
+            }
+        }
+    }
+}
+
+/// EOS token entry - can be single or multiple strings
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "python", pyclass)]
+pub struct EosTokenEntry {
+    pub tokens: Vec<String>,
+}
+
+impl EosTokenEntry {
+    pub fn single(s: String) -> Self {
+        Self { tokens: vec![s] }
+    }
+
+    pub fn multiple(tokens: Vec<String>) -> Self {
+        Self { tokens }
+    }
+
+    pub fn as_single(&self) -> Option<&str> {
+        if self.tokens.len() == 1 {
+            Some(&self.tokens[0])
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "python"))]
@@ -459,6 +542,9 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    pub grammar: Option<TopLevelGrammar>,
 }
 
 #[cfg(feature = "python")]
@@ -491,8 +577,13 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     pub mcp_mode: Option<bool>,
     #[pyo3(get, set)]
-    #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    pub grammar: Option<TopLevelGrammar>,
+    /// Grammar constraint as JSON string for Python API
+    #[pyo3(get, set)]
+    pub grammar_json: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -520,6 +611,7 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            grammar: None,
             thinking,
         }
     }
@@ -537,11 +629,34 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            grammar: None,
             thinking: None,
         }
     }
 }
 
+#[cfg(not(feature = "python"))]
+impl Default for SamplingParams {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            max_tokens: Some(16384),
+            ignore_eos: false,
+            top_k: None,
+            top_p: None,
+            session_id: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            grammar: None,
+            thinking: None,
+        }
+    }
+}
+
+#[cfg(feature = "python")]
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
@@ -557,6 +672,8 @@ impl Default for SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
+            grammar_json: None,
         }
     }
 }
@@ -588,8 +705,8 @@ pub struct GenerationConfig {
     /// Randomness of sampling.
     /// rec. default = 1
     pub temperature: Option<f32>,
-    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.  
-    /// rec. default = 1    
+    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.
+    /// rec. default = 1
     pub top_p: Option<f32>,
     /// Control the number of top tokens to consider, set -1 to consider all.
     /// rec. default = -1

@@ -20,7 +20,8 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
-use crate::utils::guidance::load_toktrie_from_path;
+use crate::utils::special_tokens::SpecialTokens;
+use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::kvcache_allocator::KVCacheAllocator;
@@ -100,6 +101,9 @@ pub struct LLMEngine {
     pub model_type: ModelType,
     pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
+    /// SpecialTokens parsed once at engine initialization
+    /// Contains EOS, BOS, and other special token IDs and their string representations
+    pub special_tokens: Arc<SpecialTokens>,
 }
 
 impl LLMEngine {
@@ -107,9 +111,23 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename()).map(Arc::new);
+        let toktrie = match load_toktrie_from_path(&model_pathes.get_tokenizer_filename()) {
+            Ok(trie) => Some(Arc::new(trie)),
+            Err(e) => {
+                crate::log_warn!("Failed to load tokenizer trie: {}", e);
+                None
+            }
+        };
+        let llg_factory = match build_llg_factory(tokenizer.clone(), config.vocab_size) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                crate::log_warn!("Failed to build llguidance factory: {}", e);
+                None
+            }
+        };
+
         if toktrie.is_none() {
-            crate::log_warn!("Guided decoding disabled: tokenizer trie unavailable.");
+            crate::log_warn!("Guided decoding (legacy) disabled: tokenizer trie unavailable.");
         }
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -121,10 +139,23 @@ impl LLMEngine {
         // In case config file missing bos and eos configuratioin
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
-            if let Some(eos) = &config_tokenizer.eos_token {
-                if let Some(token) = tokenizer.get_vocab(true).get(eos).copied() {
-                    config.eos_token_id = Some(EosTokenId::Single(token));
-                };
+            if let Some(eos_entry) = &config_tokenizer.eos_token {
+                // Extract all EOS tokens from the tokenizer vocabulary
+                let mut eos_tokens: Vec<u32> = Vec::new();
+                for eos_token_str in &eos_entry.tokens {
+                    if let Some(token) = tokenizer.get_vocab(true).get(eos_token_str).copied() {
+                        if !eos_tokens.contains(&token) {
+                            eos_tokens.push(token);
+                        }
+                    }
+                }
+                if !eos_tokens.is_empty() {
+                    config.eos_token_id = if eos_tokens.len() == 1 {
+                        Some(EosTokenId::Single(eos_tokens[0]))
+                    } else {
+                        Some(EosTokenId::Multiple(eos_tokens))
+                    };
+                }
             }
         }
         assert!(
@@ -209,7 +240,7 @@ impl LLMEngine {
                 device.clone(),
                 reporter,
                 transfer,
-                toktrie.clone(),
+                llg_factory.clone(),
                 None,
             )?;
 
@@ -417,7 +448,7 @@ impl LLMEngine {
             None,
             config_tokenizer.chat_template.clone(),
             config_tokenizer.bos_token.clone(),
-            config_tokenizer.eos_token.clone(),
+            config_tokenizer.eos_token.as_ref().map(|e| e.tokens.join("|")),
             None,
             true,
             true,
@@ -438,6 +469,9 @@ impl LLMEngine {
         } else {
             "default".to_string()
         };
+
+        // Initialize SpecialTokens once at engine startup
+        let special_tokens = Arc::new(SpecialTokens::new(&tokenizer));
 
         let engine = Arc::new(RwLock::new(Self {
             runners,
@@ -461,6 +495,7 @@ impl LLMEngine {
             tool_config,
             img_cfg,
             model_name,
+            special_tokens,
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
@@ -1576,4 +1611,9 @@ impl LLMEngine {
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
     }
+
+    pub fn template_supports_tools(&self) -> bool {
+        self.template.supports_tools()
+    }
+
 }
