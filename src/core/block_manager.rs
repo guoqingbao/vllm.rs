@@ -571,6 +571,11 @@ impl BlockManager {
             .map_or(0, |cache| cache.cached_blocks())
     }
 
+    /// Get a reference to the runners Arc
+    pub fn get_runners(&self) -> &Arc<RwLock<RunnerType>> {
+        &self.runners
+    }
+
     /// Returns how many tokens of `seq` are already cached in the prefix cache.
     /// Used to decide whether to do local prefill vs transfer to PD server.
     pub fn get_prefix_cache_match_tokens(&mut self, seq: &Sequence) -> usize {
@@ -686,6 +691,11 @@ impl BlockManager {
     }
 
     pub fn get_block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Get the block size
+    pub fn block_size(&self) -> usize {
         self.block_size
     }
 
@@ -950,5 +960,68 @@ impl BlockManager {
                 self.free_cpu_block_ids.push_back(cpu_bid);
             }
         }
+    }
+
+    /// Rollback a sequence to a specific token position, releasing blocks beyond that point.
+    /// This is used for speculative decoding mismatch recovery.
+    pub fn rollback_to_seq_tokens(&mut self, seq: &mut Sequence, target_tokens: usize) -> Result<()> {
+        let current_tokens = seq.len();
+        if target_tokens >= current_tokens {
+            return Ok(()); // Nothing to rollback
+        }
+
+        // Calculate how many blocks to release
+        let target_blocks = target_tokens.div_ceil(self.block_size);
+        let blocks_to_release = current_tokens.div_ceil(self.block_size) - target_blocks;
+
+        if blocks_to_release > 0 {
+            // Release blocks from the end
+            let released: Vec<u32> = seq.block_table.drain(target_blocks..).collect();
+            for &block_id in &released {
+                let block_id_usize = block_id as usize;
+                self.decrement_block_ref(block_id_usize);
+            }
+        }
+
+        // Update cached token count
+        let target_full_blocks = target_tokens / self.block_size;
+        seq.num_cached_tokens = target_full_blocks * self.block_size;
+
+        // Update prefix cache if enabled
+        if self.prefix_cache.is_some() {
+            // Extract prefix_cache to avoid borrow conflicts
+            let mut prefix_cache = self.prefix_cache.take().unwrap();
+
+            // Calculate which hashes correspond to released blocks
+            let target_full_blocks = target_tokens / self.block_size;
+            let current_full_blocks = current_tokens / self.block_size;
+
+            // Collect hashes to remove
+            let mut hashes_to_remove = Vec::new();
+
+            for block_idx in target_full_blocks..current_full_blocks {
+                // Get the block_id for this position before release
+                if let Some(&block_id_u32) = seq.block_table.get(block_idx) {
+                    let block_id = block_id_u32 as usize;
+
+                    // Find the hash associated with this block_id
+                    if let Some(hash) = prefix_cache.hash_for_block(block_id) {
+                        hashes_to_remove.push(hash);
+                    }
+                }
+            }
+
+            // Remove hashes from prefix cache and mamba mappings
+            for hash in hashes_to_remove {
+                if prefix_cache.remove_hash(&hash).is_some() {
+                    self.invalidate_mamba_prefix_hash(hash);
+                }
+            }
+
+            // Put prefix_cache back
+            self.prefix_cache = Some(prefix_cache);
+        }
+
+        Ok(())
     }
 }

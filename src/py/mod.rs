@@ -268,7 +268,8 @@ impl EngineConfig {
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, mamba_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         tool_prompt_template=None,
-        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None))]
+        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None,
+        allow_constraint_api=false, enable_tool_grammar=false))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -299,6 +300,8 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -342,6 +345,8 @@ impl EngineConfig {
             tool_prompt_template,
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }
@@ -376,6 +381,7 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking,
+            grammar: None,
         }
     }
 
@@ -394,6 +400,7 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
         }
     }
 }

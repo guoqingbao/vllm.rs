@@ -151,6 +151,8 @@ impl EngineBuilder {
             None,
             self.pd_server_prefix_cache_ratio,
             self.pd_client_prefix_cache_ratio,
+            false, // allow_constraint_api
+            false, // enable_tool_grammar
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

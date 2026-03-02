@@ -319,8 +319,30 @@ cargo install --features metal
   </details>
 
 ---
-## 🔌 MCP集成 (工具调用)
 
+## 🔌 LLGuidance 支持（结构化输出与约束）
+
+vLLM.rs 现在支持通过 llguidance 库实现结构化输出和约束生成：
+
+- **工具调用优化**：使用 `--enable-tool-grammar` 启用工具调用语法，强制模型输出符合工具参数schema的JSON结构
+- **自定义约束**：使用 `--allow-constraint-api` 允许客户端通过 structured_outputs 或 response_format 提交 Lark/Regex/JSON Schema 约束
+- **正则表达式约束**：强制输出符合特定格式（如电话号码、日期等）
+- **JSON Schema 约束**：通过 OpenAI 兼容的 response_format 或 structured_outputs 提交自定义约束
+
+**使用示例：**
+```bash
+# 启用工具调用语法（自动从 MCP 工具构建 LLG 语法）
+vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --enable-tool-grammar --ui-server
+
+# 启用客户端约束API（允许OpenAI风格的structured_outputs/response_format）
+vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --allow-constraint-api --ui-server
+```
+
+查看 [**结构化输出文档 →**](docs/llguidance-integration.md)
+
+---
+
+## 🔌 MCP集成 (工具调用)
 通过Model Context Protocol让LLM调用外部工具。
 
 ```bash
@@ -455,6 +477,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
 | `--prefix-cache`   | 启用前缀缓存，用于多轮对话 |
 | `--prefix-cache-max-tokens`   | 限制前缀缓存大小（按 block size 向下取整） |
+| `--allow-constraint-api`      | 允许通过HTTP API提交客户端约束（默认：false） |
+| `--enable-tool-grammar`       | 自动从工具构建LLG语法（默认：false） |
 
 ### MCP配置参数
 

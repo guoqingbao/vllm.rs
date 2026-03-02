@@ -8,7 +8,7 @@ use crate::transfer::Transfer;
 use crate::utils::graph::{
     planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
 };
-use crate::utils::guidance::GuidanceState;
+use crate::utils::guidance::{GuidanceState, ParserFactory};
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -35,7 +35,7 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use toktrie::TokTrie;
@@ -94,6 +94,11 @@ pub struct ModelRunner {
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     restored_prefix_sequences: RwLock<HashSet<usize>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
+    guidance_failed: RwLock<HashSet<usize>>,
+    guidance_mismatch: RwLock<HashSet<usize>>,
+    /// Pending rollback sequence IDs (set when mismatch detected)
+    pending_rollback: RwLock<HashSet<usize>>,
+    llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
@@ -163,7 +168,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
-        toktrie: Option<Arc<TokTrie>>,
+        llg_factory: Option<Arc<ParserFactory>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -417,12 +422,16 @@ impl ModelRunner {
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             restored_prefix_sequences: RwLock::new(HashSet::new()),
-            guidance_states: RwLock::new(HashMap::new()),
-            transfer,
-            is_first_rank: comm.rank() == 0,
-            model_type,
-        })
-    }
+             guidance_states: RwLock::new(HashMap::new()),
+              guidance_failed: RwLock::new(HashSet::new()),
+              guidance_mismatch: RwLock::new(HashSet::new()),
+              pending_rollback: RwLock::new(HashSet::new()),
+              llg_factory,
+             transfer,
+             is_first_rank: comm.rank() == 0,
+             model_type,
+         })
+     }
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
         loop {
@@ -1215,9 +1224,183 @@ impl ModelRunner {
             logits.to_owned()
         };
 
+        let logits = if let Some(factory) = &self.llg_factory {
+            #[cfg(not(feature = "python"))]
+            {
+                let mut guidance_states = self.guidance_states.write();
+                let mut guidance_failed = self.guidance_failed.write();
+                let mut guidance_mismatch = self.guidance_mismatch.write();
+                let mut modified = false;
+                let vocab_size = logits.dim(1)?;
+
+                // We only materialize logits on CPU if at least one constraint mask applies.
+
+                // We'll collect masks first to minimize holding locks or complex logic inside the loop
+                let mut masks = Vec::new(); // (seq_index, seq_id, mask)
+
+                for (i, id) in seq_ids.iter().enumerate() {
+                    let sampling_params = match &seqs {
+                        Seqs::SeqRefs(refs) => &refs[i].sampling_params,
+                        Seqs::DecodeVec(vec) => &vec[i].sampling_params,
+                    };
+
+                    if guidance_failed.contains(id) {
+                        continue;
+                    }
+
+                    // Use to_constraint() to get constraint from either field
+                    let constraint = match sampling_params.to_constraint() {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    let state = match guidance_states.entry(*id) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            match GuidanceState::new(factory.clone(), &constraint) {
+                                Ok(state) => entry.insert(state),
+                                Err(err) => {
+                                    guidance_failed.insert(*id);
+                                    crate::log_warn!(
+                                        "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                                        id,
+                                        err
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    if let Ok(Some(mask)) = state.compute_mask() {
+                        masks.push((i, *id, mask));
+                        modified = true;
+                    }
+                }
+
+                if modified {
+                    // Now we must convert to Vec, modify, and update logits
+                    let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+
+                    for (seq_idx, seq_id, mask) in masks {
+                        let start = seq_idx * vocab_size;
+                        let end = start + vocab_size;
+                        let row = &mut logits_vec[start..end];
+                        let mask_len = mask.len();
+
+                        // Apply mask: set disallowed to -inf
+                        // This iterates entire vocab, but check is fast
+                        if mask_len == 0 {
+                            if guidance_failed.insert(seq_id) {
+                                crate::log_warn!(
+                                    "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                                    seq_id
+                                );
+                            }
+                            continue;
+                        }
+
+                        if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
+                            crate::log_warn!(
+                                "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                                seq_id,
+                                mask_len,
+                                vocab_size
+                            );
+                            // Snapshot is captured when constraint is first applied in GuidanceState::new()
+                            // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
+                        }
+
+                        let apply_len = std::cmp::min(vocab_size, mask_len);
+                        for tok in 0..apply_len {
+                            if !mask.is_allowed(tok as u32) {
+                                row[tok] = f32::NEG_INFINITY;
+                            }
+                        }
+                        if mask_len < vocab_size {
+                            for tok in mask_len..vocab_size {
+                                row[tok] = f32::NEG_INFINITY;
+                            }
+                        }
+                    }
+                    Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+                } else {
+                    logits
+                }
+            }
+            #[cfg(feature = "python")]
+            {
+                // Python version: constraints are handled via server/mod.rs
+                // The guidance_states are populated directly from server layer
+                logits
+            }
+        } else {
+            logits
+        };
+
         let tokens = self
             .logit_processor
             .sample_with_strategy(&logits, &cached_params.sampling)?;
+
+        // Re-sample tokens that fail validation (hybrid approach)
+        let mut re_sampled_tokens = tokens.clone();
+        if let Some(factory) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
+                if let Some(state) = guidance_states.get_mut(seq_id) {
+                    let token = tokens[seq_idx];
+
+                    if !state.validate_token(token) {
+                        // Token invalid - need to re-sample
+                        let mask = match state.compute_mask_or_eos() {
+                            Ok(m) => m,
+                            Err(e) => {
+                                crate::log_error!(
+                                    "[llg] Unable to compute mask for token {} due to {}", token, e
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Apply mask to THIS sequence's logits only
+                        // let mut biased_logits = logits.clone();
+                        let vocab_size = logits.dim(1)?;
+                        let row_start = seq_idx * vocab_size;
+                        let row_end = row_start + vocab_size;
+
+                        let mut row_vec = logits.clone().flatten_all()?.to_vec1::<f32>()?;
+                        let row = &mut row_vec[row_start..row_end];
+
+                        // Apply mask: set disallowed to -inf
+                        for tok in 0..vocab_size {
+                            if !mask.is_allowed(tok as u32) {
+                                row[tok] = f32::NEG_INFINITY;
+                            }
+                        }
+
+                        // Re-create biased logits tensor
+                        let biased_tensor = Tensor::from_vec(row_vec, logits.shape(), logits.device())?;
+
+                        // Re-sample single token
+                        let re_sampled = self.logit_processor.sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
+                        re_sampled_tokens[seq_idx] = re_sampled[seq_idx];
+
+                        // Consume the re-sampled token to ACTUAL state
+                        match state.commit_token(re_sampled_tokens[seq_idx]) {
+                            Ok(()) => crate::log_debug!("[llg] Resampled token {} consumed by matcher", re_sampled_tokens[seq_idx]),
+                            Err(e) => crate::log_error!("[llg] Resampled token {} rejected by matcher due to {}", re_sampled_tokens[seq_idx], e)
+                        }
+                    } else {
+                        // Token is valid, consume to ACTUAL state
+                        match state.commit_token(token) {
+                            Ok(()) => crate::log_debug!("[llg] Token {} consumed by matcher", token),
+                            Err(e) => crate::log_error!("[llg] Token {} rejected by matcher due to {}", token, e)
+                        }
+                    }
+                }
+            }
+
+        }
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {
@@ -1233,7 +1416,19 @@ impl ModelRunner {
                 }
             }
         }
-        Ok(tokens)
+
+        // Commit tokens to guidance states
+        if let Some(_) = &self.llg_factory {
+            let mut guidance_states = self.guidance_states.write();
+            for (i, id) in seq_ids.iter().enumerate() {
+                if let Some(state) = guidance_states.get_mut(id) {
+                    if !state.is_finished() {
+                        let _ = state.commit_token(re_sampled_tokens[i]);
+                    }
+                }
+            }
+        }
+        Ok(re_sampled_tokens)
     }
 
     pub fn finished(&self, id: usize) {
@@ -1411,19 +1606,55 @@ impl ModelRunner {
 
     pub fn clear_blocks(&self, _block_ids: Vec<u32>) -> Result<bool> {
         Ok(true)
-        // fn cache_clear(gpu_cache: &Vec<(Tensor, Tensor)>, block_ids: &Vec<u32>) -> Result<bool> {
-        //     if gpu_cache.is_empty() || block_ids.is_empty() {
-        //         return Ok(true);
-        //     }
+    }
 
-        //     for i in 0..gpu_cache.len() {
-        //         cache::clear_blocks(&gpu_cache[i].0, block_ids)?;
-        //         cache::clear_blocks(&gpu_cache[i].1, block_ids)?;
-        //     }
+    /// Validate a sequence's output_ids against the grammar using llguidance
+    /// Returns Some(valid_token_count) if guidance exists, None if no constraint
+    pub fn validate_sequence_for_grammar(&self, seq_id: usize, output_ids: &[u32]) -> Option<usize> {
+        let mut guidance_states = self.guidance_states.write();
+        let state = guidance_states.get_mut(&seq_id)?;
+        match state.validate_tokens(output_ids) {
+            Some(count) => Some(count),
+            None => None,
+        }
+    }
 
-        //     Ok(true)
-        // }
+    /// Rollback guidance state for a sequence
+    /// This is called from Scheduler::rollback_sequence() to reset llguidance FSM state
+    pub fn rollback_sequence_for_guidance(&self, seq_id: usize, target_tokens: usize) -> Result<()> {
+        let mut guidance_states = self.guidance_states.write();
+        let mut guidance_failed = self.guidance_failed.write();
+        let mut guidance_mismatch = self.guidance_mismatch.write();
 
-        // cache_clear(&*self.get_kv_cache(), &block_ids)
+        if let Some(state) = guidance_states.get_mut(&seq_id) {
+            // Calculate byte position (approx 4 bytes per token)
+            let target_bytes = target_tokens * 4;
+            match state.rollback_to(target_tokens, target_bytes) {
+                Ok(()) => {}
+                Err(e) => {
+                    return Err(candle_core::Error::Msg(format!("Guidance rollback failed: {}", e)));
+                }
+            }
+        }
+
+        // Clear failed and mismatch status for re-initialization
+        guidance_failed.remove(&seq_id);
+        guidance_mismatch.remove(&seq_id);
+
+        Ok(())
+    }
+
+    /// Fast-forward and consume tokens guaranteed to be accepted by the grammar
+    /// This is used for speculative decoding optimization
+    pub fn consume_ff_tokens(&self, seq_id: usize) -> Result<Vec<u32>> {
+        let mut guidance_states = self.guidance_states.write();
+        if let Some(state) = guidance_states.get_mut(&seq_id) {
+            match state.consume_ff_tokens() {
+                Ok(tokens) => Ok(tokens),
+                Err(e) => Err(candle_core::Error::Msg(format!("FF tokens failed: {}", e))),
+            }
+        } else {
+            Ok(Vec::new())
+        }
     }
 }

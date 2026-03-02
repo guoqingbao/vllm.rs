@@ -95,9 +95,9 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ## 📘 Usage in Python
 
 ### 📦 Install with pip
-- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**  
+- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**
   (no `flash-attn` support; alternatively use **Rust mode**).
-- 💡 The **prebuilt wheel** is built with the `flash-context` feature enabled.  
+- 💡 The **prebuilt wheel** is built with the `flash-context` feature enabled.
   To use **FP8 KV Cache**, you must **build manually** (remove the `flash-context` build flag).
 
 
@@ -284,7 +284,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
   # Metal/MacOS
   vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```
-  
+
   <details open>
     <summary>Multi-GPU + Unquantized Model</summary>
 
@@ -329,6 +329,28 @@ vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
   ```
 
   </details>
+
+---
+
+## 🔌 LLGuidance Support (Structured Outputs & Constraints)
+
+vLLM.rs now supports structured output and constraint-based generation via llguidance:
+
+- **Tool Call Optimization**: Use `--enable-tool-grammar` to auto-build LLG grammar from tools, forcing model to output JSON matching tool parameter schemas
+- **Custom Constraints**: Use `--allow-constraint-api` to allow clients to submit Lark/Regex/JSON Schema constraints via OpenAI-compatible structured_outputs/response_format
+- **Regex Constraints**: Enforce output formats like phone numbers (`^number\s\d{3}-\d{3}-\d{4}$`)
+- **JSON Schema Constraints**: Enforce structured output via response_format or structured_outputs
+
+**Usage Examples:**
+```bash
+# Enable tool grammar (auto-builds LLG grammar from MCP tools)
+vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --enable-tool-grammar --ui-server
+
+# Enable client constraints API (accepts structured_outputs/response_format)
+vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --allow-constraint-api --ui-server
+```
+
+See [**Structured Outputs Documentation →**](docs/llguidance-integration.md)
 
 ---
 
@@ -434,7 +456,7 @@ PD Disaggregation separates prefill (prompt processing) and decode (token genera
 
 ## 📽️ Demo Video
 
-Watch it in action 🎉 
+Watch it in action 🎉
 
 <video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
 
@@ -462,19 +484,19 @@ pip install maturin[patchelf]  # For Linux/Windows
 2. **Build the Python package**
 
 ```bash
-# Naive CUDA (single GPU only) 
+# Naive CUDA (single GPU only)
 maturin build --release --features cuda,python
 
 # Naive CUDA (+CUDA Graph, experimental)
 ./build.sh --release --features cuda,graph,python
 
-# CUDA (with prefix-cache and FP8 KV Cache, no Flash Attention, compatible with V100) 
+# CUDA (with prefix-cache and FP8 KV Cache, no Flash Attention, compatible with V100)
 ./build.sh --release --features cuda,nccl,python
 
-# CUDA (+Flash Attention, only used in prefill stage) 
+# CUDA (+Flash Attention, only used in prefill stage)
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (+cutlass (sm90+), +Flash Attention for decoding, +high prefill throughput, long time to build) 
+# CUDA (+cutlass (sm90+), +Flash Attention for decoding, +high prefill throughput, long time to build)
 ./build.sh --release --features cuda,nccl,flash-attn,flash-context,cutlass,python
 
 # macOS (Metal, single GPU only, with prefix-cache and FP8 kvcache)
@@ -518,6 +540,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
 | `--prefix-cache-max-tokens`   | Cap prefix cache size in tokens (rounded down to block size) |
+| `--allow-constraint-api`      | Allow client-submitted constraints via HTTP API (default: false) |
+| `--enable-tool-grammar`       | Automatically build LLG grammar from tools (default: false) |
 
 ### MCP Configuration
 
@@ -563,7 +587,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Claude/Anthropic-compatible API Server**
 * [x] **Support CUDA 13**
 * [x] **Support FlashInfer backend**
-* [ ] TentorRT-LLM 
+* [ ] TentorRT-LLM
 ---
 
 ## 📚 References

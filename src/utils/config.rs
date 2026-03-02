@@ -1,12 +1,42 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
+use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Constraint {
+    Regex(String),
+    Lark(String),
+    JsonSchema(serde_json::Value),
+    Llguidance(TopLevelGrammar),
+    None,
+}
 use std::collections::HashMap;
 use std::fmt;
+
+#[cfg(not(feature = "python"))]
+impl SamplingParams {
+    /// Convert grammar to constraint for GuidanceState construction
+    /// Prioritizes constraint field, falls back to grammar field
+    pub fn to_constraint(&self) -> Option<Constraint> {
+        self.constraint.clone().or_else(|| {
+            self.grammar.as_ref().map(|g| Constraint::Llguidance(g.clone()))
+        })
+    }
+}
+
+#[cfg(feature = "python")]
+impl SamplingParams {
+    /// Convert grammar to constraint for GuidanceState construction
+    /// Prioritizes constraint field, falls back to grammar field
+    pub fn to_constraint(&self) -> Option<Constraint> {
+        self.grammar.as_ref().map(|g| Constraint::Llguidance(g.clone()))
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum EosTokenId {
@@ -263,6 +293,10 @@ pub struct EngineConfig {
     pub tool_prompt_template: Option<String>,
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    /// Allow client-submitted constraints via HTTP API
+    pub allow_constraint_api: bool,
+    /// Whether to automatically build LLG grammar from tools
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(feature = "python")]
@@ -340,6 +374,10 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    #[pyo3(get, set)]
+    pub allow_constraint_api: bool,
+    #[pyo3(get, set)]
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -374,7 +412,9 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
-    ) -> Self {
+        allow_constraint_api: bool,
+         _enable_tool_grammar: bool,
+     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
@@ -420,12 +460,14 @@ impl EngineConfig {
             pd_config,
             mcp_command,
             mcp_config,
-            mcp_args,
-            tool_prompt_template,
-            pd_server_prefix_cache_ratio,
-            pd_client_prefix_cache_ratio,
-        }
-    }
+             mcp_args,
+             tool_prompt_template,
+             pd_server_prefix_cache_ratio,
+             pd_client_prefix_cache_ratio,
+             allow_constraint_api: false,
+             enable_tool_grammar: false,
+          }
+      }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -459,6 +501,11 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
+    #[serde(default)]
+    pub constraint: Option<Constraint>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    pub grammar: Option<TopLevelGrammar>,
 }
 
 #[cfg(feature = "python")]
@@ -491,8 +538,13 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     pub mcp_mode: Option<bool>,
     #[pyo3(get, set)]
-    #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    #[cfg(not(feature = "python"))]
+    #[serde(default)]
+    pub constraint: Option<Constraint>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    pub grammar: Option<TopLevelGrammar>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -520,6 +572,8 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            constraint: None,
+            grammar: None,
             thinking,
         }
     }
@@ -537,11 +591,36 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
+            constraint: None,
+            grammar: None,
             thinking: None,
         }
     }
 }
 
+#[cfg(not(feature = "python"))]
+impl Default for SamplingParams {
+    fn default() -> Self {
+        Self {
+            temperature: None,
+            max_tokens: Some(16384),
+            ignore_eos: false,
+            top_k: None,
+            top_p: None,
+            session_id: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            mcp_mode: None,
+            stop_sequences: None,
+            stop_token_ids: None,
+            constraint: None,
+            grammar: None,
+            thinking: None,
+        }
+    }
+}
+
+#[cfg(feature = "python")]
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
@@ -557,6 +636,7 @@ impl Default for SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
         }
     }
 }
@@ -588,8 +668,8 @@ pub struct GenerationConfig {
     /// Randomness of sampling.
     /// rec. default = 1
     pub temperature: Option<f32>,
-    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.  
-    /// rec. default = 1    
+    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.
+    /// rec. default = 1
     pub top_p: Option<f32>,
     /// Control the number of top tokens to consider, set -1 to consider all.
     /// rec. default = -1

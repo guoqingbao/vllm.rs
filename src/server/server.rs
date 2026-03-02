@@ -1,4 +1,5 @@
 // src/server/server.rs
+use llguidance::api::TopLevelGrammar;
 use super::logger::ChatCompletionLogger;
 use super::{
     build_messages_and_images,
@@ -31,6 +32,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task;
 use uuid::Uuid;
+use serde_json::json;
+
 
 /// Helper struct to manage streaming response chunks
 /// Provides clean API for sending tokens, errors, and status notifications
@@ -337,6 +340,20 @@ pub async fn chat_completion(
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
+
+    // Build llguidance constraint from tools if enable_tool_grammar is set
+    if has_tools && engine_config.enable_tool_grammar {
+        let schema = serde_json::to_value(tool_schemas.as_ref()).unwrap_or_else(|_| json!({}));
+        let lark = crate::tools::schema::build_tool_call_lark_grammar(
+            &schema,
+            &tool_config.start_token_str,
+            &tool_config.end_token_str,
+            tool_config.start_is_special,
+            tool_config.end_is_special,
+        );
+        params.grammar = Some(TopLevelGrammar::from_lark(lark));
+        crate::log_debug!("[llg] Applied grammar to params");
+    }
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");
