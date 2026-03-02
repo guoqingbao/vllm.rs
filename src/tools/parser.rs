@@ -5,9 +5,8 @@
 
 use super::{new_tool_call, ToolCall};
 use regex::Regex;
-use serde::{de::{Deserializer, MapAccess, Visitor}, Serializer};
+use serde::{de::{Deserializer, MapAccess, Visitor}};
 use serde_json::{Map, Value};
-use std::collections::HashSet;
 use std::fmt;
 use std::sync::OnceLock;
 

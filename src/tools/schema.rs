@@ -6,7 +6,6 @@
 use crate::tools::Tool;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::OnceLock;
 
 /// Remove JSON Schema features that llguidance doesn't support.
 /// Currently strips all "format" fields recursively.

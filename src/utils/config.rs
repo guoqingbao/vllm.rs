@@ -32,7 +32,6 @@ impl SamplingParams {
 #[cfg(feature = "python")]
 impl SamplingParams {
     /// Convert grammar to constraint for GuidanceState construction
-    /// Prioritizes constraint field, falls back to grammar field
     pub fn to_constraint(&self) -> Option<Constraint> {
         self.grammar.as_ref().map(|g| Constraint::Llguidance(g.clone()))
     }
@@ -413,8 +412,8 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         allow_constraint_api: bool,
-         _enable_tool_grammar: bool,
-     ) -> Self {
+        enable_tool_grammar: bool,
+      ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);

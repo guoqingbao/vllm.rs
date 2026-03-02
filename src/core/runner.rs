@@ -38,7 +38,6 @@ use parking_lot::RwLock;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use toktrie::TokTrie;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -1344,7 +1343,7 @@ impl ModelRunner {
 
         // Re-sample tokens that fail validation (hybrid approach)
         let mut re_sampled_tokens = tokens.clone();
-        if let Some(factory) = &self.llg_factory {
+        if let Some(_factory) = &self.llg_factory {
             let mut guidance_states = self.guidance_states.write();
             for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
                 if let Some(state) = guidance_states.get_mut(seq_id) {
