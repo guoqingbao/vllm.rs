@@ -9,6 +9,7 @@ use crate::utils::graph::{
     planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
 };
 use crate::utils::guidance::{GuidanceState, ParserFactory};
+use toktrie::SimpleVob;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -95,8 +96,6 @@ pub struct ModelRunner {
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
     guidance_failed: RwLock<HashSet<usize>>,
     guidance_mismatch: RwLock<HashSet<usize>>,
-    /// Pending rollback sequence IDs (set when mismatch detected)
-    pending_rollback: RwLock<HashSet<usize>>,
     llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
@@ -424,7 +423,6 @@ impl ModelRunner {
              guidance_states: RwLock::new(HashMap::new()),
               guidance_failed: RwLock::new(HashSet::new()),
               guidance_mismatch: RwLock::new(HashSet::new()),
-              pending_rollback: RwLock::new(HashSet::new()),
               llg_factory,
              transfer,
              is_first_rank: comm.rank() == 0,
@@ -1235,7 +1233,7 @@ impl ModelRunner {
                 // We only materialize logits on CPU if at least one constraint mask applies.
 
                 // We'll collect masks first to minimize holding locks or complex logic inside the loop
-                let mut masks = Vec::new(); // (seq_index, seq_id, mask)
+                let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
 
                 for (i, id) in seq_ids.iter().enumerate() {
                     let sampling_params = match &seqs {
@@ -1247,16 +1245,16 @@ impl ModelRunner {
                         continue;
                     }
 
-                    // Use to_constraint() to get constraint from either field
-                    let constraint = match sampling_params.to_constraint() {
-                        Some(c) => c,
+                    // Use grammar directly from sampling_params
+                    let grammar = match sampling_params.grammar.as_ref() {
+                        Some(g) => g,
                         None => continue,
                     };
 
                     let state = match guidance_states.entry(*id) {
                         Entry::Occupied(entry) => entry.into_mut(),
                         Entry::Vacant(entry) => {
-                            match GuidanceState::new(factory.clone(), &constraint) {
+                            match GuidanceState::new_from_grammar(factory.clone(), grammar) {
                                 Ok(state) => entry.insert(state),
                                 Err(err) => {
                                     guidance_failed.insert(*id);

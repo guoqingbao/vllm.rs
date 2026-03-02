@@ -9,7 +9,9 @@ use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{Constraint, EngineConfig};
+use crate::utils::config::EngineConfig;
+use crate::utils::guidance::{ComposedGrammar, GrammarFragment};
+use llguidance::api::TopLevelGrammar;
 use crate::utils::image::{
     compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
     ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
@@ -52,6 +54,22 @@ pub struct ChatCompletionRequest {
     /// How the model should choose which tool to call
     #[serde(default)]
     pub tool_choice: Option<crate::tools::ToolChoice>,
+    /// OpenAI-style response format for structured outputs
+    #[serde(default)]
+    pub response_format: Option<ResponseFormat>,
+    /// Extra body for OpenAI-compatible clients (e.g. structured_outputs)
+    #[serde(default)]
+    pub extra_body: Option<ExtraBody>,
+    /// Direct structured_outputs for convenience (parsed from extra_body if not present)
+    #[serde(default, alias = "structured_outputs")]
+    pub structured_outputs: Option<StructuredOutputs>,
+    /// Legacy constraint field for llguidance (llg-new.diff pattern)
+    /// Use constraint_type to specify grammar format: "regex", "lark", "json_schema"
+    #[serde(alias = "grammar", default)]
+    pub constraint: Option<String>,
+    /// Type of constraint for legacy constraint field
+    #[serde(default)]
+    pub constraint_type: Option<String>,
 }
 
 pub fn resolve_engine_model_id(econfig: &EngineConfig) -> Option<String> {
@@ -102,7 +120,7 @@ impl Default for EncodingFormat {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct StructuredOutputs {
     #[serde(default)]
@@ -117,7 +135,7 @@ pub struct StructuredOutputs {
     pub structural_tag: Option<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct ResponseFormatJsonSchema {
     #[serde(default)]
@@ -125,7 +143,7 @@ pub struct ResponseFormatJsonSchema {
     pub schema: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct ResponseFormat {
     #[serde(rename = "type")]
@@ -134,7 +152,7 @@ pub struct ResponseFormat {
     pub json_schema: Option<ResponseFormatJsonSchema>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct ExtraBody {
     #[serde(default)]
@@ -143,44 +161,50 @@ pub struct ExtraBody {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-// Constraint conversion functions
-pub fn constraint_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<Constraint>> {
-    crate::log_debug!("[llg] constraint_from_structured_outputs() called");
+// GrammarFragment conversion functions
+pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<TopLevelGrammar>> {
+    crate::log_debug!("[llg] grammar_fragment_from_structured_outputs() called");
     
-    let mut selected: Option<Constraint> = None;
+    let mut selected: Option<TopLevelGrammar> = None;
 
-    let mut set_constraint = |constraint: Constraint| -> Result<()> {
+    let mut set_grammar = |grammar: TopLevelGrammar| -> Result<()> {
         if selected.is_some() {
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        selected = Some(constraint);
+        selected = Some(grammar);
         Ok(())
     };
 
     if let Some(choice) = &structured.choice {
         if !choice.is_empty() {
             crate::log_debug!("[llg] Building Lark grammar from choice options: {:?}", choice);
-            let grammar = crate::tools::schema::build_choice_lark_grammar(choice)
+            let grammar_fragment = crate::tools::schema::build_choice_lark_grammar(choice)
                 .map_err(|e| candle_core::Error::msg(e))?;
-            set_constraint(Constraint::Lark(grammar))?;
+            let llg_grammar = TopLevelGrammar::from_lark(grammar_fragment.body.clone());
+            set_grammar(llg_grammar)?;
         }
     }
 
     if let Some(regex) = &structured.regex {
         crate::log_debug!("[llg] Building regex constraint: {}", regex);
-        set_constraint(Constraint::Regex(regex.clone()))?;
+        let sanitized = crate::utils::guidance::sanitize_to_ascii(regex);
+        let llg_grammar = TopLevelGrammar::from_regex(&sanitized);
+        set_grammar(llg_grammar)?;
     }
 
     if let Some(schema) = &structured.json {
         crate::log_debug!("[llg] Sanitizing JSON schema for llguidance");
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(schema);
-        set_constraint(Constraint::JsonSchema(schema))?;
+        let llg_grammar = TopLevelGrammar::from_json_schema(schema);
+        set_grammar(llg_grammar)?;
     }
 
     if let Some(grammar) = &structured.grammar {
         crate::log_debug!("[llg] Using Lark grammar from structured_outputs.grammar");
-        set_constraint(Constraint::Lark(grammar.clone()))?;
+        let sanitized = crate::utils::guidance::sanitize_utf8_valid(grammar);
+        let llg_grammar = TopLevelGrammar::from_lark(sanitized);
+        set_grammar(llg_grammar)?;
     }
 
     if let Some(tag) = &structured.structural_tag {
@@ -189,8 +213,13 @@ pub fn constraint_from_structured_outputs(structured: &StructuredOutputs) -> Res
             .map_err(|e| candle_core::Error::msg(e))?;
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
         crate::log_debug!("[llg] Building tool call Lark grammar with structural_tag: start={}, end={}", start, end);
-        let grammar = crate::tools::schema::build_tool_call_lark_grammar(&schema, &start, &end, false, false);
-        set_constraint(Constraint::Lark(grammar))?;
+        let grammar_fragment = crate::tools::schema::build_tool_call_lark_grammar(&schema, &start, &end, false, false);
+        // Build ComposedGrammar with TEXT alternative and tool_call fragment
+        let composed = ComposedGrammar::new()
+            .with_text_fragment(GrammarFragment::new("TEXT", "TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/"))
+            .with_tool_fragment(grammar_fragment);
+        let llg_grammar = TopLevelGrammar::from_lark(composed.to_lark_string());
+        set_grammar(llg_grammar)?;
     }
 
     if selected.is_none() {
@@ -198,12 +227,12 @@ pub fn constraint_from_structured_outputs(structured: &StructuredOutputs) -> Res
         return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
     }
 
-    crate::log_info!("[llg] constraint_from_structured_outputs() completed with constraint: {:?}", selected);
+    crate::log_info!("[llg] grammar_fragment_from_structured_outputs() completed with grammar: {:?}", selected.is_some());
     Ok(selected)
 }
 
-pub fn constraint_from_response_format(response_format: &ResponseFormat) -> Result<Option<Constraint>> {
-    crate::log_debug!("[llg] constraint_from_response_format() called with type: {}", response_format.format_type);
+pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -> Result<Option<TopLevelGrammar>> {
+    crate::log_debug!("[llg] grammar_fragment_from_response_format() called with type: {}", response_format.format_type);
     
     match response_format.format_type.as_str() {
         "json_schema" => {
@@ -213,8 +242,10 @@ pub fn constraint_from_response_format(response_format: &ResponseFormat) -> Resu
             };
             crate::log_debug!("[llg] Sanitizing JSON schema from response_format");
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
-            crate::log_info!("[llg] constraint_from_response_format() completed with JsonSchema constraint");
-            Ok(Some(Constraint::JsonSchema(schema)))
+            // Build TopLevelGrammar from JSON schema first (matches llg-new.diff pattern)
+            let llg_grammar = TopLevelGrammar::from_json_schema(schema);
+            crate::log_info!("[llg] grammar_fragment_from_response_format() completed with Llguidance constraint");
+            Ok(Some(llg_grammar))
         }
         other => {
             crate::log_error!("[llg] Unsupported response_format type '{}'; only 'json_schema' is supported", other);
@@ -1394,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_choice() {
+    fn test_grammar_fragment_from_structured_outputs_choice() {
         let so = StructuredOutputs {
             choice: Some(vec!["option1".to_string(), "option2".to_string()]),
             regex: None,
@@ -1402,13 +1433,13 @@ mod tests {
             grammar: None,
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_json() {
+    fn test_grammar_fragment_from_structured_outputs_json() {
         let so = StructuredOutputs {
             choice: None,
             regex: None,
@@ -1416,13 +1447,13 @@ mod tests {
             grammar: None,
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Some(Constraint::JsonSchema(_))));
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_regex() {
+    fn test_grammar_fragment_from_structured_outputs_regex() {
         let so = StructuredOutputs {
             choice: None,
             regex: Some("^[a-z]+$".to_string()),
@@ -1430,13 +1461,13 @@ mod tests {
             grammar: None,
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Some(Constraint::Regex(_))));
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_grammar() {
+    fn test_grammar_fragment_from_structured_outputs_grammar() {
         let so = StructuredOutputs {
             choice: None,
             regex: None,
@@ -1444,13 +1475,13 @@ mod tests {
             grammar: Some("start: 'hello' 'world'".to_string()),
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Some(Constraint::Lark(_))));
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_empty() {
+    fn test_grammar_fragment_from_structured_outputs_empty() {
         let so = StructuredOutputs {
             choice: None,
             regex: None,
@@ -1458,12 +1489,12 @@ mod tests {
             grammar: None,
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_constraint_from_structured_outputs_too_many() {
+    fn test_grammar_fragment_from_structured_outputs_too_many() {
         let so = StructuredOutputs {
             choice: Some(vec!["a".to_string()]),
             regex: Some("b".to_string()),
@@ -1471,12 +1502,12 @@ mod tests {
             grammar: None,
             structural_tag: None,
         };
-        let result = constraint_from_structured_outputs(&so);
+        let result = grammar_fragment_from_structured_outputs(&so);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_constraint_from_response_format_json_schema() {
+    fn test_grammar_fragment_from_response_format_json_schema() {
         let rf = ResponseFormat {
             format_type: "json_schema".to_string(),
             json_schema: Some(ResponseFormatJsonSchema {
@@ -1484,28 +1515,28 @@ mod tests {
                 schema: serde_json::json!({"type": "object", "properties": {}}),
             }),
         };
-        let result = constraint_from_response_format(&rf);
+        let result = grammar_fragment_from_response_format(&rf);
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), Some(Constraint::JsonSchema(_))));
+        assert!(result.unwrap().is_some());
     }
 
     #[test]
-    fn test_constraint_from_response_format_missing_json_schema() {
+    fn test_grammar_fragment_from_response_format_missing_json_schema() {
         let rf = ResponseFormat {
             format_type: "json_schema".to_string(),
             json_schema: None,
         };
-        let result = constraint_from_response_format(&rf);
+        let result = grammar_fragment_from_response_format(&rf);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_constraint_from_response_format_unsupported_type() {
+    fn test_grammar_fragment_from_response_format_unsupported_type() {
         let rf = ResponseFormat {
             format_type: "unsupported".to_string(),
             json_schema: None,
         };
-        let result = constraint_from_response_format(&rf);
+        let result = grammar_fragment_from_response_format(&rf);
         assert!(result.is_err());
     }
 }

@@ -2,6 +2,7 @@
 use llguidance::api::TopLevelGrammar;
 use super::logger::ChatCompletionLogger;
 use super::{
+    grammar_fragment_from_structured_outputs, grammar_fragment_from_response_format,
     build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
     ChatResponder, DetokenizeRequest, DetokenizeResponse, EmbeddingRequest, EmbeddingResponse,
@@ -17,6 +18,7 @@ use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolPars
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
     resolve_tools, retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
+    sanitize_tools_for_llguidance,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
@@ -287,6 +289,102 @@ pub async fn chat_completion(
         )
     };
 
+    // Handle client-submitted constraints via structured_outputs or response_format
+    // First check top-level structured_outputs for convenience
+    if let Some(ref structured) = request.structured_outputs {
+        if engine_config.allow_constraint_api {
+            match grammar_fragment_from_structured_outputs(structured) {
+                Ok(Some(grammar)) => {
+                    params.grammar = Some(grammar);
+                    crate::log_debug!("[llg] Applied client grammar from top-level structured_outputs");
+                }
+                Ok(None) => {}  // No grammar specified
+                Err(err) => {
+                    crate::log_error!("[llg] Failed to parse structured_outputs: {:?}", err);
+                    return ChatResponder::ValidationError(format!("{:?}", err));
+                }
+            }
+        } else {
+            crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+        }
+    }
+    // Fallback to extra_body.structured_outputs for backwards compatibility
+    else if let Some(ref extra_body) = request.extra_body {
+        if let Some(ref structured) = extra_body.structured_outputs {
+            if engine_config.allow_constraint_api {
+                match grammar_fragment_from_structured_outputs(structured) {
+                    Ok(Some(grammar)) => {
+                        params.grammar = Some(grammar);
+                        crate::log_debug!("[llg] Applied client grammar from extra_body.structured_outputs");
+                    }
+                    Ok(None) => {}  // No grammar specified
+                    Err(err) => {
+                        crate::log_error!("[llg] Failed to parse structured_outputs: {:?}", err);
+                        return ChatResponder::ValidationError(format!("{:?}", err));
+                    }
+                }
+            } else {
+                crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+            }
+        }
+    }
+
+    if let Some(ref response_format) = request.response_format {
+        if engine_config.allow_constraint_api {
+            match grammar_fragment_from_response_format(response_format) {
+                Ok(Some(grammar)) => {
+                    params.grammar = Some(grammar);
+                    crate::log_debug!("[llg] Applied client grammar from response_format");
+                }
+                Ok(None) => {}  // No grammar specified
+                Err(err) => {
+                    crate::log_error!("[llg] Failed to parse response_format: {:?}", err);
+                    return ChatResponder::ValidationError(format!("{:?}", err));
+                }
+            }
+        } else {
+            crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+        }
+    }
+
+    // Fallback: legacy constraint field (llg-new.diff pattern)
+    // constraint field directly sets grammar via TopLevelGrammar constructors
+    if params.grammar.is_none() {
+        if let Some(ref grammar_str) = request.constraint {
+            let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
+            match constraint_type {
+                "regex" => {
+                    // Sanitize to ASCII to prevent binary data issues
+                    let sanitized = crate::utils::guidance::sanitize_to_ascii(grammar_str);
+                    params.grammar = Some(TopLevelGrammar::from_regex(&sanitized));
+                    crate::log_debug!("[llg] Built grammar from regex constraint (sanitized)");
+                }
+                "lark" => {
+                    // Sanitize to valid UTF-8 to prevent binary data issues
+                    let sanitized = crate::utils::guidance::sanitize_utf8_valid(grammar_str);
+                    params.grammar = Some(TopLevelGrammar::from_lark(sanitized));
+                    crate::log_debug!("[llg] Built grammar from lark constraint (sanitized)");
+                }
+                "json_schema" | "json" => {
+                    // Sanitize JSON string to valid UTF-8 before parsing
+                    let sanitized = crate::utils::guidance::sanitize_utf8_valid(grammar_str);
+                    match serde_json::from_str(&sanitized) {
+                        Ok(val) => {
+                            params.grammar = Some(TopLevelGrammar::from_json_schema(val));
+                            crate::log_debug!("[llg] Built grammar from json_schema constraint (sanitized)");
+                        }
+                        Err(e) => {
+                            crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                        }
+                    }
+                }
+                _ => {
+                    crate::log_warn!("[llg] Unknown constraint_type: {}", constraint_type);
+                }
+            }
+        }
+    }
+
     let mcp_tools = data
         .mcp_manager
         .as_ref()
@@ -337,12 +435,16 @@ pub async fn chat_completion(
         }
     }
 
-    let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
+    // Sanitize tools before building schema map to ensure ASCII-only tool names
+    let sanitized_tools = sanitize_tools_for_llguidance(&resolved_tools);
+    let tool_schemas = Arc::new(build_tool_schema_map(&sanitized_tools));
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
 
     // Build llguidance constraint from tools if enable_tool_grammar is set
-    if has_tools && engine_config.enable_tool_grammar {
+    let _tool_gram = if has_tools && engine_config.enable_tool_grammar {
+        // Use model-specific tool call grammar via build_tool_call_lark_grammar()
+        // This respects tool_config.start_token_str, tool_config.end_token_str, and special token flags
         let schema = serde_json::to_value(tool_schemas.as_ref()).unwrap_or_else(|_| json!({}));
         let lark = crate::tools::schema::build_tool_call_lark_grammar(
             &schema,
@@ -351,8 +453,18 @@ pub async fn chat_completion(
             tool_config.start_is_special,
             tool_config.end_is_special,
         );
-        params.grammar = Some(TopLevelGrammar::from_lark(lark));
-        crate::log_debug!("[llg] Applied grammar to params");
+        crate::log_debug!("Using model-specific tool call grammar fragment:\n{}", &lark.body);
+        Some(lark)
+    } else { None };
+
+    // If user provided a constraint, rebuild grammar with outer envelope
+    if params.grammar.is_some() && has_tools && engine_config.enable_tool_grammar {
+        let grammar_json = serde_json::to_string(&params.grammar).ok();
+        if let Some(ref user_constraint) = grammar_json {
+            let lark = crate::utils::guidance::build_lark_outer_envelope(&resolved_tools, Some(user_constraint));
+            params.grammar = Some(TopLevelGrammar::from_lark(lark));
+            crate::log_debug!("[llg] Built outer envelope with user constraint");
+        }
     }
 
     if has_tools {

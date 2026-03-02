@@ -7,7 +7,211 @@ use tokenizers::Tokenizer;
 use toktrie::{SimpleVob, TokTrie};
 use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
-use crate::utils::config::Constraint;
+use crate::tools::Tool;
+use serde_json::json;
+use std::collections::HashMap as StdHashMap;
+
+/// Sanitize a string by removing all non-ASCII bytes (including magic byte 0xFF)
+/// This is used for tool choice strings to ensure only safe ASCII characters reach llguidance lexer
+pub fn sanitize_to_ascii(s: &str) -> String {
+    s.bytes()
+        .filter(|&b| b.is_ascii())
+        .map(|b| b as char)
+        .collect::<String>()
+}
+
+/// Sanitize a string by removing invalid UTF-8 sequences and control characters
+/// This ensures proper UTF-8 encoding before passing to llguidance grammar parser
+pub fn sanitize_utf8_valid(s: &str) -> String {
+    let mut result = String::new();
+    for ch in s.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            continue;  // Skip control characters except newline/tab
+        }
+        result.push(ch);
+    }
+    result
+}
+
+// Wrapper functions that sanitize inputs before passing to llguidance
+
+/// A grammar fragment with a tag and body
+#[derive(Debug, Clone)]
+pub struct GrammarFragment {
+    pub tag: String,
+    pub body: String,
+}
+
+impl GrammarFragment {
+    pub fn new(tag: impl Into<String>, body: impl Into<String>) -> Self {
+        Self {
+            tag: tag.into(),
+            body: body.into(),
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        format!("{}: {}", self.tag, self.body)
+    }
+
+    pub fn contains(&self, s: &str) -> bool {
+        self.body.contains(s)
+    }
+}
+
+/// A composed grammar that ORs two grammar fragments
+#[derive(Debug, Clone)]
+pub struct ComposedGrammar {
+    pub text_fragment: Option<GrammarFragment>,
+    pub tool_fragment: Option<GrammarFragment>,
+}
+
+impl ComposedGrammar {
+    pub fn new() -> Self {
+        Self {
+            text_fragment: None,
+            tool_fragment: None,
+        }
+    }
+
+    pub fn with_text_fragment(mut self, fragment: GrammarFragment) -> Self {
+        self.text_fragment = Some(fragment);
+        self
+    }
+
+    pub fn with_tool_fragment(mut self, fragment: GrammarFragment) -> Self {
+        self.tool_fragment = Some(fragment);
+        self
+    }
+
+    pub fn to_lark_string(&self) -> String {
+        let text_tag = self.text_fragment.as_ref().map(|f| f.tag.as_str()).unwrap_or("TEXT");
+        let tool_tag = self.tool_fragment.as_ref().map(|f| f.tag.as_str()).unwrap_or("tool_call");
+
+        let mut result = format!("start: {} | {}\n", text_tag, tool_tag);
+
+        if let Some(frag) = &self.text_fragment {
+            result.push_str(&format!("{}: {}\n", frag.tag, frag.body));
+        }
+
+        if let Some(frag) = &self.tool_fragment {
+            result.push_str(&format!("{}: {}\n", frag.tag, frag.body));
+        }
+
+        result
+    }
+}
+
+/// Create TopLevelGrammar from regex with ASCII sanitization
+/// This uses TopLevelGrammar::from_regex() which converts the regex to a Lark grammar
+/// using llguidance's internal regex_to_lark() function.
+pub fn top_level_grammar_from_regex(regex: &str) -> TopLevelGrammar {
+    let sanitized = sanitize_to_ascii(regex);
+    TopLevelGrammar::from_regex(&sanitized)
+}
+
+/// Build Lark grammar string for optimized outer envelope
+/// This creates a grammar that:
+/// - Makes tool-calling optional (allows normal text output via TEXT)
+/// - Embeds tool parameter schemas using %json { ... } for validation
+/// - When user_constraint is provided, uses it instead of TEXT for the first alternative
+pub fn build_lark_outer_envelope(tools: &[Tool], user_constraint: Option<&str>) -> String {
+    if tools.is_empty() {
+        // No tools - just allow any text output
+        return r#"start: TEXT
+TEXT: /(.|[\n\r])*/"#.to_string();
+    }
+
+    let mut obj_rules = Vec::new();
+
+    for tool in tools {
+        let name = &tool.function.name;
+        let schema_str = serde_json::to_string(&tool.function.parameters).unwrap_or_default();
+
+        obj_rules.push(format!(r#"
+obj_{name}: %json {schema}
+"#, name = name.replace("-", "_"), schema = schema_str));
+    }
+
+    // Build Lark grammar with outer envelope that makes tool-calling optional
+    // When user_constraint is provided, use it instead of TEXT for the first alternative
+    let (first_alt, user_grammar_def) = user_constraint.map_or(
+        ("TEXT".to_string(), "TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/".to_string()),
+        |uc| {
+            let sanitized = sanitize_utf8_valid(uc);
+            ("USER_GRAMMAR".to_string(), format!("USER_GRAMMAR: /{}/", sanitized))
+        }
+    );
+
+    let lark_grammar = format!(r#"start: {first_alt} | tool_call
+
+{user_grammar_def}
+
+TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/
+
+tool_call: <tool_call> ws json_array ws </tool_call>
+json_array: "[" obj ("," obj)* "]"
+
+obj:
+ws: /[ \t\n]*/"#);
+
+    format!("{}\n{}", lark_grammar.trim_end(), obj_rules.join("\n").trim_start())
+}
+
+/// Build JSON Schema from Tool definitions for llguidance constraints.
+/// This function extracts the parameter schemas from each tool and builds a composite schema.
+pub fn build_tool_schema(tools: &[Tool]) -> serde_json::Value {
+    crate::log_debug!("[llg] Building JSON Schema from tools");
+
+    let mut properties = StdHashMap::<String, serde_json::Value>::new();
+
+    // Extract required fields from each tool's parameters schema
+    let mut all_required = Vec::new();
+
+    for tool in tools {
+        // Insert the full parameters schema (including its own "required" array)
+        properties.insert(format!("{}_params", &tool.function.name), tool.function.parameters.clone());
+
+        // Extract the required field from this tool's parameters schema
+        let params = &tool.function.parameters;
+        if let Some(reqs) = params.get("required") {
+            if let Some(arr) = reqs.as_array() {
+                for item in arr.iter() {
+                    if let Some(s) = item.as_str() {
+                        all_required.push(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    crate::log_debug!("[llg] Tool schema built successfully with {} tools, {} required fields", tools.len(), all_required.len());
+
+    // Return a simple JSON Schema that describes valid tool call outputs
+    json!({
+        "type": "object",
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": properties,
+        "required": all_required
+    })
+}
+
+/// Create TopLevelGrammar from Lark string with UTF-8 sanitization
+pub fn top_level_grammar_from_lark(lark: &str) -> TopLevelGrammar {
+    let sanitized = sanitize_utf8_valid(lark);
+    TopLevelGrammar::from_lark(sanitized)
+}
+
+/// Create TopLevelGrammar from JSON schema with UTF-8 sanitization
+pub fn top_level_grammar_from_json_schema(schema: serde_json::Value) -> Result<TopLevelGrammar, anyhow::Error> {
+    // Convert to string and sanitize
+    let schema_str = serde_json::to_string_pretty(&schema)?;
+    let sanitized = sanitize_utf8_valid(&schema_str);
+
+    // Parse back to Value and create grammar
+    let value = serde_json::from_str(&sanitized)?;
+    Ok(TopLevelGrammar::from_json_schema(value))
+}
 
 /// Cache for precomputed mask slices to avoid expensive re-computation
 #[derive(Clone, Default)]
@@ -41,21 +245,10 @@ pub struct GuidanceState {
 }
 
 impl GuidanceState {
-    pub fn new(factory: Arc<ParserFactory>, constraint: &Constraint) -> Result<Self> {
-        crate::log_debug!("[llg] GuidanceState::new() called with constraint type: {:?}", constraint);
-        let grammar = llg_grammar_from_constraint(constraint)?;
-        crate::log_debug!("[llg] Grammar converted from constraint: {:?}", grammar.is_some());
-
-        let grammar = match grammar {
-            Some(g) => g,
-            None => {
-                crate::log_error!("[llg] Cannot create GuidanceState from Constraint::None");
-                anyhow::bail!("Cannot create GuidanceState from Constraint::None");
-            }
-        };
-
+    pub fn new_from_grammar(factory: Arc<ParserFactory>, grammar: &TopLevelGrammar) -> Result<Self> {
+        crate::log_debug!("[llg] GuidanceState::new_from_grammar() called");
         crate::log_trace!("[llg] Creating parser from grammar");
-        let parser = factory.create_parser(grammar)?;
+        let parser = factory.create_parser(grammar.clone())?;
         crate::log_trace!("[llg] Creating Matcher from parser");
         let matcher = Matcher::new(Ok(parser));
         crate::log_info!("[llg] GuidanceState created successfully for grammar");
@@ -265,14 +458,43 @@ pub fn load_toktrie_from_path(path: impl AsRef<std::path::Path>) -> Result<TokTr
     let env = ByteTokenizerEnv::new(tokenizer, None)?;
     Ok(env.tok_trie)
 }
+    
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::function_tool;
 
-pub fn llg_grammar_from_constraint(constraint: &Constraint) -> Result<Option<TopLevelGrammar>> {
-    let grm = match constraint {
-        Constraint::Regex(regex) => TopLevelGrammar::from_regex(regex),
-        Constraint::Lark(lark) => TopLevelGrammar::from_lark(lark.clone()),
-        Constraint::JsonSchema(value) => TopLevelGrammar::from_json_schema(value.clone()),
-        Constraint::Llguidance(value) => value.clone(),
-        Constraint::None => return Ok(None),
-    };
-    Ok(Some(grm))
+    #[test]
+    fn test_build_lark_outer_envelope_no_constraint() {
+        let tools = vec![function_tool("test_tool", "A test tool")
+            .param("arg", "string", "An argument", true)
+            .build()];
+        let grammar = build_lark_outer_envelope(&tools, None);
+        assert!(grammar.contains("start: TEXT | tool_call"));
+        assert!(grammar.contains("obj_test_tool: %json"));
+    }
+
+    #[test]
+    fn test_build_lark_outer_envelope_with_constraint() {
+        let tools = vec![function_tool("test_tool", "A test tool")
+            .param("arg", "string", "An argument", true)
+            .build()];
+        let grammar = build_lark_outer_envelope(&tools, Some("^test.*"));
+        assert!(grammar.contains("start: USER_GRAMMAR | tool_call"));
+        assert!(grammar.contains("USER_GRAMMAR: /^test.*/"));
+    }
+
+    #[test]
+    fn test_sanitize_utf8_valid() {
+        let input = "hello\x00\x01world";
+        let sanitized = sanitize_utf8_valid(input);
+        assert_eq!(sanitized, "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_to_ascii() {
+        let input = "hello";
+        let sanitized = sanitize_to_ascii(input);
+        assert_eq!(sanitized, "hello");
+    }
 }

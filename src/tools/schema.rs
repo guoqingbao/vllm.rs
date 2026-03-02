@@ -29,44 +29,63 @@ pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
 }
 
 /// Lark grammar helper functions for llguidance constraint building
+/// Sanitize string for Lark grammar - only allow ASCII characters
 fn lark_quote(value: &str) -> String {
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    // Strip non-ASCII characters to prevent grammar parser errors
+    let sanitized: String = value
+        .chars()
+        .filter(|c| c.is_ascii())
+        .collect();
+    let escaped = sanitized.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{}\"", escaped)
 }
 
 fn lark_literal(value: &str, is_special: bool) -> String {
     if is_special && value.starts_with('<') && value.ends_with('>') {
-        value.to_string()
+        // Only allow ASCII special tags
+        let sanitized: String = value
+            .chars()
+            .filter(|c| c.is_ascii())
+            .collect();
+        sanitized
     } else {
         lark_quote(value)
     }
 }
 
-/// Build a Lark grammar that wraps a tool call JSON schema between start/end markers.
+/// Build a Lark grammar fragment for tool calls (without start: line)
+/// This fragment describes the tool_call format for a specific model
 pub fn build_tool_call_lark_grammar(
     schema: &Value,
     start: &str,
     end: &str,
     start_is_special: bool,
     end_is_special: bool,
-) -> String {
+) -> GrammarFragment {
     let schema_json = serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_string());
 
     if start.is_empty() || end.is_empty() {
-        return format!("start: tool\ntool: %json {schema_json}\n");
+        return GrammarFragment::new(
+            "tool_call",
+            format!("tool: %json {schema_json}\n"),
+        );
     }
 
     let start_lit = lark_literal(start, start_is_special);
     let end_lit = lark_literal(end, end_is_special);
 
-    format!(
-        "start: {start_lit} _WS? tool _WS? {end_lit}\n\
-         tool: %json {schema_json}\n\
-         _WS: /[ \\t\\r\\n]+/\n"
+    GrammarFragment::new(
+        "tool_call",
+        format!(
+            "{start_lit} _WS? tool _WS? {end_lit}\n\
+             tool: %json {schema_json}\n\
+             _WS: /[ \\t\\r\\n]+/\n"
+        ),
     )
 }
 
-/// Build a Lark grammar for QwenCoder-style function/parameter tags with JSON values.
+/// Build a Lark grammar fragment for QwenCoder-style function/parameter tags with JSON values.
+/// This returns the tool_call fragment without the start: line.
 pub fn build_function_tag_lark_grammar(
     tools: &[Tool],
     start: &str,
@@ -75,12 +94,12 @@ pub fn build_function_tag_lark_grammar(
     end_is_special: bool,
 ) -> String {
     let mut rules: Vec<String> = Vec::new();
-    let start_tag = if start.is_empty() {
+    let _start_tag = if start.is_empty() {
         None
     } else {
         Some(lark_literal(start, start_is_special))
     };
-    let end_tag = if end.is_empty() {
+    let _end_tag = if end.is_empty() {
         None
     } else {
         Some(lark_literal(end, end_is_special))
@@ -88,21 +107,17 @@ pub fn build_function_tag_lark_grammar(
 
     let tool_rule_names: Vec<String> = (0..tools.len()).map(|i| format!("tool_{i}")).collect();
     let toolcall_rule = if tool_rule_names.is_empty() {
-        "toolcall:".to_string()
+        "tool_call:".to_string()
     } else {
-        format!("toolcall: {}", tool_rule_names.join(" | "))
+        format!("tool_call: {}", tool_rule_names.join(" | "))
     };
-
-    if let (Some(start_lit), Some(end_lit)) = (start_tag.as_ref(), end_tag.as_ref()) {
-        rules.push(format!("start: {start_lit} _WS? toolcall _WS? {end_lit}"));
-    } else {
-        rules.push("start: toolcall".to_string());
-    }
 
     rules.push(toolcall_rule);
 
     for (tool_idx, tool) in tools.iter().enumerate() {
-        let func_start = lark_quote(&format!("<‌function={}>", tool.function.name));
+        // Sanitize tool name to ASCII-only for grammar safety
+        let tool_name_ascii: String = tool.function.name.chars().filter(|c| c.is_ascii()).collect();
+        let func_start = lark_quote(&format!("<‌function={}>", tool_name_ascii));
         let func_end = lark_quote("<‌/function>");
 
         let params_schema = &tool.function.parameters;
@@ -114,7 +129,9 @@ pub fn build_function_tag_lark_grammar(
 
         if let Some(props) = props {
             for (param_idx, (param_name, schema)) in props.iter().enumerate() {
-                let param_tag = lark_quote(&format!("<‌parameter={}>", param_name));
+                // Sanitize parameter name to ASCII-only for grammar safety
+                let param_name_ascii: String = param_name.chars().filter(|c| c.is_ascii()).collect();
+                let param_tag = lark_quote(&format!("<‌parameter={}>", param_name_ascii));
                 let param_end = lark_quote("<‌/parameter>");
                 let value_rule = format!("value_{tool_idx}_{param_idx}");
                 let param_rule = format!("param_{tool_idx}_{param_idx}");
@@ -423,8 +440,10 @@ pub mod common {
     }
 }
 
+use crate::utils::guidance::GrammarFragment;
+
 /// Build a Lark grammar for choice constraints (structured outputs choice field)
-pub fn build_choice_lark_grammar(choices: &[String]) -> Result<String, String> {
+pub fn build_choice_lark_grammar(choices: &[String]) -> Result<GrammarFragment, String> {
     if choices.is_empty() {
         return Err("structured_outputs.choice must include at least one option".to_string());
     }
@@ -437,7 +456,8 @@ pub fn build_choice_lark_grammar(choices: &[String]) -> Result<String, String> {
         parts.push(lark_quote(choice));
     }
 
-    Ok(format!("start: {}\\n", parts.join(" | ")))
+    let body = parts.join(" | ");
+    Ok(GrammarFragment::new("choice", body))
 }
 
 /// Normalize a tag string for structural_tag parsing

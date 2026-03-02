@@ -7,14 +7,6 @@ use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum Constraint {
-    Regex(String),
-    Lark(String),
-    JsonSchema(serde_json::Value),
-    Llguidance(TopLevelGrammar),
-    None,
-}
 use std::collections::HashMap;
 use std::fmt;
 
@@ -22,18 +14,16 @@ use std::fmt;
 impl SamplingParams {
     /// Convert grammar to constraint for GuidanceState construction
     /// Prioritizes constraint field, falls back to grammar field
-    pub fn to_constraint(&self) -> Option<Constraint> {
-        self.constraint.clone().or_else(|| {
-            self.grammar.as_ref().map(|g| Constraint::Llguidance(g.clone()))
-        })
+    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
+        self.grammar.clone()
     }
 }
 
 #[cfg(feature = "python")]
 impl SamplingParams {
     /// Convert grammar to constraint for GuidanceState construction
-    pub fn to_constraint(&self) -> Option<Constraint> {
-        self.grammar.as_ref().map(|g| Constraint::Llguidance(g.clone()))
+    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
+        self.grammar.clone()
     }
 }
 
@@ -463,8 +453,8 @@ impl EngineConfig {
              tool_prompt_template,
              pd_server_prefix_cache_ratio,
              pd_client_prefix_cache_ratio,
-             allow_constraint_api: false,
-             enable_tool_grammar: false,
+             allow_constraint_api,
+             enable_tool_grammar,
           }
       }
 }
@@ -500,8 +490,6 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
-    #[serde(default)]
-    pub constraint: Option<Constraint>,
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
     pub grammar: Option<TopLevelGrammar>,
@@ -538,9 +526,6 @@ pub struct SamplingParams {
     pub mcp_mode: Option<bool>,
     #[pyo3(get, set)]
     pub thinking: Option<bool>,
-    #[cfg(not(feature = "python"))]
-    #[serde(default)]
-    pub constraint: Option<Constraint>,
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
     pub grammar: Option<TopLevelGrammar>,
@@ -571,7 +556,6 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
-            constraint: None,
             grammar: None,
             thinking,
         }
@@ -590,7 +574,6 @@ impl SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
-            constraint: None,
             grammar: None,
             thinking: None,
         }
@@ -612,7 +595,6 @@ impl Default for SamplingParams {
             mcp_mode: None,
             stop_sequences: None,
             stop_token_ids: None,
-            constraint: None,
             grammar: None,
             thinking: None,
         }
