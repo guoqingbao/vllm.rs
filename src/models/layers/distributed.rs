@@ -65,6 +65,7 @@ impl TensorParallelColumnLinear {
 pub struct MergedParallelColumnLinear {
     linears: Vec<TensorParallelColumnLinear>,
     biases: Vec<Option<Tensor>>,
+    output_splits: Option<Vec<usize>>,
 }
 
 impl MergedParallelColumnLinear {
@@ -72,9 +73,40 @@ impl MergedParallelColumnLinear {
         Self {
             linears,
             biases: Vec::new(),
+            output_splits: None,
         }
     }
     pub fn forward(&self, x: &Tensor) -> Result<Vec<Tensor>> {
+        if let Some(output_splits) = &self.output_splits {
+            if self.linears.len() != 1 {
+                candle_core::bail!(
+                    "MergedParallelColumnLinear expected exactly 1 linear for split outputs, got {}",
+                    self.linears.len()
+                );
+            }
+            let mut ys = self.linears[0].forward(x)?;
+            if let Some(Some(bias)) = self.biases.first() {
+                ys = ys.broadcast_add(bias)?;
+            }
+            let split_dim = ys.dims().len().saturating_sub(1);
+            let total_dim = ys.dim(split_dim)?;
+            let expected_dim: usize = output_splits.iter().sum();
+            if total_dim != expected_dim {
+                candle_core::bail!(
+                    "MergedParallelColumnLinear split mismatch: output dim {} vs expected {}",
+                    total_dim,
+                    expected_dim
+                );
+            }
+            let mut outputs = Vec::with_capacity(output_splits.len());
+            let mut start = 0usize;
+            for split_size in output_splits {
+                outputs.push(ys.narrow(split_dim, start, *split_size)?.contiguous()?);
+                start += *split_size;
+            }
+            return Ok(outputs);
+        }
+
         let mut xss = Vec::<Tensor>::new();
         for i in 0..self.linears.len() {
             let mut xs = self.linears[i].forward(x)?;
@@ -377,6 +409,7 @@ impl MergedParallelColumnLinear {
         Ok(Self {
             linears: vec_linear,
             biases: vec![None; chunks],
+            output_splits: None,
         })
     }
 
@@ -398,7 +431,12 @@ impl MergedParallelColumnLinear {
             false
         };
 
-        if quant_cfg.is_some() || vb.is_qvar_builder() {
+        if vb.is_qvar_builder() {
+            candle_core::bail!(
+                "Merged quantized weight is not supported for GGUF varbuilder at the moment!"
+            );
+        }
+        if quant_cfg.is_some() && !is_fp8_quant {
             candle_core::bail!(
                 "Merged quantized weight is not supported at the moment, using ISQ instead!"
             );
@@ -413,21 +451,173 @@ impl MergedParallelColumnLinear {
             }
         }
         let mut vec_linear = Vec::<TensorParallelColumnLinear>::new();
+        let mut output_splits: Option<Vec<usize>> = None;
         use crate::models::layers::linear::{LinearX, LnFp8, QLinear};
         match vb.0 {
             Either::Left(v) => {
                 if is_fp8_quant {
-                    for chunk_idx in 0..chunks.len() {
-                        let linear = LinearX::LnFp8(LnFp8::new(
-                            in_dim,
-                            out_dim,
-                            v.clone(),
-                            shard(0, chunk_idx, chunks.len()),
-                            quant_cfg.as_ref().unwrap(),
-                        )?);
-                        let ln = TensorParallelColumnLinear { linear };
-                        vec_linear.push(ln);
+                    if chunk_dim != 0 {
+                        candle_core::bail!(
+                            "FP8 merged chunk loading currently supports chunk_dim=0 only, got {}",
+                            chunk_dim
+                        );
                     }
+                    let quant_cfg = quant_cfg.as_ref().ok_or_else(|| {
+                        candle_core::Error::Msg(
+                            "FP8 merged chunk loading requires quantization config".to_string(),
+                        )
+                    })?;
+
+                    let block_size = quant_cfg
+                        .weight_block_size
+                        .clone()
+                        .unwrap_or(vec![128, 128]);
+                    if block_size.len() != 2 {
+                        candle_core::bail!("LnFp8: weight_block_size must have 2 elements");
+                    }
+                    let by = block_size[0];
+                    let bx = block_size[1];
+                    if by == 0 || bx == 0 {
+                        candle_core::bail!("LnFp8: invalid zero in weight_block_size");
+                    }
+
+                    let weight = v.get_with_hints_dtype(
+                        (out_dim, in_dim),
+                        "weight",
+                        Shard::default(),
+                        DType::U8,
+                    )?;
+                    let scale_dim0 = (out_dim + by - 1) / by;
+                    let scale_dim1 = (in_dim + bx - 1) / bx;
+                    let weight_scale = match v.get_with_hints_dtype(
+                        (scale_dim0, scale_dim1),
+                        "weight_scale",
+                        Shard::default(),
+                        DType::F32,
+                    ) {
+                        Ok(s) => s,
+                        Err(_) => v
+                            .get_with_hints_dtype(
+                                (scale_dim0, scale_dim1),
+                                "weight_scale_inv",
+                                Shard::default(),
+                                DType::F32,
+                            )
+                            .map_err(|_| {
+                                candle_core::Error::Msg(
+                                    "LnFp8: Missing weight_scale or weight_scale_inv".into(),
+                                )
+                            })?,
+                    };
+
+                    #[cfg(feature = "cuda")]
+                    let sm_version =
+                        attention_rs::cuda_utils::sm_version(v.device().as_cuda_device()?)
+                            .unwrap_or(0) as usize;
+
+                    #[cfg(not(feature = "cuda"))]
+                    let sm_version = 0;
+
+                    let mut chunk_start = 0;
+                    let mut local_weight_chunks = Vec::<Tensor>::with_capacity(chunks.len());
+                    let mut local_scale_chunks = Vec::<Tensor>::with_capacity(chunks.len());
+                    let mut local_output_splits = Vec::<usize>::with_capacity(chunks.len());
+                    for chunk_idx in 0..chunks.len() {
+                        let chunk_size = chunks[chunk_idx];
+                        let ws = weight.narrow(0, chunk_start, chunk_size)?;
+                        let chunk_shard = if let Some(chunk_shards) = &chunk_shards {
+                            chunk_shards[chunk_idx]
+                        } else {
+                            shard(0, comm.rank(), comm.world_size())
+                        };
+                        if chunk_shard.dim != 0 {
+                            candle_core::bail!(
+                                "FP8 merged chunk {} shard dim {} is unsupported, expected 0",
+                                chunk_idx,
+                                chunk_shard.dim
+                            );
+                        }
+                        if ws.dim(0)? % chunk_shard.world_size != 0 {
+                            candle_core::bail!(
+                                "FP8 merged chunk {} dim {} is not divisible by shard world_size {}",
+                                chunk_idx,
+                                ws.dim(0)?,
+                                chunk_shard.world_size
+                            );
+                        }
+                        let local_out = ws.dim(0)? / chunk_shard.world_size;
+                        if local_out == 0 {
+                            candle_core::bail!(
+                                "FP8 merged chunk {} produced empty shard",
+                                chunk_idx
+                            );
+                        }
+                        let local_out_start = chunk_start + chunk_shard.rank * local_out;
+                        if local_out_start % by != 0 {
+                            candle_core::bail!(
+                                "FP8 merged chunk {} local start {} is not aligned to block_size_y {}",
+                                chunk_idx,
+                                local_out_start,
+                                by
+                            );
+                        }
+                        let ws_chunk = ws
+                            .narrow(0, chunk_shard.rank * local_out, local_out)?
+                            .contiguous()?;
+                        local_output_splits.push(local_out);
+
+                        let scale_row_start = local_out_start / by;
+                        let scale_rows = (local_out + by - 1) / by;
+                        if scale_row_start + scale_rows > scale_dim0 {
+                            candle_core::bail!(
+                                "FP8 merged chunk {} scale slice out of bounds: start={}, rows={}, total={}",
+                                chunk_idx,
+                                scale_row_start,
+                                scale_rows,
+                                scale_dim0
+                            );
+                        }
+                        let ws_scale = weight_scale
+                            .narrow(0, scale_row_start, scale_rows)?
+                            .contiguous()?;
+                        local_weight_chunks.push(ws_chunk);
+                        local_scale_chunks.push(ws_scale);
+                        chunk_start += chunk_size;
+                    }
+
+                    let merged_weight = if local_weight_chunks.len() == 1 {
+                        local_weight_chunks.remove(0)
+                    } else {
+                        let weight_refs = local_weight_chunks.iter().collect::<Vec<_>>();
+                        Tensor::cat(&weight_refs, 0)?
+                    };
+
+                    let merged_scale = if local_scale_chunks.len() == 1 {
+                        local_scale_chunks.remove(0)
+                    } else {
+                        let scale_refs = local_scale_chunks.iter().collect::<Vec<_>>();
+                        Tensor::cat(&scale_refs, 0)?
+                    };
+
+                    #[cfg(feature = "cutlass")]
+                    let merged_scale = if sm_version >= 100 {
+                        merged_scale.t()?
+                    } else if sm_version >= 90 {
+                        merged_scale.t()?.contiguous()?
+                    } else {
+                        merged_scale
+                    };
+
+                    let linear = LinearX::LnFp8(LnFp8 {
+                        weight: merged_weight,
+                        weight_scale: merged_scale,
+                        bias: None,
+                        weight_block_size: block_size.clone(),
+                        sm_version,
+                    });
+                    let ln = TensorParallelColumnLinear { linear };
+                    vec_linear.push(ln);
+                    output_splits = Some(local_output_splits);
                 } else {
                     let weight = v.get((out_dim, in_dim), "weight")?;
                     let weight = if weight.dtype() != dtype {
@@ -488,9 +678,11 @@ impl MergedParallelColumnLinear {
             }
         }
 
+        let linear_count = vec_linear.len();
         Ok(Self {
             linears: vec_linear,
-            biases: vec![None; chunks.len()],
+            biases: vec![None; linear_count],
+            output_splits,
         })
     }
 }
