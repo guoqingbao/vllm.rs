@@ -13,7 +13,7 @@ use crate::runner::{
     receive_local, send_and_expect_ack, send_local, MessageType, RunnerInitRequest,
 };
 use crate::server::logger::ChatCompletionLogger;
-use crate::server::parser::ToolConfig;
+use crate::server::parser::{detect_prefilled_reasoning_end_marker, ToolConfig};
 use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
 use crate::transfer::PdRole;
@@ -90,6 +90,7 @@ pub struct LLMEngine {
     request_types: HashMap<usize, RequestType>,
     decode_start_times: HashMap<usize, usize>,
     decode_length: HashMap<usize, usize>,
+    seq_prefilled_reasoning_end: HashMap<usize, String>,
     last_check_throughput_time: usize,
     active_requests: HashSet<usize>,
     cancelled_sequences: Vec<usize>,
@@ -450,6 +451,7 @@ impl LLMEngine {
             request_types: HashMap::new(),
             decode_start_times: HashMap::new(),
             decode_length: HashMap::new(),
+            seq_prefilled_reasoning_end: HashMap::new(),
             last_check_throughput_time: 0,
             active_requests: HashSet::new(),
             cancelled_sequences: Vec::new(),
@@ -574,6 +576,9 @@ impl LLMEngine {
             );
         }
         let seq_id = self.scheduler.add(seq);
+        if let Some(end_marker) = detect_prefilled_reasoning_end_marker(prompt) {
+            self.seq_prefilled_reasoning_end.insert(seq_id, end_marker);
+        }
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -812,6 +817,7 @@ impl LLMEngine {
                     }
                     self.decode_start_times.remove(&seq_id);
                     self.decode_length.remove(&seq_id);
+                    self.seq_prefilled_reasoning_end.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
                     if self.econfig.server_mode.unwrap_or(true) {
                         self.scheduler.print_free_blocks();
@@ -949,6 +955,7 @@ impl LLMEngine {
             }
             self.stream_decoders.remove(&seq_id);
             self.decode_start_times.remove(&seq_id);
+            self.seq_prefilled_reasoning_end.remove(&seq_id);
             if let Some(r) = &reason {
                 if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                     if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -1279,6 +1286,13 @@ impl LLMEngine {
         crate::log_error!("***Release all resources for future usage!");
         self.scheduler.clear_finished();
         self.scheduler.release_waitings();
+        self.seq_prefilled_reasoning_end.clear();
+    }
+
+    /// Returns the reasoning end marker when the prompt for this sequence
+    /// already ended with an opening think marker.
+    pub fn get_prefilled_reasoning_end_marker(&self, seq_id: usize) -> Option<String> {
+        self.seq_prefilled_reasoning_end.get(&seq_id).cloned()
     }
 
     pub fn generate_stream(

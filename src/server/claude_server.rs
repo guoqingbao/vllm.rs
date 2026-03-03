@@ -1484,6 +1484,10 @@ pub async fn messages(
             .unwrap_or(256);
         let (response_tx, client_rx) = flume::bounded(buffer_size);
         let engine_clone = data.engine.clone();
+        let prefilled_reasoning_end = {
+            let e = data.engine.read();
+            e.get_prefilled_reasoning_end_marker(seq_id)
+        };
         let stream_model_id = model_id.clone();
         let stream_parser_model_id = parser_model_id.clone();
         let stream_model_type = model_type.clone();
@@ -1607,6 +1611,7 @@ pub async fn messages(
                 stream_tools.clone(),
                 enforce_parser.clone(),
             );
+            tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end.clone());
             let should_parse_tools = !stream_tools.is_empty();
 
             let mut current_stream = stream;

@@ -2,6 +2,7 @@ pub mod chat_template;
 pub mod command;
 pub mod config;
 pub mod downloader;
+pub mod env;
 pub mod gguf_helper;
 pub mod gguf_varbuilder;
 pub mod gptq;

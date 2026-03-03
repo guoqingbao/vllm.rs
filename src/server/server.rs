@@ -389,15 +389,20 @@ pub async fn chat_completion(
         // Clone data needed for the async task
         let engine_clone = data.engine.clone();
         let _img_cfg_clone = img_cfg.clone();
+        let prefilled_reasoning_end = {
+            let e = data.engine.read();
+            e.get_prefilled_reasoning_end_marker(seq_id)
+        };
 
         let tool_config = tool_config.clone();
-        let tool_parser = StreamToolParser::new_with_config(
+        let mut tool_parser = StreamToolParser::new_with_config(
             &model_type,
             parser_model_id.clone(),
             tool_config,
             resolved_tools.clone(),
             enforce_parser.clone(),
         );
+        tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
         let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
