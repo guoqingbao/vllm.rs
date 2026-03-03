@@ -164,7 +164,7 @@ pub struct ExtraBody {
 // GrammarFragment conversion functions
 pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<TopLevelGrammar>> {
     crate::log_debug!("[llg] grammar_fragment_from_structured_outputs() called");
-    
+
     let mut selected: Option<TopLevelGrammar> = None;
 
     let mut set_grammar = |grammar: TopLevelGrammar| -> Result<()> {
@@ -233,7 +233,7 @@ pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) 
 
 pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -> Result<Option<TopLevelGrammar>> {
     crate::log_debug!("[llg] grammar_fragment_from_response_format() called with type: {}", response_format.format_type);
-    
+
     match response_format.format_type.as_str() {
         "json_schema" => {
             let Some(schema) = response_format.json_schema.as_ref() else {

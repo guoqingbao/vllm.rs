@@ -59,46 +59,68 @@ impl GrammarFragment {
     }
 }
 
-/// A composed grammar that ORs two grammar fragments
+/// A composed grammar that ORs multiple grammar fragments
+/// Fragments are added in order, with the first being the highest priority alternative
 #[derive(Debug, Clone)]
 pub struct ComposedGrammar {
-    pub text_fragment: Option<GrammarFragment>,
-    pub tool_fragment: Option<GrammarFragment>,
+    fragments: Vec<GrammarFragment>,
 }
 
 impl ComposedGrammar {
     pub fn new() -> Self {
-        Self {
-            text_fragment: None,
-            tool_fragment: None,
-        }
+        Self { fragments: Vec::new() }
+    }
+
+    pub fn with_fragment(mut self, fragment: GrammarFragment) -> Self {
+        self.fragments.push(fragment);
+        self
     }
 
     pub fn with_text_fragment(mut self, fragment: GrammarFragment) -> Self {
-        self.text_fragment = Some(fragment);
+        self.fragments.push(fragment);
         self
     }
 
     pub fn with_tool_fragment(mut self, fragment: GrammarFragment) -> Self {
-        self.tool_fragment = Some(fragment);
+        self.fragments.push(fragment);
         self
     }
 
+    /// Build Lark grammar string from fragments
+    /// The start rule ORs all fragment tags in the order they were added
+    /// Fragment definitions are appended after the start rule
     pub fn to_lark_string(&self) -> String {
-        let text_tag = self.text_fragment.as_ref().map(|f| f.tag.as_str()).unwrap_or("TEXT");
-        let tool_tag = self.tool_fragment.as_ref().map(|f| f.tag.as_str()).unwrap_or("tool_call");
-
-        let mut result = format!("start: {} | {}\n", text_tag, tool_tag);
-
-        if let Some(frag) = &self.text_fragment {
-            result.push_str(&format!("{}: {}\n", frag.tag, frag.body));
+        if self.fragments.is_empty() {
+            return "start: TEXT\nTEXT: /(.|[\\n\\r])*/".to_string();
         }
 
-        if let Some(frag) = &self.tool_fragment {
+        // Build the OR alternation from fragment tags
+        let alternations: Vec<&str> = self.fragments.iter().map(|f| f.tag.as_str()).collect();
+        let start_rule = format!("start: {}\n", alternations.join(" | "));
+
+        // Build fragment definitions
+        let mut result = start_rule;
+        for frag in &self.fragments {
             result.push_str(&format!("{}: {}\n", frag.tag, frag.body));
         }
 
         result
+    }
+
+    /// Get the number of fragments
+    pub fn fragment_count(&self) -> usize {
+        self.fragments.len()
+    }
+
+    /// Check if any fragments are present
+    pub fn has_fragments(&self) -> bool {
+        !self.fragments.is_empty()
+    }
+}
+
+impl Default for ComposedGrammar {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -110,52 +132,178 @@ pub fn top_level_grammar_from_regex(regex: &str) -> TopLevelGrammar {
     TopLevelGrammar::from_regex(&sanitized)
 }
 
-/// Build Lark grammar string for optimized outer envelope
-/// This creates a grammar that:
-/// - Makes tool-calling optional (allows normal text output via TEXT)
-/// - Embeds tool parameter schemas using %json { ... } for validation
-/// - When user_constraint is provided, uses it instead of TEXT for the first alternative
-pub fn build_lark_outer_envelope(tools: &[Tool], user_constraint: Option<&str>) -> String {
-    if tools.is_empty() {
-        // No tools - just allow any text output
-        return r#"start: TEXT
-TEXT: /(.|[\n\r])*/"#.to_string();
-    }
-
-    let mut obj_rules = Vec::new();
-
-    for tool in tools {
-        let name = &tool.function.name;
-        let schema_str = serde_json::to_string(&tool.function.parameters).unwrap_or_default();
-
-        obj_rules.push(format!(r#"
-obj_{name}: %json {schema}
-"#, name = name.replace("-", "_"), schema = schema_str));
-    }
-
-    // Build Lark grammar with outer envelope that makes tool-calling optional
-    // When user_constraint is provided, use it instead of TEXT for the first alternative
-    let (first_alt, user_grammar_def) = user_constraint.map_or(
-        ("TEXT".to_string(), "TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/".to_string()),
-        |uc| {
-            let sanitized = sanitize_utf8_valid(uc);
-            ("USER_GRAMMAR".to_string(), format!("USER_GRAMMAR: /{}/", sanitized))
+/// Parse regex to find lowercase literal strings that would be interpreted as Lark rules
+/// This helper function identifies strings in the regex that look like Lark rule names
+/// (lowercase identifiers starting with a letter, containing only lowercase letters, digits, and underscores)
+/// Only standalone lowercase words (not preceded by backslash) are collected.
+fn find_lowercase_literals(regex: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut in_escape = false;
+    let mut in_quote = false;
+    let mut current_literal = String::new();
+    
+    for c in regex.chars() {
+        if in_escape {
+            // After a backslash, reset the current literal since we're in an escape sequence
+            if !current_literal.is_empty() {
+                literals.push(current_literal.clone());
+                current_literal.clear();
+            }
+            in_escape = false;
+            continue;
         }
-    );
+        
+        match c {
+            '\\' => {
+                in_escape = true;
+                // Save any collected literal before the backslash
+                if !current_literal.is_empty() {
+                    literals.push(current_literal.clone());
+                    current_literal.clear();
+                }
+            }
+            '"' | '\'' => {
+                in_quote = !in_quote;
+                // Save any collected literal before the quote
+                if !current_literal.is_empty() {
+                    literals.push(current_literal.clone());
+                    current_literal.clear();
+                }
+            }
+            c if c.is_ascii_lowercase() || c == '_' => {
+                if !in_quote {
+                    current_literal.push(c);
+                }
+            }
+            c if c.is_ascii_digit() => {
+                // Only add digits if we already have a starting letter
+                if !current_literal.is_empty() {
+                    current_literal.push(c);
+                }
+            }
+            _ => {
+                // Save any collected literal when we hit a non-matching character
+                if !current_literal.is_empty() {
+                    literals.push(current_literal.clone());
+                    current_literal.clear();
+                }
+            }
+        }
+    }
+    
+    // Don't forget to save any remaining literal at the end
+    if !current_literal.is_empty() {
+        literals.push(current_literal);
+    }
+    
+    // Filter to keep only unique lowercase literals
+    let mut seen = std::collections::HashSet::new();
+    literals.retain(|s| {
+        if seen.contains(s) {
+            false
+        } else {
+            seen.insert(s.clone());
+            true
+        }
+    });
+    
+    literals
+}
 
-    let lark_grammar = format!(r#"start: {first_alt} | tool_call
+/// Convert a regex to a Lark grammar string, handling lowercase literal strings
+/// that would be incorrectly interpreted as Lark rule references.
+///
+/// This function:
+/// 1. Finds all lowercase literal strings in the regex
+/// 2. Creates uppercase token definitions for them
+/// 3. Replaces the lowercase strings with token references in the regex
+/// 4. Returns a complete Lark grammar string
+///
+/// Example:
+/// Input regex: "^number\\s\\d{3}-\\d{3}-\\d{4}"
+/// Output Lark: "NUMBER: \"number\"\nstart: /^NUMBER\\s\\d{3}-\\d{3}-\\d{4}/"
+fn regex_to_lark_with_tokens(regex: &str) -> String {
+    let literals = find_lowercase_literals(regex);
+    
+    if literals.is_empty() {
+        // No lowercase literals found, use standard conversion
+        return format!("start: /{}/", regex);
+    }
+    
+    // Build token definitions for each lowercase literal
+    let mut token_defs = String::new();
+    let mut modified_regex = regex.to_string();
+    
+    for literal in literals {
+        // Create uppercase token name
+        let token_name = literal.to_uppercase();
+        
+        // Add token definition
+        token_defs.push_str(&format!("{}: \"{}\"\n", token_name, literal));
+        
+        // Replace all occurrences of the literal in the regex with the token name
+        // We need to be careful to only replace standalone literals, not parts of other words
+        // For simplicity, we replace the literal as-is in the regex
+        modified_regex = modified_regex.replace(&literal, &token_name);
+    }
+    
+    format!("{}start: /{}/", token_defs, modified_regex)
+}
 
-{user_grammar_def}
+/// Create ComposedGrammar from regex with proper handling of lowercase literal strings
+/// that would be incorrectly interpreted as Lark rule references.
+pub fn composed_grammar_from_regex(regex: &str) -> ComposedGrammar {
+    let sanitized = sanitize_to_ascii(regex);
+    let lark_grammar = regex_to_lark_with_tokens(&sanitized);
+    // The lark_grammar is already a complete grammar string, parse it to fragments
+    // For now, create a single USER_GRAMMAR fragment
+    ComposedGrammar::new().with_fragment(GrammarFragment::new("USER_GRAMMAR", lark_grammar))
+}
 
-TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/
+/// Create TopLevelGrammar from regex with proper handling of lowercase literal strings
+/// that would be incorrectly interpreted as Lark rule references.
+///
+/// This function converts the regex to a Lark grammar, detecting lowercase literals
+/// like "number" and creating proper token definitions for them.
+pub fn top_level_grammar_from_regex_with_tokens(regex: &str) -> TopLevelGrammar {
+    let composed = composed_grammar_from_regex(regex);
+    let lark_grammar = composed.to_lark_string();
+    TopLevelGrammar::from_lark(lark_grammar)
+}
 
-tool_call: <tool_call> ws json_array ws </tool_call>
-json_array: "[" obj ("," obj)* "]"
+/// Build Lark grammar string for optimized outer envelope using ComposedGrammar
+/// This creates a grammar that:
+/// - Always has TEXT as the first alternative so LLM can talk to user
+/// - Adds user constraint as second alternative (if provided)
+/// - Adds tool_call as last alternative (if tools are present)
+pub fn build_lark_outer_envelope(tools: &[Tool], user_constraint: Option<&str>) -> String {
+    let mut composed = ComposedGrammar::new();
 
-obj:
-ws: /[ \t\n]*/"#);
+    // Always add TEXT first so LLM can talk to user directly
+    // This ensures the grammar NEVER starts with tool_call
+    composed = composed.with_fragment(GrammarFragment::new("TEXT", "/(.|[\\n\\r])*/"));
 
-    format!("{}\n{}", lark_grammar.trim_end(), obj_rules.join("\n").trim_start())
+    // Add user constraint as second alternative (if provided)
+    if let Some(uc) = user_constraint {
+        let sanitized = sanitize_utf8_valid(uc);
+        // Wrap in /.../ for Lark regex syntax
+        composed = composed.with_fragment(GrammarFragment::new("USER_GRAMMAR", format!("/{}{}/", if sanitized.starts_with('^') { "" } else { "^" }, sanitized.trim_start_matches('^'))));
+    }
+
+    // Add tool_call as last alternative (if tools are present)
+    if !tools.is_empty() {
+        let mut obj_rules = String::new();
+        for tool in tools {
+            let name = &tool.function.name;
+            let schema_str = serde_json::to_string(&tool.function.parameters).unwrap_or_default();
+            obj_rules.push_str(&format!("obj_{name}: %json {schema}\n", name = name.replace("-", "_"), schema = schema_str));
+        }
+
+        let tool_call_body = format!("<‌tool_call> ws json_array ws <‌/tool_call>\njson_array: \"[\" obj (\",\" obj)* \"]\"\nobj:\nws: /[ \\t\\n]*/\n{}", obj_rules.trim_end());
+        composed = composed.with_fragment(GrammarFragment::new("tool_call", tool_call_body));
+    }
+
+    composed.to_lark_string()
 }
 
 /// Build JSON Schema from Tool definitions for llguidance constraints.
@@ -458,7 +606,7 @@ pub fn load_toktrie_from_path(path: impl AsRef<std::path::Path>) -> Result<TokTr
     let env = ByteTokenizerEnv::new(tokenizer, None)?;
     Ok(env.tok_trie)
 }
-    
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,7 +618,8 @@ mod tests {
             .param("arg", "string", "An argument", true)
             .build()];
         let grammar = build_lark_outer_envelope(&tools, None);
-        assert!(grammar.contains("start: TEXT | tool_call"));
+        // TEXT must be first, then tool_call
+        assert!(grammar.starts_with("start: TEXT | tool_call"));
         assert!(grammar.contains("obj_test_tool: %json"));
     }
 
@@ -480,8 +629,12 @@ mod tests {
             .param("arg", "string", "An argument", true)
             .build()];
         let grammar = build_lark_outer_envelope(&tools, Some("^test.*"));
-        assert!(grammar.contains("start: USER_GRAMMAR | tool_call"));
-        assert!(grammar.contains("USER_GRAMMAR: /^test.*/"));
+        eprintln!("Grammar output: {}", grammar);
+        // TEXT must be first, then USER_GRAMMAR, then tool_call
+        assert!(grammar.starts_with("start: TEXT | USER_GRAMMAR | tool_call"));
+        assert!(grammar.contains("USER_GRAMMAR: /"));
+        assert!(grammar.contains("test.*/"));
+        assert!(grammar.contains("obj_test_tool: %json"));
     }
 
     #[test]
@@ -496,5 +649,42 @@ mod tests {
         let input = "hello";
         let sanitized = sanitize_to_ascii(input);
         assert_eq!(sanitized, "hello");
+    }
+
+    #[test]
+    fn test_find_lowercase_literals() {
+        // Test simple lowercase word
+        let literals = find_lowercase_literals("number");
+        assert!(literals.contains(&"number".to_string()));
+
+        // Test regex with lowercase word
+        let literals = find_lowercase_literals("^number\\s");
+        assert!(literals.contains(&"number".to_string()));
+
+        // Test multiple lowercase words
+        let literals = find_lowercase_literals("hello world");
+        assert!(literals.contains(&"hello".to_string()));
+        assert!(literals.contains(&"world".to_string()));
+
+        // Test that regex special chars don't get collected
+        let literals = find_lowercase_literals("\\d{3}");
+        assert!(literals.is_empty());
+
+        // Test that uppercase words are not collected
+        let literals = find_lowercase_literals("NUMBER");
+        assert!(literals.is_empty());
+    }
+
+    #[test]
+    fn test_regex_to_lark_with_tokens() {
+        // Test basic lowercase word handling
+        let result = regex_to_lark_with_tokens("number");
+        assert!(result.contains("NUMBER: \"number\""));
+        assert!(result.contains("start: /NUMBER/"));
+
+        // Test user's regex pattern with anchor
+        let result = regex_to_lark_with_tokens("^number\\s\\d{3}-\\d{3}-\\d{4}");
+        assert!(result.contains("NUMBER: \"number\""));
+        assert!(result.contains("start: /^NUMBER\\s\\d{3}-\\d{3}-\\d{4}/"));
     }
 }

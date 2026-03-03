@@ -421,19 +421,19 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 2. **构建 Python 包**
 
 ```bash
-# Naive CUDA (只能用于单卡推理) 
+# Naive CUDA (只能用于单卡推理)
 maturin build --release --features cuda,python
 
 # Naive CUDA (+CUDA Graph, 实验阶段)
 maturin build --release --features cuda,graph,python
 
-# CUDA (支持Context-cache与FP8 KV Cache，不使用Flash attention) 
+# CUDA (支持Context-cache与FP8 KV Cache，不使用Flash attention)
 ./build.sh --release --features cuda,nccl,python
 
-# CUDA (+Flash attention，仅prefill时启用) 
+# CUDA (+Flash attention，仅prefill时启用)
 ./build.sh --release --features cuda,nccl,flash-attn,python
 
-# CUDA (+Flash attention，prefill/decoding均使用Flash attention，编译时间最长) 
+# CUDA (+Flash attention，prefill/decoding均使用Flash attention，编译时间最长)
 ./build.sh --release --features cuda,nccl,flash-context,python
 
 # macOS（Metal, 支持Context-cache与FP8 KV Cache，但不支持多GPU推理）

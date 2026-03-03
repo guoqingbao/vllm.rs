@@ -356,8 +356,10 @@ pub async fn chat_completion(
                 "regex" => {
                     // Sanitize to ASCII to prevent binary data issues
                     let sanitized = crate::utils::guidance::sanitize_to_ascii(grammar_str);
-                    params.grammar = Some(TopLevelGrammar::from_regex(&sanitized));
-                    crate::log_debug!("[llg] Built grammar from regex constraint (sanitized)");
+                    // Use top_level_grammar_from_regex_with_tokens to handle lowercase literal strings
+                    // that would be incorrectly interpreted as Lark rule references
+                    params.grammar = Some(crate::utils::guidance::top_level_grammar_from_regex_with_tokens(&sanitized));
+                    crate::log_debug!("[llg] Built grammar from regex constraint (with token handling)");
                 }
                 "lark" => {
                     // Sanitize to valid UTF-8 to prevent binary data issues
