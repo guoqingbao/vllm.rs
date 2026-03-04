@@ -1051,11 +1051,8 @@ impl StreamToolParser {
         match model_type {
             ModelType::LLaMa => "llama",
             ModelType::Mistral | ModelType::Mistral3VL => "mistral",
-            ModelType::Qwen3
-            | ModelType::Qwen3MoE
-            | ModelType::Qwen3_5
-            | ModelType::Qwen3_5MoE
-            | ModelType::Qwen3VL => {
+            ModelType::Qwen3_5 | ModelType::Qwen3_5MoE => "qwen_coder",
+            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
                 if model_lower.contains("coder") {
                     "qwen_coder"
                 } else {
@@ -1892,5 +1889,21 @@ abc
         let safe = parser.sanitize_tool_markup_for_display(raw);
         assert!(safe.contains("<\u{200C}tool_ca"));
         assert!(!parser.contains_tool_markup(&safe));
+    }
+
+    #[test]
+    fn test_parser_defaults_to_qwen_coder_for_qwen35() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5, "qwen3.5-instruct"),
+            "qwen_coder"
+        );
+    }
+
+    #[test]
+    fn test_parser_defaults_to_qwen_coder_for_qwen35_moe() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5MoE, "qwen3.5-moe"),
+            "qwen_coder"
+        );
     }
 }
