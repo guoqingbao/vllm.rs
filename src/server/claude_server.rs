@@ -7,7 +7,7 @@ use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls,
-    retain_tool_calls_forced_name,
+    retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
 };
 use crate::tools::{Tool, ToolCall, ToolChoice};
 use crate::utils::config::SamplingParams;
@@ -1938,45 +1938,57 @@ pub async fn messages(
                             );
                         }
 
-                        let (tool_calls, has_tool_calls, invalid_feedback) =
-                            if pending_tool_calls.is_empty() {
-                                (Vec::new(), false, None)
-                            } else {
-                                let (validated_calls, invalid) = filter_tool_calls(
-                                    &pending_tool_calls,
-                                    stream_tool_schemas.as_ref(),
+                        let (tool_calls, has_tool_calls, invalid_feedback) = if pending_tool_calls
+                            .is_empty()
+                        {
+                            (Vec::new(), false, None)
+                        } else {
+                            let (validated_calls, invalid) = filter_tool_calls(
+                                &pending_tool_calls,
+                                stream_tool_schemas.as_ref(),
+                            );
+                            if !invalid.is_empty() {
+                                crate::log_error!(
+                                    "[Seq {}] Found {} invalid tool call(s): {:?}",
+                                    seq_id,
+                                    invalid.len(),
+                                    invalid
                                 );
-                                if !invalid.is_empty() {
+                            }
+
+                            if !invalid.is_empty() {
+                                log_tool_calls("Invalid", seq_id, &invalid);
+                                if let Some(ref l) = stream_logger {
+                                    l.log_tool_calls("Invalid", &invalid);
+                                }
+                            }
+                            let invalid_feedback = build_invalid_tool_call_feedback(
+                                &invalid,
+                                stream_tool_schemas.as_ref(),
+                                forced_tool_name.as_deref(),
+                            );
+
+                            let (final_tool_calls, invalid_feedback) =
+                                if !invalid.is_empty() && !strict_tool_call_validation_enabled() {
                                     crate::log_error!(
-                                        "[Seq {}] Found {} invalid tool call(s)",
-                                        seq_id,
-                                        invalid.len()
+                                        "Invalid tool call feedback {:?}",
+                                        invalid_feedback
                                     );
-                                }
-
-                                if !invalid.is_empty() {
-                                    log_tool_calls("Invalid", seq_id, &invalid);
-                                    if let Some(ref l) = stream_logger {
-                                        l.log_tool_calls("Invalid", &invalid);
-                                    }
-                                }
-                                let invalid_feedback = build_invalid_tool_call_feedback(
-                                    &invalid,
-                                    stream_tool_schemas.as_ref(),
-                                    forced_tool_name.as_deref(),
-                                );
-                                let final_tool_calls = validated_calls;
-
-                                if final_tool_calls.is_empty() {
-                                    (Vec::new(), false, invalid_feedback)
+                                    (pending_tool_calls, None)
                                 } else {
-                                    log_tool_calls("Valid", seq_id, &final_tool_calls);
-                                    if let Some(ref l) = stream_logger {
-                                        l.log_tool_calls("Valid", &final_tool_calls);
-                                    }
-                                    (final_tool_calls, true, invalid_feedback)
+                                    (validated_calls, invalid_feedback)
+                                };
+
+                            if final_tool_calls.is_empty() {
+                                (Vec::new(), false, invalid_feedback)
+                            } else {
+                                log_tool_calls("Valid", seq_id, &final_tool_calls);
+                                if let Some(ref l) = stream_logger {
+                                    l.log_tool_calls("Valid", &final_tool_calls);
                                 }
-                            };
+                                (final_tool_calls, true, invalid_feedback)
+                            }
+                        };
 
                         if tool_choice_required && !has_tool_calls {
                             if let Some(ref name) = forced_tool_name {

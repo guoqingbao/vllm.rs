@@ -7,8 +7,9 @@ use super::{FunctionCall, Tool, ToolCall};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::env;
 use std::sync::OnceLock;
-
+static STRICT_TOOL_CALL_VALIDATION: OnceLock<bool> = OnceLock::new();
 /// Resolve tools from request or MCP fallback
 pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<Tool> {
     if let Some(tools) = request_tools {
@@ -17,6 +18,20 @@ pub fn resolve_tools(request_tools: Option<&[Tool]>, mcp_tools: &[Tool]) -> Vec<
         }
     }
     mcp_tools.to_vec()
+}
+
+/// Returns whether strict server-side tool schema validation is enabled.
+/// When disabled, parsed tool calls are forwarded to clients (SGLang-style retry loop).
+pub fn strict_tool_call_validation_enabled() -> bool {
+    *STRICT_TOOL_CALL_VALIDATION.get_or_init(|| {
+        env::var("VLLM_RS_STRICT_TOOL_CALL")
+            .ok()
+            .map(|raw| {
+                let normalized = raw.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Build a map of tool names to their parameter schemas

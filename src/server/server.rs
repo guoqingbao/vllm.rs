@@ -15,7 +15,7 @@ use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
-    resolve_tools, retain_tool_calls_forced_name,
+    resolve_tools, retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
@@ -755,7 +755,14 @@ pub async fn chat_completion(
                             forced_tool_name.as_deref(),
                         );
 
-                        let valid_calls = validated_calls;
+                        let (valid_calls, invalid_feedback) = if !invalid_calls.is_empty()
+                            && !strict_tool_call_validation_enabled()
+                        {
+                            crate::log_error!("Invalid tool call feedback {:?}", invalid_feedback);
+                            (pending_tool_calls, None)
+                        } else {
+                            (validated_calls, invalid_feedback)
+                        };
 
                         let tool_calls: Option<Vec<crate::server::PublicToolCall>> =
                             if valid_calls.is_empty() {
