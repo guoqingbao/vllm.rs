@@ -7,6 +7,7 @@ use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
+use llguidance::api::TopLevelGrammar;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
 use pyo3::exceptions::PyValueError;
@@ -356,7 +357,8 @@ impl SamplingParams {
     #[new]
     #[pyo3(signature = (temperature=None, max_tokens=None,
         ignore_eos=Some(false), top_k=None, top_p=None, session_id=None,
-        frequency_penalty=None, presence_penalty=None, thinking=None))]
+        frequency_penalty=None, presence_penalty=None, thinking=None,
+        grammar_json=None))]
     pub fn new(
         temperature: Option<f32>,
         max_tokens: Option<usize>,
@@ -367,7 +369,13 @@ impl SamplingParams {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
         thinking: Option<bool>,
+        grammar_json: Option<String>,
     ) -> Self {
+        // Convert grammar_json to TopLevelGrammar if present
+        let grammar = grammar_json.as_ref().and_then(|s| {
+            serde_json::from_str::<TopLevelGrammar>(s).ok()
+        });
+        
         Self {
             temperature,
             max_tokens,
@@ -381,7 +389,8 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking,
-            grammar: None,
+            grammar_json,
+            grammar,
         }
     }
 
@@ -400,7 +409,24 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar_json: None,
             grammar: None,
+        }
+    }
+
+    #[getter]
+    fn grammar_json(&self) -> Option<String> {
+        self.grammar.as_ref().and_then(|g| serde_json::to_string(g).ok())
+    }
+
+    #[setter]
+    fn set_grammar_json(&mut self, value: Option<String>) {
+        self.grammar_json = value.clone();
+        // Also update grammar from JSON if provided
+        if let Some(ref s) = value {
+            self.grammar = serde_json::from_str::<TopLevelGrammar>(s).ok();
+        } else {
+            self.grammar = None;
         }
     }
 }

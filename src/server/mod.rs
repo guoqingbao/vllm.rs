@@ -1,3 +1,4 @@
+// src/server/mod.rs
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 pub mod claude_server;
@@ -10,8 +11,7 @@ use crate::server::streaming::Streamer;
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
-use crate::utils::guidance::{ComposedGrammar, GrammarFragment};
-use llguidance::api::TopLevelGrammar;
+use crate::utils::guidance::TopLevelGrammarExt;
 use crate::utils::image::{
     compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
     ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
@@ -28,6 +28,7 @@ use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
 use std::collections::HashMap;
+use crate::tools::schema::schema_to_tools;
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -161,65 +162,79 @@ pub struct ExtraBody {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
-// GrammarFragment conversion functions
-pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<TopLevelGrammar>> {
+// TopLevelGrammar conversion functions
+// Client grammars are composed via merge_top_level_grammars alongside TEXT and tool grammars.
+
+pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<llguidance::api::TopLevelGrammar>> {
     crate::log_debug!("[llg] grammar_fragment_from_structured_outputs() called");
 
-    let mut selected: Option<TopLevelGrammar> = None;
-
-    let mut set_grammar = |grammar: TopLevelGrammar| -> Result<()> {
-        if selected.is_some() {
-            crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
-            return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-        }
-        selected = Some(grammar);
-        Ok(())
-    };
+    let mut selected: Option<llguidance::api::TopLevelGrammar> = None;
+    let mut constraint_count = 0;
 
     if let Some(choice) = &structured.choice {
         if !choice.is_empty() {
-            crate::log_debug!("[llg] Building Lark grammar from choice options: {:?}", choice);
-            let grammar_fragment = crate::tools::schema::build_choice_lark_grammar(choice)
+            constraint_count += 1;
+            if constraint_count > 1 {
+                crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
+                return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
+            }
+            crate::log_debug!("[llg] Building choice grammar from: {:?}", choice);
+            let choice_gram = crate::tools::schema::build_choice_lark_grammar(choice)
                 .map_err(|e| candle_core::Error::msg(e))?;
-            let llg_grammar = TopLevelGrammar::from_lark(grammar_fragment.body.clone());
-            set_grammar(llg_grammar)?;
+            selected = Some(choice_gram);
         }
     }
 
     if let Some(regex) = &structured.regex {
-        crate::log_debug!("[llg] Building regex constraint: {}", regex);
-        let sanitized = crate::utils::guidance::sanitize_to_ascii(regex);
-        let llg_grammar = TopLevelGrammar::from_regex(&sanitized);
-        set_grammar(llg_grammar)?;
+        constraint_count += 1;
+        if constraint_count > 1 {
+            crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
+            return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
+        }
+        crate::log_debug!("[llg] Building regex grammar: {}", regex);
+        let regex_gram = TopLevelGrammarExt::from_regex_ascii(regex);
+        selected = Some(regex_gram);
     }
 
     if let Some(schema) = &structured.json {
-        crate::log_debug!("[llg] Sanitizing JSON schema for llguidance");
+        constraint_count += 1;
+        if constraint_count > 1 {
+            crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
+            return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
+        }
+        crate::log_debug!("[llg] Building JSON schema grammar");
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(schema);
-        let llg_grammar = TopLevelGrammar::from_json_schema(schema);
-        set_grammar(llg_grammar)?;
+        let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
+            .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+        selected = Some(json_gram);
     }
 
     if let Some(grammar) = &structured.grammar {
+        constraint_count += 1;
+        if constraint_count > 1 {
+            crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
+            return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
+        }
         crate::log_debug!("[llg] Using Lark grammar from structured_outputs.grammar");
-        let sanitized = crate::utils::guidance::sanitize_utf8_valid(grammar);
-        let llg_grammar = TopLevelGrammar::from_lark(sanitized);
-        set_grammar(llg_grammar)?;
+        let lark_gram = TopLevelGrammarExt::from_lark_utf8(grammar);
+        selected = Some(lark_gram);
     }
 
     if let Some(tag) = &structured.structural_tag {
-        crate::log_debug!("[llg] Parsing structural_tag: {:?}", tag);
+        constraint_count += 1;
+        if constraint_count > 1 {
+            crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
+            return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
+        }
+        crate::log_debug!("[llg] Building tool call grammar from structural_tag");
         let (start, end, schema) = crate::tools::schema::parse_structural_tag(tag)
             .map_err(|e| candle_core::Error::msg(e))?;
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
-        crate::log_debug!("[llg] Building tool call Lark grammar with structural_tag: start={}, end={}", start, end);
-        let grammar_fragment = crate::tools::schema::build_tool_call_lark_grammar(&schema, &start, &end, false, false);
-        // Build ComposedGrammar with TEXT alternative and tool_call fragment
-        let composed = ComposedGrammar::new()
-            .with_text_fragment(GrammarFragment::new("TEXT", "TEXT: /[^\\n\\r][^\\n\\r]*|[\\n\\r]+/"))
-            .with_tool_fragment(grammar_fragment);
-        let llg_grammar = TopLevelGrammar::from_lark(composed.to_lark_string());
-        set_grammar(llg_grammar)?;
+        // Convert schema Value to Vec<Tool> for build_json_tool_lark_grammar
+        let tools = schema_to_tools(&schema);
+        // structural_tag uses text-based matching, pass None for token IDs
+        let tool_gram = crate::tools::schema::build_json_tool_lark_grammar(&tools, &start, &end, false, false, None, None);
+        selected = Some(tool_gram);
     }
 
     if selected.is_none() {
@@ -231,7 +246,7 @@ pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) 
     Ok(selected)
 }
 
-pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -> Result<Option<TopLevelGrammar>> {
+pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -> Result<Option<llguidance::api::TopLevelGrammar>> {
     crate::log_debug!("[llg] grammar_fragment_from_response_format() called with type: {}", response_format.format_type);
 
     match response_format.format_type.as_str() {
@@ -240,12 +255,12 @@ pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -
                 crate::log_error!("[llg] response_format.json_schema is required for type=json_schema");
                 return Err(candle_core::Error::msg("response_format.json_schema is required"));
             };
-            crate::log_debug!("[llg] Sanitizing JSON schema from response_format");
+            crate::log_debug!("[llg] Building JSON schema grammar from response_format");
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
-            // Build TopLevelGrammar from JSON schema first (matches llg-new.diff pattern)
-            let llg_grammar = TopLevelGrammar::from_json_schema(schema);
-            crate::log_info!("[llg] grammar_fragment_from_response_format() completed with Llguidance constraint");
-            Ok(Some(llg_grammar))
+            let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
+                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            crate::log_info!("[llg] grammar_fragment_from_response_format() completed with grammar");
+            Ok(Some(json_gram))
         }
         other => {
             crate::log_error!("[llg] Unsupported response_format type '{}'; only 'json_schema' is supported", other);
@@ -1412,9 +1427,9 @@ mod tests {
         assert!(json.contains("\"prompt\":\"Hello, world!\""));
     }
 
-        #[test]
+    #[test]
     fn test_chat_completion_tool_choice_required_parsing() {
-        let json = r#"{ "messages": [{"role":"user","content":"hi"}], "tool_choice": "required" }"#;
+        let json = r#"{"messages": [{"role":"user","content":"hi"}], "tool_choice": "required"}"#;
         let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert!(matches!(
             request.tool_choice,
@@ -1472,7 +1487,8 @@ mod tests {
             choice: None,
             regex: None,
             json: None,
-            grammar: Some("start: 'hello' 'world'".to_string()),
+            // Grammar without start: - that's managed by ComposedGrammar
+            grammar: Some("'hello' 'world'".to_string()),
             structural_tag: None,
         };
         let result = grammar_fragment_from_structured_outputs(&so);
@@ -1538,5 +1554,22 @@ mod tests {
         };
         let result = grammar_fragment_from_response_format(&rf);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_grammar_fragment_from_response_format_json_schema_composed() {
+        // Test that json_schema grammars pass through ComposedGrammar
+        let rf = ResponseFormat {
+            format_type: "json_schema".to_string(),
+            json_schema: Some(ResponseFormatJsonSchema {
+                name: None,
+                schema: serde_json::json!({"type": "object", "properties": {"test": {"type": "string"}}}),
+            }),
+        };
+        let result = grammar_fragment_from_response_format(&rf);
+        assert!(result.is_ok());
+        // The grammar was created via ComposedGrammar - just verify it's Some
+        let grammar = result.unwrap();
+        assert!(grammar.is_some());
     }
 }

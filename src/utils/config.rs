@@ -529,6 +529,9 @@ pub struct SamplingParams {
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
     pub grammar: Option<TopLevelGrammar>,
+    /// Grammar constraint as JSON string for Python API
+    #[pyo3(get, set)]
+    pub grammar_json: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -618,6 +621,7 @@ impl Default for SamplingParams {
             stop_token_ids: None,
             thinking: None,
             grammar: None,
+            grammar_json: None,
         }
     }
 }

@@ -1222,133 +1222,137 @@ impl ModelRunner {
         };
 
         let logits = if let Some(factory) = &self.llg_factory {
-            #[cfg(not(feature = "python"))]
-            {
-                let mut guidance_states = self.guidance_states.write();
-                let mut guidance_failed = self.guidance_failed.write();
-                let mut guidance_mismatch = self.guidance_mismatch.write();
-                let mut modified = false;
-                let vocab_size = logits.dim(1)?;
+            let mut guidance_states = self.guidance_states.write();
+            let mut guidance_failed = self.guidance_failed.write();
+            let mut guidance_mismatch = self.guidance_mismatch.write();
+            let mut modified = false;
+            let vocab_size = logits.dim(1)?;
 
-                // We only materialize logits on CPU if at least one constraint mask applies.
+            // We only materialize logits on CPU if at least one constraint mask applies.
 
-                // We'll collect masks first to minimize holding locks or complex logic inside the loop
-                let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
+            // We'll collect masks first to minimize holding locks or complex logic inside the loop
+            let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
 
-                for (i, id) in seq_ids.iter().enumerate() {
-                    let sampling_params = match &seqs {
-                        Seqs::SeqRefs(refs) => &refs[i].sampling_params,
-                        Seqs::DecodeVec(vec) => &vec[i].sampling_params,
-                    };
+            for (i, id) in seq_ids.iter().enumerate() {
+                let sampling_params = match &seqs {
+                    Seqs::SeqRefs(refs) => &refs[i].sampling_params,
+                    Seqs::DecodeVec(vec) => &vec[i].sampling_params,
+                };
 
-                    if guidance_failed.contains(id) {
+                if guidance_failed.contains(id) {
+                    continue;
+                }
+
+                // Use grammar directly from sampling_params
+                let grammar = match sampling_params.grammar.as_ref() {
+                    Some(g) => g,
+                    None => continue,
+                };
+
+                let state = match guidance_states.entry(*id) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        match GuidanceState::new_from_grammar(factory.clone(), grammar) {
+                            Ok(state) => entry.insert(state),
+                            Err(err) => {
+                                guidance_failed.insert(*id);
+                                crate::log_warn!(
+                                    "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                                    id,
+                                    err
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                };
+
+                if let Ok(Some(mask)) = state.compute_mask() {
+                    masks.push((i, *id, mask));
+                    modified = true;
+                }
+            }
+
+            if modified {
+                // Now we must convert to Vec, modify, and update logits
+                let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+
+                for (seq_idx, seq_id, mask) in masks {
+                    let start = seq_idx * vocab_size;
+                    let end = start + vocab_size;
+                    let row = &mut logits_vec[start..end];
+                    let mask_len = mask.len();
+
+                    // Apply mask: set disallowed to -inf
+                    // This iterates entire vocab, but check is fast
+                    if mask_len == 0 {
+                        if guidance_failed.insert(seq_id) {
+                            crate::log_warn!(
+                                "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                                seq_id
+                            );
+                        }
                         continue;
                     }
 
-                    // Use grammar directly from sampling_params
-                    let grammar = match sampling_params.grammar.as_ref() {
-                        Some(g) => g,
-                        None => continue,
-                    };
-
-                    let state = match guidance_states.entry(*id) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => {
-                            match GuidanceState::new_from_grammar(factory.clone(), grammar) {
-                                Ok(state) => entry.insert(state),
-                                Err(err) => {
-                                    guidance_failed.insert(*id);
-                                    crate::log_warn!(
-                                        "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
-                                        id,
-                                        err
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
-                    if let Ok(Some(mask)) = state.compute_mask() {
-                        masks.push((i, *id, mask));
-                        modified = true;
+                    if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
+                        crate::log_warn!(
+                            "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                            seq_id,
+                            mask_len,
+                            vocab_size
+                        );
+                        // Snapshot is captured when constraint is first applied in GuidanceState::new()
+                        // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
                     }
-                }
 
-                if modified {
-                    // Now we must convert to Vec, modify, and update logits
-                    let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-
-                    for (seq_idx, seq_id, mask) in masks {
-                        let start = seq_idx * vocab_size;
-                        let end = start + vocab_size;
-                        let row = &mut logits_vec[start..end];
-                        let mask_len = mask.len();
-
-                        // Apply mask: set disallowed to -inf
-                        // This iterates entire vocab, but check is fast
-                        if mask_len == 0 {
-                            if guidance_failed.insert(seq_id) {
-                                crate::log_warn!(
-                                    "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
-                                    seq_id
-                                );
-                            }
-                            continue;
-                        }
-
-                        if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
-                            crate::log_warn!(
-                                "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
-                                seq_id,
-                                mask_len,
-                                vocab_size
-                            );
-                            // Snapshot is captured when constraint is first applied in GuidanceState::new()
-                            // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
-                        }
-
-                        let apply_len = std::cmp::min(vocab_size, mask_len);
-                        for tok in 0..apply_len {
-                            if !mask.is_allowed(tok as u32) {
-                                row[tok] = f32::NEG_INFINITY;
-                            }
-                        }
-                        if mask_len < vocab_size {
-                            for tok in mask_len..vocab_size {
-                                row[tok] = f32::NEG_INFINITY;
-                            }
+                    let apply_len = std::cmp::min(vocab_size, mask_len);
+                    for tok in 0..apply_len {
+                        if !mask.is_allowed(tok as u32) {
+                            row[tok] = f32::NEG_INFINITY;
                         }
                     }
-                    Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
-                } else {
-                    logits
+                    if mask_len < vocab_size {
+                        for tok in mask_len..vocab_size {
+                            row[tok] = f32::NEG_INFINITY;
+                        }
+                    }
                 }
-            }
-            #[cfg(feature = "python")]
-            {
-                // Python version: constraints are handled via server/mod.rs
-                // The guidance_states are populated directly from server layer
+                Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+            } else {
                 logits
             }
+
         } else {
             logits
         };
 
-        let tokens = self
+        let mut tokens = self
             .logit_processor
             .sample_with_strategy(&logits, &cached_params.sampling)?;
 
         // Re-sample tokens that fail validation (hybrid approach)
-        let mut re_sampled_tokens = tokens.clone();
         if let Some(_factory) = &self.llg_factory {
             let mut guidance_states = self.guidance_states.write();
             for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
-                if let Some(state) = guidance_states.get_mut(seq_id) {
-                    let token = tokens[seq_idx];
+                let token = tokens[seq_idx];
 
-                    if !state.validate_token(token) {
-                        // Token invalid - need to re-sample
+                crate::log_trace!("[llg] Processing seq {} (idx {}): token {}", seq_id, seq_idx, token);
+
+                if let Some(state) = guidance_states.get_mut(seq_id) {
+                    if state.is_finished() {
+                        crate::log_trace!("[llg] Matcher is stopped for seq {}, skipping validation", seq_id);
+                        continue;
+                    }
+
+                    let valid = state.validate_token(token);
+                    crate::log_trace!("[llg] Token {} validation result: {}", token, valid);
+
+                    if valid {
+                        crate::log_trace!("[llg] Token {} is valid, consuming for seq {}", token, seq_id);
+                        let _ = state.commit_token(token);
+                    } else {
+                        crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
                         let mask = match state.compute_mask_or_eos() {
                             Ok(m) => m,
                             Err(e) => {
@@ -1359,8 +1363,9 @@ impl ModelRunner {
                             }
                         };
 
-                        // Apply mask to THIS sequence's logits only
-                        // let mut biased_logits = logits.clone();
+                        crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
+
+                        // Memory-efficient: use flat vector with slice operations
                         let vocab_size = logits.dim(1)?;
                         let row_start = seq_idx * vocab_size;
                         let row_end = row_start + vocab_size;
@@ -1368,35 +1373,29 @@ impl ModelRunner {
                         let mut row_vec = logits.clone().flatten_all()?.to_vec1::<f32>()?;
                         let row = &mut row_vec[row_start..row_end];
 
-                        // Apply mask: set disallowed to -inf
+                        // Direct mask application: set disallowed tokens to -inf
                         for tok in 0..vocab_size {
                             if !mask.is_allowed(tok as u32) {
                                 row[tok] = f32::NEG_INFINITY;
                             }
                         }
 
-                        // Re-create biased logits tensor
+                        // Create tensor with correct shape for re-sampling
                         let biased_tensor = Tensor::from_vec(row_vec, logits.shape(), logits.device())?;
 
-                        // Re-sample single token
-                        let re_sampled = self.logit_processor.sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
-                        re_sampled_tokens[seq_idx] = re_sampled[seq_idx];
+                        crate::log_debug!("[llg] Re-sampling with biased logits for seq {}", seq_id);
 
-                        // Consume the re-sampled token to ACTUAL state
-                        match state.commit_token(re_sampled_tokens[seq_idx]) {
-                            Ok(()) => crate::log_debug!("[llg] Resampled token {} consumed by matcher", re_sampled_tokens[seq_idx]),
-                            Err(e) => crate::log_error!("[llg] Resampled token {} rejected by matcher due to {}", re_sampled_tokens[seq_idx], e)
-                        }
-                    } else {
-                        // Token is valid, consume to ACTUAL state
-                        match state.commit_token(token) {
-                            Ok(()) => crate::log_debug!("[llg] Token {} consumed by matcher", token),
-                            Err(e) => crate::log_error!("[llg] Token {} rejected by matcher due to {}", token, e)
-                        }
+                        // Use sample_with_strategy with proper cached params
+                        let re_sampled = self.logit_processor.sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
+                        tokens[seq_idx] = re_sampled[seq_idx];
+
+                        crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
+                        let _ = state.commit_token(tokens[seq_idx]);
                     }
+                } else {
+                    crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
                 }
             }
-
         }
 
         // Track tokens for sequences when penalties are enabled
@@ -1414,18 +1413,8 @@ impl ModelRunner {
             }
         }
 
-        // Commit tokens to guidance states
-        if let Some(_) = &self.llg_factory {
-            let mut guidance_states = self.guidance_states.write();
-            for (i, id) in seq_ids.iter().enumerate() {
-                if let Some(state) = guidance_states.get_mut(id) {
-                    if !state.is_finished() {
-                        let _ = state.commit_token(re_sampled_tokens[i]);
-                    }
-                }
-            }
-        }
-        Ok(re_sampled_tokens)
+        // Token commits are now done inline in the re-sample loop below
+        Ok(tokens)
     }
 
     pub fn finished(&self, id: usize) {

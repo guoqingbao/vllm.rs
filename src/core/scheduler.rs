@@ -21,7 +21,8 @@ pub struct Scheduler {
     transferred: VecDeque<Sequence>,
     pub block_manager: BlockManager,
     next_seq_id: usize,
-    eos_token_id: Vec<u32>,
+    /// Token IDs that represent the end of sequence
+    pub eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
     /// Token IDs that represent the start of a tool call (used to avoid false end matches)
