@@ -1302,13 +1302,16 @@ impl LLMEngine {
         images: Option<ImageData>, //collection of images of the full conversation
         tools: &Vec<Tool>,
         logger: &Option<Arc<ChatCompletionLogger>>,
-    ) -> Result<(usize, usize, mpsc::Receiver<StreamItem>)> {
+    ) -> Result<(usize, usize, Option<String>, mpsc::Receiver<StreamItem>)> {
         let (prompt, image_idx) = self.apply_chat_template(params, messages, tools, false);
         if let Some(ref l) = logger {
             l.log_prompt(&prompt);
         }
         match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
-            Ok((seq_id, prompt_length, rx)) => Ok((seq_id, prompt_length, rx)),
+            Ok((seq_id, prompt_length, rx)) => {
+                let prefilled_reasoning_end = self.get_prefilled_reasoning_end_marker(seq_id);
+                Ok((seq_id, prompt_length, prefilled_reasoning_end, rx))
+            }
             Err(e) => {
                 candle_core::bail!("{:?}", e)
             }

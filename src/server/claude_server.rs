@@ -1459,10 +1459,12 @@ pub async fn messages(
     };
 
     if use_stream {
-        let (seq_id, prompt_length, stream) = {
+        let (seq_id, prompt_length, prefilled_reasoning_end, stream) = {
             let mut e = data.engine.write();
             match e.generate_stream(&params, &messages, image_data, &resolved_tools, &logger) {
-                Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                Ok((seq_id, prompt_length, prefilled_reasoning_end, stream)) => {
+                    (seq_id, prompt_length, prefilled_reasoning_end, stream)
+                }
                 Err(err) => {
                     return ClaudeResponder::Error(
                         ClaudeErrorResponse {
@@ -1484,10 +1486,6 @@ pub async fn messages(
             .unwrap_or(256);
         let (response_tx, client_rx) = flume::bounded(buffer_size);
         let engine_clone = data.engine.clone();
-        let prefilled_reasoning_end = {
-            let e = data.engine.read();
-            e.get_prefilled_reasoning_end_marker(seq_id)
-        };
         let stream_model_id = model_id.clone();
         let stream_parser_model_id = parser_model_id.clone();
         let stream_model_type = model_type.clone();
