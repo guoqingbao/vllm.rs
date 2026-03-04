@@ -105,7 +105,7 @@ impl Engine {
         params: SamplingParams,
         messages: Vec<Message>,
     ) -> PyResult<(usize, usize, EngineStream)> {
-        let (seq_id, prompt_length, stream) = {
+        let (seq_id, prompt_length, _prefilled_reasoning_end, stream) = {
             let mut engine = self.engine.write();
             engine
                 .generate_stream(&params, &messages, None, &Vec::new(), &None)

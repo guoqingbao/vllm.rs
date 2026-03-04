@@ -368,10 +368,12 @@ pub async fn chat_completion(
         if let Some(sid) = session_id {
             crate::log_warn!("Stream request has session_id {sid}");
         }
-        let (seq_id, prompt_length, stream) = {
+        let (seq_id, prompt_length, prefilled_reasoning_end, stream) = {
             let mut e = data.engine.write();
             match e.generate_stream(&params, &messages, image_data, &resolved_tools, &logger) {
-                Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                Ok((seq_id, prompt_length, prefilled_reasoning_end, stream)) => {
+                    (seq_id, prompt_length, prefilled_reasoning_end, stream)
+                }
                 Err(e) => {
                     crate::log_error!("Stream generation failed: {:?}", e);
                     return ChatResponder::ValidationError(format!(
@@ -391,13 +393,14 @@ pub async fn chat_completion(
         let _img_cfg_clone = img_cfg.clone();
 
         let tool_config = tool_config.clone();
-        let tool_parser = StreamToolParser::new_with_config(
+        let mut tool_parser = StreamToolParser::new_with_config(
             &model_type,
             parser_model_id.clone(),
             tool_config,
             resolved_tools.clone(),
             enforce_parser.clone(),
         );
+        tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
         let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {

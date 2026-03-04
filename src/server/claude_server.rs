@@ -1459,10 +1459,12 @@ pub async fn messages(
     };
 
     if use_stream {
-        let (seq_id, prompt_length, stream) = {
+        let (seq_id, prompt_length, prefilled_reasoning_end, stream) = {
             let mut e = data.engine.write();
             match e.generate_stream(&params, &messages, image_data, &resolved_tools, &logger) {
-                Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                Ok((seq_id, prompt_length, prefilled_reasoning_end, stream)) => {
+                    (seq_id, prompt_length, prefilled_reasoning_end, stream)
+                }
                 Err(err) => {
                     return ClaudeResponder::Error(
                         ClaudeErrorResponse {
@@ -1607,6 +1609,7 @@ pub async fn messages(
                 stream_tools.clone(),
                 enforce_parser.clone(),
             );
+            tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end.clone());
             let should_parse_tools = !stream_tools.is_empty();
 
             let mut current_stream = stream;

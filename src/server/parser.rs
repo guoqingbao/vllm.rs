@@ -311,7 +311,7 @@ pub struct StreamToolParser {
     // Accumulated output for final parsing
     accumulated_output: String,
     // Reasoning block tracking
-    active_reasoning_end: Option<&'static str>,
+    active_reasoning_end: Option<String>,
     // Code block tracking
     in_code_block: bool,
     // Set when incremental parsing found ToolCallItem(s) for the latest processed token.
@@ -329,6 +329,20 @@ const REASONING_MARKERS: &[(&str, &str)] = &[
     ("[THINK]", "[/THINK]"),
     ("<thought>", "</thought>"),
 ];
+
+/// Detect whether a rendered prompt already ends inside a reasoning block.
+///
+/// This happens for templates that prefill `<think>` in `add_generation_prompt`.
+/// Returns the corresponding end marker if matched.
+pub fn detect_prefilled_reasoning_end_marker(prompt: &str) -> Option<String> {
+    let trimmed = prompt.trim_end();
+    for &(start, end) in REASONING_MARKERS {
+        if trimmed.ends_with(start) {
+            return Some(end.to_string());
+        }
+    }
+    None
+}
 
 impl StreamToolParser {
     /// Create a new parser for the given model type
@@ -407,6 +421,11 @@ impl StreamToolParser {
     /// Check if currently inside a reasoning block
     pub fn in_reasoning(&self) -> bool {
         self.active_reasoning_end.is_some()
+    }
+
+    /// Set initial reasoning state when prompt already includes an opening think marker.
+    pub fn set_initial_reasoning_end_marker(&mut self, end_marker: Option<String>) {
+        self.active_reasoning_end = end_marker;
     }
 
     /// Check if currently inside a code block
@@ -493,11 +512,11 @@ impl StreamToolParser {
         if self.active_reasoning_end.is_none() {
             for &(start, end) in REASONING_MARKERS {
                 if token_text.contains(start) || self.accumulated_output.ends_with(start) {
-                    self.active_reasoning_end = Some(end);
+                    self.active_reasoning_end = Some(end.to_string());
                     break;
                 }
             }
-        } else if let Some(end_marker) = self.active_reasoning_end {
+        } else if let Some(end_marker) = self.active_reasoning_end.as_deref() {
             if token_text.contains(end_marker) || self.accumulated_output.ends_with(end_marker) {
                 self.active_reasoning_end = None;
             }
@@ -1032,11 +1051,8 @@ impl StreamToolParser {
         match model_type {
             ModelType::LLaMa => "llama",
             ModelType::Mistral | ModelType::Mistral3VL => "mistral",
-            ModelType::Qwen3
-            | ModelType::Qwen3MoE
-            | ModelType::Qwen3_5
-            | ModelType::Qwen3_5MoE
-            | ModelType::Qwen3VL => {
+            ModelType::Qwen3_5 | ModelType::Qwen3_5MoE => "qwen_coder",
+            ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
                 if model_lower.contains("coder") {
                     "qwen_coder"
                 } else {
@@ -1873,5 +1889,21 @@ abc
         let safe = parser.sanitize_tool_markup_for_display(raw);
         assert!(safe.contains("<\u{200C}tool_ca"));
         assert!(!parser.contains_tool_markup(&safe));
+    }
+
+    #[test]
+    fn test_parser_defaults_to_qwen_coder_for_qwen35() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5, "qwen3.5-instruct"),
+            "qwen_coder"
+        );
+    }
+
+    #[test]
+    fn test_parser_defaults_to_qwen_coder_for_qwen35_moe() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5MoE, "qwen3.5-moe"),
+            "qwen_coder"
+        );
     }
 }

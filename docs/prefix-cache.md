@@ -23,6 +23,23 @@ If `--prefix-cache-max-tokens` is not set, defaults are:
 - PD server: ~75% of GPU KV blocks
 - PD client: ~35% of GPU KV blocks
 
+## Hybrid Mamba Snapshot Stride
+For hybrid Mamba models (for example Qwen3.5), prefix reuse also needs a
+compatible Mamba snapshot at the matched boundary.
+
+Use environment variable `VLLM_RS_MAMBA_SNAPSHOT_STRIDE_BLOCKS` to control
+sparse snapshot capture during decode:
+- Default: `8` blocks
+- Minimum valid value: `1` (capture every block)
+- Effective snapshot boundary in tokens: `block_size * stride`
+
+Example with default `block_size=64` and stride `8`:
+- Decode snapshot boundary is every `512` tokens.
+- Effective hybrid prefix reuse is aligned to the nearest captured boundary.
+
+This setting only sparsifies decode-time snapshot capture. Prompt/prefill
+snapshot capture remains dense.
+
 ## Notes
 - Prefix cache uses the same KV memory pool as active sequences. A larger cache
   reduces the maximum number of concurrent tokens available for new requests.

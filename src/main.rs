@@ -319,7 +319,7 @@ async fn main() -> Result<()> {
 
         let mut outputs = {
             if interactive {
-                let (seq_id, prompt_length, stream) = {
+                let (seq_id, prompt_length, _prefilled_reasoning_end, stream) = {
                     let mut e = engine.write();
                     match e.generate_stream(
                         &request_params,
@@ -328,7 +328,9 @@ async fn main() -> Result<()> {
                         &Vec::new(),
                         &None,
                     ) {
-                        Ok((seq_id, prompt_length, stream)) => (seq_id, prompt_length, stream),
+                        Ok((seq_id, prompt_length, prefilled_reasoning_end, stream)) => {
+                            (seq_id, prompt_length, prefilled_reasoning_end, stream)
+                        }
                         Err(e) => {
                             tracing::error!("Session unexpectedly ended because: {:?}", e);
                             print!("\n🌀 Chat history cleared. Start a new conversation.\n");

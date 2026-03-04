@@ -4,6 +4,7 @@ use super::runner::RunnerType;
 use super::sequence::{Sequence, SequenceStatus};
 use crate::def_broadcast_message_to_runners;
 use crate::runner::{receive_local, send_local, MessageType};
+use crate::utils::env::{mamba_snapshot_block_stride_blocks, MAMBA_SNAPSHOT_BLOCK_STRIDE_ENV};
 use crate::utils::image::ImageData;
 use candle_core::Result;
 use interprocess::{local_socket::Stream as LocalStream, TryClone};
@@ -40,6 +41,7 @@ pub struct BlockManager {
     runners: Arc<RwLock<RunnerType>>,
     prefix_cache: Option<PrefixCache>,
     mamba_prefix_enabled: bool,
+    mamba_snapshot_block_stride_blocks: usize,
     mamba_prefix_hashes_by_block: HashMap<usize, HashSet<u64>>,
     mamba_prefix_block_by_hash: HashMap<u64, usize>,
     valid_mamba_prefix_hashes: HashSet<u64>,
@@ -80,6 +82,15 @@ impl BlockManager {
         } else {
             None
         };
+        let mamba_snapshot_block_stride_blocks = mamba_snapshot_block_stride_blocks();
+        if mamba_prefix_enabled {
+            crate::log_info!(
+                "Hybrid mamba snapshot capture stride: {} block(s) ({} tokens), configured by {}.",
+                mamba_snapshot_block_stride_blocks,
+                mamba_snapshot_block_stride_blocks.saturating_mul(block_size),
+                MAMBA_SNAPSHOT_BLOCK_STRIDE_ENV
+            );
+        }
 
         Self {
             blocks,
@@ -92,6 +103,7 @@ impl BlockManager {
             runners,
             prefix_cache,
             mamba_prefix_enabled,
+            mamba_snapshot_block_stride_blocks,
             mamba_prefix_hashes_by_block: HashMap::new(),
             mamba_prefix_block_by_hash: HashMap::new(),
             valid_mamba_prefix_hashes: HashSet::new(),
@@ -408,6 +420,15 @@ impl BlockManager {
         let processed_tokens = processed_tokens.min(seq.token_ids.len());
         let full_blocks = processed_tokens / self.block_size;
         if full_blocks == 0 {
+            return;
+        }
+        // Keep prompt/prefill captures dense, but sparsify decode-time captures.
+        // Decode tokens are reflected in output_ids, so this avoids overwriting
+        // useful prompt snapshots every block while preserving prompt reuse quality.
+        if !seq.output_ids.is_empty()
+            && self.mamba_snapshot_block_stride_blocks > 1
+            && full_blocks % self.mamba_snapshot_block_stride_blocks != 0
+        {
             return;
         }
         let seed = seq.images.as_ref().map(Self::image_prefix_seed);

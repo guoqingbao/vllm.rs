@@ -226,7 +226,7 @@ impl Engine {
         let img_cfg = { self.engine.read().img_cfg.clone() };
         let (messages, image_data) = build_messages_and_images(&messages, img_cfg.as_ref())?;
 
-        let (seq_id, prompt_length, stream) = {
+        let (seq_id, prompt_length, _prefilled_reasoning_end, stream) = {
             let mut engine = self.engine.write();
             engine.generate_stream(&params, &messages, image_data, &tools, &None)?
         };
