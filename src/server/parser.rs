@@ -1058,7 +1058,7 @@ impl StreamToolParser {
         serde_json::from_str::<Vec<Value>>(trimmed).is_ok()
     }
 
-    fn parser_name_for_model(model_type: &ModelType, model_id: &str) -> &'static str {
+    pub fn parser_name_for_model(model_type: &ModelType, model_id: &str) -> &'static str {
         let model_lower = model_id.to_ascii_lowercase();
         match model_type {
             ModelType::LLaMa => "llama",

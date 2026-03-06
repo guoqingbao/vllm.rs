@@ -318,12 +318,56 @@ impl ToolGrammarBuilder {
                 }
             }
 
-            let params_expr = if param_rule_names.is_empty() {
+            // Determine which parameters are required from the schema
+            let required_params: Vec<&str> = params_schema.get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+    
+            // Build required parameters first (no *, must be present)
+            let required_expr: String = if required_params.is_empty() {
                 String::new()
             } else {
-                format!("({})*", param_rule_names.join(" | "))
+                let required_rules: Vec<String> = param_rule_names.iter()
+                    .filter(|r| {
+                        let param_idx = r.split('_').nth(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                        if let Some(props) = props {
+                            props.keys().nth(param_idx).map(|k| required_params.contains(&k.as_str())).unwrap_or(false)
+                        } else {
+                            false
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if required_rules.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} ", required_rules.join(" "))
+                }
             };
-
+    
+            // Build optional parameters (with *, can be omitted)
+            let optional_expr: String = {
+                let optional_rules: Vec<String> = param_rule_names.iter()
+                    .filter(|r| {
+                        let param_idx = r.split('_').nth(2).and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+                        if let Some(props) = props {
+                            props.keys().nth(param_idx).map(|k| !required_params.contains(&k.as_str())).unwrap_or(true)
+                        } else {
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if optional_rules.is_empty() {
+                    String::new()
+                } else {
+                    format!("({})* ", optional_rules.join(" | "))
+                }
+            };
+    
+            let params_expr = format!("{}{}", required_expr, optional_expr).trim().to_string();
+    
             if params_expr.is_empty() {
                 rules.push(format!("tool_{tool_idx}: {func_start} _WS? {func_end}"));
             } else {
@@ -839,7 +883,7 @@ pub fn schema_to_tools(schema: &Value) -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::guidance::{chat_text_expression, get_lark_from_top_level_grammar, merge_top_level_grammars};
+    use crate::utils::guidance::{chat_text_expression_with_eos, get_lark_from_top_level_grammar, merge_top_level_grammars};
     use llguidance::api::TopLevelGrammar;
 
     #[test]
@@ -1047,8 +1091,8 @@ mod tests {
     fn test_merge_top_level_grammars_qwen3_text_and_json_tool() {
         // Test tool_call | TEXT merging for Qwen3 (JSON format)
         // Use chat_text_expression() as the single source of truth for TEXT pattern
-        let lark = format!("start: TEXT\n{}", chat_text_expression());
-        let text_gram = TopLevelGrammar::from_lark(lark);
+        // Use chat_text_expression_with_eos with empty EOS to get proper text pattern
+        let text_gram = TopLevelGrammar::from_lark(chat_text_expression_with_eos(&[56, 78]));
         let tool_gram = build_json_tool_lark_grammar(
             &vec![crate::tools::ToolBuilder::new("search".to_string(), "Search".to_string())
                 .param("query", "string", "Query", true)
@@ -1060,7 +1104,7 @@ mod tests {
         let result = merge_top_level_grammars(vec![text_gram, tool_gram], None, None);
         let lark_str = get_lark_from_top_level_grammar(&result);
 
-        assert!(lark_str.contains("start: TEXT | tool_call"), "Expected TEXT | tool_call");
+        assert!(lark_str.contains("start: ( text_with_eos | tool_call )+"), "Expected ( text_with_eos | tool_call )+");
         assert!(!lark_str.contains("rule_0:"), "Should not contain rule_0 indirection");
         assert!(!lark_str.contains("rule_1:"), "Should not contain rule_1 indirection");
     }
@@ -1068,8 +1112,8 @@ mod tests {
     #[test]
     fn test_merge_top_level_grammars_qwen3_coder_text_and_xml_tool() {
         // Test tool_call | TEXT merging for Qwen3-Coder (XML format)
-        let lark = format!("start: TEXT\n{}", chat_text_expression());
-        let text_gram = TopLevelGrammar::from_lark(lark);
+        // Use chat_text_expression_with_eos with empty EOS to get proper text pattern
+        let text_gram = TopLevelGrammar::from_lark(chat_text_expression_with_eos(&[21, 43]));
         let tool_gram = build_xml_tool_lark_grammar(
             &vec![crate::tools::ToolBuilder::new("search".to_string(), "Search".to_string())
                 .param("query", "string", "Query", true)
@@ -1081,8 +1125,77 @@ mod tests {
         let result = merge_top_level_grammars(vec![text_gram, tool_gram], None, None);
         let lark_str = get_lark_from_top_level_grammar(&result);
 
-        assert!(lark_str.contains("start: TEXT | tool_call"), "Expected TEXT | tool_call");
+        assert!(lark_str.contains("start: ( text_with_eos | tool_call )+"), "Expected ( text_with_eos | tool_call )+ but got {}", &lark_str);
         assert!(!lark_str.contains("rule_0:"), "Should not contain rule_0 indirection");
         assert!(!lark_str.contains("rule_1:"), "Should not contain rule_1 indirection");
+    }
+    #[test]
+    fn test_build_json_tool_lark_grammar_qwen3_deep_parameters() {
+        // Test Qwen3 JSON tool format with nested/complex parameters
+        let tools = vec![
+            crate::tools::ToolBuilder::new("edit_file".to_string(), "Edit a file with complex parameters".to_string())
+                .param("file_path", "string", "Path to the file", true)
+                .param("old_string", "string", "String to replace", true)
+                .param("new_string", "string", "Replacement string", true)
+                .param("replace_all", "boolean", "Replace all occurrences", false)
+                .param("line_numbers", "array", "Optional line numbers array", false)
+                .param("context", "object", "Optional context object with multiple fields", false)
+                .build(),
+        ];
+        let grammar = build_json_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let lark_str = get_lark_from_top_level_grammar(&grammar);
+        println!("JSON Grammar:\n{}", &lark_str);
+
+        // Verify the grammar contains the tool structure
+        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
+        assert!(lark_str.contains("obj_edit_file:"), "Should contain obj_edit_file rule");
+        
+        // Verify JSON schema contains all required parameters
+        assert!(lark_str.contains("file_path"), "Should contain file_path parameter");
+        assert!(lark_str.contains("old_string"), "Should contain old_string parameter");
+        assert!(lark_str.contains("new_string"), "Should contain new_string parameter");
+        assert!(lark_str.contains("replace_all"), "Should contain replace_all parameter");
+        assert!(lark_str.contains("line_numbers"), "Should contain line_numbers parameter");
+        assert!(lark_str.contains("context"), "Should contain context parameter");
+        
+        // Verify required parameters are in JSON schema
+        assert!(lark_str.contains("required"), "Should contain required array");
+    }
+
+    #[test]
+    fn test_build_xml_tool_lark_grammar_qwen3_coder_deep_parameters() {
+        // Test Qwen3-Coder XML tool format with nested/complex parameters
+        let tools = vec![
+            crate::tools::ToolBuilder::new("edit_file".to_string(), "Edit a file with complex parameters".to_string())
+                .param("file_path", "string", "Path to the file", true)
+                .param("old_string", "string", "String to replace", true)
+                .param("new_string", "string", "Replacement string", true)
+                .param("replace_all", "boolean", "Replace all occurrences", false)
+                .build(),
+        ];
+        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let lark_str = get_lark_from_top_level_grammar(&grammar);
+        println!("XML Grammar:\n{}", &lark_str);
+
+        // Verify the grammar contains XML structure
+        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
+        // Note: <‌function=...> uses U+200C (zero-width non-joiner) which is invisible
+        assert!(lark_str.contains("function="), "Should contain function tag with attribute");
+        
+        // Verify all parameter tags are present
+        // Note: <‌parameter=...> uses U+200C (zero-width non-joiner) which is invisible
+        assert!(lark_str.contains("parameter=file_path"), "Should contain file_path parameter tag");
+        assert!(lark_str.contains("parameter=old_string"), "Should contain old_string parameter tag");
+        assert!(lark_str.contains("parameter=new_string"), "Should contain new_string parameter tag");
+        assert!(lark_str.contains("parameter=replace_all"), "Should contain replace_all parameter tag");
+        
+        // Verify parameter rules reference the correct types
+        assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 rule for first param");
+        assert!(lark_str.contains("param_0_1:"), "Should have param_0_1 rule for second param");
+        assert!(lark_str.contains("param_0_2:"), "Should have param_0_2 rule for third param");
+        assert!(lark_str.contains("param_0_3:"), "Should have param_0_3 rule for fourth param");
+        
+        // Verify tool rule has all parameters
+        assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
     }
 }

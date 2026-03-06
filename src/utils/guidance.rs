@@ -1129,7 +1129,7 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&result);
 
         // Verify that start: directly alternates 'a' | 'b' without rule_N indirection
-        assert!(lark_str.contains("start: 'a' | 'b'"), "Expected direct alternation in start rule: {}", lark_str);
+        assert!(lark_str.contains("start: ( 'a' | 'b' )+"), "Expected ( 'a' | 'b' )+ alternation in start rule: {}", lark_str);
         // Verify that rule_N indirection is NOT present
         assert!(!lark_str.contains("rule_0:"), "Should not contain rule_0 indirection");
         assert!(!lark_str.contains("rule_1:"), "Should not contain rule_1 indirection");
@@ -1138,8 +1138,8 @@ mod tests {
     #[test]
     fn test_merge_top_level_grammars_with_text_and_tool() {
         // Test the actual TEXT | tool_call scenario from the issue
-        let lark = format!("start: TEXT\n{}", chat_text_expression());
-        let text_gram = TopLevelGrammar::from_lark(lark);
+        // Use chat_text_expression_with_eos with dummy token IDs
+        let text_gram = TopLevelGrammar::from_lark(chat_text_expression_with_eos(&[1, 2]));
         let tool_gram = TopLevelGrammar::from_lark("start: tool_call\ntool_call: \"test\"".to_string());
         // Use None for default separator (|)
         let result = merge_top_level_grammars(vec![text_gram, tool_gram], None, None);
@@ -1148,7 +1148,7 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&result);
 
         // Verify that start: directly alternates TEXT | tool_call
-        assert!(lark_str.contains("start: TEXT | tool_call"), "Expected direct alternation: {}", lark_str);
+        assert!(lark_str.contains("start: ( text_with_eos | tool_call )+"), "Expected ( text_with_eos | tool_call )+: {}", lark_str);
         // Verify that rule_N indirection is NOT present
         assert!(!lark_str.contains("rule_0:"), "Should not contain rule_0 indirection");
         assert!(!lark_str.contains("rule_1:"), "Should not contain rule_1 indirection");
@@ -1251,7 +1251,8 @@ WS: {lark_ws_regex()}
         // Note: tool_call now uses regex pattern format
         let result = compose_grammars(Vec::new(), Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: /test/".to_string())), true, false, None, None, &[]);
         let lark_str = get_lark_from_top_level_grammar(&result);
-        assert!(lark_str.contains("start: text | tool_call"), "Expected text | tool_call alternation: {}", lark_str);
+        // chat_text_expression produces 'text' not 'text_with_eos' when no EOS IDs provided
+        assert!(lark_str.contains("start: ( text | tool_call )+"), "Expected ( text | tool_call )+ alternation: {}", lark_str);
     }
 
     #[test]
@@ -1262,7 +1263,8 @@ WS: {lark_ws_regex()}
         let tool_gram = Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: /tool/".to_string()));
         let result = compose_grammars(vec![constraint_gram], tool_gram, true, false, None, None, &[]);
         let lark_str = get_lark_from_top_level_grammar(&result);
-        assert!(lark_str.contains("start: constraint | tool_call"), "Expected constraint | tool_call alternation: {}", lark_str);
+        // compose_grammars with constraints produces constraint alternation, not text_with_eos
+        assert!(lark_str.contains("start: ( constraint | tool_call )+"), "Expected ( constraint | tool_call )+ alternation: {}", lark_str);
     }
 
     #[test]

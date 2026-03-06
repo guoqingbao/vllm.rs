@@ -451,59 +451,10 @@ pub async fn chat_completion(
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
 
-    // Build llguidance constraint from tools if enable_tool_grammar is set
-      let tool_gram = if has_tools && engine_config.enable_tool_grammar {
-          // Use model-specific tool call grammar via build_json_tool_lark_grammar()
-          // This respects tool_config.start_token_str, tool_config.end_token_str, and special token flags
-          // Pass sanitized_tools directly instead of converting to Value schema
-          // Use token IDs when available, fall back to string literals
-          let tool_gram = crate::tools::schema::build_json_tool_lark_grammar(
-              &sanitized_tools,
-              &tool_config.start_token_str,
-              &tool_config.end_token_str,
-              tool_config.start_is_special,
-              tool_config.end_is_special,
-              Some(&tool_config.start_token_ids),
-              Some(&tool_config.end_token_ids),
-          );
-          crate::log_debug!("[llg] Built tool grammar from tools");
-          Some(tool_gram)
-      } else {
-          // When no tools or tool_grammar disabled, use None
-          crate::log_debug!("[llg] No tool grammar enabled");
-          None
-      };
-
-    // Add tool grammar to option
-     let tool_grammar = tool_gram;
-
     // Compose all grammars using compose_grammars from guidance.rs
-     // Clone forced_tool_name for later use in retain_tool_calls_forced_name
-     let forced_tool_name_clone = forced_tool_name.clone();
+    // Clone forced_tool_name for later use in retain_tool_calls_forced_name
+    let forced_tool_name_clone = forced_tool_name.clone();
 
-     // Only set grammar if it's not just default TEXT-only grammar
-     // (i.e., if there are constraints or tool_grammar provided)
-     if constraint_grammars.is_empty() && !engine_config.enable_tool_grammar {
-        crate::log_debug!("[llg] No constraint or tool grammar - not setting guidance");
-     } else {
-        // Get EOS token IDs from engine scheduler for building TEXT pattern with EOS bounding
-        let engine = data.engine.read();
-        let eos_token_ids = engine.scheduler.eos_token_ids();
-        let llg_grammar = compose_grammars(
-            constraint_grammars,
-            tool_grammar,
-            has_tools,
-            tool_choice_required,
-            forced_tool_name,
-            Some(max_tokens.clone()),
-            eos_token_ids,
-        );
-        drop(engine); // Explicitly drop the lock guard
-        let lark_string = get_lark_from_top_level_grammar(&llg_grammar);
-         crate::log_debug!("[llg] TopLevelGrammar for SamplingParams: {:?}", &llg_grammar);
-         crate::log_debug!("[llg] Lark grammar string:\n{}", lark_string);
-         params.grammar = Some(llg_grammar);
-     }
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");
@@ -514,8 +465,39 @@ pub async fn chat_completion(
         return ChatResponder::ValidationError(err);
     }
     let parser_model_id =
-        super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
-    let enforce_parser = engine_config.enforce_parser.clone();
+         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
+     let enforce_parser = engine_config.enforce_parser.clone();
+
+     // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
+     let tool_parser_name = StreamToolParser::parser_name_for_model(&model_type, &parser_model_id);
+     let use_xml_grammar = tool_parser_name == "qwen_coder";
+     let tool_gram = if has_tools && engine_config.enable_tool_grammar {
+         let tool_gram = if use_xml_grammar {
+             crate::tools::schema::build_xml_tool_lark_grammar(
+                 &sanitized_tools,
+                 &tool_config.start_token_str,
+                 &tool_config.end_token_str,
+                 tool_config.start_is_special,
+                 tool_config.end_is_special,
+                 Some(&tool_config.start_token_ids),
+                 Some(&tool_config.end_token_ids),
+             )
+         } else {
+             crate::tools::schema::build_json_tool_lark_grammar(
+                 &sanitized_tools,
+                 &tool_config.start_token_str,
+                 &tool_config.end_token_str,
+                 tool_config.start_is_special,
+                 tool_config.end_is_special,
+                 Some(&tool_config.start_token_ids),
+                 Some(&tool_config.end_token_ids),
+             )
+         };
+         crate::log_debug!("[llg] Built tool grammar (use_xml_grammar={})", use_xml_grammar);
+         Some(tool_gram)
+     } else {
+         None
+     };
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,
@@ -529,6 +511,28 @@ pub async fn chat_completion(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+
+    if constraint_grammars.is_empty() && !engine_config.enable_tool_grammar {
+        crate::log_debug!("[llg] No constraint or tool grammar - not setting guidance");
+    } else {
+        // Get EOS token IDs from engine scheduler for building TEXT pattern with EOS bounding
+        let engine = data.engine.read();
+        let eos_token_ids = engine.scheduler.eos_token_ids();
+        let llg_grammar = compose_grammars(
+            constraint_grammars,
+            tool_gram,
+            has_tools,
+            tool_choice_required,
+            forced_tool_name.clone(),
+            Some(max_tokens.clone()),
+            eos_token_ids,
+        );
+        drop(engine); // Explicitly drop the lock guard
+        let lark_string = get_lark_from_top_level_grammar(&llg_grammar);
+        crate::log_debug!("[llg] TopLevelGrammar for SamplingParams: {:?}", &llg_grammar);
+        crate::log_debug!("[llg] Lark grammar string:\n{}", lark_string);
+        params.grammar = Some(llg_grammar);
+    }
 
     if use_stream {
         let session_id = params.session_id.clone();
@@ -568,7 +572,6 @@ pub async fn chat_completion(
             enforce_parser.clone(),
         );
         tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
-        let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
             l.log_start_response();
