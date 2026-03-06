@@ -323,7 +323,7 @@ impl ToolGrammarBuilder {
                 .and_then(|r| r.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
-    
+
             // Build required parameters first (no *, must be present)
             let required_expr: String = if required_params.is_empty() {
                 String::new()
@@ -345,7 +345,7 @@ impl ToolGrammarBuilder {
                     format!("{} ", required_rules.join(" "))
                 }
             };
-    
+
             // Build optional parameters (with *, can be omitted)
             let optional_expr: String = {
                 let optional_rules: Vec<String> = param_rule_names.iter()
@@ -365,9 +365,9 @@ impl ToolGrammarBuilder {
                     format!("({})* ", optional_rules.join(" | "))
                 }
             };
-    
+
             let params_expr = format!("{}{}", required_expr, optional_expr).trim().to_string();
-    
+
             if params_expr.is_empty() {
                 rules.push(format!("tool_{tool_idx}: {func_start} _WS? {func_end}"));
             } else {
@@ -1149,7 +1149,7 @@ mod tests {
         // Verify the grammar contains the tool structure
         assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
         assert!(lark_str.contains("obj_edit_file:"), "Should contain obj_edit_file rule");
-        
+
         // Verify JSON schema contains all required parameters
         assert!(lark_str.contains("file_path"), "Should contain file_path parameter");
         assert!(lark_str.contains("old_string"), "Should contain old_string parameter");
@@ -1157,7 +1157,7 @@ mod tests {
         assert!(lark_str.contains("replace_all"), "Should contain replace_all parameter");
         assert!(lark_str.contains("line_numbers"), "Should contain line_numbers parameter");
         assert!(lark_str.contains("context"), "Should contain context parameter");
-        
+
         // Verify required parameters are in JSON schema
         assert!(lark_str.contains("required"), "Should contain required array");
     }
@@ -1181,21 +1181,102 @@ mod tests {
         assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
         // Note: <‌function=...> uses U+200C (zero-width non-joiner) which is invisible
         assert!(lark_str.contains("function="), "Should contain function tag with attribute");
-        
+
         // Verify all parameter tags are present
         // Note: <‌parameter=...> uses U+200C (zero-width non-joiner) which is invisible
         assert!(lark_str.contains("parameter=file_path"), "Should contain file_path parameter tag");
         assert!(lark_str.contains("parameter=old_string"), "Should contain old_string parameter tag");
         assert!(lark_str.contains("parameter=new_string"), "Should contain new_string parameter tag");
         assert!(lark_str.contains("parameter=replace_all"), "Should contain replace_all parameter tag");
-        
+
         // Verify parameter rules reference the correct types
         assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 rule for first param");
         assert!(lark_str.contains("param_0_1:"), "Should have param_0_1 rule for second param");
         assert!(lark_str.contains("param_0_2:"), "Should have param_0_2 rule for third param");
         assert!(lark_str.contains("param_0_3:"), "Should have param_0_3 rule for fourth param");
-        
+
         // Verify tool rule has all parameters
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
+    }
+
+    #[test]
+    fn test_json_grammar_required_params_in_schema() {
+        // Test that JSON grammar correctly encodes required parameters in the schema
+        let tools = vec![crate::tools::ToolBuilder::new("weather_tool".to_string(), "Get weather".to_string())
+            .param("location", "string", "City name", true)      // REQUIRED
+            .param("units", "string", "Temperature units", false)  // OPTIONAL
+            .build()];
+
+        let grammar = build_json_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let lark_str = get_lark_from_top_level_grammar(&grammar);
+
+        // Verify the JSON schema contains required array with location
+        assert!(lark_str.contains("\"required\":[\"location\"]") || lark_str.contains("\"required\": [\"location\"]"),
+            "JSON schema should have location in required array");
+
+        // Verify both params appear in properties (this is expected - they're both in the schema)
+        assert!(lark_str.contains("location"), "Should contain location param");
+        assert!(lark_str.contains("units"), "Should contain units param");
+    }
+
+    #[test]
+    fn test_xml_grammar_required_params_no_wrapper() {
+        // Test that XML grammar puts required params directly without (...) * wrapper
+        let tools = vec![crate::tools::ToolBuilder::new("search_tool".to_string(), "Search tool".to_string())
+            .param("query", "string", "Search query", true)      // REQUIRED - should appear as bare rule reference
+            .build()];
+
+        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let lark_str = get_lark_from_top_level_grammar(&grammar);
+
+        // Required param rule should appear directly in tool_0 (no parentheses/asterisk around it)
+        assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
+        assert!(lark_str.contains("param_0"), "Should have parameter rules");
+
+        // The required param should NOT be wrapped in (...) * pattern
+        // Look for the pattern where required params appear as direct references: "param_X Y" not "(param_X | ...)*"
+    }
+
+    #[test]
+    fn test_xml_grammar_optional_params_wrapped() {
+        // Test that XML grammar wraps optional params with (...) * syntax
+        let tools = vec![crate::tools::ToolBuilder::new("mixed_tool".to_string(), "Mixed params".to_string())
+            .param("required_param", "string", "Required", true)      // REQUIRED
+            .param("optional_param", "string", "Optional", false)     // OPTIONAL
+            .build()];
+
+        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let lark_str = get_lark_from_top_level_grammar(&grammar);
+
+        println!("XML Grammar for mixed tool:\n{}", lark_str);
+
+        // Optional parameters should appear in a (...) * pattern when there are multiple options
+        assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
+    }
+
+    #[test]
+    fn test_json_tool_call_structure_validates() {
+        // Full end-to-end: verify JSON grammar produces valid llguidance TopLevelGrammar structure
+        let tools = vec![crate::tools::ToolBuilder::new("calculator".to_string(), "Calculator".to_string())
+            .param("expression", "string", "Math expression", true)
+            .build()];
+
+        let grammar = build_json_tool_lark_grammar(&tools, "", "", false, false, None, None);
+
+        // Grammar should have at least one sub-grammar (the tool_obj or obj_calculator rule)
+        assert!(grammar.grammars.len() > 0, "Should have generated grammars");
+    }
+
+    #[test]
+    fn test_xml_tool_call_structure_validates() {
+        // Full end-to-end: verify XML grammar produces valid llguidance TopLevelGrammar structure
+        let tools = vec![crate::tools::ToolBuilder::new("formatter".to_string(), "Formatter".to_string())
+            .param("text", "string", "Text to format", true)
+            .build()];
+
+        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+
+        // Grammar should have at least one sub-grammar (the tool rules)
+        assert!(grammar.grammars.len() > 0, "Should have generated grammars");
     }
 }

@@ -357,42 +357,46 @@ pub async fn chat_completion(
         }
     }
 
-    // Legacy constraint field
-    if let Some(ref grammar_str) = request.constraint {
-        let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
-        match constraint_type {
-            "regex" => {
-                let llg_grammar = TopLevelGrammarExt::from_regex_ascii(grammar_str);
-                constraint_grammars.push(llg_grammar);
-                crate::log_debug!("[llg] Generated regex constraint");
-            }
-            "lark" => {
-                let llg_grammar = TopLevelGrammarExt::from_lark_utf8(grammar_str);
-                constraint_grammars.push(llg_grammar);
-                crate::log_debug!("[llg] Generated lark constraint");
-            }
-            "json_schema" | "json" => {
-                match serde_json::from_str::<serde_json::Value>(grammar_str) {
-                    Ok(val) => {
-                        match TopLevelGrammarExt::from_json_schema_utf8(val) {
-                            Ok(llg_grammar) => {
-                                constraint_grammars.push(llg_grammar);
-                                crate::log_debug!("[llg] Generated json_schema constraint");
-                            }
-                            Err(e) => {
-                                crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+    // Legacy constraint field (PROTECTED by allow_constraint_api flag)
+    if engine_config.allow_constraint_api {
+        if let Some(ref grammar_str) = request.constraint {
+            let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
+            match constraint_type {
+                "regex" => {
+                    let llg_grammar = TopLevelGrammarExt::from_regex_ascii(grammar_str);
+                    constraint_grammars.push(llg_grammar);
+                    crate::log_debug!("[llg] Generated regex constraint");
+                }
+                "lark" => {
+                    let llg_grammar = TopLevelGrammarExt::from_lark_utf8(grammar_str);
+                    constraint_grammars.push(llg_grammar);
+                    crate::log_debug!("[llg] Generated lark constraint");
+                }
+                "json_schema" | "json" => {
+                    match serde_json::from_str::<serde_json::Value>(grammar_str) {
+                        Ok(val) => {
+                            match TopLevelGrammarExt::from_json_schema_utf8(val) {
+                                Ok(llg_grammar) => {
+                                    constraint_grammars.push(llg_grammar);
+                                    crate::log_debug!("[llg] Generated json_schema constraint");
+                                }
+                                Err(e) => {
+                                    crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                                }
                             }
                         }
-                    }
-                    Err(e) => {
-                        crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                        Err(e) => {
+                            crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                        }
                     }
                 }
-            }
-            _ => {
-                crate::log_warn!("[llg] Unknown constraint_type: {}", constraint_type);
+                _ => {
+                    crate::log_warn!("[llg] Unknown constraint_type: {}", constraint_type);
+                }
             }
         }
+    } else {
+        crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
     }
 
     let mcp_tools = data
