@@ -320,7 +320,7 @@ impl EngineConfig {
             mamba_memory_bytes: 0,
             mamba_slot_bytes: 0,
             mamba_cache_capacity: None,
-            block_size: 64,
+            block_size: 128,
             max_num_seqs: max_num_seqs.unwrap_or(32),
             max_num_batched_tokens: 32768, //placeholder
             config_model_len,
