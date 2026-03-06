@@ -22,6 +22,7 @@ use crate::tools::helpers::{
     sanitize_tools_for_llguidance,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
+use crate::tools::schema::ToolGrammarBuilder;
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -473,7 +474,12 @@ pub async fn chat_completion(
      let enforce_parser = engine_config.enforce_parser.clone();
 
      // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
-     let tool_parser_name = StreamToolParser::parser_name_for_model(&model_type, &parser_model_id);
+     // Honor parser override flag (--enforce-parser) when available
+     let tool_parser_name = if let Some(ref enforced) = enforce_parser {
+         enforced.clone()
+     } else {
+         StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
+     };
      let use_xml_grammar = tool_parser_name == "qwen_coder";
      let tool_gram = if has_tools && engine_config.enable_tool_grammar {
          let tool_gram = if use_xml_grammar {
@@ -486,17 +492,17 @@ pub async fn chat_completion(
                  Some(&tool_config.start_token_ids),
                  Some(&tool_config.end_token_ids),
              )
-         } else {
-             crate::tools::schema::build_json_tool_lark_grammar(
-                 &sanitized_tools,
-                 &tool_config.start_token_str,
-                 &tool_config.end_token_str,
-                 tool_config.start_is_special,
-                 tool_config.end_is_special,
-                 Some(&tool_config.start_token_ids),
-                 Some(&tool_config.end_token_ids),
-             )
-         };
+          } else {
+              ToolGrammarBuilder::new()
+                  .tools(&sanitized_tools)
+                  .start_tag(&tool_config.start_token_str)
+                  .end_tag(&tool_config.end_token_str)
+                  .start_is_special(tool_config.start_is_special)
+                  .end_is_special(tool_config.end_is_special)
+                  .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                  .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                  .build_json()
+          };
          crate::log_debug!("[llg] Built tool grammar (use_xml_grammar={})", use_xml_grammar);
          Some(tool_gram)
      } else {

@@ -24,7 +24,7 @@ use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
+use config::{Config, EngineConfig, EosTokenEntry, EosTokenId, GenerationConfig, TokenizerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -852,7 +852,7 @@ pub fn init_config_tokenizer(
             add_eos_token: Some(eos.is_some()),
             chat_template: chat_template.clone(),
             bos_token: bos,
-            eos_token: eos,
+            eos_token: eos.map(|e| EosTokenEntry::multiple(vec![e])),
         };
         let archs = config.architectures.as_ref().unwrap();
 

@@ -28,7 +28,7 @@ use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
 use std::collections::HashMap;
-use crate::tools::schema::schema_to_tools;
+use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -233,7 +233,13 @@ pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) 
         // Convert schema Value to Vec<Tool> for build_json_tool_lark_grammar
         let tools = schema_to_tools(&schema);
         // structural_tag uses text-based matching, pass None for token IDs
-        let tool_gram = crate::tools::schema::build_json_tool_lark_grammar(&tools, &start, &end, false, false, None, None);
+        let tool_gram = ToolGrammarBuilder::new()
+            .tools(&tools)
+            .start_tag(&start)
+            .end_tag(&end)
+            .start_is_special(false)
+            .end_is_special(false)
+            .build_json();
         selected = Some(tool_gram);
     }
 

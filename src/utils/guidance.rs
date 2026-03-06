@@ -9,7 +9,7 @@ use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
 use crate::tools::Tool;
 use serde_json::json;
-use std::collections::HashMap as StdHashMap;
+use crate::tools::schema::ToolGrammarBuilder;
 
 /// Error type for grammar-related errors
 #[derive(Debug, thiserror::Error)]
@@ -129,7 +129,13 @@ impl ConstraintBuilder {
                 .map_err(|e| anyhow::Error::msg(e))?;
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
             let tools = crate::tools::schema::schema_to_tools(&schema);
-            let tool_gram = crate::tools::schema::build_json_tool_lark_grammar(&tools, &start, &end, false, false, None, None);
+            let tool_gram = ToolGrammarBuilder::new()
+                .tools(&tools)
+                .start_tag(&start)
+                .end_tag(&end)
+                .start_is_special(false)
+                .end_is_special(false)
+                .build_json();
             selected = Some(tool_gram);
         }
 
@@ -242,53 +248,6 @@ pub fn sanitize_utf8_valid(s: &str) -> String {
         result.push(ch);
     }
     result
-}
-
-/// Create TopLevelGrammar from regex with ASCII sanitization
-pub fn top_level_grammar_from_regex(regex: &str) -> TopLevelGrammar {
-    let sanitized = sanitize_to_ascii(regex);
-    TopLevelGrammar::from_regex(&sanitized)
-}
-
-/// Create TopLevelGrammar from Lark string with UTF-8 sanitization
-pub fn top_level_grammar_from_lark(lark: &str) -> TopLevelGrammar {
-    let sanitized = sanitize_utf8_valid(lark);
-    TopLevelGrammar::from_lark(sanitized)
-}
-
-/// Create TopLevelGrammar from JSON schema with UTF-8 sanitization
-pub fn top_level_grammar_from_json_schema(schema: serde_json::Value) -> Result<TopLevelGrammar> {
-    let schema_str = serde_json::to_string(&schema)?;
-    let sanitized = sanitize_utf8_valid(&schema_str);
-    let val = serde_json::from_str(&sanitized)?;
-    Ok(TopLevelGrammar::from_json_schema(val))
-}
-
-/// Build JSON Schema from Tool definitions for llguidance constraints
-pub fn build_tool_schema(tools: &[Tool]) -> serde_json::Value {
-    let mut properties = StdHashMap::<String, serde_json::Value>::new();
-    let mut all_required = Vec::new();
-
-    for tool in tools {
-        properties.insert(format!("{}_params", &tool.function.name), tool.function.parameters.clone());
-        let params = &tool.function.parameters;
-        if let Some(reqs) = params.get("required") {
-            if let Some(arr) = reqs.as_array() {
-                for item in arr.iter() {
-                    if let Some(s) = item.as_str() {
-                        all_required.push(s.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    json!({
-        "type": "object",
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "properties": properties,
-        "required": all_required
-    })
 }
 
 /// Parse a Lark grammar string to extract the start rule RHS and other rules

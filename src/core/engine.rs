@@ -135,10 +135,23 @@ impl LLMEngine {
         // In case config file missing bos and eos configuratioin
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
-            if let Some(eos) = &config_tokenizer.eos_token {
-                if let Some(token) = tokenizer.get_vocab(true).get(eos).copied() {
-                    config.eos_token_id = Some(EosTokenId::Single(token));
-                };
+            if let Some(eos_entry) = &config_tokenizer.eos_token {
+                // Extract all EOS tokens from the tokenizer vocabulary
+                let mut eos_tokens: Vec<u32> = Vec::new();
+                for eos_token_str in &eos_entry.tokens {
+                    if let Some(token) = tokenizer.get_vocab(true).get(eos_token_str).copied() {
+                        if !eos_tokens.contains(&token) {
+                            eos_tokens.push(token);
+                        }
+                    }
+                }
+                if !eos_tokens.is_empty() {
+                    config.eos_token_id = if eos_tokens.len() == 1 {
+                        Some(EosTokenId::Single(eos_tokens[0]))
+                    } else {
+                        Some(EosTokenId::Multiple(eos_tokens))
+                    };
+                }
             }
         }
         assert!(
@@ -431,7 +444,7 @@ impl LLMEngine {
             None,
             config_tokenizer.chat_template.clone(),
             config_tokenizer.bos_token.clone(),
-            config_tokenizer.eos_token.clone(),
+            config_tokenizer.eos_token.as_ref().map(|e| e.tokens.join("|")),
             None,
             true,
             true,

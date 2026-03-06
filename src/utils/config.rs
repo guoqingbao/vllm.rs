@@ -466,7 +466,59 @@ pub struct TokenizerConfig {
     pub add_eos_token: Option<bool>,
     pub chat_template: Option<String>,
     pub bos_token: Option<String>,
-    pub eos_token: Option<String>,
+    #[serde(deserialize_with = "eos_token_deserialize")]
+    pub eos_token: Option<EosTokenEntry>,
+}
+
+/// Helper to deserialize EOS token which can be a string or a list of strings
+fn eos_token_deserialize<'de, D>(deserializer: D) -> Result<Option<EosTokenEntry>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        None => Ok(None),
+        Some(v) => {
+            if v.is_string() {
+                Ok(Some(EosTokenEntry::single(v.as_str().unwrap().to_string())))
+            } else if v.is_array() {
+                let arr = v.as_array().unwrap();
+                let tokens: Vec<String> = arr
+                    .iter()
+                    .map(|x| x.as_str().unwrap().to_string())
+                    .collect();
+                Ok(Some(EosTokenEntry::multiple(tokens)))
+            } else {
+                Err(serde::de::Error::custom("eos_token must be a string or array"))
+            }
+        }
+    }
+}
+
+/// EOS token entry - can be single or multiple strings
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "python", pyclass)]
+pub struct EosTokenEntry {
+    pub tokens: Vec<String>,
+}
+
+impl EosTokenEntry {
+    pub fn single(s: String) -> Self {
+        Self { tokens: vec![s] }
+    }
+
+    pub fn multiple(tokens: Vec<String>) -> Self {
+        Self { tokens }
+    }
+
+    pub fn as_single(&self) -> Option<&str> {
+        if self.tokens.len() == 1 {
+            Some(&self.tokens[0])
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "python"))]
