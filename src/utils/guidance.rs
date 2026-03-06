@@ -949,10 +949,11 @@ pub fn batch_mask_bias(
     let mut bias_data = vec![f32::NEG_INFINITY; batch_size * vocab_size];
     
     // Fill in allowed tokens using sparse iteration
-    for (seq_idx, (_seq_idx, mask)) in masks.iter().enumerate() {
+    // masks is Vec<(batch_idx, SimpleVob)> where batch_idx is the sequence position in the batch
+    for (batch_idx, mask) in masks.iter() {
         mask.iter_set_entries(|idx| {
             if idx < vocab_size {
-                bias_data[seq_idx * vocab_size + idx] = 0.0;
+                bias_data[*batch_idx * vocab_size + idx] = 0.0;
             }
         });
     }
@@ -1009,24 +1010,26 @@ pub fn early_exit_validate(
                 }
             });
             
-            // Get logits as vector and apply bias
-            let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-            let row = &mut logits_vec[seq_idx * vocab_size..][..vocab_size];
+            // Get current sequence's logits as 1D tensor - MUST CLONE to avoid cross-contamination
+            let row_start = seq_idx * vocab_size;
+            let row_end = row_start + vocab_size;
+            let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+            let mut row_vec = logits_vec.clone();  // Clone to avoid modifying original
+            let row = &mut row_vec[row_start..row_end];
             
+            // Apply bias directly to this sequence's row
             for tok in 0..vocab_size {
-                if acc[tok] == 0.0 {
-                    // Keep original logit value
-                } else {
+                if acc[tok] != 0.0 {
                     row[tok] = f32::NEG_INFINITY;
                 }
             }
             
-            // Create biased tensor
-            let biased_tensor = Tensor::from_vec(logits_vec, logits.shape(), logits.device())?;
+            // Create 1D tensor for just this sequence
+            let biased_row = Tensor::from_vec(row_vec[row_start..row_end].to_vec(), (vocab_size,), logits.device())?;
             
-            // Re-sample with biased logits
-            let re_sampled = logit_processor.sample_with_strategy(&biased_tensor, sampling)?;
-            tokens[seq_idx] = re_sampled[seq_idx];
+            // Re-sample just this sequence from the biased 1D logits
+            let re_sampled = logit_processor.sample_with_strategy(&biased_row, sampling)?;
+            tokens[seq_idx] = re_sampled[0];  // 1D output, first (only) element
             
             crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
             
