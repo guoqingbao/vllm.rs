@@ -8,7 +8,7 @@ use crate::transfer::Transfer;
 use crate::utils::graph::{
     planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
 };
-use crate::utils::guidance::{GuidanceState, ParserFactory};
+use crate::utils::guidance::{GuidanceState, ParserFactory, batch_mask_bias, early_exit_validate};
 use toktrie::SimpleVob;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
@@ -1274,51 +1274,12 @@ impl ModelRunner {
             }
 
             if modified {
-                // Now we must convert to Vec, modify, and update logits
-                let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-
-                for (seq_idx, seq_id, mask) in masks {
-                    let start = seq_idx * vocab_size;
-                    let end = start + vocab_size;
-                    let row = &mut logits_vec[start..end];
-                    let mask_len = mask.len();
-
-                    // Apply mask: set disallowed to -inf
-                    // This iterates entire vocab, but check is fast
-                    if mask_len == 0 {
-                        if guidance_failed.insert(seq_id) {
-                            crate::log_warn!(
-                                "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
-                                seq_id
-                            );
-                        }
-                        continue;
-                    }
-
-                    if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
-                        crate::log_warn!(
-                            "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
-                            seq_id,
-                            mask_len,
-                            vocab_size
-                        );
-                        // Snapshot is captured when constraint is first applied in GuidanceState::new()
-                        // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
-                    }
-
-                    let apply_len = std::cmp::min(vocab_size, mask_len);
-                    for tok in 0..apply_len {
-                        if !mask.is_allowed(tok as u32) {
-                            row[tok] = f32::NEG_INFINITY;
-                        }
-                    }
-                    if mask_len < vocab_size {
-                        for tok in mask_len..vocab_size {
-                            row[tok] = f32::NEG_INFINITY;
-                        }
-                    }
-                }
-                Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+                // Use optimized batch mask bias function
+                batch_mask_bias(
+                    &logits,
+                    &masks.iter().map(|(seq_idx, _, mask)| (*seq_idx, mask.clone())).collect::<Vec<_>>(),
+                    vocab_size,
+                )?
             } else {
                 logits
             }
@@ -1332,70 +1293,21 @@ impl ModelRunner {
             .sample_with_strategy(&logits, &cached_params.sampling)?;
 
         // Re-sample tokens that fail validation (hybrid approach)
-        if let Some(_factory) = &self.llg_factory {
+        if let Some(factory) = &self.llg_factory {
             let mut guidance_states = self.guidance_states.write();
-            for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
-                let token = tokens[seq_idx];
+            let vocab_size = logits.dim(1)?;
 
-                crate::log_trace!("[llg] Processing seq {} (idx {}): token {}", seq_id, seq_idx, token);
-
-                if let Some(state) = guidance_states.get_mut(seq_id) {
-                    if state.is_finished() {
-                        crate::log_trace!("[llg] Matcher is stopped for seq {}, skipping validation", seq_id);
-                        continue;
-                    }
-
-                    let valid = state.validate_token(token);
-                    crate::log_trace!("[llg] Token {} validation result: {}", token, valid);
-
-                    if valid {
-                        crate::log_trace!("[llg] Token {} is valid, consuming for seq {}", token, seq_id);
-                        let _ = state.commit_token(token);
-                    } else {
-                        crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
-                        let mask = match state.compute_mask_or_eos() {
-                            Ok(m) => m,
-                            Err(e) => {
-                                crate::log_error!(
-                                    "[llg] Unable to compute mask for token {} due to {}", token, e
-                                );
-                                continue;
-                            }
-                        };
-
-                        crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
-
-                        // Memory-efficient: use flat vector with slice operations
-                        let vocab_size = logits.dim(1)?;
-                        let row_start = seq_idx * vocab_size;
-                        let row_end = row_start + vocab_size;
-
-                        let mut row_vec = logits.clone().flatten_all()?.to_vec1::<f32>()?;
-                        let row = &mut row_vec[row_start..row_end];
-
-                        // Direct mask application: set disallowed tokens to -inf
-                        for tok in 0..vocab_size {
-                            if !mask.is_allowed(tok as u32) {
-                                row[tok] = f32::NEG_INFINITY;
-                            }
-                        }
-
-                        // Create tensor with correct shape for re-sampling
-                        let biased_tensor = Tensor::from_vec(row_vec, logits.shape(), logits.device())?;
-
-                        crate::log_debug!("[llg] Re-sampling with biased logits for seq {}", seq_id);
-
-                        // Use sample_with_strategy with proper cached params
-                        let re_sampled = self.logit_processor.sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
-                        tokens[seq_idx] = re_sampled[seq_idx];
-
-                        crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
-                        let _ = state.commit_token(tokens[seq_idx]);
-                    }
-                } else {
-                    crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
-                }
-            }
+            // Use optimized early exit validation
+            early_exit_validate(
+                &mut guidance_states,
+                &seq_ids,
+                &mut tokens,
+                &logits,
+                vocab_size,
+                factory,
+                &cached_params.sampling,
+                &self.logit_processor,
+            )?;
         }
 
         // Track tokens for sequences when penalties are enabled

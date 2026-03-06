@@ -1,5 +1,6 @@
 // src/utils/guidance.rs
 use anyhow::Result;
+use candle_core::Tensor;
 use llguidance::{api::TopLevelGrammar, Matcher, ParserFactory as LlgParserFactory};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use toktrie::{SimpleVob, TokTrie};
 use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
 use crate::tools::Tool;
+use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use serde_json::json;
 use std::collections::HashMap as StdHashMap;
 
@@ -932,6 +934,110 @@ impl GuidanceState {
             Err(_) => None,
         }
     }
+}
+
+/// Apply sparse mask bias to logits
+/// Uses iter_set_entries to only iterate allowed tokens
+pub fn batch_mask_bias(
+    logits: &Tensor,
+    masks: &[(usize, SimpleVob)],
+    vocab_size: usize,
+) -> candle_core::Result<Tensor> {
+    let batch_size = masks.len();
+    
+    // Create bias vector initialized to -inf
+    let mut bias_data = vec![f32::NEG_INFINITY; batch_size * vocab_size];
+    
+    // Fill in allowed tokens using sparse iteration
+    for (seq_idx, (_seq_idx, mask)) in masks.iter().enumerate() {
+        mask.iter_set_entries(|idx| {
+            if idx < vocab_size {
+                bias_data[seq_idx * vocab_size + idx] = 0.0;
+            }
+        });
+    }
+    
+    // Create bias tensor on same device as logits
+    let bias_tensor = Tensor::from_vec(bias_data, (batch_size, vocab_size), logits.device())?;
+    
+    // GPU tensor addition (no CPU copy)
+    logits.broadcast_add(&bias_tensor)
+}
+
+/// Two-stage validation with early exit
+/// Stage 1: Sample and validate token
+/// Stage 2: Only compute mask if token is invalid
+pub fn early_exit_validate(
+    guidance_states: &mut HashMap<usize, GuidanceState>,
+    seq_ids: &[usize],
+    tokens: &mut [u32],
+    logits: &Tensor,
+    vocab_size: usize,
+    _factory: &Arc<ParserFactory>,
+    sampling: &Sampling,
+    logit_processor: &LogitsProcessor,
+) -> candle_core::Result<()> {
+    for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
+        let token = tokens[seq_idx];
+        
+        if let Some(state) = guidance_states.get_mut(seq_id) {
+            // Stage 1: Validate token
+            if state.validate_token(token) {
+                // Early exit - token is valid, consume it
+                state.commit_token(token).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+                continue;
+            }
+            
+            crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
+            
+            // Stage 2: Token is invalid, compute mask and re-sample
+            let mask = match state.compute_mask_or_eos() {
+                Ok(m) => m,
+                Err(e) => {
+                    crate::log_error!("[llg] Unable to compute mask for token {} due to {}", token, e);
+                    continue;
+                }
+            };
+            
+            crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
+            
+            // Build bias vector using sparse iteration
+            let mut acc = vec![f32::NEG_INFINITY; vocab_size];
+            mask.iter_set_entries(|idx| {
+                if idx < acc.len() {
+                    acc[idx] = 0.0;
+                }
+            });
+            
+            // Get logits as vector and apply bias
+            let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+            let row = &mut logits_vec[seq_idx * vocab_size..][..vocab_size];
+            
+            for tok in 0..vocab_size {
+                if acc[tok] == 0.0 {
+                    // Keep original logit value
+                } else {
+                    row[tok] = f32::NEG_INFINITY;
+                }
+            }
+            
+            // Create biased tensor
+            let biased_tensor = Tensor::from_vec(logits_vec, logits.shape(), logits.device())?;
+            
+            // Re-sample with biased logits
+            let re_sampled = logit_processor.sample_with_strategy(&biased_tensor, sampling)?;
+            tokens[seq_idx] = re_sampled[seq_idx];
+            
+            crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
+            
+            // Commit the re-sampled token
+            state.commit_token(tokens[seq_idx]).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
+        } else {
+            crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
+        }
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]

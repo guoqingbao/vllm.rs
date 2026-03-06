@@ -375,7 +375,7 @@ impl SamplingParams {
         let grammar = grammar_json.as_ref().and_then(|s| {
             serde_json::from_str::<TopLevelGrammar>(s).ok()
         });
-        
+
         Self {
             temperature,
             max_tokens,

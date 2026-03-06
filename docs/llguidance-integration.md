@@ -35,16 +35,16 @@ sequenceDiagram
     participant Model
 
     User->>API: Request with constraint (regex/json_schema/lark/llguidance)
-    
+
     Note over User,API: Phase 1: Request Setup and Grammar Building
-    
+
     API->>Pipeline: build_llg_factory(tokenizer)
     Pipeline->>LLGFactory: toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer)
     LLGFactory->>TokTrie: Create token trie from tokenizer vocabulary
     TokTrie-->>LLGFactory: Return TokEnv with trie
     LLGFactory->>LLGFactory: ParserFactory::new_simple(&env)
     LLGFactory-->>Pipeline: Return Arc<ParserFactory>
-    
+
     Pipeline->>Pipeline: llg_grammar_from_constraint(&request.constraint)
     Pipeline->>Matcher: constraint_from_llg_grammar(&factory, grm)
     Matcher->>Matcher: factory.create_parser(grm)
@@ -53,54 +53,54 @@ sequenceDiagram
     TokenParser->>Lexer: Build LexerSpec from grammar
     Lexer->>TokTrie: Precompute large lexemes if needed
     TokTrie-->>Lexer: Return optimized lexeme sets
-    
+
     Note over User,Matcher: Phase 2: Prompt Processing (if needed)
-    
+
     User->>API: Optional: process_prompt(prompt_tokens)
     API->>TokenParser: process_prompt(prompt_tokens)
     TokenParser->>TokenParser: tokenize_bytes_marker(&prompt_bytes)
     TokenParser->>TokenParser: process_prompt() returns new prompt
-    
+
     Note over User,Matcher: Phase 3: Inference Loop
-    
+
     loop for each token generation
-    
+
     Model->>Model: Forward pass on input tokens
     Model-->>Pipeline: Return logits tensor
-    
+
     Pipeline->>Sampler: sample_sequence(logits, seq, ...)
-    
+
     Note over Sampler: Two-stage sampling with llguidance
-    
+
     Sampler->>LogitsProcessor: Apply llguidance constraint
-    
+
     LogitsProcessor->>TokenParser: compute_mask()
     TokenParser->>TokenParser: compute_mask_inner()
     TokenParser->>EarleyParser: run_speculative("compute_mask")
     EarleyParser->>EarleyParser: trie_started("compute_mask")
     EarleyParser->>EarleyParser: compute_bias()
     EarleyParser->>Lexer: compute_bias() with token_prefix
-    
+
     Note over Lexer,TokTrie: Lexical Scope Analysis
-    
+
     Lexer->>TokTrie: Walk token trie for allowed lexemes
     TokTrie-->>Lexer: Return SimpleVob bit mask
-    
+
     Lexer->>EarleyParser: Return mask to TokenParser
     TokenParser->>TokenParser: cache mask for fast-forward
-    
+
     TokenParser-->>LogitsProcessor: Return SimpleVob mask
-    
+
     LogitsProcessor->>LogitsProcessor: Check if sampled token is allowed
     LogitsProcessor->>Sampler: Apply logit biasing
-    
+
     alt Token is allowed
         Sampler->>Sampler: No biasing needed
     else Token is not allowed
         Sampler->>Sampler: Set invalid tokens to -f32::INFINITY
         Sampler->>Sampler: Re-sample with biased logits
     end
-    
+
     Sampler->>TokenParser: consume_token(sampled_token)
     TokenParser->>TokenParser: apply_token(sampled_token)
     TokenParser->>TokenParser: llm_tokens.push(sampled_token)
@@ -109,22 +109,22 @@ sequenceDiagram
     EarleyParser->>Lexer: advance lexer state
     Lexer->>Lexer: Update lexer_stack with new state
     Lexer->>EarleyParser: Return backtrack count
-    
+
     alt Backtrack needed
         EarleyParser->>EarleyParser: rollback(backtrack_bytes)
         EarleyParser->>EarleyParser: Update llm_tokens and llm_bytes
     end
-    
+
     TokenParser->>TokenParser: check_stop()
     TokenParser-->>Sampler: Return CommitResult
-    
+
     Note over Sampler: Phase 4: Fast-Forward (if enabled)
-    
+
     Sampler->>TokenParser: compute_ff_tokens()
     TokenParser->>TokenParser: ff_tokens()
     TokenParser->>TokTrie: Tokenize forced bytes
     TokTrie-->>TokenParser: Return fast-forward tokens
-    
+
     alt Fast-forward tokens available
         TokenParser->>TokenParser: consume_ff_tokens()
         loop for each ff_token
@@ -133,56 +133,56 @@ sequenceDiagram
             TokenParser->>TokenParser: llm_bytes.extend(ff_token_bytes)
         end
     end
-    
+
     Note over Sampler: Phase 5: Speculative Decoding (if enabled)
-    
+
     Model->>Model: Draft model forward pass
     Model-->>Pipeline: Return draft logits
-    
+
     Pipeline->>Sampler: sample_target_sequence_speculative()
     Sampler->>TokenParser: rollback(n_toks)
     TokenParser->>EarleyParser: parser.rollback(bytes_to_drop)
     EarleyParser->>Lexer: pop lexer states
     Lexer-->>TokenParser: Return rollback result
-    
+
     Sampler->>Sampler: Sample draft tokens
     Sampler->>TokenParser: validate_tokens(draft_tokens)
     TokenParser->>TokenParser: consume_token(draft_token)
-    
+
     alt Draft token accepted
         TokenParser->>TokenParser: Continue with next draft
     else Draft token rejected
         TokenParser->>TokenParser: Accept partial draft
         TokenParser->>TokenParser: Rollback to last valid state
     end
-    
+
     end
-    
+
     Note over User,Matcher: Phase 6: Token Geometry and Binary Data State
-    
+
     TokTrie->>TokTrie: Token encoding (8:24 bit split)
     TokTrie->>TokTrie: node.bits = (token_id << 8) | byte
     TokTrie->>TokTrie: node.bits2 = (subtree_size << 10) | num_parents
-    
+
     TokTrie->>SimpleVob: Bit mask storage
     SimpleVob->>SimpleVob: data: Vec<u32> (32 tokens per word)
     SimpleVob->>SimpleVob: allow_token(tok): data[tok>>5] |= 1 << (tok&31)
-    
+
     Note over User,Matcher: Phase 7: Rollback and Verification
-    
+
     TokenParser->>TokenParser: validate_tokens(tokens)
     TokenParser->>EarleyParser: validate_tokens_raw(tokens)
     EarleyParser->>Lexer: Check if tokens match current lexer state
     Lexer-->>TokenParser: Return number of valid tokens
-    
+
     TokenParser->>TokenParser: rollback(n_tokens)
     TokenParser->>EarleyParser: parser.rollback(bytes_to_drop)
     EarleyParser->>Lexer: pop lexer states
     TokenParser->>TokenParser: llm_tokens.truncate(new_len)
     TokenParser->>TokenParser: llm_bytes.truncate(new_len)
-    
+
     Note over User,Matcher: Phase 8: Response Generation
-    
+
     Pipeline->>API: Return completion with tokens
     API->>User: Stream or return final response
     end
@@ -446,27 +446,27 @@ sequenceDiagram
     User->>Server: Request with tools + structured_outputs
     Server->>ConstraintBuilder: grammar_fragment_from_structured_outputs()
     ConstraintBuilder->>LarkParser: Parse JSON schema
-    
+
     LarkBuilder->>ConstraintBuilder: Return TopLevelGrammar
     Server->>ToolGrammarBuilder: build_json_tool_lark_grammar() if enabled
-    
+
     ToolGrammarBuilder->>LarkParser: Build tool call grammar
     LarkParser->>ToolGrammarBuilder: Return tool TopLevelGrammar
-    
+
     Note over ComposeLogic: compose_grammars()
-    
+
     ComposeLogic->>ComposeLogic: Determine match arm based on:
     ComposeLogic->>ComposeLogic: - constraint_grammars length
     ComposeLogic->>ComposeLogic: - tool_grammar presence
     ComposeLogic->>ComposeLogic: - tool_choice_required
     ComposeLogic->>ComposeLogic: - forced_tool_name presence
-    
+
     ComposeLogic->>ComposeLogic: If multiple grammars: merge_top_level_grammars()
     ComposeGrammar->>EarleyCompiler: Compile direct alternation
     EarleyCompiler->>LexerBuilder: Build lexer spec
-    
+
     LexerBuilder->>ComposeLogic: Return single TopLevelGrammar
-    
+
     Note over ComposeLogic: Generated grammar:
     start: TEXT | tool_call
     TEXT: /[\x20-\x7E\x80-\uFFFF\n\r\t]/
@@ -597,7 +597,7 @@ pub fn merge_top_level_grammars(
 ) -> TopLevelGrammar {
     // Extract all Lark grammar strings
     let mut lark_parts = Vec::new();
-    
+
     for (_i, g) in grammars.iter().enumerate() {
         for gw in &g.grammars {
             if let Some(lark) = &gw.lark_grammar {
@@ -605,32 +605,32 @@ pub fn merge_top_level_grammars(
             }
         }
     }
-    
+
     if lark_parts.is_empty() {
         let lark_start_exp = format!("start: TEXT\n{}", chat_text_expression());
         let mut tlg = TopLevelGrammar::from_lark(lark_start_exp);
         tlg.max_tokens = max_tokens;
         return tlg;
     }
-    
+
     // Parse each grammar and extract start RHS + other rules
     let mut combined_start_rhs = Vec::new();
     let mut all_other_rules = Vec::new();
-    
+
     for lark in lark_parts.iter() {
         let (start_rhs, other_rules) = parse_lark_grammar(lark);
         combined_start_rhs.push(start_rhs);
         all_other_rules.extend(other_rules);
     }
-    
+
     // Combine all other rules, handling duplicates
     let combined_rules = combine_rules(all_other_rules);
-    
+
     // Build new grammar with direct alternation at start
     let start_separator = format!(" {} ", &start_separator.unwrap_or_else(|| "|".to_string()));
     let start_alternation = combined_start_rhs.join(&start_separator);
     let final_grammar = format!("start: {}\n{}", start_alternation, combined_rules);
-    
+
     let mut top_gram = TopLevelGrammar::from_lark(final_grammar);
     top_gram.max_tokens = max_tokens;
     top_gram
@@ -649,19 +649,19 @@ fn parse_lark_grammar(lark: &str) -> (String, Vec<String>) {
     if lines.is_empty() {
         return (String::new(), Vec::new());
     }
-    
+
     let first_line = lines[0].trim();
     if first_line.starts_with("start:") {
         // Extract only the rule names after "start:", not the full rule definition
         let rhs_part = first_line.strip_prefix("start:").unwrap_or("").trim();
-        
+
         // Parse the RHS to get individual rule names (separated by |)
         let rule_names: Vec<String> = rhs_part
             .split('|')
             .map(|s| s.trim().to_string())
             .collect();
         let start_rhs = rule_names.join(" | ");
-        
+
         // Return all remaining lines as other rules
         let other_rules: Vec<String> = lines[1..].iter().map(|s| s.to_string()).collect();
         (start_rhs, other_rules)
@@ -683,16 +683,16 @@ fn combine_rules(rules: Vec<String>) -> String {
     if rules.is_empty() {
         return String::new();
     }
-    
+
     use std::collections::HashMap;
     let mut rule_groups: HashMap<String, Vec<String>> = HashMap::new();
-    
+
     for rule in rules {
         let rule = rule.trim();
         if rule.is_empty() {
             continue;
         }
-        
+
         // Find the rule name (before the first ":")
         if let Some(colon_pos) = rule.find(':') {
             let name = rule[..colon_pos].trim().to_string();
@@ -703,7 +703,7 @@ fn combine_rules(rules: Vec<String>) -> String {
             rule_groups.entry("anonymous".to_string()).or_default().push(rule.to_string());
         }
     }
-    
+
     // Reconstruct rules, merging duplicates
     let mut combined = Vec::new();
     for (name, bodies) in rule_groups {
@@ -714,7 +714,7 @@ fn combine_rules(rules: Vec<String>) -> String {
             combined.push(format!("{}: {}", name, bodies.join(" | ")));
         }
     }
-    
+
     combined.join("\n")
 }
 ```
@@ -761,13 +761,13 @@ fn build_json_tool_lark_string(
         lark_literal(end, end_is_special)
     };
     let ws = lark_ws_regex();
-    
+
     // Build the complete grammar with rules in correct dependency order
     let mut all_rules = Vec::new();
     all_rules.push("start: tool_call".to_string());
     all_rules.push(format!("tool_call: {} ws json_array ws {}", start_tag, end_tag));
     all_rules.push("json_array: \"[\" obj (\",\" obj)* \"]\"".to_string());
-    
+
     if obj_rules.is_empty() {
         // No tools - use a generic object schema
         all_rules.push("obj: %json {\"type\": \"object\"}".to_string());
@@ -781,7 +781,7 @@ fn build_json_tool_lark_string(
     }
     // ws comes LAST - it's a helper rule for whitespace
     all_rules.push(format!("ws: {}", ws));
-    
+
     all_rules.join("\n") + "\n"
 }
 ```
@@ -1586,7 +1586,7 @@ Or via structured_outputs:
 The llguidance matcher computes the probability of each token being valid given the current grammar state:
 
 ```
-P(token | grammar_state) = 
+P(token | grammar_state) =
     1.0 if token ∈ valid_tokens(grammar_state)
     0.0 otherwise
 ```
