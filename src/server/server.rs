@@ -486,6 +486,9 @@ pub async fn chat_completion(
      if constraint_grammars.is_empty() && !engine_config.enable_tool_grammar {
         crate::log_debug!("[llg] No constraint or tool grammar - not setting guidance");
      } else {
+        // Get EOS token IDs from engine scheduler for building TEXT pattern with EOS bounding
+        let engine = data.engine.read();
+        let eos_token_ids = engine.scheduler.eos_token_ids();
         let llg_grammar = compose_grammars(
             constraint_grammars,
             tool_grammar,
@@ -493,7 +496,9 @@ pub async fn chat_completion(
             tool_choice_required,
             forced_tool_name,
             Some(max_tokens.clone()),
+            eos_token_ids,
         );
+        drop(engine); // Explicitly drop the lock guard
         let lark_string = get_lark_from_top_level_grammar(&llg_grammar);
          crate::log_debug!("[llg] TopLevelGrammar for SamplingParams: {:?}", &llg_grammar);
          crate::log_debug!("[llg] Lark grammar string:\n{}", lark_string);

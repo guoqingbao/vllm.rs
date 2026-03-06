@@ -167,6 +167,8 @@ impl GrammarBuilder {
     }
 
     pub fn build(self) -> TopLevelGrammar {
+        // Note: GrammarBuilder currently uses chat_text_expression() without EOS tokens
+        // EOS token support is provided through compose_grammars() directly
         match self.alternatives.len() {
             0 => {
                 let lark = chat_text_expression();
@@ -408,7 +410,7 @@ pub fn merge_top_level_grammars(grammars: Vec<TopLevelGrammar>, max_tokens: Opti
     // Build new grammar with direct alternation at start
     let start_separator = format!(" {} ", &sep);
     let start_alternation = combined_start_rhs.join(&start_separator);
-    let final_grammar = format!("start: {}\n{}", start_alternation, combined_rules);
+    let final_grammar = format!("start: ( {} )+\n{}", start_alternation, combined_rules);
 
     let mut top_gram = TopLevelGrammar::from_lark(final_grammar);
     top_gram.max_tokens = max_tokens;
@@ -513,6 +515,37 @@ pub fn build_tool_call_end_tag(end_token_ids: &std::collections::HashSet<u32>, e
     build_special_token_tag(end_token_ids, end_token_str)
 }
 
+/// Build TEXT pattern with explicit EOS token IDs using <[id]> syntax
+/// The EOS tokens are alternated as optional termination: TEXT eos?
+pub fn chat_text_expression_with_eos(eos_token_ids: &[u32]) -> String {
+    // First check environment variable override
+    if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
+        return format!("{}", val);
+    }
+
+    // Build EOS alternation pattern using <[id]> syntax for token IDs
+    // LHS must be lowercase - literal tokens aren't allowed in TERMINAL rules
+    let eos_pattern = if eos_token_ids.is_empty() {
+        // Fallback to stop="" when no EOS tokens available
+        r#"start: text
+text[stop=""]: /((?s).*?)/"#.to_string()
+    } else if eos_token_ids.len() == 1 {
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: <[{}]>"#, eos_token_ids[0])
+    } else {
+        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
+        let eos_alternation = ids.join(" | ");
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: {}"#, eos_alternation)
+    };
+
+    eos_pattern
+}
+
 /// Build TEXT pattern with stop="" attribute for proper EOS bounding
 /// The stop="" attribute sets ends_at_eos: true so the parser can terminate at EOS
 /// The [lazy] syntax is for rules, not terminals - options go AFTER the rule name, BEFORE the colon
@@ -586,6 +619,7 @@ pub fn compose_grammars(
     tool_choice_required: bool,
     forced_tool_name: Option<String>,
     max_tokens: Option<usize>,
+    eos_token_ids: &[u32],
 ) -> TopLevelGrammar {
     crate::log_debug!("[llg] compose_grammars() called: constraints={:?}", constraint_grammars.len());
     crate::log_debug!("[llg] compose_grammars(): has_tools={}, tool_choice_required={}, forced_tool_name={:?}", has_tools, tool_choice_required, forced_tool_name);
@@ -596,24 +630,24 @@ pub fn compose_grammars(
         tool_choice_required,
         forced_tool_name.is_some(),
     ) {
-        // No constraint, no tools → text only
+        // No constraint, no tools → text with EOS bounding
         (true, false, _, _) => {
-            // text[stop=""]: /((?s).*?)/ matches any character including newlines with EOS bounding
-            // (?s) enables dotall mode where . matches newlines too
-            // stop="" sets ends_at_eos: true so the parser can terminate at EOS
-            let lark = format!("start: text\ntext[stop=\"\"]: /((?s).*?)/");
-            crate::log_debug!("[llg] compose_grammars() -> text only: {}", &lark);
+            // Build TEXT pattern with explicit EOS token IDs
+            // This generates: start: text_with_eos, text_with_eos: TEXT eos?, TEXT: /pattern/, eos: <[id]>
+            let lark = chat_text_expression_with_eos(eos_token_ids);
+            crate::log_debug!("[llg] compose_grammars() -> text with EOS: {}", &lark);
             TopLevelGrammar::from_lark(lark)
         }
 
-        // No constraint, tools optional → tool_call | text
+        // No constraint, tools optional → tool_call | text with EOS
         (true, true, false, false) => {
-            let lark = format!("start: text\ntext[stop=\"\"]: /((?s).*?)/");
+            // Build text grammar with explicit EOS token IDs
+            let lark = chat_text_expression_with_eos(eos_token_ids);
             let text_gram = TopLevelGrammar::from_lark(lark);
             let tool_gram = tool_grammar.unwrap();
             let start_sep = "|".to_string();
             let merged = merge_top_level_grammars(vec![text_gram, tool_gram], max_tokens, Some(start_sep));
-            crate::log_debug!("[llg] compose_grammars() -> tool_call | text");
+            crate::log_debug!("[llg] compose_grammars() -> tool_call | text with EOS");
             merged
         }
 
@@ -920,28 +954,28 @@ mod tests {
 
     #[test]
     fn test_compose_grammars_no_constraint_no_tools() {
-        let result = compose_grammars(Vec::new(), None, false, false, None, None);
+        let result = compose_grammars(Vec::new(), None, false, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
     #[test]
     fn test_compose_grammars_no_constraint_tools_optional() {
         let tool_gram = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(Vec::new(), Some(tool_gram), true, false, None, None);
+        let result = compose_grammars(Vec::new(), Some(tool_gram), true, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
     #[test]
     fn test_compose_grammars_no_constraint_tools_required() {
         let tool_gram = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(Vec::new(), Some(tool_gram), true, true, None, None);
+        let result = compose_grammars(Vec::new(), Some(tool_gram), true, true, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
     #[test]
     fn test_compose_grammars_constraint_no_tools() {
         let constraint_gram = TopLevelGrammar::from_lark("start: 'choice'".to_string());
-        let result = compose_grammars(vec![constraint_gram], None, false, false, None, None);
+        let result = compose_grammars(vec![constraint_gram], None, false, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -949,7 +983,7 @@ mod tests {
     fn test_compose_grammars_constraint_with_tools_optional() {
         let constraint_gram = TopLevelGrammar::from_lark("start: 'constraint'".to_string());
         let tool_gram = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, false, None, None);
+        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -957,7 +991,7 @@ mod tests {
     fn test_compose_grammars_constraint_with_tools_required() {
         let constraint_gram = TopLevelGrammar::from_lark("start: 'constraint'".to_string());
         let tool_gram = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, true, None, None);
+        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, true, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -965,7 +999,7 @@ mod tests {
     fn test_compose_grammars_constraint_with_forced_tool() {
         let constraint_gram = TopLevelGrammar::from_lark("start: 'constraint'".to_string());
         let tool_gram = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, false, Some("forced_tool".to_string()), None);
+        let result = compose_grammars(vec![constraint_gram], Some(tool_gram), true, false, Some("forced_tool".to_string()), None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -973,7 +1007,7 @@ mod tests {
     fn test_compose_grammars_regex_constraint_no_tools() {
         let sanitized = sanitize_to_ascii("^[a-z]+$");
         let constraint_gram = TopLevelGrammar::from_regex(&sanitized);
-        let result = compose_grammars(vec![constraint_gram], None, false, false, None, None);
+        let result = compose_grammars(vec![constraint_gram], None, false, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -1049,13 +1083,13 @@ mod tests {
 
         // (false, false, _, _) -> constraint only
         let constraint = TopLevelGrammar::from_lark("start: 'a'".to_string());
-        let result = compose_grammars(vec![constraint], None, false, false, None, None);
+        let result = compose_grammars(vec![constraint], None, false, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
 
         // (false, true, false, false) -> constraint | tool_call
         let constraint = TopLevelGrammar::from_lark("start: 'a'".to_string());
         let tool = TopLevelGrammar::from_lark("start: 'tool'".to_string());
-        let result = compose_grammars(vec![constraint], Some(tool), true, false, None, None);
+        let result = compose_grammars(vec![constraint], Some(tool), true, false, None, None, &[]);
         assert!(result.grammars.len() > 0);
     }
 
@@ -1077,10 +1111,39 @@ WS: {lark_ws_regex()}
     }
 
     #[test]
+    fn test_chat_text_expression_with_eos_single() {
+        // Test that chat_text_expression_with_eos generates correct grammar with single EOS token
+        let eos_ids = [151645u32];
+        let lark = chat_text_expression_with_eos(&eos_ids);
+        assert!(lark.contains("start: text_with_eos"), "Expected text_with_eos start rule: {}", lark);
+        assert!(lark.contains("text_with_eos: TEXT eos?"), "Expected text_with_eos rule with optional eos: {}", lark);
+        assert!(lark.contains("eos: <[151645]>"), "Expected EOS token ID in grammar: {}", lark);
+    }
+
+    #[test]
+    fn test_chat_text_expression_with_eos_multiple() {
+        // Test that chat_text_expression_with_eos generates correct grammar with multiple EOS tokens
+        let eos_ids = [151645u32, 151643u32];
+        let lark = chat_text_expression_with_eos(&eos_ids);
+        assert!(lark.contains("start: text_with_eos"), "Expected text_with_eos start rule: {}", lark);
+        assert!(lark.contains("eos: <[151645]> | <[151643]>"), "Expected multiple EOS tokens in grammar: {}", lark);
+    }
+
+    #[test]
+    fn test_chat_text_expression_with_eos_empty() {
+        // Test fallback behavior when no EOS tokens provided
+        let eos_ids: [u32; 2] = [19287, 3645];
+        let lark = chat_text_expression_with_eos(&eos_ids);
+        println!("{}", &lark);
+        assert!(lark.contains("start: text_with_eos"), "Expected text start rule: {}", lark);
+        assert!(lark.contains("<[19287]>"), "Expected 19287 token for EOS bounding: {}", lark);
+    }
+
+    #[test]
     fn test_compose_grammars_text_tool_call_plus_pattern() {
         // Test that (TEXT | tool_call)* is properly generated
         // Note: tool_call now uses regex pattern format
-        let result = compose_grammars(Vec::new(), Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: /test/".to_string())), true, false, None, None);
+        let result = compose_grammars(Vec::new(), Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: /test/".to_string())), true, false, None, None, &[]);
         let lark_str = get_lark_from_top_level_grammar(&result);
         assert!(lark_str.contains("start: text | tool_call"), "Expected text | tool_call alternation: {}", lark_str);
     }
@@ -1091,7 +1154,7 @@ WS: {lark_ws_regex()}
         // Note: tool_call now uses regex pattern format
         let constraint_gram = TopLevelGrammar::from_lark("start: constraint\nconstraint: /test/".to_string());
         let tool_gram = Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: /tool/".to_string()));
-        let result = compose_grammars(vec![constraint_gram], tool_gram, true, false, None, None);
+        let result = compose_grammars(vec![constraint_gram], tool_gram, true, false, None, None, &[]);
         let lark_str = get_lark_from_top_level_grammar(&result);
         assert!(lark_str.contains("start: constraint | tool_call"), "Expected constraint | tool_call alternation: {}", lark_str);
     }
@@ -1099,7 +1162,7 @@ WS: {lark_ws_regex()}
     #[test]
     fn test_compose_grammars_forced_tool_no_text() {
         // Test that forced tool only uses tool_call grammar
-        let result = compose_grammars(Vec::new(), Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: \"test\"".to_string())), true, false, Some("forced_tool".to_string()), None);
+        let result = compose_grammars(Vec::new(), Some(TopLevelGrammar::from_lark("start: tool_call\ntool_call: \"test\"".to_string())), true, false, Some("forced_tool".to_string()), None, &[]);
         let lark_str = get_lark_from_top_level_grammar(&result);
         assert!(lark_str.contains("start: tool_call"), "Expected tool_call only: {}", lark_str);
         assert!(!lark_str.contains("TEXT"), "Should not contain TEXT when tool is forced: {}", lark_str);

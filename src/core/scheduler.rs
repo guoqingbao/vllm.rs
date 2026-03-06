@@ -1283,6 +1283,11 @@ impl Scheduler {
         false
     }
 
+    /// Get the EOS token IDs from the scheduler
+    pub fn eos_token_ids(&self) -> &[u32] {
+        &self.eos_token_id
+    }
+
     fn stop_sequence_match_index(&self, token: u32, seq: &Sequence) -> Option<usize> {
         let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
             return None;

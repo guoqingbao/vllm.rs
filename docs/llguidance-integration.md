@@ -19,70 +19,173 @@ This document provides comprehensive documentation for the llguidance integratio
 
 ### Component Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         User Request                            │
-│  (OpenAI / Claude / MCP / Structured Outputs)                   │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    Server Layer                                 │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  chat_completion() [src/server/server.rs:250]             │  │
-│  │  - Parse request fields                                    │  │
-│  │  - Resolve tools (MCP + request)                           │  │
-│  │  - Build constraints from structured_outputs/response_format│ │
-│  │  - Build grammar from tools (if enable_tool_grammar=true)  │  │
-│  │  - Compose grammars via compose_grammars()                 │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   Engine Layer                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  LLMEngine::generate_stream() / generate_sync()          │  │
-│  │  - Create Sequence                                       │  │
-│  │  - Allocate blocks                                       │  │
-│  │  - Initialize GuidanceState if grammar exists            │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Scheduler Layer                                │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  postprocess() [src/core/scheduler.rs:616]                │  │
-│  │  - Rollback validation via ModelRunner                   │  │
-│  │  - Sequence state management                             │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  ModelRunner Layer                              │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  GuidanceState::compute_mask()                           │  │
-│  │  GuidanceState::validate_tokens()                        │  │
-│  │  GuidanceState::rollback_to()                            │  │
-│  │  GuidanceState::consume_ff_tokens()                      │  │
-│  │  - Compute valid token mask from llguidance Matcher      │  │
-│  │  - Validate generated tokens against grammar             │  │
-│  │  - Rollback to previous state on failure                 │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└───────────────────────┬─────────────────────────────────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  BlockManager Layer                             │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │  rollback_to_seq_tokens() [src/core/block_manager.rs:946]│  │
-│  │  - Release KV cache blocks                               │  │
-│  │  - Clean up prefix cache                                 │  │
-│  │  - Invalidate Mamba state                                │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant User
+    participant API
+    participant Pipeline
+    participant LLGFactory
+    participant Matcher
+    participant TokenParser
+    participant EarleyParser
+    participant Lexer
+    participant TokTrie
+    participant Sampler
+    participant LogitsProcessor
+    participant Model
+
+    User->>API: Request with constraint (regex/json_schema/lark/llguidance)
+    
+    Note over User,API: Phase 1: Request Setup and Grammar Building
+    
+    API->>Pipeline: build_llg_factory(tokenizer)
+    Pipeline->>LLGFactory: toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer)
+    LLGFactory->>TokTrie: Create token trie from tokenizer vocabulary
+    TokTrie-->>LLGFactory: Return TokEnv with trie
+    LLGFactory->>LLGFactory: ParserFactory::new_simple(&env)
+    LLGFactory-->>Pipeline: Return Arc<ParserFactory>
+    
+    Pipeline->>Pipeline: llg_grammar_from_constraint(&request.constraint)
+    Pipeline->>Matcher: constraint_from_llg_grammar(&factory, grm)
+    Matcher->>Matcher: factory.create_parser(grm)
+    Matcher->>TokenParser: Create with grammar_init
+    TokenParser->>EarleyParser: Build CGrammar from grammar
+    TokenParser->>Lexer: Build LexerSpec from grammar
+    Lexer->>TokTrie: Precompute large lexemes if needed
+    TokTrie-->>Lexer: Return optimized lexeme sets
+    
+    Note over User,Matcher: Phase 2: Prompt Processing (if needed)
+    
+    User->>API: Optional: process_prompt(prompt_tokens)
+    API->>TokenParser: process_prompt(prompt_tokens)
+    TokenParser->>TokenParser: tokenize_bytes_marker(&prompt_bytes)
+    TokenParser->>TokenParser: process_prompt() returns new prompt
+    
+    Note over User,Matcher: Phase 3: Inference Loop
+    
+    loop for each token generation
+    
+    Model->>Model: Forward pass on input tokens
+    Model-->>Pipeline: Return logits tensor
+    
+    Pipeline->>Sampler: sample_sequence(logits, seq, ...)
+    
+    Note over Sampler: Two-stage sampling with llguidance
+    
+    Sampler->>LogitsProcessor: Apply llguidance constraint
+    
+    LogitsProcessor->>TokenParser: compute_mask()
+    TokenParser->>TokenParser: compute_mask_inner()
+    TokenParser->>EarleyParser: run_speculative("compute_mask")
+    EarleyParser->>EarleyParser: trie_started("compute_mask")
+    EarleyParser->>EarleyParser: compute_bias()
+    EarleyParser->>Lexer: compute_bias() with token_prefix
+    
+    Note over Lexer,TokTrie: Lexical Scope Analysis
+    
+    Lexer->>TokTrie: Walk token trie for allowed lexemes
+    TokTrie-->>Lexer: Return SimpleVob bit mask
+    
+    Lexer->>EarleyParser: Return mask to TokenParser
+    TokenParser->>TokenParser: cache mask for fast-forward
+    
+    TokenParser-->>LogitsProcessor: Return SimpleVob mask
+    
+    LogitsProcessor->>LogitsProcessor: Check if sampled token is allowed
+    LogitsProcessor->>Sampler: Apply logit biasing
+    
+    alt Token is allowed
+        Sampler->>Sampler: No biasing needed
+    else Token is not allowed
+        Sampler->>Sampler: Set invalid tokens to -f32::INFINITY
+        Sampler->>Sampler: Re-sample with biased logits
+    end
+    
+    Sampler->>TokenParser: consume_token(sampled_token)
+    TokenParser->>TokenParser: apply_token(sampled_token)
+    TokenParser->>TokenParser: llm_tokens.push(sampled_token)
+    TokenParser->>TokenParser: llm_bytes.extend(token_bytes)
+    TokenParser->>EarleyParser: parser.apply_token(token_bytes, token_id)
+    EarleyParser->>Lexer: advance lexer state
+    Lexer->>Lexer: Update lexer_stack with new state
+    Lexer->>EarleyParser: Return backtrack count
+    
+    alt Backtrack needed
+        EarleyParser->>EarleyParser: rollback(backtrack_bytes)
+        EarleyParser->>EarleyParser: Update llm_tokens and llm_bytes
+    end
+    
+    TokenParser->>TokenParser: check_stop()
+    TokenParser-->>Sampler: Return CommitResult
+    
+    Note over Sampler: Phase 4: Fast-Forward (if enabled)
+    
+    Sampler->>TokenParser: compute_ff_tokens()
+    TokenParser->>TokenParser: ff_tokens()
+    TokenParser->>TokTrie: Tokenize forced bytes
+    TokTrie-->>TokenParser: Return fast-forward tokens
+    
+    alt Fast-forward tokens available
+        TokenParser->>TokenParser: consume_ff_tokens()
+        loop for each ff_token
+            TokenParser->>TokenParser: consume_token(ff_token)
+            TokenParser->>TokenParser: llm_tokens.push(ff_token)
+            TokenParser->>TokenParser: llm_bytes.extend(ff_token_bytes)
+        end
+    end
+    
+    Note over Sampler: Phase 5: Speculative Decoding (if enabled)
+    
+    Model->>Model: Draft model forward pass
+    Model-->>Pipeline: Return draft logits
+    
+    Pipeline->>Sampler: sample_target_sequence_speculative()
+    Sampler->>TokenParser: rollback(n_toks)
+    TokenParser->>EarleyParser: parser.rollback(bytes_to_drop)
+    EarleyParser->>Lexer: pop lexer states
+    Lexer-->>TokenParser: Return rollback result
+    
+    Sampler->>Sampler: Sample draft tokens
+    Sampler->>TokenParser: validate_tokens(draft_tokens)
+    TokenParser->>TokenParser: consume_token(draft_token)
+    
+    alt Draft token accepted
+        TokenParser->>TokenParser: Continue with next draft
+    else Draft token rejected
+        TokenParser->>TokenParser: Accept partial draft
+        TokenParser->>TokenParser: Rollback to last valid state
+    end
+    
+    end
+    
+    Note over User,Matcher: Phase 6: Token Geometry and Binary Data State
+    
+    TokTrie->>TokTrie: Token encoding (8:24 bit split)
+    TokTrie->>TokTrie: node.bits = (token_id << 8) | byte
+    TokTrie->>TokTrie: node.bits2 = (subtree_size << 10) | num_parents
+    
+    TokTrie->>SimpleVob: Bit mask storage
+    SimpleVob->>SimpleVob: data: Vec<u32> (32 tokens per word)
+    SimpleVob->>SimpleVob: allow_token(tok): data[tok>>5] |= 1 << (tok&31)
+    
+    Note over User,Matcher: Phase 7: Rollback and Verification
+    
+    TokenParser->>TokenParser: validate_tokens(tokens)
+    TokenParser->>EarleyParser: validate_tokens_raw(tokens)
+    EarleyParser->>Lexer: Check if tokens match current lexer state
+    Lexer-->>TokenParser: Return number of valid tokens
+    
+    TokenParser->>TokenParser: rollback(n_tokens)
+    TokenParser->>EarleyParser: parser.rollback(bytes_to_drop)
+    EarleyParser->>Lexer: pop lexer states
+    TokenParser->>TokenParser: llm_tokens.truncate(new_len)
+    TokenParser->>TokenParser: llm_bytes.truncate(new_len)
+    
+    Note over User,Matcher: Phase 8: Response Generation
+    
+    Pipeline->>API: Return completion with tokens
+    API->>User: Stream or return final response
+    end
 ```
 
 ### Key Data Structures
