@@ -17,35 +17,33 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --server 
 
 ## 2) Configure Goose
 
-### Download and install Goose: https://block.github.io/goose/docs/getting-started/installation/
-
 ```shell
 # For non-UI system,
 export GOOSE_DISABLE_KEYRING=1
 ```
-
 Export empty API KEY
 
 ```shell
 export VLLM_API_KEY="empty"
 ```
 
+### Download and install Goose: https://block.github.io/goose/docs/getting-started/installation/
 
 ### Configure goose with `Custom Providers` and API key `empty`
 
 ```shell
 goose configure
 
-┌   goose-configure 
+┌   goose-configure
 │
 ◇  What would you like to configure?
-│  Custom Providers 
+│  Custom Providers
 │
 ◇  What would you like to do?
-│  Add A Custom Provider 
+│  Add A Custom Provider
 │
 ◇  What type of API is this?
-│  OpenAI Compatible 
+│  OpenAI Compatible
 │
 ◇  What should we call this provider?
 │  vllm-rs
@@ -60,10 +58,10 @@ goose configure
 │  default
 │
 ◇  Does this provider support streaming responses?
-│  Yes 
+│  Yes
 │
 ◇  Does this provider require custom headers?
-│  No 
+│  No
 │
 └  Custom provider added: vllm-rs
 └  Configuration saved successfully to /root/.config/goose/config.yaml

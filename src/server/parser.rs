@@ -50,6 +50,8 @@ pub struct ToolConfig {
     pub end_token_ids: HashSet<u32>,
     pub start_token_str: String,
     pub end_token_str: String,
+    pub start_is_special: bool,
+    pub end_is_special: bool,
 }
 
 impl ToolConfig {
@@ -68,6 +70,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<|python_tag|>".to_string(),
                     end_token_str: "<|eom_id|>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Qwen3
@@ -83,6 +87,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<tool_call>".to_string(),
                     end_token_str: "</tool_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Mistral | ModelType::Mistral3VL => {
@@ -93,6 +99,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "[TOOL_CALLS]".to_string(),
                     end_token_str: "]".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             ModelType::Gemma | ModelType::Gemma3 => {
@@ -102,6 +110,8 @@ impl ToolConfig {
                     end_token_ids: end_ids,
                     start_token_str: "<start_function_call>".to_string(),
                     end_token_str: "<end_function_call>".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
                 }
             }
             // Phi, GLM, Yi, StableLM, DeepSeek - use Qwen format (text-only)
@@ -116,6 +126,8 @@ impl ToolConfig {
                 end_token_ids: HashSet::new(),
                 start_token_str: "<tool_call>".to_string(),
                 end_token_str: "</tool_call>".to_string(),
+                start_is_special: false,
+                end_is_special: false,
             },
         }
     }
@@ -1046,7 +1058,7 @@ impl StreamToolParser {
         serde_json::from_str::<Vec<Value>>(trimmed).is_ok()
     }
 
-    fn parser_name_for_model(model_type: &ModelType, model_id: &str) -> &'static str {
+    pub fn parser_name_for_model(model_type: &ModelType, model_id: &str) -> &'static str {
         let model_lower = model_id.to_ascii_lowercase();
         match model_type {
             ModelType::LLaMa => "llama",

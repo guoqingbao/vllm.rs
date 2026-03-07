@@ -1,6 +1,9 @@
 // src/server/server.rs
 use super::logger::ChatCompletionLogger;
+use crate::utils::guidance::{compose_grammars, get_lark_from_top_level_grammar, TopLevelGrammarExt};
+use llguidance::api::TopLevelGrammar;
 use super::{
+    grammar_fragment_from_structured_outputs, grammar_fragment_from_response_format,
     build_messages_and_images,
     streaming::{ChatResponse, Streamer, StreamingStatus},
     ChatResponder, DetokenizeRequest, DetokenizeResponse, EmbeddingRequest, EmbeddingResponse,
@@ -16,8 +19,10 @@ use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolPars
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
     resolve_tools, retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
+    sanitize_tools_for_llguidance,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
+use crate::tools::schema::ToolGrammarBuilder;
 use crate::utils::config::SamplingParams;
 use axum::{
     extract::{Json, Query, State},
@@ -31,6 +36,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task;
 use uuid::Uuid;
+
 
 /// Helper struct to manage streaming response chunks
 /// Provides clean API for sending tokens, errors, and status notifications
@@ -275,14 +281,124 @@ pub async fn chat_completion(
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
     let (img_cfg, model_type, tool_config, engine_config) = {
-        let e = data.engine.read();
-        (
-            e.img_cfg.clone(),
-            e.model_type.clone(),
-            e.tool_config.clone(),
-            e.econfig.clone(),
-        )
-    };
+         let e = data.engine.read();
+         (
+             e.img_cfg.clone(),
+             e.model_type.clone(),
+             e.tool_config.clone(),
+             e.econfig.clone(),
+         )
+     };
+     let model_type = model_type.clone(); // Clone for later use
+
+    // Collect all TopLevelGrammars from various sources
+    let mut constraint_grammars: Vec<TopLevelGrammar> = Vec::new();
+
+    // Handle client-submitted constraints via structured_outputs or response_format
+    // First check top-level structured_outputs for convenience
+    if let Some(ref structured) = request.structured_outputs {
+        if engine_config.allow_constraint_api {
+            match grammar_fragment_from_structured_outputs(structured) {
+                Ok(Some(grammar)) => {
+                    constraint_grammars.push(grammar);
+                    crate::log_debug!("[llg] Collected constraint grammar from top-level structured_outputs");
+                }
+                Ok(None) => {
+                    // No constraint specified
+                }
+                Err(err) => {
+                    crate::log_error!("[llg] Failed to parse structured_outputs: {:?}", err);
+                    return ChatResponder::ValidationError(format!("{:?}", err));
+                }
+            }
+        } else {
+            crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+        }
+    }
+    // Fallback to extra_body.structured_outputs for backwards compatibility
+    else if let Some(ref extra_body) = request.extra_body {
+        if let Some(ref structured) = extra_body.structured_outputs {
+            if engine_config.allow_constraint_api {
+                match grammar_fragment_from_structured_outputs(structured) {
+                    Ok(Some(grammar)) => {
+                        constraint_grammars.push(grammar);
+                        crate::log_debug!("[llg] Collected constraint grammar from extra_body.structured_outputs");
+                    }
+                    Ok(None) => {
+                        // No constraint specified
+                    }
+                    Err(err) => {
+                        crate::log_error!("[llg] Failed to parse structured_outputs: {:?}", err);
+                        return ChatResponder::ValidationError(format!("{:?}", err));
+                    }
+                }
+            } else {
+                crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+            }
+        }
+    }
+
+    if let Some(ref response_format) = request.response_format {
+        if engine_config.allow_constraint_api {
+            match grammar_fragment_from_response_format(response_format) {
+                Ok(Some(grammar)) => {
+                    constraint_grammars.push(grammar);
+                    crate::log_debug!("[llg] Collected constraint grammar from response_format");
+                }
+                Ok(None) => {
+                    // No constraint specified
+                }
+                Err(err) => {
+                    crate::log_error!("[llg] Failed to parse response_format: {:?}", err);
+                    return ChatResponder::ValidationError(format!("{:?}", err));
+                }
+            }
+        } else {
+            crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+        }
+    }
+
+    // Legacy constraint field (PROTECTED by allow_constraint_api flag)
+    if engine_config.allow_constraint_api {
+        if let Some(ref grammar_str) = request.constraint {
+            let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
+            match constraint_type {
+                "regex" => {
+                    let llg_grammar = TopLevelGrammarExt::from_regex_ascii(grammar_str);
+                    constraint_grammars.push(llg_grammar);
+                    crate::log_debug!("[llg] Generated regex constraint");
+                }
+                "lark" => {
+                    let llg_grammar = TopLevelGrammarExt::from_lark_utf8(grammar_str);
+                    constraint_grammars.push(llg_grammar);
+                    crate::log_debug!("[llg] Generated lark constraint");
+                }
+                "json_schema" | "json" => {
+                    match serde_json::from_str::<serde_json::Value>(grammar_str) {
+                        Ok(val) => {
+                            match TopLevelGrammarExt::from_json_schema_utf8(val) {
+                                Ok(llg_grammar) => {
+                                    constraint_grammars.push(llg_grammar);
+                                    crate::log_debug!("[llg] Generated json_schema constraint");
+                                }
+                                Err(e) => {
+                                    crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::log_warn!("[llg] Failed to parse json_schema constraint: {:?}", e);
+                        }
+                    }
+                }
+                _ => {
+                    crate::log_warn!("[llg] Unknown constraint_type: {}", constraint_type);
+                }
+            }
+        }
+    } else {
+        crate::log_warn!("[llg] Client-submitted constraints are disabled. Set --allow-constraint-api to enable.");
+    }
 
     let mcp_tools = data
         .mcp_manager
@@ -334,9 +450,16 @@ pub async fn chat_completion(
         }
     }
 
-    let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
+    // Sanitize tools before building schema map to ensure ASCII-only tool names
+    let sanitized_tools = sanitize_tools_for_llguidance(&resolved_tools);
+    let tool_schemas = Arc::new(build_tool_schema_map(&sanitized_tools));
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
+
+    // Compose all grammars using compose_grammars from guidance.rs
+    // Clone forced_tool_name for later use in retain_tool_calls_forced_name
+    let forced_tool_name_clone = forced_tool_name.clone();
+
 
     if has_tools {
         crate::log_warn!("Tools enabled for request");
@@ -347,8 +470,44 @@ pub async fn chat_completion(
         return ChatResponder::ValidationError(err);
     }
     let parser_model_id =
-        super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
-    let enforce_parser = engine_config.enforce_parser.clone();
+         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
+     let enforce_parser = engine_config.enforce_parser.clone();
+
+     // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
+     // Honor parser override flag (--enforce-parser) when available
+     let tool_parser_name = if let Some(ref enforced) = enforce_parser {
+         enforced.clone()
+     } else {
+         StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
+     };
+     let use_xml_grammar = tool_parser_name == "qwen_coder";
+     let tool_gram = if has_tools && engine_config.enable_tool_grammar {
+         let tool_gram = if use_xml_grammar {
+             crate::tools::schema::build_xml_tool_lark_grammar(
+                 &sanitized_tools,
+                 &tool_config.start_token_str,
+                 &tool_config.end_token_str,
+                 tool_config.start_is_special,
+                 tool_config.end_is_special,
+                 Some(&tool_config.start_token_ids),
+                 Some(&tool_config.end_token_ids),
+             )
+          } else {
+              ToolGrammarBuilder::new()
+                  .tools(&sanitized_tools)
+                  .start_tag(&tool_config.start_token_str)
+                  .end_tag(&tool_config.end_token_str)
+                  .start_is_special(tool_config.start_is_special)
+                  .end_is_special(tool_config.end_is_special)
+                  .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                  .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                  .build_json()
+          };
+         crate::log_debug!("[llg] Built tool grammar (use_xml_grammar={})", use_xml_grammar);
+         Some(tool_gram)
+     } else {
+         None
+     };
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,
@@ -362,6 +521,28 @@ pub async fn chat_completion(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+
+    if constraint_grammars.is_empty() && !engine_config.enable_tool_grammar {
+        crate::log_debug!("[llg] No constraint or tool grammar - not setting guidance");
+    } else {
+        // Get SpecialTokens from engine for building TEXT pattern with EOS bounding
+        let engine = data.engine.read();
+        let special_tokens = &engine.special_tokens;
+        let llg_grammar = compose_grammars(
+            constraint_grammars,
+            tool_gram,
+            has_tools,
+            tool_choice_required,
+            forced_tool_name.clone(),
+            Some(max_tokens.clone()),
+            special_tokens,
+        );
+        drop(engine); // Explicitly drop the lock guard
+        let lark_string = get_lark_from_top_level_grammar(&llg_grammar);
+        crate::log_debug!("[llg] TopLevelGrammar for SamplingParams: {:?}", &llg_grammar);
+        crate::log_debug!("[llg] Lark grammar string:\n{}", lark_string);
+        params.grammar = Some(llg_grammar);
+    }
 
     if use_stream {
         let session_id = params.session_id.clone();
@@ -401,7 +582,6 @@ pub async fn chat_completion(
             enforce_parser.clone(),
         );
         tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
-        let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
             l.log_start_response();
@@ -725,7 +905,7 @@ pub async fn chat_completion(
 
                         let dropped = retain_tool_calls_forced_name(
                             &mut pending_tool_calls,
-                            forced_tool_name.as_deref(),
+                            forced_tool_name_clone.as_deref(),
                         );
                         if dropped > 0 {
                             crate::log_warn!(
@@ -752,7 +932,7 @@ pub async fn chat_completion(
                         let invalid_feedback = build_invalid_tool_call_feedback(
                             &invalid_calls,
                             stream_tool_schemas.as_ref(),
-                            forced_tool_name.as_deref(),
+                            forced_tool_name_clone.as_deref(),
                         );
 
                         let (valid_calls, invalid_feedback) = if !invalid_calls.is_empty()
@@ -1019,7 +1199,7 @@ pub async fn chat_completion(
                     .parse_complete_with_fallback(&output.decode_output)
                     .await;
                 let dropped =
-                    retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
+                    retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name_clone.as_deref());
                 if dropped > 0 {
                     crate::log_warn!(
                         "Dropped {} tool call(s) that did not match forced tool_choice",
@@ -1036,7 +1216,7 @@ pub async fn chat_completion(
                 let invalid_feedback = build_invalid_tool_call_feedback(
                     &invalid_calls,
                     tool_schemas.as_ref(),
-                    forced_tool_name.as_deref(),
+                    forced_tool_name_clone.as_deref(),
                 );
 
                 let valid_calls = validated_calls;
