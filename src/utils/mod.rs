@@ -14,6 +14,7 @@ pub mod image;
 pub mod kvcache_allocator;
 pub mod logits_processor;
 pub mod progress;
+pub mod special_tokens;
 use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;

@@ -23,7 +23,7 @@ pub struct ToolBuilder {
 }
 
 impl ToolBuilder {
-    fn new(name: String, description: String) -> Self {
+    pub fn new(name: String, description: String) -> Self {
         Self {
             name,
             description,

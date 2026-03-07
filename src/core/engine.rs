@@ -20,6 +20,7 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
+use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
@@ -100,6 +101,9 @@ pub struct LLMEngine {
     pub model_type: ModelType,
     pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
+    /// SpecialTokens parsed once at engine initialization
+    /// Contains EOS, BOS, and other special token IDs and their string representations
+    pub special_tokens: Arc<SpecialTokens>,
 }
 
 impl LLMEngine {
@@ -466,6 +470,9 @@ impl LLMEngine {
             "default".to_string()
         };
 
+        // Initialize SpecialTokens once at engine startup
+        let special_tokens = Arc::new(SpecialTokens::new(&tokenizer));
+
         let engine = Arc::new(RwLock::new(Self {
             runners,
             scheduler,
@@ -488,6 +495,7 @@ impl LLMEngine {
             tool_config,
             img_cfg,
             model_name,
+            special_tokens,
         }));
         Self::start_engine(engine.clone());
         Ok(engine)
