@@ -9,6 +9,7 @@ use crate::utils::graph::{
     planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
 };
 use crate::utils::guidance::{GuidanceState, ParserFactory};
+// use crate::utils::guidance::{GuidanceState, ParserFactory, batch_mask_bias, early_exit_validate};
 use toktrie::SimpleVob;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
@@ -1319,6 +1320,14 @@ impl ModelRunner {
                     }
                 }
                 Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+                /*
+                // Use optimized batch mask bias function
+                batch_mask_bias(
+                    &logits,
+                    &masks.iter().map(|(seq_idx, _, mask)| (*seq_idx, mask.clone())).collect::<Vec<_>>(),
+                    vocab_size,
+                )?
+                */
             } else {
                 logits
             }
@@ -1395,6 +1404,20 @@ impl ModelRunner {
                 } else {
                     crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
                 }
+            /*
+            // Use optimized early exit validation
+            let vocab_size = logits.dim(1)?;
+            early_exit_validate(
+                &mut guidance_states,
+                &seq_ids,
+                &mut tokens,
+                &logits,
+                vocab_size,
+                factory,
+                &cached_params.sampling,
+                &self.logit_processor,
+            )?
+            */
             }
         }
 
