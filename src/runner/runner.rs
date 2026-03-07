@@ -126,31 +126,36 @@ fn main() -> anyhow::Result<()> {
                 (None, false)
             };
 
-            let vb = VarBuilderX::new(
-                &init_req.model_pathes,
-                init_req.is_gguf,
-                init_req.dtype.into(),
-                &device,
-            )?;
             let stream_kv = Some(stream.try_clone()?);
             let mut econfig = init_req.econfig.clone();
             let toktrie = load_toktrie_from_path(&init_req.model_pathes.get_tokenizer_filename())
                 .map(Arc::new);
             #[allow(unused_mut)]
-            let mut runner = ModelRunner::new(
-                init_req.model_type,
-                &vb,
-                comm,
-                &mut econfig,
-                &init_req.config,
-                init_req.dtype.into(),
-                init_req.is_rope_i,
-                device,
-                progress_reporter,
-                transfer,
-                toktrie,
-                stream_kv,
-            )?;
+            let mut runner = {
+                let _guard = candle_core::InferenceMode::enter();
+                let vb = VarBuilderX::new(
+                    &init_req.model_pathes,
+                    init_req.is_gguf,
+                    init_req.dtype.into(),
+                    &device,
+                )?;
+                let runner = ModelRunner::new(
+                    init_req.model_type,
+                    &vb,
+                    comm,
+                    &mut econfig,
+                    &init_req.config,
+                    init_req.dtype.into(),
+                    init_req.is_rope_i,
+                    device,
+                    progress_reporter,
+                    transfer,
+                    toktrie,
+                    stream_kv,
+                )?;
+                drop(vb);
+                runner
+            };
 
             vllm_rs::log_info!(
                 "Runner at rank {} created (PD config: {:?})!",
