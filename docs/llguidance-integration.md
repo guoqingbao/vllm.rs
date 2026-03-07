@@ -24,6 +24,7 @@ sequenceDiagram
     participant User
     participant API
     participant Pipeline
+    participant SpecialTokens
     participant LLGFactory
     participant Matcher
     participant TokenParser
@@ -38,6 +39,8 @@ sequenceDiagram
 
     Note over User,API: Phase 1: Request Setup and Grammar Building
 
+    API->>SpecialTokens: SpecialTokens::new(&tokenizer)
+    SpecialTokens-->>API: Return EOS, BOS, TOOL token IDs
     API->>Pipeline: build_llg_factory(tokenizer)
     Pipeline->>LLGFactory: toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer)
     LLGFactory->>TokTrie: Create token trie from tokenizer vocabulary
@@ -205,7 +208,7 @@ pub struct GuidanceState {
 ```
 
 #### `SamplingParams` Struct
-**Location**: [`src/utils/config.rs:474-496`](src/utils/config.rs:474-496)
+**Location**: [`src/utils/config.rs`](src/utils/config.rs)
 
 ```rust
 pub struct SamplingParams {
@@ -218,7 +221,7 @@ pub struct SamplingParams {
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
-    pub stop_token_ids: Option<Vec<Vec<u32>>>,
+    // stop_token_ids removed - now uses SpecialTokens for EOS detection
     pub mcp_mode: Option<bool>,           // Tool call mode
     pub grammar: Option<TopLevelGrammar>, // LLG constraint (TopLevelGrammar)
     pub thinking: Option<bool>,
@@ -226,6 +229,8 @@ pub struct SamplingParams {
     pub grammar_json: Option<String>,     // Grammar as JSON string for Python API
 }
 ```
+
+**Note**: The `stop_token_ids` field has been removed. Stop sequences are now resolved using the engine's `SpecialTokens` instance for consistent EOS detection across the system.
 
 #### `EngineConfig` Struct
 **Location**: [`src/utils/config.rs:244-289`](src/utils/config.rs:244-289)
@@ -254,7 +259,7 @@ The server layer provides several functions to convert client requests to `TopLe
 
 ### Grammar Composition
 
-The `compose_grammars()` function ([`src/utils/guidance.rs:363`](src/utils/guidance.rs:363)) handles grammar composition:
+The `compose_grammars()` function ([`src/utils/guidance.rs:581`](src/utils/guidance.rs:581)) handles grammar composition:
 
 ```rust
 pub fn compose_grammars(
@@ -264,18 +269,21 @@ pub fn compose_grammars(
     tool_choice_required: bool,                  // Whether tool_choice is "required"
     forced_tool_name: Option<String>,            // Specific tool forced via tool_choice
     max_tokens: Option<usize>,
+    special_tokens: &SpecialTokens,              // ← EOS token IDs for TEXT patterns
 ) -> TopLevelGrammar
 ```
 
 This function handles 8 different scenarios:
-1. No constraint, no tools → TEXT only
-2. No constraint, tools optional → TEXT | tool_call
+1. No constraint, no tools → text with EOS bounding
+2. No constraint, tools optional → tool_call | text with EOS
 3. No constraint, tools required → tool_call only
 4. No constraint, tools optional, specific tool forced → tool_call only
 5. Constraint only, no tools → constraint only
 6. Constraint only, tools optional → constraint | tool_call
 7. Constraint only, tools required → constraint | tool_call
 8. Constraint only, specific tool forced → constraint | tool_call
+
+**Note**: The `special_tokens: &SpecialTokens` parameter provides EOS token IDs for proper freeform text termination via [`chat_text_expression_with_eos()`](src/utils/guidance.rs:485).
 
 ---
 
@@ -302,8 +310,12 @@ User Request
     │   [tools/schema.rs:87] build_json_tool_lark_grammar()
     │   └─ Creates Lark grammar with tool schemas as %json directives
     │
-    ├─ Compose grammars via compose_grammars() [utils/guidance.rs:363]
-    │   └─ Combines constraint_grammars + tool_grammar
+    ├─ Initialize SpecialTokens for EOS detection
+    │   [utils/special_tokens.rs:133] SpecialTokens::new(&tokenizer)
+    │   └─ Extracts EOS, BOS, PAD, TOOL, FUNCTION token IDs from tokenizer
+    │
+    ├─ Compose grammars via compose_grammars() [utils/guidance.rs:581]
+    │   └─ Passes special_tokens: &SpecialTokens for EOS handling
     │
     ▼
 [core/engine.rs:1298] generate_stream()
@@ -478,112 +490,11 @@ sequenceDiagram
     ws: /[ \t\r\n]+/
 ```
 
-### The `compose_grammars()` Function
 
-**Location**: [`src/utils/guidance.rs:363-445`](src/utils/guidance.rs:363-445)
-
-This function composes multiple grammars into a single TopLevelGrammar:
-
-```rust
-pub fn compose_grammars(
-    mut constraint_grammars: Vec<TopLevelGrammar>,
-    tool_grammar: Option<TopLevelGrammar>,
-    has_tools: bool,
-    tool_choice_required: bool,
-    forced_tool_name: Option<String>,
-    max_tokens: Option<usize>,
-) -> TopLevelGrammar {
-    crate::log_debug!("[llg] compose_grammars() called: constraints={:?}", constraint_grammars.len());
-    crate::log_debug!("[llg] compose_grammars(): has_tools={}, tool_choice_required={}, forced_tool_name={:?}", has_tools, tool_choice_required, forced_tool_name);
-
-    match (
-        constraint_grammars.is_empty(),
-        tool_grammar.is_some(),
-        tool_choice_required,
-        forced_tool_name.is_some(),
-    ) {
-        // No constraint, no tools → TEXT only
-        (true, false, _, _) => {
-            let lark = format!("start: TEXT\n{}", chat_text_expression());
-            crate::log_debug!("[llg] compose_grammars() -> TEXT only: {}", &lark);
-            TopLevelGrammar::from_lark(lark)
-        }
-
-        // No constraint, tools optional → tool_call | TEXT
-        (true, true, false, false) => {
-            let lark = format!("start: TEXT\n{}", chat_text_expression());
-            let text_gram = TopLevelGrammar::from_lark(lark);
-            let tool_gram = tool_grammar.unwrap();
-            let start_sep = "|".to_string();
-            let merged = merge_top_level_grammars(vec![text_gram, tool_gram], max_tokens, Some(start_sep));
-            crate::log_debug!("[llg] compose_grammars() -> tool_call | TEXT");
-            merged
-        }
-
-        // No constraint, tools required → tool_call only
-        (true, true, true, _) => {
-            let tool_gram = tool_grammar.unwrap();
-            crate::log_debug!("[llg] compose_grammars() -> tool_call only (tools required)");
-            tool_gram
-        }
-
-        // No constraint, tools optional, specific tool forced → tool_call only
-        (true, true, false, true) => {
-            let tool_gram = tool_grammar.unwrap();
-            crate::log_debug!("[llg] compose_grammars() -> tool_call only (forced tool: {})", forced_tool_name.unwrap());
-            tool_gram
-        }
-
-        // Constraint only, no tools → constraint only
-        (false, false, _, _) => {
-            let constraint_gram = constraint_grammars.remove(0);
-            crate::log_debug!("[llg] compose_grammars() -> constraint only");
-            constraint_gram
-        }
-
-        // Constraint only, tools optional → tool_call | constraint
-        (false, true, false, false) => {
-            let constraint_gram = constraint_grammars.remove(0);
-            let tool_gram = tool_grammar.unwrap();
-            merge_top_level_grammars(vec![constraint_gram, tool_gram], max_tokens, None)
-        }
-
-        // Constraint only, tools required → tool_call | constraint
-        (false, true, true, _) => {
-            let constraint_gram = constraint_grammars.remove(0);
-            let tool_gram = tool_grammar.unwrap();
-            merge_top_level_grammars(vec![constraint_gram, tool_gram], max_tokens, None)
-        }
-
-        // Constraint only, specific tool forced → tool_call | constraint
-        (false, true, false, true) => {
-            let constraint_gram = constraint_grammars.remove(0);
-            let tool_gram = tool_grammar.unwrap();
-            merge_top_level_grammars(vec![constraint_gram, tool_gram], max_tokens, None)
-        }
-    }
-}
-```
 
 ### Helper Functions
 
-#### `chat_text_expression()`
 
-**Location**: [`src/utils/guidance.rs:306-312`](src/utils/guidance.rs:306-312)
-
-Returns the TEXT pattern for free-form text matching:
-
-```rust
-pub fn chat_text_expression() -> String {
-    // TEXT pattern for free-form text matching any characters including newlines
-    // Check VLLM_LLG_DEFAULT_TEXT env var first, fallback to default pattern
-    std::env::var("VLLM_LLG_DEFAULT_TEXT")
-        .map(|val| format!("TEXT: {}", val))
-        .unwrap_or_else(|_| r#"TEXT: /[\x20-\x7E\x80-\uFFFF\n\r\t]/"#.to_string())
-}
-```
-
-#### `merge_top_level_grammars()`
 
 **Location**: [`src/utils/guidance.rs:161-206`](src/utils/guidance.rs:161-206)
 
@@ -1100,6 +1011,48 @@ pub fn compose_grammars(
 ```
 
 See Section 3 for full documentation.
+
+#### `chat_text_expression_with_eos()`
+
+**Location**: [`src/utils/guidance.rs:485-514`](src/utils/guidance.rs:485-514)
+
+Returns the TEXT pattern with explicit EOS token IDs for free-form text matching with proper termination:
+
+```rust
+pub fn chat_text_expression_with_eos(special_tokens: &SpecialTokens) -> String {
+    let eos_token_ids = special_tokens.eos_ids();
+    
+    // First check environment variable override
+    if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
+        return format!("{}", val);
+    }
+    
+    // Build EOS alternation pattern using <[id]> syntax for token IDs
+    if eos_token_ids.is_empty() {
+        // Fallback to stop="" when no EOS tokens available
+        r#"start: text
+text[stop=""]: /((?s).*?)/"#.to_string()
+    } else if eos_token_ids.len() == 1 {
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: <[{}]>"#, eos_token_ids[0])
+    } else {
+        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
+        let eos_alternation = ids.join(" | ");
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: {}"#, eos_alternation)
+    }
+}
+```
+
+This function:
+1. Extracts EOS token IDs from `SpecialTokens`
+2. Builds a TEXT pattern with optional EOS termination (`eos?`)
+3. Uses `<[token_id]>` syntax for token ID references in the Lark grammar
+4. Falls back to `stop=""` pattern when no EOS tokens are available
 
 #### `merge_top_level_grammars()`
 **Location**: [`src/utils/guidance.rs:161`](src/utils/guidance.rs:161)
@@ -2031,5 +1984,192 @@ The fix is implemented in two helper functions:
 
 ---
 
-This documentation was generated from the llguidance integration in vllm.rs.
-Last updated: 2026-03-05
+---
+
+## 15. EOS TOKEN MANDATE FOR FREEFORM GENERATION
+
+### Why EOS Tokens Are Required
+
+For freeform TEXT generation (non-constrained), the grammar MUST include an explicit EOS token boundary. Without it:
+
+1. **Mask Preemption**: The `compute_mask()` function returns token IDs before generation, but the TEXT pattern `/((?s).)*/` allows any character including EOS
+2. **No Finite Boundary**: Without an explicit EOS in the grammar, the lexer has no way to know when to stop accepting TEXT tokens
+3. **Run-on Generation**: The model continues generating indefinitely until max_tokens is reached
+
+### Correct TEXT Pattern with EOS
+
+```lark
+start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: <[248044]> | <[248046]> | <[248048]> | <[248052]> | <[248054]> | <[248050]>
+```
+
+### Incorrect TEXT Pattern (causes run-on generation)
+
+```lark
+start: text
+text: TEXT
+TEXT: /(?s:.*)/
+```
+
+### Implementation in chat_text_expression_with_eos()
+
+The function [`chat_text_expression_with_eos()`](src/utils/guidance.rs:485) in guidance.rs properly handles this:
+
+```rust
+pub fn chat_text_expression_with_eos(special_tokens: &SpecialTokens) -> String {
+    let eos_token_ids = special_tokens.eos_ids();
+    
+    let eos_pattern = if eos_token_ids.is_empty() {
+        // Fallback to stop="" when no EOS tokens available
+        r#"start: text
+text[stop=""]: /((?s).*?)/"#.to_string()
+    } else if eos_token_ids.len() == 1 {
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: <[{}]>"#, eos_token_ids[0])
+    } else {
+        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
+        let eos_alternation = ids.join(" | ");
+        format!(r#"start: text_with_eos
+text_with_eos: TEXT eos?
+TEXT: /(?s:.*)/
+eos: {}"#, eos_alternation)
+    };
+    
+    eos_pattern
+}
+```
+
+### Key Points
+
+1. **Use `chat_text_expression_with_eos()`** instead of `chat_text_expression()` when freeform TEXT is needed
+2. **Always include EOS tokens** in the grammar for unconstrained generation
+3. **Avoid `stop=""` patterns** - they don't work reliably with llguidance's lexer
+4. **Use `eos?` syntax** to make EOS optional at the end of text
+
+---
+
+## 16. QWEN CODER TOOL PARSING ISSUES
+
+### Problem: XML Nested Tags in Parameter Values
+
+Qwen Coder models output tool parameters with XML-style nested tags like:
+
+```xml
+<‌tool_call>
+<‌function=edit_file>
+<‌parameter=file_path>/tmp/a.rs</‌parameter>
+<‌parameter=new_string>
+fn a() { let x = vec![1,2,3]; }</‌parameter>
+<‌/function>
+<‌/tool_call>
+```
+
+### The Grammar Challenge
+
+The current grammar uses regex patterns to match XML content:
+
+```lark
+value_4_0: /[^<]*(<[^\/][^<]*)*?/
+```
+
+This pattern:
+- **Allows**: Regular text and non-closing angle brackets
+- **Fails on**: Content that contains `<` followed by a `/` (closing tag) - **premature termination**
+- **Fails on**: Content that contains `<` followed by a letter (opening tag) - **false positive tag detection**
+
+### Why This Is Fundamentally Broken
+
+1. **Look-Ahead Limitation**: Earley regex cannot express "match until you see `<‌/parameter>` but allow `<‌function=...>` in between"
+2. **Finite Masks**: llguidance precomputes token masks, but nested XML requires unbounded context
+3. **No Recursive Grammars**: Lark cannot express recursive XML structures in a way that maps to token masks
+
+### Current Workarounds
+
+#### Option A: Conservative Text Matching (Current)
+```lark
+value: /[^<]*(<[^\/][^<]*)*?/
+```
+- **Pros**: Works for most cases, finite mask possible
+- **Cons**: Fails if parameter content contains `<` character
+
+#### Option B: Allow Any Character Until Strict End
+```lark
+value: /(?s).*?(?=<‌\/parameter>)/
+```
+- **Pros**: Handles `<` in content
+- **Cons**: Requires look-ahead, impossible with finite masks
+
+#### Option C: Use Token IDs Instead of String Literals
+```lark
+value: /[^<]*(<[0-9]+[^\/][^<]*)*?/
+```
+- **Pros**: More flexible pattern matching
+- **Cons**: Still can't handle nested `<` characters
+
+### The Real Problem
+
+```
+<‌parameter=new_string>  ← Start of parameter
+fn a() { let x = vec![1,2,3]; }  ← Contains '<' characters
+<‌/parameter>            ← End of parameter (but mask sees '<' and thinks it's a tag)
+```
+
+When the mask encounters `<`, it:
+1. Checks if next character is `/` → closing tag
+2. Checks if next character is letter → opening tag  
+3. **Preempts content generation** before the actual `</‌parameter>`
+
+### Recommended Solution: Avoid XML Parameters for Tool Calls
+
+Instead of nested XML like:
+
+```lark
+<‌function=edit_file>
+<‌parameter=file_path>/tmp/a.rs</‌parameter>
+<‌parameter=new_string>fn a() { let x = vec![1,2,3]; }</‌parameter>
+<‌/function>
+```
+
+Use **flat JSON** format:
+
+```json
+{
+  "name": "edit_file",
+  "arguments": {
+    "file_path": "/tmp/a.rs",
+    "new_string": "fn a() { let x = vec![1,2,3]; }"
+  }
+}
+```
+
+### Grammar for JSON Tool Calls (Recommended)
+
+```lark
+start: tool_call
+tool_call: "<‌tool_call>" ws json_array ws "<‌/tool_call>"
+json_array: "[" obj ("," obj)* "]"
+obj: obj_search | obj_edit
+obj_search: %json {"type":"object","properties":{...}}
+obj_edit: %json {"type":"object","properties":{...}}
+ws: /[ \t\r\n]+/
+```
+
+This avoids the XML nested tag problem entirely by:
+1. Using `%json` directives for structured parameter schemas
+2. Not exposing parameter tags in the grammar
+3. Letting the parser validate JSON structure instead of regex
+
+### Summary
+
+| Issue | Current State | Recommendation |
+|-------|--------------|----------------|
+| Nested XML tags | Cannot be expressed in finite mask grammar | Use JSON instead |
+| `<` in parameter values | Causes premature termination | Avoid XML format |
+| Look-ahead parsing | Not supported by llguidance lexer | Use simpler grammar structures |
+| |
+
+Last updated: 2026-03-07
