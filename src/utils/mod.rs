@@ -25,7 +25,7 @@ use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use config::{Config, EngineConfig, EosTokenEntry, EosTokenId, GenerationConfig, TokenizerConfig};
+use config::{Config, EngineConfig, GenerationConfig, TokenizerConfig};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -176,9 +176,9 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
     let eos_token_id = if eos_token_id.is_ok() {
-        EosTokenId::Single(eos_token_id.unwrap().to_u32()?)
+        Some(vec![eos_token_id.unwrap().to_u32()?])
     } else {
-        EosTokenId::Multiple(vec![])
+        None
     };
 
     // ---------------- RoPE scaling --------------------------
@@ -376,7 +376,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         final_logit_softcapping: None,
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
-        eos_token_id: Some(eos_token_id),
+        eos_token_id,
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
@@ -438,8 +438,10 @@ fn merge_multimodal_top_level_config(
 
     if let Some(eos) = raw_root.get("eos_token_id") {
         if !eos.is_null() {
-            if let Ok(eos_token_id) = serde_json::from_value::<EosTokenId>(eos.clone()) {
-                config.eos_token_id = Some(eos_token_id);
+            if let Ok(eos_ids) = serde_json::from_value::<Vec<u32>>(eos.clone()) {
+                config.eos_token_id = Some(eos_ids);
+            } else if let Ok(eos_id) = serde_json::from_value::<u32>(eos.clone()) {
+                config.eos_token_id = Some(vec![eos_id]);
             }
         }
     }
@@ -657,6 +659,7 @@ pub fn init_config_tokenizer(
                             .map_err(candle_core::Error::wrap)?;
                         let mut config: Config = serde_json::from_value(config_value)
                             .map_err(candle_core::Error::wrap)?;
+                        // Gemma3Config already uses Vec<u32> for eos_token_id
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }
@@ -853,7 +856,7 @@ pub fn init_config_tokenizer(
             add_eos_token: Some(eos.is_some()),
             chat_template: chat_template.clone(),
             bos_token: bos,
-            eos_token: eos.map(|e| EosTokenEntry::multiple(vec![e])),
+            eos_token: eos,
         };
         let archs = config.architectures.as_ref().unwrap();
 

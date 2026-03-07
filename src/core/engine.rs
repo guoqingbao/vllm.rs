@@ -19,7 +19,7 @@ use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
+use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
 use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -139,23 +139,15 @@ impl LLMEngine {
         // In case config file missing bos and eos configuratioin
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
-            if let Some(eos_entry) = &config_tokenizer.eos_token {
-                // Extract all EOS tokens from the tokenizer vocabulary
-                let mut eos_tokens: Vec<u32> = Vec::new();
-                for eos_token_str in &eos_entry.tokens {
-                    if let Some(token) = tokenizer.get_vocab(true).get(eos_token_str).copied() {
-                        if !eos_tokens.contains(&token) {
-                            eos_tokens.push(token);
-                        }
-                    }
+            // Extract EOS tokens from the tokenizer vocabulary
+            let mut eos_tokens: Vec<u32> = Vec::new();
+            if let Some(eos_str) = &config_tokenizer.eos_token {
+                if let Some(token) = tokenizer.get_vocab(true).get(eos_str).copied() {
+                    eos_tokens.push(token);
                 }
-                if !eos_tokens.is_empty() {
-                    config.eos_token_id = if eos_tokens.len() == 1 {
-                        Some(EosTokenId::Single(eos_tokens[0]))
-                    } else {
-                        Some(EosTokenId::Multiple(eos_tokens))
-                    };
-                }
+            }
+            if !eos_tokens.is_empty() {
+                config.eos_token_id = Some(eos_tokens);
             }
         }
         assert!(
@@ -412,7 +404,11 @@ impl LLMEngine {
             econfig.max_model_len = Some(32768);
         }
         let runners = Arc::new(RwLock::new(runners));
-        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
+        
+        // Initialize SpecialTokens once at engine startup (before Scheduler)
+        let special_tokens = Arc::new(SpecialTokens::new(&tokenizer));
+        
+        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
 
         // Initialize tool call end tokens for detection based on model type.
         let mut tool_config = ToolConfig::for_model_type(&model_type);
@@ -453,7 +449,7 @@ impl LLMEngine {
             None,
             config_tokenizer.chat_template.clone(),
             config_tokenizer.bos_token.clone(),
-            config_tokenizer.eos_token.as_ref().map(|e| e.tokens.join("|")),
+            config_tokenizer.eos_token.clone(),
             None,
             true,
             true,
@@ -474,9 +470,6 @@ impl LLMEngine {
         } else {
             "default".to_string()
         };
-
-        // Initialize SpecialTokens once at engine startup
-        let special_tokens = Arc::new(SpecialTokens::new(&tokenizer));
 
         let engine = Arc::new(RwLock::new(Self {
             runners,
@@ -557,31 +550,14 @@ impl LLMEngine {
         }
 
         if let Some(stop_sequences) = &params.stop_sequences {
-            let mut stop_token_ids = Vec::new();
             let mut resolved_stop_sequences = Vec::new();
             for sequence in stop_sequences {
                 if sequence.is_empty() {
                     continue;
                 }
-                match self.tokenizer.encode(sequence.as_str(), false) {
-                    Ok(encoding) => {
-                        let ids = encoding.get_ids();
-                        if !ids.is_empty() {
-                            stop_token_ids.push(ids.to_vec());
-                            resolved_stop_sequences.push(sequence.clone());
-                        }
-                    }
-                    Err(err) => {
-                        crate::log_warn!(
-                            "Failed to encode stop sequence '{}': {:?}",
-                            sequence,
-                            err
-                        );
-                    }
-                }
+                resolved_stop_sequences.push(sequence.clone());
             }
-            if !stop_token_ids.is_empty() {
-                params.stop_token_ids = Some(stop_token_ids);
+            if !resolved_stop_sequences.is_empty() {
                 params.stop_sequences = Some(resolved_stop_sequences);
             }
         }

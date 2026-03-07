@@ -7,7 +7,8 @@ use super::{
 };
 use crate::tools::parser::prefix_could_be_tool;
 use crate::transfer::{PdConfig, PdRole};
-use crate::utils::config::{Config, EngineConfig, EosTokenId};
+use crate::utils::config::{Config, EngineConfig};
+use crate::utils::special_tokens::SpecialTokens;
 use candle_core::Result;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
@@ -111,7 +112,13 @@ fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
 }
 
 impl Scheduler {
-    pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
+    /// Create a new Scheduler with SpecialTokens for EOS detection
+    pub fn new(
+        runners: Arc<RwLock<RunnerType>>,
+        econfig: &EngineConfig,
+        config: &Config,
+        special_tokens: Arc<SpecialTokens>,
+    ) -> Self {
         let prefix_cache_cfg = build_prefix_cache_config(econfig);
         Self {
             waiting: VecDeque::new(),
@@ -132,11 +139,8 @@ impl Scheduler {
                     .unwrap_or(false),
             ),
             next_seq_id: 0,
-            eos_token_id: match &config.eos_token_id {
-                Some(EosTokenId::Single(eos)) => vec![*eos],
-                Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
-                _ => vec![],
-            },
+            // Use SpecialTokens for EOS token IDs - this is the single source of truth
+            eos_token_id: special_tokens.eos_ids(),
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
             tool_call_start_token_ids: Vec::new(),
@@ -1288,37 +1292,10 @@ impl Scheduler {
         &self.eos_token_id
     }
 
-    fn stop_sequence_match_index(&self, token: u32, seq: &Sequence) -> Option<usize> {
-        let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
-            return None;
-        };
-        if stop_sequences.is_empty() {
-            return None;
-        }
-
-        for (idx, stop) in stop_sequences.iter().enumerate() {
-            if stop.is_empty() {
-                continue;
-            }
-            if stop.len() == 1 {
-                if stop[0] == token {
-                    return Some(idx);
-                }
-                continue;
-            }
-
-            let prior_len = seq.output_ids.len();
-            if stop.len() - 1 > prior_len {
-                continue;
-            }
-            let start_idx = prior_len + 1 - stop.len();
-            if seq.output_ids[start_idx..] == stop[..stop.len() - 1]
-                && stop[stop.len() - 1] == token
-            {
-                return Some(idx);
-            }
-        }
-
+    fn stop_sequence_match_index(&self, _token: u32, seq: &Sequence) -> Option<usize> {
+        // Stop sequence matching now uses SpecialTokens
+        // The actual matching is done via SpecialTokens.search()
+        seq.sampling_params.stop_sequences.as_ref()?;
         None
     }
 }

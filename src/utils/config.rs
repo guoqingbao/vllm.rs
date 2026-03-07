@@ -3,12 +3,8 @@ use crate::transfer::PdConfig;
 use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
-use serde::de::value::SeqAccessDeserializer;
-use serde::de::{Deserializer, Visitor};
-use serde::{Deserialize, Serialize, Serializer};
-
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 
 #[cfg(not(feature = "python"))]
 impl SamplingParams {
@@ -27,120 +23,7 @@ impl SamplingParams {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum EosTokenId {
-    Single(u32),
-    Multiple(Vec<u32>),
-}
-
-impl<'de> Deserialize<'de> for EosTokenId {
-    fn deserialize<D>(deserializer: D) -> Result<EosTokenId, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        if deserializer.is_human_readable() {
-            // For JSON: deserialize as "untagged" using a visitor
-            struct EosTokenIdVisitor;
-
-            impl<'de> Visitor<'de> for EosTokenIdVisitor {
-                type Value = EosTokenId;
-
-                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                    formatter.write_str("a u32 or a sequence of u32s")
-                }
-
-                // Handle a single number
-                fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
-                    Ok(EosTokenId::Single(v as u32))
-                }
-
-                // Handle an array of numbers
-                fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
-                where
-                    A: serde::de::SeqAccess<'de>,
-                {
-                    let vals = Vec::<u32>::deserialize(SeqAccessDeserializer::new(seq))?;
-                    Ok(EosTokenId::Multiple(vals))
-                }
-            }
-
-            deserializer.deserialize_any(EosTokenIdVisitor)
-        } else {
-            // For Bincode: deserialize as "tagged"
-            let bincode_id = BincodeEosTokenId::deserialize(deserializer)?;
-            let id = match bincode_id {
-                BincodeEosTokenId::Single(v) => EosTokenId::Single(v),
-                BincodeEosTokenId::Multiple(v) => EosTokenId::Multiple(v),
-            };
-            Ok(id)
-        }
-    }
-}
-
-impl Serialize for EosTokenId {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        if serializer.is_human_readable() {
-            // For JSON: serialize as "untagged"
-            match self {
-                EosTokenId::Single(v) => v.serialize(serializer),
-                EosTokenId::Multiple(v) => v.serialize(serializer),
-            }
-        } else {
-            // For Bincode: serialize as "tagged"
-            let bincode_id = match self {
-                EosTokenId::Single(v) => BincodeEosTokenId::Single(*v),
-                EosTokenId::Multiple(v) => BincodeEosTokenId::Multiple(v.clone()),
-            };
-            bincode_id.serialize(serializer)
-        }
-    }
-}
-
-impl EosTokenId {
-    /// Merge `other` into `self`, returning the combined token set.
-    /// - Single + Single => Multiple([a, b])
-    /// - Single + Multiple => Multiple([a, ...])
-    /// - Multiple + Single => Multiple([... , b])
-    /// - Multiple + Multiple => Multiple([... , ...])
-    pub fn merge(self, other: EosTokenId) -> EosTokenId {
-        let mut out = self.into_vec();
-        out.extend(other.into_vec());
-        EosTokenId::Multiple(out)
-    }
-
-    /// Like merge, but de-duplicates while preserving first-seen order.
-    pub fn merge_dedup(self, other: EosTokenId) -> EosTokenId {
-        use std::collections::HashSet;
-
-        let mut seen = HashSet::<u32>::new();
-        let mut out = Vec::<u32>::new();
-
-        for id in self.into_vec().into_iter().chain(other.into_vec()) {
-            if seen.insert(id) {
-                out.push(id);
-            }
-        }
-        EosTokenId::Multiple(out)
-    }
-
-    fn into_vec(self) -> Vec<u32> {
-        match self {
-            EosTokenId::Single(x) => vec![x],
-            EosTokenId::Multiple(v) => v,
-        }
-    }
-}
-
-// To make the "tagged" logic work for bincode, we need a separate
-// definition of the enum with derived traits. We keep it private inside this module.
-#[derive(Serialize, Deserialize)]
-enum BincodeEosTokenId {
-    Single(u32),
-    Multiple(Vec<u32>),
-}
+// EosTokenId enum has been replaced with direct Vec<u32> for simplicity
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MoEConfig {
@@ -205,7 +88,7 @@ pub struct Config {
     pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: Option<EosTokenId>,
+    pub eos_token_id: Option<Vec<u32>>,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
@@ -236,7 +119,11 @@ impl Config {
             (None, None) => None,
             (None, Some(e)) => Some(e.clone()),
             (Some(e), None) => Some(e),
-            (Some(e), Some(other)) => Some(e.merge(other.clone())),
+            (Some(e), Some(other)) => {
+                let mut merged = e.clone();
+                merged.extend(other.clone());
+                Some(merged)
+            }
         };
     }
 }
@@ -466,59 +353,7 @@ pub struct TokenizerConfig {
     pub add_eos_token: Option<bool>,
     pub chat_template: Option<String>,
     pub bos_token: Option<String>,
-    #[serde(deserialize_with = "eos_token_deserialize")]
-    pub eos_token: Option<EosTokenEntry>,
-}
-
-/// Helper to deserialize EOS token which can be a string or a list of strings
-fn eos_token_deserialize<'de, D>(deserializer: D) -> Result<Option<EosTokenEntry>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    use serde::Deserialize;
-    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
-    match opt {
-        None => Ok(None),
-        Some(v) => {
-            if v.is_string() {
-                Ok(Some(EosTokenEntry::single(v.as_str().unwrap().to_string())))
-            } else if v.is_array() {
-                let arr = v.as_array().unwrap();
-                let tokens: Vec<String> = arr
-                    .iter()
-                    .map(|x| x.as_str().unwrap().to_string())
-                    .collect();
-                Ok(Some(EosTokenEntry::multiple(tokens)))
-            } else {
-                Err(serde::de::Error::custom("eos_token must be a string or array"))
-            }
-        }
-    }
-}
-
-/// EOS token entry - can be single or multiple strings
-#[derive(Debug, Clone)]
-#[cfg_attr(feature = "python", pyclass)]
-pub struct EosTokenEntry {
-    pub tokens: Vec<String>,
-}
-
-impl EosTokenEntry {
-    pub fn single(s: String) -> Self {
-        Self { tokens: vec![s] }
-    }
-
-    pub fn multiple(tokens: Vec<String>) -> Self {
-        Self { tokens }
-    }
-
-    pub fn as_single(&self) -> Option<&str> {
-        if self.tokens.len() == 1 {
-            Some(&self.tokens[0])
-        } else {
-            None
-        }
-    }
+    pub eos_token: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -534,8 +369,7 @@ pub struct SamplingParams {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
-    #[serde(skip)]
-    pub stop_token_ids: Option<Vec<Vec<u32>>>,
+    // stop_token_ids removed - use SpecialTokens for stop detection
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>, // enable reasoning
     /// Tool mode for tool call handling.
@@ -570,8 +404,7 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
-    #[serde(skip)]
-    pub stop_token_ids: Option<Vec<Vec<u32>>>,
+    // stop_token_ids removed - use SpecialTokens for stop detection
     /// Tool mode for tool call handling.
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[pyo3(get, set)]
@@ -610,7 +443,6 @@ impl SamplingParams {
             presence_penalty,
             mcp_mode: None,
             stop_sequences: None,
-            stop_token_ids: None,
             grammar: None,
             thinking,
         }
@@ -628,7 +460,6 @@ impl SamplingParams {
             presence_penalty: None,
             mcp_mode: None,
             stop_sequences: None,
-            stop_token_ids: None,
             grammar: None,
             thinking: None,
         }
@@ -649,7 +480,6 @@ impl Default for SamplingParams {
             presence_penalty: None,
             mcp_mode: None,
             stop_sequences: None,
-            stop_token_ids: None,
             grammar: None,
             thinking: None,
         }
@@ -670,7 +500,6 @@ impl Default for SamplingParams {
             presence_penalty: None,
             mcp_mode: None,
             stop_sequences: None,
-            stop_token_ids: None,
             thinking: None,
             grammar: None,
             grammar_json: None,
@@ -716,7 +545,7 @@ pub struct GenerationConfig {
     pub presence_penalty: Option<f32>,
 
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: Option<EosTokenId>,
+    pub eos_token_id: Option<Vec<u32>>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]

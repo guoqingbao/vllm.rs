@@ -3,6 +3,7 @@ use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use tokenizers::Tokenizer;
+use crate::utils::special_tokens::SpecialTokens;
 
 #[cfg(feature = "python")]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -129,11 +130,11 @@ pub struct ChatTemplate {
 
 impl ChatTemplate {
     pub fn collect_escape_tokens(tokenizer: &Tokenizer, tool_markers: &[&str]) -> Vec<String> {
-        let mut tokens = tokenizer
-            .get_added_tokens_decoder()
-            .into_values()
-            .filter(|added| added.special)
-            .map(|added| added.content)
+        let special_tokens = SpecialTokens::new(tokenizer);
+        let mut tokens = special_tokens
+            .all_special()
+            .into_iter()
+            .map(|(_, added)| added.content)
             .collect::<Vec<_>>();
 
         for marker in tool_markers {
