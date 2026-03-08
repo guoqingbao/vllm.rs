@@ -175,43 +175,48 @@ impl LLMEngine {
             let reporter: Arc<RwLock<Box<dyn ProgressLike>>> =
                 Arc::new(RwLock::new(Box::new(ProgressReporter::new(0))));
             let handle = progress_worker(1, config.num_hidden_layers, &reporter);
-            let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
-            let transfer = if let Some(p_cfg) = &econfig.pd_config {
-                Some(Arc::new(Transfer::new(
-                    p_cfg.clone(),
-                    0,
-                    model_loaded.clone(),
-                    stop_flag.clone(),
-                )?))
-            } else {
-                None
-            };
-
-            let mut model_runner = ModelRunner::new(
-                model_type.clone(),
-                &vb,
-                #[cfg(not(feature = "nccl"))]
-                Rc::new(Comm::default()),
-                #[cfg(feature = "nccl")]
-                Rc::new(
-                    Comm::from_rank(
-                        device.as_cuda_device().unwrap().cuda_device(),
+            let mut model_runner = {
+                let _guard = candle_core::InferenceMode::enter();
+                let vb = VarBuilderX::new(&model_pathes, is_gguf, dtype, &device)?;
+                let transfer = if let Some(p_cfg) = &econfig.pd_config {
+                    Some(Arc::new(Transfer::new(
+                        p_cfg.clone(),
                         0,
-                        1,
-                        Id::new().unwrap(),
-                    )
-                    .unwrap(),
-                ),
-                &mut econfig,
-                &config,
-                dtype,
-                is_rope_i,
-                device.clone(),
-                reporter,
-                transfer,
-                toktrie.clone(),
-                None,
-            )?;
+                        model_loaded.clone(),
+                        stop_flag.clone(),
+                    )?))
+                } else {
+                    None
+                };
+
+                let runner = ModelRunner::new(
+                    model_type.clone(),
+                    &vb,
+                    #[cfg(not(feature = "nccl"))]
+                    Rc::new(Comm::default()),
+                    #[cfg(feature = "nccl")]
+                    Rc::new(
+                        Comm::from_rank(
+                            device.as_cuda_device().unwrap().cuda_device(),
+                            0,
+                            1,
+                            Id::new().unwrap(),
+                        )
+                        .unwrap(),
+                    ),
+                    &mut econfig,
+                    &config,
+                    dtype,
+                    is_rope_i,
+                    device.clone(),
+                    reporter,
+                    transfer,
+                    toktrie.clone(),
+                    None,
+                )?;
+                drop(vb);
+                runner
+            };
 
             if !is_pd_server {
                 //No graph capture for PD server

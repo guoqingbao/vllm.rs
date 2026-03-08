@@ -538,11 +538,7 @@ impl Gemma3ForConditionalGeneration {
             } else {
                 vb.pp("language_model.model.embed_tokens")
             },
-            if is_qvar_builder || g_cfg.quant.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
+            dtype,
         )?;
 
         let embed_scale = (config.text_config.hidden_size as f64).sqrt();
@@ -659,6 +655,17 @@ impl Gemma3ForConditionalGeneration {
         })
     }
 
+    fn embed_forward(&self, input_ids: &Tensor) -> Result<Tensor> {
+        let xs = self.embed_tokens.forward(input_ids)?;
+        let xs = if (self.is_qvar_builder || self.g_cfg.quant.is_some()) && xs.dtype() != DType::F32
+        {
+            xs.to_dtype(DType::F32)?
+        } else {
+            xs
+        };
+        xs * self.embed_scale
+    }
+
     fn vision_tower(
         &self,
         image_features: &Tensor,
@@ -687,7 +694,7 @@ impl Gemma3ForConditionalGeneration {
     ) -> Result<Tensor> {
         let text_cfg = &self.config.text_config;
         // 1. Prepare Text Embeddings (Scaled)
-        let mut xs = (self.embed_tokens.forward(input_ids)? * self.embed_scale)?;
+        let mut xs = self.embed_forward(input_ids)?;
 
         // vision projection and embedding
         if let Some(images) = images {
