@@ -78,8 +78,6 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         k: &Tensor,
         positions: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        use attention_rs::fused_rope::FusedRope;
-
         // Handle partial rotary (rotary_dim < head_dim) - must return new tensors
         if let Some(rotary_dim) = self.rotary_dim {
             use candle_core::D;
@@ -112,8 +110,28 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         // Full rotary embedding - use fused kernel with position selection
         // Pass full cos/sin tables and positions - kernel selects on-the-fly
         // This eliminates the index_select kernel launch!
-        FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
-        Ok(None)
+        #[cfg(any(feature = "cuda", feature = "metal"))]
+        {
+            use attention_rs::fused_rope::FusedRope;
+            FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, self.is_rope_i)?;
+            Ok(None)
+        }
+        #[cfg(not(any(feature = "cuda", feature = "metal")))]
+        {
+            // For CPU builds, use index_select and apply rope manually
+            let cos = self.cos.index_select(positions, 0)?;
+            let sin = self.sin.index_select(positions, 0)?;
+
+            // Use candle_nn for full rotary (same as partial, but rotary_dim == head_dim)
+            let func = if self.is_rope_i {
+                candle_nn::rotary_emb::rope_i
+            } else {
+                candle_nn::rotary_emb::rope
+            };
+            let q_embed = func(q, &cos, &sin)?;
+            let k_embed = func(k, &cos, &sin)?;
+            Ok(Some((q_embed, k_embed)))
+        }
     }
 
     fn get_original_max_position_embeddings(&self) -> Option<usize> {
