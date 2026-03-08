@@ -348,11 +348,7 @@ impl Qwen3MoEForCausalLM {
             } else {
                 vb.pp(&format!("{}embed_tokens", prefix))
             },
-            if is_qvar_builder || config.quant.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
+            dtype,
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
             if is_qvar_builder || config.quant.is_some() {
@@ -436,7 +432,12 @@ impl Qwen3MoEForCausalLM {
     }
 
     pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.embed_tokens.forward(xs)
+        let xs = self.embed_tokens.forward(xs)?;
+        if (self.is_qvar_builder || self.config.quant.is_some()) && xs.dtype() != DType::F32 {
+            xs.to_dtype(DType::F32)
+        } else {
+            Ok(xs)
+        }
     }
 
     fn forward_inner(
@@ -463,7 +464,7 @@ impl Qwen3MoEForCausalLM {
         let mut xs = if embeded_inputs {
             input_ids.to_owned()
         } else {
-            self.embed_tokens.forward(input_ids)?
+            self.embed_forward(input_ids)?
         };
 
         if let Some(kv_caches) = kv_caches {
