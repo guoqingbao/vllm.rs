@@ -138,7 +138,7 @@ impl LLMEngine {
 
         // Initialize SpecialTokens early to use for EOS token extraction
         let special_tokens = SpecialTokens::new(&tokenizer);
-        
+
         // In case config file missing bos and eos configuration
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
@@ -402,7 +402,7 @@ impl LLMEngine {
             econfig.max_model_len = Some(32768);
         }
         let runners = Arc::new(RwLock::new(runners));
-        
+
         let special_tokens = Arc::new(special_tokens);
         let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
 
@@ -466,13 +466,36 @@ impl LLMEngine {
         };
 
         // Create tool config from special tokens for backward compatibility
-        let tool_config = ToolConfig {
-            start_token_ids: HashSet::new(),
-            end_token_ids: HashSet::new(),
-            start_token_str: "".to_string(),
-            end_token_str: "".to_string(),
-            start_is_special: false,
-            end_is_special: false,
+        // Use idiomatic tool_tokens() method that returns Option<(SpecialToken, SpecialToken)>
+        let tool_config = match special_tokens.tool_tokens() {
+            Some((start_token, end_token)) => {
+                log_info!(
+                    "Tool tokens extracted from SpecialTokens: start={:?} ({:?}), end={:?} ({:?})",
+                    start_token.id,
+                    start_token.string(),
+                    end_token.id,
+                    end_token.string()
+                );
+                ToolConfig {
+                    start_token_ids: HashSet::from_iter(vec![start_token.id]),
+                    end_token_ids: HashSet::from_iter(vec![end_token.id]),
+                    start_token_str: start_token.string(),
+                    end_token_str: end_token.string(),
+                    start_is_special: false,
+                    end_is_special: false,
+                }
+            }
+            None => {
+                log_info!("Tool tokens not found in SpecialTokens, falling back to empty config");
+                ToolConfig {
+                    start_token_ids: HashSet::new(),
+                    end_token_ids: HashSet::new(),
+                    start_token_str: "".to_string(),
+                    end_token_str: "".to_string(),
+                    start_is_special: false,
+                    end_is_special: false,
+                }
+            }
         };
 
         let engine = Arc::new(RwLock::new(Self {

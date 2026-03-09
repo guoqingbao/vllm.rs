@@ -336,25 +336,27 @@ impl SpecialTokens {
         Self::new(&tokenizer)
     }
 
-    /// Get tool start token IDs (tokens containing 'tool_call' or 'function_call' without closing slash)
+    /// Get tool start token IDs (tokens categorized as Tool category that are start markers)
+    /// Start markers are those that don't start with </ (not closing tags) and don't end with ]
     pub fn tool_start_ids(&self) -> Vec<u32> {
         self.tool()
             .iter()
             .filter(|t| {
                 let s = t.string();
-                (s.contains("tool_call") || s.contains("function_call")) && !s.contains("</")
+                !s.starts_with("</") && !s.ends_with("]")
             })
             .map(|t| t.id)
             .collect()
     }
 
-    /// Get tool end token IDs (tokens containing '</tool_call' or '</function_call')
+    /// Get tool end token IDs (tokens categorized as Tool category that are end markers)
+    /// End markers either start with </ (XML closing tags) or end with ] (Mistral style)
     pub fn tool_end_ids(&self) -> Vec<u32> {
         self.tool()
             .iter()
             .filter(|t| {
                 let s = t.string();
-                s.contains("</tool_call") || s.contains("</function_call")
+                s.starts_with("</") || s.ends_with("]")
             })
             .map(|t| t.id)
             .collect()
@@ -368,6 +370,32 @@ impl SpecialTokens {
     /// Get tool end token IDs as HashSet for O(1) lookup
     pub fn tool_end_ids_set(&self) -> HashSet<u32> {
         self.tool_end_ids().into_iter().collect()
+    }
+
+    /// Get tool start token SpecialToken if available
+    /// Returns the SpecialToken object containing both ID and string representation
+    pub fn tool_start_token(&self) -> Option<SpecialToken> {
+        self.tool().iter().find(|t| {
+            let s = t.string();
+            !s.starts_with("</") && !s.ends_with("]")
+        }).cloned()
+    }
+
+    /// Get tool end token SpecialToken if available
+    /// Returns the SpecialToken object containing both ID and string representation
+    pub fn tool_end_token(&self) -> Option<SpecialToken> {
+        self.tool().iter().find(|t| {
+            let s = t.string();
+            s.starts_with("</") || s.ends_with("]")
+        }).cloned()
+    }
+
+    /// Get tool start and end token SpecialTokens as a pair if both available
+    /// Returns None if either token is not found, enabling graceful fallback
+    pub fn tool_tokens(&self) -> Option<(SpecialToken, SpecialToken)> {
+        let start = self.tool_start_token()?;
+        let end = self.tool_end_token()?;
+        Some((start, end))
     }
 
     /// Get all tokens
