@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use image::EncodableLayout;
 use tokenizers::tokenizer::Tokenizer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -26,14 +27,16 @@ impl Category {
                     "</s>" , "<eos>" , "<,eos,>", "<,end_of_text,>" , "<,end,>" ,
                     "<,eot,>" , "<,eot_id,>" , "<,eom_id,>" , "<,end_of_turn,>" ,
                     "<,endoftext,>" , "<,endofsequence,>" , "[EOS]", "<|im_end|>",
-                    "<|box_end|>", "<|object_ref_end|>","<|quad_end|>",
-                    "<|vision_end|>",
+                    "<|box_end|>", "<|object_ref_end|>","<|quad_end|>", "<|endoftext|>",
+                    "<|vision_end|>", "<|eot|>", "<|python_end|>", "<|end_of_text|>",
+                    "<|header_end|>", "<|eom|>"
                 ],
             Self::Bos => vec![
-                    "<s>" , "<bos>" , "<,bos,>", "<,bos_token,>" ,
+                    "<s>", "<bos>" , "<,bos,>", "<,bos_token,>" ,
                     "<,begin_of_text,>" , "<,startoftext,>" , "<,start,>" ,
                     "<,im_start,>" , "[BOS]", "<|box_start|>", "<|im_start|>",
                     "<|object_ref_start|>", "<|quad_start|>", "<|vision_start|>",
+                    "<|python_start|>", "<|begin_of_text|>", "<|header_start|>"
                 ],
             Self::Pad => vec![
                     "<pad>" , "<,pad,>" , "<pad_token>" , "<,pad_token,>" ,
@@ -59,7 +62,7 @@ impl Category {
             Self::ContentType => vec![
                     "<,content_type,>" , "<,content,>" , "<,text,>" , "<,code,>" ,
                     "<,json,>" , "<,markdown,>" , "<,output,>" , "<,html,>" ,
-                    "<,data,>" , "<,datatype,>"
+                    "<,data,>" , "<,datatype,>", "<|image|>"
                 ],
             Self::Tool=> vec![
                     "<|python_tag|>", "<|eom_id|>",
@@ -86,7 +89,7 @@ impl Category {
                     "<,thought,>" , "<,thoughts,>" , "<,internal,>" ,
                     "<internal>" , "</internal>" , "<,reflect,>" ,
                     "<reflection>" , "<,chain_of_thought,>" , "<,analysis,>" ,
-                    "<,rationale,>" , "<,explanation,>"
+                    "<,rationale,>" , "<,explanation,>", "<think>", "</think>"
                 ],
             Self::Other => vec![
                     "<,eos_token,>" , "<,unk_token,>" , "<unk>" , "[UNK]" ,
@@ -291,9 +294,11 @@ impl SpecialTokens {
         // Step 2: Add tokens from base vocabulary that match known patterns
         let vocab = tokenizer.get_vocab(true);
         for (token_str, id) in vocab {
-            // Skip special tokens collected, skip things that can't be encased in braces
-            if seen_ids.contains(&id) || token_str.len() < 3 {
-                continue; // Already processed as added token
+            // Find potential duplicates of our special tokens in the common vocab
+            if seen_ids.contains(&id) || !token_set.iter().any(
+                |f| String::from_utf8(f.content.clone()).unwrap() == token_str.to_string()
+            ) {
+                continue;
             }
 
             // Try to categorize by content
@@ -309,9 +314,11 @@ impl SpecialTokens {
             }
         }
 
+        // Sort by id for consistent ordering
+        token_set.sort_by_key(|t| t.id);
+
         Self { token_set }
     }
-
     fn categorize_by_content(content: &str) -> Category {
         for cat in &[Category::Eos, Category::Pad, Category::Bos, Category::Sep,
                      Category::Cls, Category::Mask, Category::Tool, Category::Function,
