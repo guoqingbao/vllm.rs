@@ -4,6 +4,7 @@ use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
+use serde::de::Error;
 use std::collections::HashMap;
 
 #[cfg(not(feature = "python"))]
@@ -88,6 +89,7 @@ pub struct Config {
     pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
+    #[serde(deserialize_with = "deserialize_eos_token_id")]
     pub eos_token_id: Option<Vec<u32>>,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
@@ -127,6 +129,43 @@ impl Config {
         };
     }
 }
+
+// Custom deserializer for eos_token_id to handle both integer and array formats
+fn deserialize_eos_token_id<'de, D>(deserializer: D) -> Result<Option<Vec<u32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        Some(serde_json::Value::Number(n)) => {
+            if let Some(id) = n.as_u64() {
+                Ok(Some(vec![id as u32]))
+            } else {
+                Err(serde::de::Error::custom("eos_token_id must be a positive integer"))
+            }
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            let ids: Result<Vec<u32>, D::Error> = arr
+                .into_iter()
+                .map(|v| {
+                    if let Some(id) = v.as_u64() {
+                        Ok(id as u32)
+                    } else {
+                        Err(D::Error::custom("eos_token_id array must contain only unsigned integers"))
+                    }
+                })
+                .collect();
+            Ok(Some(ids?))
+        }
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(v) => Err(serde::de::Error::custom(format!(
+            "Expected integer or array for eos_token_id, got {:?}",
+            v
+        ))),
+        None => Ok(None),
+    }
+}
+
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {

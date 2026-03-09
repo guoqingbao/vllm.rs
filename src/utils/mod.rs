@@ -175,7 +175,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
-    let eos_token_id = if eos_token_id.is_ok() {
+    let _eos_token_id = if eos_token_id.is_ok() {
         Some(vec![eos_token_id.unwrap().to_u32()?])
     } else {
         None
@@ -376,7 +376,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         final_logit_softcapping: None,
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
-        eos_token_id,
+        eos_token_id: None,
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,

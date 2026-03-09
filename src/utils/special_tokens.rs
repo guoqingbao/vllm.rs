@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use tokenizers::tokenizer::{Tokenizer, AddedToken};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -17,293 +18,350 @@ pub enum Category {
     Other,
 }
 
+impl Category {
+    pub fn search_strings(&self) -> Vec<String> {
+        match self {
+            Self::Eos => vec![
+                    "</s>" , "<eos>" , "<,eos,>" , "eos" , "<,end_of_text,>" , "<,end,>" ,
+                    "<,eot,>" , "<,eot_id,>" , "<,eom_id,>" , "<,end_of_turn,>" ,
+                    "<,endoftext,>" , "<,endofsequence,>" , "[EOS]"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Bos => vec![
+                    "<s>" , "<bos>" , "<,bos,>" , "bos" , "<,bos_token,>" ,
+                    "<,begin_of_text,>" , "<,startoftext,>" , "<,start,>" ,
+                    "<,im_start,>" , "[BOS]"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Pad => vec![
+                    "<pad>" , "<,pad,>" , "<pad_token>" , "<,pad_token,>" ,
+                    "pad" , "[PAD]" , "<padding>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Sep => vec![
+                    "<sep>" , "<,sep,>" , "<,separator,>" , "[SEP]"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Cls => vec![
+                    "<cls>" , "<,cls,>" , "[CLS]" , "<CLS>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Mask => vec![
+                    "<mask>" , "<,mask,>" , "[MASK]" , "<mask_token>" ,
+                    "<,mask_token,>" , "<,infill_mask,>" , "<,extra_id_0,>" ,
+                    "<extra_id_0>" , "<extra_id_1>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Role => vec![
+                    "<,system,>" , "<,user,>" , "<,assistant,>" , "<,role,>" ,
+                    "<,critic,>" , "<,observer,>" , "<system>" ,
+                    "<user>" , "<assistant>" , "<role>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::ContentType => vec![
+                    "<,content_type,>" , "<,content,>" , "<,text,>" , "<,code,>" ,
+                    "<,json,>" , "<,markdown,>" , "<,output,>" , "<,html,>" ,
+                    "<,data,>" , "<,datatype,>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Tool=> vec![
+                    "<|python_tag|>", "<|eom_id|>",
+                    "<‌tool_call>","<‌/tool_call>",
+                    "[TOOL_CALLS]", "]",
+                    "<start_function_call>", "<end_function_call>",
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Function => vec![
+                    "<,function,>" , "<function>" , "<,functions,>" , "<,fn,>" , "<fn>" ,
+                    "<,tool,>" , "<tool>" , "<,tools,>" , "<,api,>" ,
+                    "<,invoke,>" , "<,function_call,>" , "<,tool_call,>" ,
+                    "<,function_call_json,>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Parameter => vec![
+                    "<parameter>" , "<,parameter,>" , "<,parameters,>" ,
+                    "<,args,>" , "<,arguments,>" , "<arguments>" ,
+                    "<params>" , "<,params,>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Reasoning => vec![
+                    " magnesium " , " magnesia " , "<thinking>" , "</thinking>" ,
+                    "<,thinking,>" , "<,reasoning,>" , "<reasoning>" , "<,reason,>" ,
+                    "<,thought,>" , "<,thoughts,>" , "<,internal,>" ,
+                    "<internal>" , "</internal>" , "<,reflect,>" ,
+                    "<reflection>" , "<,chain_of_thought,>" , "<,analysis,>" ,
+                    "<,rationale,>" , "<,explanation,>"
+                ].iter().map(|e| e.to_string()).collect(),
+            Self::Other => vec![
+                    "<,eos_token,>" , "<,unk_token,>" , "<unk>" , "[UNK]" ,
+                    "<,start_header_id,>" , "<,end_header_id,>" ,
+                    "<,metadata,>" , "<,special,>"
+                ].iter().map(|e| e.to_string()).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VocabSource {
+    Special,
+    Added,
+    Common,
+}
+
 #[derive(Debug, Clone)]
-pub struct SpecialTokenMatch {
+pub struct SpecialToken {
     pub category: Category,
     pub id: u32,
-    pub content: String,
+    pub content: Vec<u8>,
+    pub source: VocabSource,
+}
+
+impl SpecialToken {
+    pub fn string(&self) -> String {
+        self.content.clone()
+        .into_iter()
+        .filter(|b| b.is_ascii())
+        .map(|b| b as char)
+        .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SpecialTokens {
-    eos: Vec<(u32, AddedToken)>,
-    pad: Vec<(u32, AddedToken)>,
-    bos: Vec<(u32, AddedToken)>,
-    sep: Vec<(u32, AddedToken)>,
-    cls: Vec<(u32, AddedToken)>,
-    mask: Vec<(u32, AddedToken)>,
-    tool: Vec<(u32, AddedToken)>,
-    function: Vec<(u32, AddedToken)>,
-    parameter: Vec<(u32, AddedToken)>,
-    role: Vec<(u32, AddedToken)>,
-    content_type: Vec<(u32, AddedToken)>,
-    reasoning: Vec<(u32, AddedToken)>,
-    other: Vec<(u32, AddedToken)>,
+    token_set: Vec<SpecialToken>,
+}
+
+// Private macros for internal implementation
+macro_rules! filter_by_category {
+    ($self:ident, $cat:ident) => {
+        $self.token_set.iter().filter(|t| t.category == Category::$cat).cloned().collect::<Vec<_>>()
+    };
+}
+
+macro_rules! filter_by_category_source {
+    ($self:ident, $cat:ident, $src:ident) => {
+        $self.token_set.iter()
+            .filter(|t| t.category == Category::$cat && t.source == VocabSource::$src)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
 }
 
 impl SpecialTokens {
-    /// Search for tokens by ID or by substring within the token content.
-    ///
-    /// # Arguments
-    /// * `id` - Optional token ID to match exactly.
-    /// * `substring` - Optional string to search for within the token content (case-sensitive).
-    ///
-    /// # Returns
-    /// A vector of `Match` structs containing the category, id, and string of all matches.
-    pub fn search(&self, id: Option<u32>, substring: Option<&str>) -> Vec<SpecialTokenMatch> {
+    // Public category accessors
+    pub fn eos(&self) -> Vec<SpecialToken> { filter_by_category!(self, Eos) }
+    pub fn pad(&self) -> Vec<SpecialToken> { filter_by_category!(self, Pad) }
+    pub fn bos(&self) -> Vec<SpecialToken> { filter_by_category!(self, Bos) }
+    pub fn sep(&self) -> Vec<SpecialToken> { filter_by_category!(self, Sep) }
+    pub fn cls(&self) -> Vec<SpecialToken> { filter_by_category!(self, Cls) }
+    pub fn mask(&self) -> Vec<SpecialToken> { filter_by_category!(self, Mask) }
+    pub fn tool(&self) -> Vec<SpecialToken> { filter_by_category!(self, Tool) }
+    pub fn function(&self) -> Vec<SpecialToken> { filter_by_category!(self, Function) }
+    pub fn parameter(&self) -> Vec<SpecialToken> { filter_by_category!(self, Parameter) }
+    pub fn role(&self) -> Vec<SpecialToken> { filter_by_category!(self, Role) }
+    pub fn content_type(&self) -> Vec<SpecialToken> { filter_by_category!(self, ContentType) }
+    pub fn reasoning(&self) -> Vec<SpecialToken> { filter_by_category!(self, Reasoning) }
+    pub fn other(&self) -> Vec<SpecialToken> { filter_by_category!(self, Other) }
+
+    // Public ID accessors returning Vec<u32>
+    pub fn eos_ids(&self) -> Vec<u32> { self.eos().iter().map(|t| t.id).collect() }
+    pub fn pad_ids(&self) -> Vec<u32> { self.pad().iter().map(|t| t.id).collect() }
+    pub fn bos_ids(&self) -> Vec<u32> { self.bos().iter().map(|t| t.id).collect() }
+    pub fn sep_ids(&self) -> Vec<u32> { self.sep().iter().map(|t| t.id).collect() }
+    pub fn cls_ids(&self) -> Vec<u32> { self.cls().iter().map(|t| t.id).collect() }
+    pub fn mask_ids(&self) -> Vec<u32> { self.mask().iter().map(|t| t.id).collect() }
+    pub fn tool_ids(&self) -> Vec<u32> { self.tool().iter().map(|t| t.id).collect() }
+    pub fn function_ids(&self) -> Vec<u32> { self.function().iter().map(|t| t.id).collect() }
+    pub fn parameter_ids(&self) -> Vec<u32> { self.parameter().iter().map(|t| t.id).collect() }
+    pub fn role_ids(&self) -> Vec<u32> { self.role().iter().map(|t| t.id).collect() }
+    pub fn content_type_ids(&self) -> Vec<u32> { self.content_type().iter().map(|t| t.id).collect() }
+    pub fn reasoning_ids(&self) -> Vec<u32> { self.reasoning().iter().map(|t| t.id).collect() }
+    pub fn other_ids(&self) -> Vec<u32> { self.other().iter().map(|t| t.id).collect() }
+
+    // Public ID accessors returning HashSet<u32> for O(1) lookup
+    pub fn eos_ids_set(&self) -> HashSet<u32> { self.eos_ids().into_iter().collect() }
+    pub fn pad_ids_set(&self) -> HashSet<u32> { self.pad_ids().into_iter().collect() }
+    pub fn bos_ids_set(&self) -> HashSet<u32> { self.bos_ids().into_iter().collect() }
+    pub fn sep_ids_set(&self) -> HashSet<u32> { self.sep_ids().into_iter().collect() }
+    pub fn cls_ids_set(&self) -> HashSet<u32> { self.cls_ids().into_iter().collect() }
+    pub fn mask_ids_set(&self) -> HashSet<u32> { self.mask_ids().into_iter().collect() }
+    pub fn tool_ids_set(&self) -> HashSet<u32> { self.tool_ids().into_iter().collect() }
+    pub fn function_ids_set(&self) -> HashSet<u32> { self.function_ids().into_iter().collect() }
+    pub fn parameter_ids_set(&self) -> HashSet<u32> { self.parameter_ids().into_iter().collect() }
+    pub fn role_ids_set(&self) -> HashSet<u32> { self.role_ids().into_iter().collect() }
+    pub fn content_type_ids_set(&self) -> HashSet<u32> { self.content_type_ids().into_iter().collect() }
+    pub fn reasoning_ids_set(&self) -> HashSet<u32> { self.reasoning_ids().into_iter().collect() }
+    pub fn other_ids_set(&self) -> HashSet<u32> { self.other_ids().into_iter().collect() }
+
+    /// Get all token IDs across all categories as HashSet for O(1) lookup
+    pub fn all_ids_set(&self) -> HashSet<u32> { self.token_set.iter().map(|t| t.id).collect() }
+
+    // Public string accessors
+    pub fn eos_strings(&self) -> Vec<String> { self.eos().iter().map(|t| t.string()).collect() }
+    pub fn pad_strings(&self) -> Vec<String> { self.pad().iter().map(|t| t.string()).collect() }
+    pub fn bos_strings(&self) -> Vec<String> { self.bos().iter().map(|t| t.string()).collect() }
+    pub fn sep_strings(&self) -> Vec<String> { self.sep().iter().map(|t| t.string()).collect() }
+    pub fn cls_strings(&self) -> Vec<String> { self.cls().iter().map(|t| t.string()).collect() }
+    pub fn mask_strings(&self) -> Vec<String> { self.mask().iter().map(|t| t.string()).collect() }
+    pub fn tool_strings(&self) -> Vec<String> { self.tool().iter().map(|t| t.string()).collect() }
+    pub fn function_strings(&self) -> Vec<String> { self.function().iter().map(|t| t.string()).collect() }
+    pub fn parameter_strings(&self) -> Vec<String> { self.parameter().iter().map(|t| t.string()).collect() }
+    pub fn role_strings(&self) -> Vec<String> { self.role().iter().map(|t| t.string()).collect() }
+    pub fn content_type_strings(&self) -> Vec<String> { self.content_type().iter().map(|t| t.string()).collect() }
+    pub fn reasoning_strings(&self) -> Vec<String> { self.reasoning().iter().map(|t| t.string()).collect() }
+    pub fn other_strings(&self) -> Vec<String> { self.other().iter().map(|t| t.string()).collect() }
+
+    /// Search for tokens by ID, substring, category, and source.
+    /// All parameters are optional - use None to skip that filter.
+    pub fn search(
+        &self,
+        id: Option<u32>,
+        substring: Option<&str>,
+        category: Option<Category>,
+        source: Option<VocabSource>,
+    ) -> Vec<SpecialToken> {
         let mut results = Vec::new();
-
-        // Helper closure to check a single vector of tokens
-        let mut check_tokens = |vec: &[(u32, AddedToken)], cat: Category| {
-            for (token_id, added_token) in vec {
-                let content = &added_token.content;
-                let id_match = match id {
-                    Some(target_id) => *token_id == target_id,
-                    None => true,
-                };
-
-                let content_match = match substring {
-                    Some(sub) => content.contains(sub),
-                    None => true,
-                };
-
-                if id_match && content_match {
-                    results.push(SpecialTokenMatch {
-                        category: cat,
-                        id: *token_id,
-                        content: content.clone(),
-                    });
+        
+        for token in &self.token_set {
+            // Filter by ID if specified
+            if let Some(target_id) = id {
+                if token.id != target_id {
+                    continue;
                 }
             }
-        };
-
-        // Iterate through all category vectors
-        check_tokens(&self.eos, Category::Eos);
-        check_tokens(&self.pad, Category::Pad);
-        check_tokens(&self.bos, Category::Bos);
-        check_tokens(&self.sep, Category::Sep);
-        check_tokens(&self.cls, Category::Cls);
-        check_tokens(&self.mask, Category::Mask);
-        check_tokens(&self.tool, Category::Tool);
-        check_tokens(&self.function, Category::Function);
-        check_tokens(&self.parameter, Category::Parameter);
-        check_tokens(&self.role, Category::Role);
-        check_tokens(&self.content_type, Category::ContentType);
-        check_tokens(&self.reasoning, Category::Reasoning);
-        check_tokens(&self.other, Category::Other);
-
+            
+            // Filter by substring if specified
+            if let Some(sub) = substring {
+                let token_str = token.string();
+                if !token_str.contains(sub) {
+                    continue;
+                }
+            }
+            
+            // Filter by category if specified
+            if let Some(cat) = category {
+                if token.category != cat {
+                    continue;
+                }
+            }
+            
+            // Filter by source if specified
+            if let Some(src) = source {
+                if token.source != src {
+                    continue;
+                }
+            }
+            
+            results.push(token.clone());
+        }
+        
         results
     }
 
+    /// Create SpecialTokens from a tokenizer
     pub fn new(tokenizer: &Tokenizer) -> Self {
-        let decoder = tokenizer.get_added_tokens_decoder();
-        let mut map: std::collections::HashMap<Category, Vec<(u32, AddedToken)>> =
-            std::collections::HashMap::from([
-                (Category::Eos, Vec::new()),
-                (Category::Pad, Vec::new()),
-                (Category::Bos, Vec::new()),
-                (Category::Sep, Vec::new()),
-                (Category::Cls, Vec::new()),
-                (Category::Mask, Vec::new()),
-                (Category::Tool, Vec::new()),
-                (Category::Function, Vec::new()),
-                (Category::Parameter, Vec::new()),
-                (Category::Role, Vec::new()),
-                (Category::ContentType, Vec::new()),
-                (Category::Reasoning, Vec::new()),
-                (Category::Other, Vec::new()),
-            ]);
-        
-        for (id, added_token) in decoder {
-            let token = (id, added_token);
+        let mut token_set: Vec<SpecialToken> = Vec::new();
+        let mut seen_ids: HashSet<u32> = HashSet::new();
 
-            // Use the `special` field from AddedToken to categorize
-            let category = if token.1.special {
-                // Special tokens - categorize by content patterns
-                match token.1.content.as_str() {
-                    // End of sequence / text
-                    "</s>" | "<eos>" | "<|eos|>" | "eos" | "<|end_of_text|>" | "<|end|>" |
-                    "<|eot|>" | "<|eot_id|>" | "<|eom_id|>" | "<|end_of_turn|>" |
-                    "<|endoftext|>" | "<|endofsequence|>" | "[EOS]" => Category::Eos,
+        // Step 1: Process all tokens from tokenizer (added + base vocab)
+        // First, get added tokens
+        for (id, added_token) in tokenizer.get_added_tokens_decoder() {
+            if seen_ids.contains(&id) {
+                continue;
+            }
+            seen_ids.insert(id);
 
-                    // Beginning of sequence / text
-                    "<s>" | "<bos>" | "<|bos|>" | "bos" | "<|bos_token|>" |
-                    "<|begin_of_text|>" | "<|startoftext|>" | "<|start|>" |
-                    "<|im_start|>" | "[BOS]" => Category::Bos,
+            // Determine category from content
+            let category = Self::categorize_by_content(&added_token.content);
 
-                    // Padding
-                    "<pad>" | "<|pad|>" | "<pad_token>" | "<|pad_token|>" |
-                    "pad" | "[PAD]" | "<padding>" => Category::Pad,
-
-                    // Separator
-                    "<sep>" | "<|sep|>" | "<|separator|>" | "[SEP]" => Category::Sep,
-
-                    // Classification
-                    "<cls>" | "<|cls|>" | "[CLS]" | "<CLS>" => Category::Cls,
-
-                    // Mask / Infill
-                    "<mask>" | "<|mask|>" | "[MASK]" | "<mask_token>" |
-                    "<|mask_token|>" | "<|infill_mask|>" | "<|extra_id_0|>" |
-                    "<extra_id_0>" | "<extra_id_1>" => Category::Mask,
-
-                    // Role / Conversation markers
-                    "<|system|>" | "<|user|>" | "<|assistant|>" | "<|role|>" |
-                    "<|critic|>" | "<|observer|>" | "<system>" |
-                    "<user>" | "<assistant>" | "<role>" => Category::Role,
-
-                    // Content typing
-                    "<|content_type|>" | "<|content|>" | "<|text|>" | "<|code|>" |
-                    "<|json|>" | "<|markdown|>" | "<|output|>" | "<|html|>" |
-                    "<|data|>" | "<|datatype|>" => Category::ContentType,
-
-                    // Function / Tool invocation
-                    "<|function|>" | "<function>" | "<|functions|>" | "<|fn|>" | "<fn>" |
-                    "<|tool|>" | "<tool>" | "<|tools|>" | "<|api|>" |
-                    "<|invoke|>" | "<|function_call|>" | "<|tool_call|>" |
-                    "<|function_call_json|>" => Category::Function,
-
-                    // Parameter / Argument delimiters
-                    "<parameter>" | "<|parameter|>" | "<|parameters|>" |
-                    "<|args|>" | "<|arguments|>" | "<arguments>" |
-                    "<params>" | "<|params|>" => Category::Parameter,
-
-                    // Reasoning / Thinking / Reflection
-                    "<think>" | "</think>" | "<thinking>" | "</thinking>" |
-                    "<|thinking|>" | "<|reasoning|>" | "<reasoning>" | "<|reason|>" |
-                    "<|thought|>" | "<|thoughts|>" | "<|internal|>" |
-                    "<internal>" | "</internal>" | "<|reflect|>" |
-                    "<reflection>" | "<|chain_of_thought|>" | "<|analysis|>" |
-                    "<|rationale|>" | "<|explanation|>" => Category::Reasoning,
-
-                    // Control / Non-semantic system tags
-                    "<|eos_token|>" | "<|unk_token|>" | "<unk>" | "[UNK]" |
-                    "<|start_header_id|>" | "<|end_header_id|>" |
-                    "<|metadata|>" | "<|special|>" => Category::Other,
-
-                    _ => Category::Other,
-                }
-
-
+            // Determine source
+            let source = if added_token.special {
+                VocabSource::Special
             } else {
-                Category::Other
+                VocabSource::Added
             };
 
-            // Push only if ID is not already present
-            let vec = map.get_mut(&category).unwrap();
-            if !vec.iter().any(|(existing_id, _)| *existing_id == id) {
-                vec.push(token);
+            token_set.push(SpecialToken {
+                category,
+                id,
+                content: added_token.content.clone().into_bytes(),
+                source,
+            });
+        }
+
+        // Step 2: Add tokens from base vocabulary that match known patterns
+        let vocab = tokenizer.get_vocab(true);
+        for (token_str, id) in vocab {
+            if seen_ids.contains(&id) {
+                continue; // Already processed as added token
+            }
+
+            // Try to categorize by content
+            let category = Self::categorize_by_content(token_str.as_str());
+            if category != Category::Other {
+                token_set.push(SpecialToken {
+                    category,
+                    id,
+                    content: token_str.as_bytes().to_vec(),
+                    source: VocabSource::Common,
+                });
             }
         }
-        
-        Self {
-            eos: map.remove(&Category::Eos).unwrap_or_default(),
-            pad: map.remove(&Category::Pad).unwrap_or_default(),
-            bos: map.remove(&Category::Bos).unwrap_or_default(),
-            sep: map.remove(&Category::Sep).unwrap_or_default(),
-            cls: map.remove(&Category::Cls).unwrap_or_default(),
-            mask: map.remove(&Category::Mask).unwrap_or_default(),
-            tool: map.remove(&Category::Tool).unwrap_or_default(),
-            function: map.remove(&Category::Function).unwrap_or_default(),
-            parameter: map.remove(&Category::Parameter).unwrap_or_default(),
-            role: map.remove(&Category::Role).unwrap_or_default(),
-            content_type: map.remove(&Category::ContentType).unwrap_or_default(),
-            reasoning: map.remove(&Category::Reasoning).unwrap_or_default(),
-            other: map.remove(&Category::Other).unwrap_or_default(),
-        }
+
+        Self { token_set }
     }
 
+    fn categorize_by_content(content: &str) -> Category {
+        for cat in &[Category::Eos, Category::Pad, Category::Bos, Category::Sep,
+                     Category::Cls, Category::Mask, Category::Tool, Category::Function,
+                     Category::Parameter, Category::Role, Category::ContentType, Category::Reasoning] {
+            if cat.search_strings().iter().any(|s| s == content) {
+                return *cat;
+            }
+        }
+        Category::Other
+    }
+
+    /// Create SpecialTokens from a tokenizer file path
     pub fn new_from_file(tokenizer_path: &str) -> Self {
         let tokenizer = Tokenizer::from_file(tokenizer_path).expect("Failed to load tokenizer");
         Self::new(&tokenizer)
     }
 
-    pub fn eos_tokens(&self) -> &[(u32, AddedToken)] { &self.eos }
-    pub fn eos_ids(&self) -> Vec<u32> { self.eos.iter().map(|(id, _)| *id).collect() }
-    pub fn eos_strings(&self) -> Vec<String> { self.eos.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn eos_special(&self) -> Vec<bool> { self.eos.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn pad_tokens(&self) -> &[(u32, AddedToken)] { &self.pad }
-    pub fn pad_ids(&self) -> Vec<u32> { self.pad.iter().map(|(id, _)| *id).collect() }
-    pub fn pad_strings(&self) -> Vec<String> { self.pad.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn pad_special(&self) -> Vec<bool> { self.pad.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn bos_tokens(&self) -> &[(u32, AddedToken)] { &self.bos }
-    pub fn bos_ids(&self) -> Vec<u32> { self.bos.iter().map(|(id, _)| *id).collect() }
-    pub fn bos_strings(&self) -> Vec<String> { self.bos.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn bos_special(&self) -> Vec<bool> { self.bos.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn sep_tokens(&self) -> &[(u32, AddedToken)] { &self.sep }
-    pub fn sep_ids(&self) -> Vec<u32> { self.sep.iter().map(|(id, _)| *id).collect() }
-    pub fn sep_strings(&self) -> Vec<String> { self.sep.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn sep_special(&self) -> Vec<bool> { self.sep.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn cls_tokens(&self) -> &[(u32, AddedToken)] { &self.cls }
-    pub fn cls_ids(&self) -> Vec<u32> { self.cls.iter().map(|(id, _)| *id).collect() }
-    pub fn cls_strings(&self) -> Vec<String> { self.cls.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn cls_special(&self) -> Vec<bool> { self.cls.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn mask_tokens(&self) -> &[(u32, AddedToken)] { &self.mask }
-    pub fn mask_ids(&self) -> Vec<u32> { self.mask.iter().map(|(id, _)| *id).collect() }
-    pub fn mask_strings(&self) -> Vec<String> { self.mask.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn mask_special(&self) -> Vec<bool> { self.mask.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn tool_tokens(&self) -> &[(u32, AddedToken)] { &self.tool }
-    pub fn tool_ids(&self) -> Vec<u32> { self.tool.iter().map(|(id, _)| *id).collect() }
-    pub fn tool_strings(&self) -> Vec<String> { self.tool.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn tool_special(&self) -> Vec<bool> { self.tool.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn function_tokens(&self) -> &[(u32, AddedToken)] { &self.function }
-    pub fn function_ids(&self) -> Vec<u32> { self.function.iter().map(|(id, _)| *id).collect() }
-    pub fn function_strings(&self) -> Vec<String> { self.function.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn function_special(&self) -> Vec<bool> { self.function.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn parameter_tokens(&self) -> &[(u32, AddedToken)] { &self.parameter }
-    pub fn parameter_ids(&self) -> Vec<u32> { self.parameter.iter().map(|(id, _)| *id).collect() }
-    pub fn parameter_strings(&self) -> Vec<String> { self.parameter.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn parameter_special(&self) -> Vec<bool> { self.parameter.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn role_tokens(&self) -> &[(u32, AddedToken)] { &self.role }
-    pub fn role_ids(&self) -> Vec<u32> { self.role.iter().map(|(id, _)| *id).collect() }
-    pub fn role_strings(&self) -> Vec<String> { self.role.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn role_special(&self) -> Vec<bool> { self.role.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn content_type_tokens(&self) -> &[(u32, AddedToken)] { &self.content_type }
-    pub fn content_type_ids(&self) -> Vec<u32> { self.content_type.iter().map(|(id, _)| *id).collect() }
-    pub fn content_type_strings(&self) -> Vec<String> { self.content_type.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn content_type_special(&self) -> Vec<bool> { self.content_type.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn reasoning_tokens(&self) -> &[(u32, AddedToken)] { &self.reasoning }
-    pub fn reasoning_ids(&self) -> Vec<u32> { self.reasoning.iter().map(|(id, _)| *id).collect() }
-    pub fn reasoning_strings(&self) -> Vec<String> { self.reasoning.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn reasoning_special(&self) -> Vec<bool> { self.reasoning.iter().map(|(_, t)| t.special).collect() }
-
-    pub fn other_tokens(&self) -> &[(u32, AddedToken)] { &self.other }
-    pub fn other_ids(&self) -> Vec<u32> { self.other.iter().map(|(id, _)| *id).collect() }
-    pub fn other_strings(&self) -> Vec<String> { self.other.iter().map(|(_, t)| t.content.clone()).collect() }
-    pub fn other_special(&self) -> Vec<bool> { self.other.iter().map(|(_, t)| t.special).collect() }
-
-    /// Get all tokens across all categories
-    pub fn all_tokens(&self) -> Vec<(u32, AddedToken)> {
-        let mut all = Vec::new();
-        all.extend(self.eos.iter().cloned());
-        all.extend(self.pad.iter().cloned());
-        all.extend(self.bos.iter().cloned());
-        all.extend(self.sep.iter().cloned());
-        all.extend(self.cls.iter().cloned());
-        all.extend(self.mask.iter().cloned());
-        all.extend(self.tool.iter().cloned());
-        all.extend(self.function.iter().cloned());
-        all.extend(self.parameter.iter().cloned());
-        all.extend(self.role.iter().cloned());
-        all.extend(self.content_type.iter().cloned());
-        all.extend(self.reasoning.iter().cloned());
-        all.extend(self.other.iter().cloned());
-        all
+    /// Get tool start token IDs (tokens containing 'tool_call' or 'function_call' without closing slash)
+    pub fn tool_start_ids(&self) -> Vec<u32> {
+        self.tool()
+            .iter()
+            .filter(|t| {
+                let s = t.string();
+                (s.contains("tool_call") || s.contains("function_call")) && !s.contains("</")
+            })
+            .map(|t| t.id)
+            .collect()
     }
 
-    /// Get all special tokens (where AddedToken.special == true)
-    pub fn all_special(&self) -> Vec<(u32, AddedToken)> {
-        self.all_tokens().into_iter().filter(|(_, t)| t.special).collect()
+    /// Get tool end token IDs (tokens containing '</tool_call' or '</function_call')
+    pub fn tool_end_ids(&self) -> Vec<u32> {
+        self.tool()
+            .iter()
+            .filter(|t| {
+                let s = t.string();
+                s.contains("</tool_call") || s.contains("</function_call")
+            })
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Get tool start token IDs as HashSet for O(1) lookup
+    pub fn tool_start_ids_set(&self) -> HashSet<u32> {
+        self.tool_start_ids().into_iter().collect()
+    }
+
+    /// Get tool end token IDs as HashSet for O(1) lookup
+    pub fn tool_end_ids_set(&self) -> HashSet<u32> {
+        self.tool_end_ids().into_iter().collect()
+    }
+
+    /// Get all tokens
+    pub fn all_tokens(&self) -> Vec<SpecialToken> {
+        self.token_set.clone()
+    }
+
+    /// Get all special tokens (Special or Added source)
+    pub fn all_special(&self) -> Vec<SpecialToken> {
+        self.token_set.iter()
+            .filter(|t| t.source == VocabSource::Special || t.source == VocabSource::Added)
+            .cloned()
+            .collect()
     }
 }
 
@@ -312,66 +370,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_token_accessors() {
-        // Test that AddedToken fields are accessible
-        let added_token = AddedToken {
-            content: "<test>".to_string(),
-            special: true,
-            single_word: false,
-            lstrip: false,
-            rstrip: false,
-            normalized: false,
+    fn test_special_token_string_conversion() {
+        let token = SpecialToken {
+            category: Category::Eos,
+            id: 2,
+            content: b"</s>".to_vec(),
+            source: VocabSource::Added,
         };
-        
-        assert_eq!(added_token.content, "<test>");
-        assert!(added_token.special);
+        assert_eq!(token.string(), "</s>");
     }
 
     #[test]
     fn test_categorize_special_tokens() {
-        // Test that special tokens are correctly categorized
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
         
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
             
             // Check that we have some tokens stored
-            assert!(!special_tokens.eos_tokens().is_empty() || 
-                    !special_tokens.pad_tokens().is_empty());
-        }
-    }
-
-    #[test]
-    fn test_search_by_id() {
-        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
-        if let Some(tok) = tokenizer {
-            let special_tokens = SpecialTokens::new(&tok);
-            
-            // Search for a specific ID
-            let results = special_tokens.search(Some(2), None);
-            
-            // Each result should have the matching ID
-            for result in &results {
-                assert_eq!(result.id, 2);
-            }
-        }
-    }
-
-    #[test]
-    fn test_search_by_content() {
-        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
-        if let Some(tok) = tokenizer {
-            let special_tokens = SpecialTokens::new(&tok);
-            
-            // Search for tokens containing "end"
-            let results = special_tokens.search(None, Some("end"));
-            
-            // Each result should contain the search string
-            for result in &results {
-                assert!(result.content.contains("end"));
-            }
+            assert!(!special_tokens.eos().is_empty() || 
+                    !special_tokens.pad().is_empty());
         }
     }
 
@@ -389,8 +407,94 @@ mod tests {
                 .chain(special_tokens.bos_ids())
                 .collect();
             
-            let unique_ids: std::collections::HashSet<u32> = all_ids.iter().cloned().collect();
+            let unique_ids: HashSet<u32> = all_ids.iter().cloned().collect();
             assert_eq!(all_ids.len(), unique_ids.len(), "Duplicate token IDs found");
+        }
+    }
+
+    #[test]
+    fn test_search_by_id() {
+        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
+        
+        if let Some(tok) = tokenizer {
+            let special_tokens = SpecialTokens::new(&tok);
+            
+            // Search for a specific ID
+            let results = special_tokens.search(Some(2), None, None, None);
+            
+            // Each result should have the matching ID
+            for result in &results {
+                assert_eq!(result.id, 2);
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_by_content() {
+        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
+        
+        if let Some(tok) = tokenizer {
+            let special_tokens = SpecialTokens::new(&tok);
+            
+            // Search for tokens containing "end"
+            let results = special_tokens.search(None, Some("end"), None, None);
+            
+            // Each result should contain the search string
+            for result in &results {
+                assert!(result.string().contains("end"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_by_category() {
+        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
+        
+        if let Some(tok) = tokenizer {
+            let special_tokens = SpecialTokens::new(&tok);
+            
+            // Search for EOS tokens
+            let results = special_tokens.search(None, None, Some(Category::Eos), None);
+            
+            // Each result should be an EOS token
+            for result in &results {
+                assert_eq!(result.category, Category::Eos);
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_by_source() {
+        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
+        
+        if let Some(tok) = tokenizer {
+            let special_tokens = SpecialTokens::new(&tok);
+            
+            // Search for tokens with Added source
+            let results = special_tokens.search(None, None, None, Some(VocabSource::Added));
+            
+            // Each result should have Added source
+            for result in &results {
+                assert_eq!(result.source, VocabSource::Added);
+            }
+        }
+    }
+
+    #[test]
+    fn test_combined_search() {
+        let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
+        
+        if let Some(tok) = tokenizer {
+            let special_tokens = SpecialTokens::new(&tok);
+            
+            // Search for EOS tokens with specific substring
+            let results = special_tokens.search(None, Some("end"), Some(Category::Eos), None);
+            
+            // Each result should match all criteria
+            for result in &results {
+                assert_eq!(result.category, Category::Eos);
+                assert!(result.string().contains("end"));
+            }
         }
     }
 }

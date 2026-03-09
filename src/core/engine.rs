@@ -136,18 +136,16 @@ impl LLMEngine {
             prepare_engine_config(econfig, &config, &config_tokenizer, &mut generation_cfg);
         config.fp8_kvcache = econfig.fp8_kvcache;
 
-        // In case config file missing bos and eos configuratioin
+        // Initialize SpecialTokens early to use for EOS token extraction
+        let special_tokens = SpecialTokens::new(&tokenizer);
+        
+        // In case config file missing bos and eos configuration
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
-            // Extract EOS tokens from the tokenizer vocabulary
-            let mut eos_tokens: Vec<u32> = Vec::new();
-            if let Some(eos_str) = &config_tokenizer.eos_token {
-                if let Some(token) = tokenizer.get_vocab(true).get(eos_str).copied() {
-                    eos_tokens.push(token);
-                }
-            }
-            if !eos_tokens.is_empty() {
-                config.eos_token_id = Some(eos_tokens);
+            // Extract EOS tokens from SpecialTokens (single source of truth)
+            let eos_ids: Vec<u32> = special_tokens.eos_ids();
+            if !eos_ids.is_empty() {
+                config.eos_token_id = Some(eos_ids);
             }
         }
         assert!(
@@ -405,32 +403,28 @@ impl LLMEngine {
         }
         let runners = Arc::new(RwLock::new(runners));
         
-        // Initialize SpecialTokens once at engine startup (before Scheduler)
-        let special_tokens = Arc::new(SpecialTokens::new(&tokenizer));
-        
+        let special_tokens = Arc::new(special_tokens);
         let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
 
-        // Initialize tool call end tokens for detection based on model type.
-        let mut tool_config = ToolConfig::for_model_type(&model_type);
-        tool_config.validate_with_tokenizer(&tokenizer, &model_type);
-        let tool_call_start_ids = tool_config.tool_call_start_ids(&tokenizer);
-        let tool_call_end_ids = tool_config.tool_call_end_ids(&tokenizer);
+        // Initialize tool call end tokens using SpecialTokens for idiomatic access
+        let tool_call_start_ids: Vec<u32> = special_tokens.tool_start_ids();
+        let tool_call_end_ids: Vec<u32> = special_tokens.tool_end_ids();
 
         if !tool_call_start_ids.is_empty() {
             scheduler.set_tool_call_start_tokens(tool_call_start_ids.clone());
             log_info!(
-                "Tool call start token IDs set to: {:?}",
+                "Tool call start token IDs set from SpecialTokens: {:?}",
                 tool_call_start_ids
             );
         } else {
-            log_info!("Tool call start token IDs not set (no reliable start token)");
+            log_info!("Tool call start token IDs not set (no tool start tokens found in tokenizer)");
         }
 
         if !tool_call_end_ids.is_empty() {
             scheduler.set_tool_call_end_tokens(tool_call_end_ids.clone());
-            log_info!("Tool call end token IDs set to: {:?}", tool_call_end_ids);
+            log_info!("Tool call end token IDs set from SpecialTokens: {:?}", tool_call_end_ids);
         } else {
-            log_info!("Tool call end token IDs not set (no reliable end token)");
+            log_info!("Tool call end token IDs not set (no tool end tokens found in tokenizer)");
         }
 
         // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
@@ -456,7 +450,7 @@ impl LLMEngine {
         );
         let escaped_special_tokens = ChatTemplate::collect_escape_tokens(
             &tokenizer,
-            &[&tool_config.start_token_str, &tool_config.end_token_str],
+            &[],
         );
         template.set_escape_tokens(escaped_special_tokens);
 
@@ -469,6 +463,16 @@ impl LLMEngine {
             archs[0].to_string()
         } else {
             "default".to_string()
+        };
+
+        // Create tool config from special tokens for backward compatibility
+        let tool_config = ToolConfig {
+            start_token_ids: HashSet::new(),
+            end_token_ids: HashSet::new(),
+            start_token_str: "".to_string(),
+            end_token_str: "".to_string(),
+            start_is_special: false,
+            end_is_special: false,
         };
 
         let engine = Arc::new(RwLock::new(Self {

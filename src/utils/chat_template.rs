@@ -134,7 +134,7 @@ impl ChatTemplate {
         let mut tokens = special_tokens
             .all_special()
             .into_iter()
-            .map(|(_, added)| added.content)
+            .map(|t| t.string())
             .collect::<Vec<_>>();
 
         for marker in tool_markers {
