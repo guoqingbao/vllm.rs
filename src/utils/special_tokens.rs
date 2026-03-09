@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use tokenizers::tokenizer::{Tokenizer, AddedToken};
+use tokenizers::tokenizer::Tokenizer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum Category {
@@ -18,61 +18,68 @@ pub enum Category {
     Other,
 }
 
+
 impl Category {
     pub fn search_strings(&self) -> Vec<String> {
         match self {
             Self::Eos => vec![
-                    "</s>" , "<eos>" , "<,eos,>" , "eos" , "<,end_of_text,>" , "<,end,>" ,
+                    "</s>" , "<eos>" , "<,eos,>", "<,end_of_text,>" , "<,end,>" ,
                     "<,eot,>" , "<,eot_id,>" , "<,eom_id,>" , "<,end_of_turn,>" ,
-                    "<,endoftext,>" , "<,endofsequence,>" , "[EOS]"
-                ].iter().map(|e| e.to_string()).collect(),
+                    "<,endoftext,>" , "<,endofsequence,>" , "[EOS]", "<|im_end|>",
+                    "<|box_end|>", "<|object_ref_end|>","<|quad_end|>",
+                    "<|vision_end|>",
+                ],
             Self::Bos => vec![
-                    "<s>" , "<bos>" , "<,bos,>" , "bos" , "<,bos_token,>" ,
+                    "<s>" , "<bos>" , "<,bos,>", "<,bos_token,>" ,
                     "<,begin_of_text,>" , "<,startoftext,>" , "<,start,>" ,
-                    "<,im_start,>" , "[BOS]"
-                ].iter().map(|e| e.to_string()).collect(),
+                    "<,im_start,>" , "[BOS]", "<|box_start|>", "<|im_start|>",
+                    "<|object_ref_start|>", "<|quad_start|>", "<|vision_start|>",
+                ],
             Self::Pad => vec![
                     "<pad>" , "<,pad,>" , "<pad_token>" , "<,pad_token,>" ,
-                    "pad" , "[PAD]" , "<padding>"
-                ].iter().map(|e| e.to_string()).collect(),
+                    "[PAD]" , "<padding>", "<|image_pad|>", "<|video_pad|>",
+                    "<|vision_pad|>",
+                ],
             Self::Sep => vec![
                     "<sep>" , "<,sep,>" , "<,separator,>" , "[SEP]"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Cls => vec![
                     "<cls>" , "<,cls,>" , "[CLS]" , "<CLS>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Mask => vec![
                     "<mask>" , "<,mask,>" , "[MASK]" , "<mask_token>" ,
                     "<,mask_token,>" , "<,infill_mask,>" , "<,extra_id_0,>" ,
                     "<extra_id_0>" , "<extra_id_1>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Role => vec![
                     "<,system,>" , "<,user,>" , "<,assistant,>" , "<,role,>" ,
                     "<,critic,>" , "<,observer,>" , "<system>" ,
                     "<user>" , "<assistant>" , "<role>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::ContentType => vec![
                     "<,content_type,>" , "<,content,>" , "<,text,>" , "<,code,>" ,
                     "<,json,>" , "<,markdown,>" , "<,output,>" , "<,html,>" ,
                     "<,data,>" , "<,datatype,>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Tool=> vec![
                     "<|python_tag|>", "<|eom_id|>",
-                    "<‌tool_call>","<‌/tool_call>",
+                    "<tool_call>", "</tool_call>",
+                    "</tool_response>", "<tool_response>",
                     "[TOOL_CALLS]", "]",
                     "<start_function_call>", "<end_function_call>",
-                ].iter().map(|e| e.to_string()).collect(),
+
+                ],
             Self::Function => vec![
                     "<,function,>" , "<function>" , "<,functions,>" , "<,fn,>" , "<fn>" ,
                     "<,tool,>" , "<tool>" , "<,tools,>" , "<,api,>" ,
                     "<,invoke,>" , "<,function_call,>" , "<,tool_call,>" ,
                     "<,function_call_json,>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Parameter => vec![
                     "<parameter>" , "<,parameter,>" , "<,parameters,>" ,
                     "<,args,>" , "<,arguments,>" , "<arguments>" ,
                     "<params>" , "<,params,>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Reasoning => vec![
                     " magnesium " , " magnesia " , "<thinking>" , "</thinking>" ,
                     "<,thinking,>" , "<,reasoning,>" , "<reasoning>" , "<,reason,>" ,
@@ -80,13 +87,13 @@ impl Category {
                     "<internal>" , "</internal>" , "<,reflect,>" ,
                     "<reflection>" , "<,chain_of_thought,>" , "<,analysis,>" ,
                     "<,rationale,>" , "<,explanation,>"
-                ].iter().map(|e| e.to_string()).collect(),
+                ],
             Self::Other => vec![
                     "<,eos_token,>" , "<,unk_token,>" , "<unk>" , "[UNK]" ,
                     "<,start_header_id,>" , "<,end_header_id,>" ,
                     "<,metadata,>" , "<,special,>"
-                ].iter().map(|e| e.to_string()).collect(),
-        }
+                ],
+        }.iter().map(|e| e.to_string()).collect()
     }
 }
 
@@ -103,6 +110,7 @@ pub struct SpecialToken {
     pub id: u32,
     pub content: Vec<u8>,
     pub source: VocabSource,
+    pub normalized: bool,
 }
 
 impl SpecialToken {
@@ -114,6 +122,7 @@ impl SpecialToken {
         .collect()
     }
 }
+
 
 #[derive(Debug, Clone, Default)]
 pub struct SpecialTokens {
@@ -273,15 +282,17 @@ impl SpecialTokens {
             token_set.push(SpecialToken {
                 category,
                 id,
-                content: added_token.content.clone().into_bytes(),
+                content: added_token.content.as_bytes().to_vec(),
                 source,
+                normalized: added_token.normalized
             });
         }
 
         // Step 2: Add tokens from base vocabulary that match known patterns
         let vocab = tokenizer.get_vocab(true);
         for (token_str, id) in vocab {
-            if seen_ids.contains(&id) {
+            // Skip special tokens collected, skip things that can't be encased in braces
+            if seen_ids.contains(&id) || token_str.len() < 3 {
                 continue; // Already processed as added token
             }
 
@@ -293,6 +304,7 @@ impl SpecialTokens {
                     id,
                     content: token_str.as_bytes().to_vec(),
                     source: VocabSource::Common,
+                    normalized: false,
                 });
             }
         }
@@ -376,6 +388,7 @@ mod tests {
             id: 2,
             content: b"</s>".to_vec(),
             source: VocabSource::Added,
+            normalized: false,
         };
         assert_eq!(token.string(), "</s>");
     }

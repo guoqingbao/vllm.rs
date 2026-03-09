@@ -91,3 +91,7 @@ python = ["pyo3"]
 [[bin]]
 name = "runner"
 path = "src/runner/runner.rs"
+
+[[bin]]
+name = "special-tokens-extraction"
+path = "example/special-tokens-extraction/src/main.rs"
