@@ -545,4 +545,217 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_special_tokens_tool_tokens_e2e() {
+        // Test that tool_tokens() extracts start/end pairs correctly
+        // Using mock data with ASCII-compatible token strings
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 151657,
+            content: b"".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Tool,
+            id: 151658,
+            content: b"".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+        
+        // Test tool_tokens() returns the pair
+        let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
+        assert_eq!(result_start.id, 151657);
+        assert_eq!(result_end.id, 151658);
+        assert_eq!(result_start.string(), "");
+        assert_eq!(result_end.string(), "");
+        
+        // Test tool_start_ids() and tool_end_ids()
+        assert_eq!(special_tokens.tool_start_ids(), vec![151657]);
+        assert_eq!(special_tokens.tool_end_ids(), vec![151658]);
+    }
+
+    #[test]
+    fn test_special_tokens_tool_tokens_missing() {
+        // Test that tool_tokens() returns None when end token is missing
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 151657,
+            content: b"start_token".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token],
+        };
+        
+        assert!(special_tokens.tool_tokens().is_none());
+    }
+
+    #[test]
+    fn test_special_tokens_tool_tokens_mistral_style() {
+        // Test that tool_tokens() handles Mistral-style tokens
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 9,
+            content: b"[TOOL_CALLS]".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Tool,
+            id: 10,
+            content: b"]".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+        
+        let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
+        assert_eq!(result_start.id, 9);
+        assert_eq!(result_end.id, 10);
+        assert_eq!(result_start.string(), "[TOOL_CALLS]");
+        assert_eq!(result_end.string(), "]");
+    }
+
+    #[test]
+    fn test_special_tokens_tool_tokens_llama_style() {
+        // Test that tool_tokens() handles Llama-style tokens
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 128010,
+            content: b"<|python_tag|>".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Tool,
+            id: 128008,
+            content: b"<|eom_id|>".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+        
+        let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
+        assert_eq!(result_start.id, 128010);
+        assert_eq!(result_end.id, 128008);
+        assert_eq!(result_start.string(), "<|python_tag|>");
+        assert_eq!(result_end.string(), "<|eom_id|>");
+    }
+
+    #[test]
+    fn test_special_tokens_tool_start_ids_set() {
+        let special_tokens = SpecialTokens {
+            token_set: vec![
+                SpecialToken {
+                    category: Category::Tool,
+                    id: 151657,
+                    content: b"<‌tool_call>".to_vec(),
+                    source: VocabSource::Added,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Tool,
+                    id: 151658,
+                    content: b"<‌/tool_call>".to_vec(),
+                    source: VocabSource::Added,
+                    normalized: false,
+                },
+            ],
+        };
+        
+        let start_ids: HashSet<u32> = special_tokens.tool_start_ids_set();
+        assert_eq!(start_ids.len(), 1);
+        assert!(start_ids.contains(&151657));
+    }
+
+    #[test]
+    fn test_special_tokens_tool_end_ids_set() {
+        let special_tokens = SpecialTokens {
+            token_set: vec![
+                SpecialToken {
+                    category: Category::Tool,
+                    id: 151657,
+                    content: b"<‌tool_call>".to_vec(),
+                    source: VocabSource::Added,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Tool,
+                    id: 151658,
+                    content: b"<‌/tool_call>".to_vec(),
+                    source: VocabSource::Added,
+                    normalized: false,
+                },
+            ],
+        };
+        
+        let end_ids: HashSet<u32> = special_tokens.tool_end_ids_set();
+        assert_eq!(end_ids.len(), 1);
+        assert!(end_ids.contains(&151658));
+    }
+
+    #[test]
+    fn test_special_tokens_tool_start_token() {
+        // Test that tool_start_token() returns the start token
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 151657,
+            content: b"<‌tool_call>".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Tool,
+            id: 151658,
+            content: b"<‌/tool_call>".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+        
+        assert_eq!(special_tokens.tool_start_token().unwrap().id, 151657);
+    }
+
+    #[test]
+    fn test_special_tokens_tool_end_token() {
+        // Test that tool_end_token() returns the end token
+        let start_token = SpecialToken {
+            category: Category::Tool,
+            id: 151657,
+            content: b"<‌tool_call>".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Tool,
+            id: 151658,
+            content: b"<‌/tool_call>".to_vec(),
+            source: VocabSource::Added,
+            normalized: false,
+        };
+        
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+        
+        assert_eq!(special_tokens.tool_end_token().unwrap().id, 151658);
+    }
 }
