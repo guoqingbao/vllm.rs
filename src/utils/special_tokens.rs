@@ -149,6 +149,10 @@ macro_rules! filter_by_category_source {
 }
 
 impl SpecialTokens {
+    pub fn from_vec(token_set: Vec<SpecialToken>) -> Self {
+        Self { token_set}
+    }
+
     // Public category accessors
     pub fn eos(&self) -> Vec<SpecialToken> { filter_by_category!(self, Eos) }
     pub fn pad(&self) -> Vec<SpecialToken> { filter_by_category!(self, Pad) }
@@ -393,8 +397,67 @@ impl SpecialTokens {
     /// Get tool start and end token SpecialTokens as a pair if both available
     /// Returns None if either token is not found, enabling graceful fallback
     pub fn tool_tokens(&self) -> Option<(SpecialToken, SpecialToken)> {
-        let start = self.tool_start_token()?;
-        let end = self.tool_end_token()?;
+        let tools = self.tool();
+        
+        // For Llama-style tokens where both are start tokens (don't end with ]),
+        // pair them based on their order in the tool list
+        let start = self.tool_start_token();
+        let end = self.tool_end_token();
+        
+        if start.is_some() && end.is_some() {
+            start.and_then(|s| end.map(|e| (s, e)))
+        } else if tools.len() >= 2 {
+            // Both tokens are start tokens - pair them based on order
+            Some((tools[0].clone(), tools[1].clone()))
+        } else {
+            None
+        }
+    }
+    /// Get reasoning start token IDs (tokens categorized as Reasoning that are start markers)
+    /// Start markers are those that don't start with </
+    pub fn reasoning_start_ids(&self) -> Vec<u32> {
+        self.reasoning()
+            .iter()
+            .filter(|t| !t.string().starts_with("</"))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Get reasoning end token IDs (tokens categorized as Reasoning that are end markers)
+    /// End markers start with </
+    pub fn reasoning_end_ids(&self) -> Vec<u32> {
+        self.reasoning()
+            .iter()
+            .filter(|t| t.string().starts_with("</"))
+            .map(|t| t.id)
+            .collect()
+    }
+
+    /// Get reasoning start token IDs as HashSet for O(1) lookup
+    pub fn reasoning_start_ids_set(&self) -> HashSet<u32> {
+        self.reasoning_start_ids().into_iter().collect()
+    }
+
+    /// Get reasoning end token IDs as HashSet for O(1) lookup
+    pub fn reasoning_end_ids_set(&self) -> HashSet<u32> {
+        self.reasoning_end_ids().into_iter().collect()
+    }
+
+    /// Get reasoning start token SpecialToken if available
+    pub fn reasoning_start_token(&self) -> Option<SpecialToken> {
+        self.reasoning().iter().find(|t| !t.string().starts_with("</")).cloned()
+    }
+
+    /// Get reasoning end token SpecialToken if available
+    pub fn reasoning_end_token(&self) -> Option<SpecialToken> {
+        self.reasoning().iter().find(|t| t.string().starts_with("</")).cloned()
+    }
+
+    /// Get reasoning start and end token SpecialTokens as a pair if both available
+    /// Returns None if either token is not found
+    pub fn reasoning_tokens(&self) -> Option<(SpecialToken, SpecialToken)> {
+        let start = self.reasoning_start_token()?;
+        let end = self.reasoning_end_token()?;
         Some((start, end))
     }
 
@@ -553,14 +616,14 @@ mod tests {
         let start_token = SpecialToken {
             category: Category::Tool,
             id: 151657,
-            content: b"".to_vec(),
+            content: b"<tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };
         let end_token = SpecialToken {
             category: Category::Tool,
             id: 151658,
-            content: b"".to_vec(),
+            content: b"</tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };
@@ -573,8 +636,8 @@ mod tests {
         let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
         assert_eq!(result_start.id, 151657);
         assert_eq!(result_end.id, 151658);
-        assert_eq!(result_start.string(), "");
-        assert_eq!(result_end.string(), "");
+        assert_eq!(result_start.string(), "<tool_call>");
+        assert_eq!(result_end.string(), "</tool_call>");
         
         // Test tool_start_ids() and tool_end_ids()
         assert_eq!(special_tokens.tool_start_ids(), vec![151657]);
@@ -631,6 +694,8 @@ mod tests {
     #[test]
     fn test_special_tokens_tool_tokens_llama_style() {
         // Test that tool_tokens() handles Llama-style tokens
+        // For Llama-style tool tokens, both are start tokens (don't end with ]),
+        // so they're paired based on their order in the tool list
         let start_token = SpecialToken {
             category: Category::Tool,
             id: 128010,
@@ -650,7 +715,8 @@ mod tests {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
         
-        let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
+        let (result_start, result_end) = special_tokens.tool_tokens()
+            .expect("Should have tool tokens (paired by order)");
         assert_eq!(result_start.id, 128010);
         assert_eq!(result_end.id, 128008);
         assert_eq!(result_start.string(), "<|python_tag|>");
@@ -664,14 +730,14 @@ mod tests {
                 SpecialToken {
                     category: Category::Tool,
                     id: 151657,
-                    content: b"<‌tool_call>".to_vec(),
+                    content: b"<tool_call>".to_vec(),
                     source: VocabSource::Added,
                     normalized: false,
                 },
                 SpecialToken {
                     category: Category::Tool,
                     id: 151658,
-                    content: b"<‌/tool_call>".to_vec(),
+                    content: b"</tool_call>".to_vec(),
                     source: VocabSource::Added,
                     normalized: false,
                 },
@@ -690,14 +756,14 @@ mod tests {
                 SpecialToken {
                     category: Category::Tool,
                     id: 151657,
-                    content: b"<‌tool_call>".to_vec(),
+                    content: b"<tool_call>".to_vec(),
                     source: VocabSource::Added,
                     normalized: false,
                 },
                 SpecialToken {
                     category: Category::Tool,
                     id: 151658,
-                    content: b"<‌/tool_call>".to_vec(),
+                    content: b"</tool_call>".to_vec(),
                     source: VocabSource::Added,
                     normalized: false,
                 },
@@ -710,19 +776,64 @@ mod tests {
     }
 
     #[test]
+    fn test_special_tokens_reasoning_tokens_e2e() {
+        let start_token = SpecialToken {
+            category: Category::Reasoning,
+            id: 151660,
+            content: b"<thinking>".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+        let end_token = SpecialToken {
+            category: Category::Reasoning,
+            id: 151661,
+            content: b"</thinking>".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token.clone(), end_token.clone()],
+        };
+
+        let (result_start, result_end) = special_tokens.reasoning_tokens().expect("Should have reasoning tokens");
+        assert_eq!(result_start.id, 151660);
+        assert_eq!(result_end.id, 151661);
+        assert_eq!(special_tokens.reasoning_start_ids(), vec![151660]);
+        assert_eq!(special_tokens.reasoning_end_ids(), vec![151661]);
+    }
+
+    #[test]
+    fn test_special_tokens_reasoning_tokens_missing() {
+        let start_token = SpecialToken {
+            category: Category::Reasoning,
+            id: 151660,
+            content: b"<!-- reasoning -->".to_vec(),
+            source: VocabSource::Special,
+            normalized: false,
+        };
+
+        let special_tokens = SpecialTokens {
+            token_set: vec![start_token],
+        };
+
+        assert!(special_tokens.reasoning_tokens().is_none());
+    }
+
+    #[test]
     fn test_special_tokens_tool_start_token() {
         // Test that tool_start_token() returns the start token
         let start_token = SpecialToken {
             category: Category::Tool,
             id: 151657,
-            content: b"<‌tool_call>".to_vec(),
+            content: b"<tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };
         let end_token = SpecialToken {
             category: Category::Tool,
             id: 151658,
-            content: b"<‌/tool_call>".to_vec(),
+            content: b"</tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };
@@ -740,14 +851,14 @@ mod tests {
         let start_token = SpecialToken {
             category: Category::Tool,
             id: 151657,
-            content: b"<‌tool_call>".to_vec(),
+            content: b"<tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };
         let end_token = SpecialToken {
             category: Category::Tool,
             id: 151658,
-            content: b"<‌/tool_call>".to_vec(),
+            content: b"</tool_call>".to_vec(),
             source: VocabSource::Added,
             normalized: false,
         };

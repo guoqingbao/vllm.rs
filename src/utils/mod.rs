@@ -9,12 +9,18 @@ pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod guidance;
+#[cfg(test)]
+pub mod guidance_tests;
 pub mod heartbeat;
 pub mod image;
 pub mod kvcache_allocator;
 pub mod logits_processor;
 pub mod progress;
 pub mod special_tokens;
+pub mod reasoning;
+
+// Re-export reasoning types for convenience
+pub use reasoning::{ReasoningEffort, ThinkingGrammarBuilder, build_reasoning_grammar, thinking_grammar_with_reasoning_block};
 use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;

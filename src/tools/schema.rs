@@ -11,7 +11,7 @@ use llguidance::api::TopLevelGrammar;
 
 /// Remove JSON Schema features that llguidance doesn't support.
 /// Currently strips all "format" fields recursively.
-pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
+fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
     match schema {
         Value::Object(map) => {
             let mut out = Map::new();
@@ -19,15 +19,83 @@ pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
                 if key == "format" {
                     continue;
                 }
-                out.insert(key.clone(), sanitize_schema_for_llguidance(value));
+                out.insert(key.clone(), sanitize_schema_for_llguidance_recursive(value));
             }
             Value::Object(out)
         }
         Value::Array(items) => {
-            Value::Array(items.iter().map(sanitize_schema_for_llguidance).collect())
+            Value::Array(items.iter().map(sanitize_schema_for_llguidance_recursive).collect())
         }
         _ => schema.clone(),
     }
+}
+
+/// Remove null from type arrays for required fields.
+/// This ensures grammars enforce field presence for required parameters.
+fn strip_null_from_required_fields(schema: Value) -> Value {
+    match schema {
+        Value::Object(mut map) => {
+            // Extract the required fields as a Vec before any mutable borrows
+            let required_fields: Vec<String> = map
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect())
+                .unwrap_or_default();
+            
+            // Clone the properties map to avoid borrow conflicts
+            let mut props = map.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+            
+            // Process properties - collect fields that need null stripped
+            let props_to_update: Vec<String> = props.iter()
+                .filter(|(name, _)| required_fields.contains(name))
+                .map(|(name, _)| name.clone())
+                .collect();
+            
+            // Update properties with null stripped from required fields
+            for name in props_to_update {
+                if let Some(prop) = props.get_mut(&name) {
+                    if let Some(obj) = prop.as_object_mut() {
+                        if let Some(type_val) = obj.get_mut("type") {
+                            if let Some(type_arr) = type_val.as_array_mut() {
+                                // Remove "null" from the type array
+                                type_arr.retain(|v| v.as_str() != Some("null"));
+                                // If only one type remains, use string instead of array
+                                if type_arr.len() == 1 {
+                                    *type_val = type_arr[0].clone();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Insert updated properties back into map
+            map.insert("properties".to_string(), Value::Object(props));
+            
+            // Recursively process nested schemas
+            // For nested objects, we need to process their properties as well
+            for (key, value) in map.iter_mut() {
+                *value = strip_null_from_required_fields(value.clone());
+            }
+            
+            Value::Object(map)
+        }
+        Value::Array(mut arr) => {
+            arr.iter_mut().for_each(|v| *v = strip_null_from_required_fields(v.clone()));
+            Value::Array(arr)
+        }
+        _ => schema,
+    }
+}
+
+/// Remove JSON Schema features that llguidance doesn't support.
+/// Currently strips all "format" fields recursively.
+/// Also strips null from required fields to enforce proper field selection.
+pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
+    let schema = sanitize_schema_for_llguidance_recursive(schema);
+    strip_null_from_required_fields(schema)
 }
 
 /// Lark grammar helper functions for llguidance constraint building
@@ -672,6 +740,52 @@ mod tests {
         assert!(sanitized["properties"]["url"].get("format").is_none());
         assert!(sanitized["properties"]["nested"]["properties"]["id"].get("format").is_none());
     }
+
+    #[test]
+    fn test_strip_null_from_required_fields() {
+        // Test that null is stripped from required fields
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "cwd": {"type": ["string", "null"]}
+            },
+            "required": ["command", "cwd"],
+            "additionalProperties": false
+        });
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+        // Required field cwd should have null stripped, leaving only "string"
+        assert_eq!(sanitized["properties"]["cwd"]["type"], "string");
+        assert!(sanitized["properties"]["cwd"]["type"].as_array().is_none());
+    }
+
+    #[test]
+    fn test_strip_null_preserves_optional_fields_with_null() {
+        // Test that optional fields can still have null in their type
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "cwd": {"type": ["string", "null"]},
+                "env": {"type": ["object", "null"]}
+            },
+            "required": ["command"],  // cwd and env are optional
+            "additionalProperties": false
+        });
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+        // Required field should have null stripped
+        assert_eq!(sanitized["properties"]["command"]["type"], "string");
+        // Optional fields should keep null in their type
+        assert!(sanitized["properties"]["cwd"]["type"].is_array());
+        assert!(sanitized["properties"]["cwd"]["type"].as_array().unwrap().contains(&Value::String("null".to_string())));
+        assert!(sanitized["properties"]["env"]["type"].is_array());
+        assert!(sanitized["properties"]["env"]["type"].as_array().unwrap().contains(&Value::String("null".to_string())));
+    }
+
+    // Note: We do NOT recursively process nested properties within tool parameter schemas
+    // because the OpenAI tool calling spec uses flat tool definitions. Nested objects
+    // within parameters are just JSON Schema types, not separate tool schemas.
+    // Processing them recursively would cause stack overflow.
 
     #[test]
     fn test_build_choice_lark_grammar_empty_string() {

@@ -24,6 +24,7 @@ use crate::tools::helpers::{
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::tools::schema::ToolGrammarBuilder;
 use crate::utils::config::SamplingParams;
+use crate::utils::guidance::ReasoningEffort;
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -528,6 +529,11 @@ pub async fn chat_completion(
         // Get SpecialTokens from engine for building TEXT pattern with EOS bounding
         let engine = data.engine.read();
         let special_tokens = &engine.special_tokens;
+        // Get reasoning_effort from request if provided
+        let reasoning_effort = request.reasoning_effort.as_ref().map(|s| {
+            ReasoningEffort::from_str(s.to_string())
+        });
+        
         let llg_grammar = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -536,6 +542,7 @@ pub async fn chat_completion(
             forced_tool_name.clone(),
             Some(max_tokens.clone()),
             special_tokens,
+            reasoning_effort,
         );
         drop(engine); // Explicitly drop the lock guard
         let lark_string = get_lark_from_top_level_grammar(&llg_grammar);

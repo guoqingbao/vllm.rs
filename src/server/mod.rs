@@ -71,6 +71,10 @@ pub struct ChatCompletionRequest {
     /// Type of constraint for legacy constraint field
     #[serde(default)]
     pub constraint_type: Option<String>,
+    /// Reasoning effort level for OpenAI-compatible reasoning API
+    /// Values: "none", "low", "medium", "high"
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_effort: Option<String>,
 }
 
 pub fn resolve_engine_model_id(econfig: &EngineConfig) -> Option<String> {

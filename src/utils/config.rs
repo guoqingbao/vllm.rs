@@ -1,6 +1,7 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
 use llguidance::api::TopLevelGrammar;
+use crate::utils::guidance::ReasoningEffort;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::{Deserialize, Serialize};
@@ -418,6 +419,9 @@ pub struct SamplingParams {
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
     pub grammar: Option<TopLevelGrammar>,
+    /// Reasoning effort level for OpenAI-compatible reasoning API
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[cfg(feature = "python")]
@@ -456,6 +460,9 @@ pub struct SamplingParams {
     /// Grammar constraint as JSON string for Python API
     #[pyo3(get, set)]
     pub grammar_json: Option<String>,
+    /// Reasoning effort level for OpenAI-compatible reasoning API
+    #[pyo3(get, set)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -470,6 +477,7 @@ impl SamplingParams {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
         thinking: Option<bool>,
+        reasoning_effort: Option<ReasoningEffort>,
     ) -> Self {
         Self {
             temperature,
@@ -484,6 +492,7 @@ impl SamplingParams {
             stop_sequences: None,
             grammar: None,
             thinking,
+            reasoning_effort,
         }
     }
 
@@ -501,6 +510,7 @@ impl SamplingParams {
             stop_sequences: None,
             grammar: None,
             thinking: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -521,6 +531,7 @@ impl Default for SamplingParams {
             stop_sequences: None,
             grammar: None,
             thinking: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -542,6 +553,7 @@ impl Default for SamplingParams {
             thinking: None,
             grammar: None,
             grammar_json: None,
+            reasoning_effort: None,
         }
     }
 }
