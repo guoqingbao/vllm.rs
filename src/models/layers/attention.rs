@@ -267,32 +267,22 @@ impl Attention {
             (q_raw, None)
         };
 
-        let q = q_linear
-            .reshape((1, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = k
-            .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = v
-            .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let q = q_linear.reshape((seq_len, self.num_heads, self.head_dim))?;
+        let k = k.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
+        let v = v.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
 
         let (q, k) = if self.q_norm.is_some() && self.k_norm.is_some() {
-            //Per‑head RMSNorm in qwen3
             if self.no_per_head_norm {
                 let q = self.q_norm.as_ref().unwrap().forward(&q)?;
                 let k = self.k_norm.as_ref().unwrap().forward(&k)?;
                 (q, k)
             } else {
-                let q_flat = q.flatten(0, 2)?; // (B*H, L, D) -> (BHL, D) after transpose later
-                let k_flat = k.flatten(0, 2)?;
+                let q_flat = q.flatten(0, 1)?;
+                let k_flat = k.flatten(0, 1)?;
                 let q_flat = self.q_norm.as_ref().unwrap().forward(&q_flat)?;
                 let k_flat = self.k_norm.as_ref().unwrap().forward(&k_flat)?;
-                let q = q_flat.reshape((1, self.num_heads, seq_len, self.head_dim))?;
-                let k = k_flat.reshape((1, self.num_kv_heads, seq_len, self.head_dim))?;
+                let q = q_flat.reshape((seq_len, self.num_heads, self.head_dim))?;
+                let k = k_flat.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
                 (q, k)
             }
         } else {
@@ -335,6 +325,7 @@ impl Attention {
                     original_max_position_embeddings as f64,
                 )?
                 .to_dtype(q.dtype())?;
+                let scale = scale.squeeze(0)?.squeeze(0)?.reshape((seq_len, 1, 1))?;
                 q = q.broadcast_mul(&scale)?;
             }
         }

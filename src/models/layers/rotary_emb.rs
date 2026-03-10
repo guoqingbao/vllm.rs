@@ -83,6 +83,21 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         // Handle partial rotary (rotary_dim < head_dim) - must return new tensors
         if let Some(rotary_dim) = self.rotary_dim {
             use candle_core::D;
+
+            #[cfg(feature = "cuda")]
+            if q.dims().len() == 3 && k.dims().len() == 3 {
+                FusedRope::apply_inplace_partial(
+                    q,
+                    k,
+                    &self.cos,
+                    &self.sin,
+                    positions,
+                    self.is_rope_i,
+                    rotary_dim,
+                )?;
+                return Ok(None);
+            }
+
             let cos = self.cos.index_select(positions, 0)?;
             let sin = self.sin.index_select(positions, 0)?;
 
