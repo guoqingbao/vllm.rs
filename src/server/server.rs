@@ -471,44 +471,47 @@ pub async fn chat_completion(
         return ChatResponder::ValidationError(err);
     }
     let parser_model_id =
-         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
-     let enforce_parser = engine_config.enforce_parser.clone();
+        super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
+    let enforce_parser = engine_config.enforce_parser.clone();
 
-     // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
-     // Honor parser override flag (--enforce-parser) when available
-     let tool_parser_name = if let Some(ref enforced) = enforce_parser {
-         enforced.clone()
-     } else {
-         StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
-     };
-     let use_xml_grammar = tool_parser_name == "qwen_coder";
-     let tool_gram = if has_tools && engine_config.enable_tool_grammar {
-         let tool_gram = if use_xml_grammar {
-             crate::tools::schema::build_xml_tool_lark_grammar(
-                 &sanitized_tools,
-                 &tool_config.start_token_str,
-                 &tool_config.end_token_str,
-                 tool_config.start_is_special,
-                 tool_config.end_is_special,
-                 Some(&tool_config.start_token_ids),
-                 Some(&tool_config.end_token_ids),
-             )
-          } else {
-              ToolGrammarBuilder::new()
-                  .tools(&sanitized_tools)
-                  .start_tag(&tool_config.start_token_str)
-                  .end_tag(&tool_config.end_token_str)
-                  .start_is_special(tool_config.start_is_special)
-                  .end_is_special(tool_config.end_is_special)
-                  .start_token_ids(Some(tool_config.start_token_ids.clone()))
-                  .end_token_ids(Some(tool_config.end_token_ids.clone()))
-                  .build_json()
-          };
-         crate::log_debug!("[llg] Built tool grammar (use_xml_grammar={})", use_xml_grammar);
-         Some(tool_gram)
-     } else {
-         None
-     };
+    // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
+    // Honor parser override flag (--enforce-parser) when available
+    let tool_parser_name = if let Some(ref enforced) = enforce_parser {
+        enforced.clone()
+    } else {
+        StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
+    };
+    let use_xml_grammar = tool_parser_name == "qwen_coder";
+    let tool_gram = if has_tools && engine_config.enable_tool_grammar {
+        let tool_gram = {
+            let engine = data.engine.read();
+            let pad_ids = engine.special_tokens.get_xml_anchor_pad_ids();
+            drop(engine);
+            
+            if use_xml_grammar {
+                ToolGrammarBuilder::new()
+                    .tools(&sanitized_tools)
+                    .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                    .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                    .build_xml_with_anchors(&pad_ids[..])
+            } else {
+                ToolGrammarBuilder::new()
+                    .tools(&sanitized_tools)
+                    .start_tag(&tool_config.start_token_str)
+                    .end_tag(&tool_config.end_token_str)
+                    .start_is_special(tool_config.start_is_special)
+                    .end_is_special(tool_config.end_is_special)
+                    .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                    .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                    .build_json()
+            }
+        };
+        crate::log_debug!("[llg] Built tool grammar (use_xml_grammar={})", use_xml_grammar);
+        Some(tool_gram)
+    } else {
+        None
+    };
+
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,
@@ -528,7 +531,9 @@ pub async fn chat_completion(
     } else {
         // Get SpecialTokens from engine for building TEXT pattern with EOS bounding
         let engine = data.engine.read();
-        let special_tokens = &engine.special_tokens;
+        let special_tokens = &engine.special_tokens.clone();
+        drop(engine);
+        let pad_ids = special_tokens.get_xml_anchor_pad_ids();
         // Get reasoning_effort from request if provided
         let reasoning_effort = request
             .reasoning_effort
@@ -545,7 +550,6 @@ pub async fn chat_completion(
             special_tokens,
             reasoning_effort,
         );
-        drop(engine); // Explicitly drop the lock guard
         let lark_string = get_lark_from_top_level_grammar(&llg_grammar);
         crate::log_debug!("[llg] TopLevelGrammar for SamplingParams: {:?}", &llg_grammar);
         crate::log_debug!("[llg] Lark grammar string:\n{}", lark_string);

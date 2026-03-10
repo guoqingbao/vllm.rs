@@ -20,6 +20,7 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
+use crate::utils::reasoning::ReasoningEffort;
 use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -104,6 +105,8 @@ pub struct LLMEngine {
     /// SpecialTokens parsed once at engine initialization
     /// Contains EOS, BOS, and other special token IDs and their string representations
     pub special_tokens: Arc<SpecialTokens>,
+    /// XML anchor pad IDs for template impregnation
+    xml_anchor_pad_ids: Vec<u32>,
 }
 
 impl LLMEngine {
@@ -404,6 +407,7 @@ impl LLMEngine {
         let runners = Arc::new(RwLock::new(runners));
 
         let special_tokens = Arc::new(special_tokens);
+        let pad_ids = special_tokens.get_xml_anchor_pad_ids();
         let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
 
         // Initialize tool call end tokens using SpecialTokens for idiomatic access
@@ -521,7 +525,9 @@ impl LLMEngine {
             img_cfg,
             model_name,
             special_tokens,
+            xml_anchor_pad_ids: pad_ids,
         }));
+
         Self::start_engine(engine.clone());
         Ok(engine)
     }
@@ -1081,9 +1087,41 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
+        // Add anchors
+        prompt_template.impregnate_with_anchors(&self.xml_anchor_pad_ids);
 
-        // Apply user's thinking preference - default to false if not specified
-        let enable_thinking = params.thinking.unwrap_or(false);
+        // Automatically enable thinking when reasoning_effort is set to a value other than None
+        // User's explicit thinking parameter takes precedence if set
+        let enable_thinking = params.thinking.unwrap_or({
+            #[cfg(feature = "python")]
+            {
+                // When python feature is enabled, reasoning_effort is a String
+                // Convert it to ReasoningEffort enum for matching
+                // Custom variant is not available in Python builds
+                if let Some(ref effort_str) = params.reasoning_effort {
+                    matches!(
+                        ReasoningEffort::from_str(effort_str.clone()),
+                        ReasoningEffort::Low
+                            | ReasoningEffort::Medium
+                            | ReasoningEffort::High
+                            | ReasoningEffort::ChainOfThought
+                    )
+                } else {
+                    false
+                }
+            }
+            #[cfg(not(feature = "python"))]
+            {
+                matches!(
+                    params.reasoning_effort,
+                    Some(ReasoningEffort::Low)
+                        | Some(ReasoningEffort::Medium)
+                        | Some(ReasoningEffort::High)
+                        | Some(ReasoningEffort::ChainOfThought)
+                        | Some(ReasoningEffort::Custom(_))
+                )
+            }
+        });
         prompt_template.set_enable_thinking(enable_thinking);
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;

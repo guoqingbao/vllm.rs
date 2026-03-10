@@ -1,169 +1,182 @@
 use vllm_rs::utils::special_tokens::SpecialTokens;
 use std::env;
+use std::fs;
+use std::path::Path;
+
+fn load_chat_template_from_json(template_path: &str) -> Option<String> {
+    if let Ok(content) = fs::read_to_string(template_path) {
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        json.get("chat_template").and_then(|v| v.as_str()).map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+fn load_chat_template_from_jinja(template_path: &str) -> Option<String> {
+    fs::read_to_string(template_path).ok()
+}
 
 fn main() {
     println!("=== Testing Tokenizer Library ===\n");
 
-    // Path to our mock tokenizer file
     let args: Vec<String> = env::args().collect();
+    
     let tokenizer_path = if args.len() > 1 {
-        args[1].clone()
+        let path = args[1].clone();
+        if path.ends_with("tokenizer_config.json") {
+            let parent_dir = Path::new(&path).parent().unwrap_or(Path::new("."));
+            let tokenizer_json = parent_dir.join("tokenizer.json");
+            if tokenizer_json.exists() {
+                tokenizer_json.to_string_lossy().into_owned()
+            } else {
+                path
+            }
+        } else {
+            path
+        }
     } else {
         "./tokenizer.json".to_string()
     };
 
+    let chat_template_path = args.get(2).map(|s| s.as_str());
+
+    println!("--- Loading Tokenizer ---");
+    println!("Tokenizer path: {}", tokenizer_path);
+    
     let special = SpecialTokens::new_from_file(&tokenizer_path);
 
-    let reasoning_matches = special.search(None, Some("tool"), None, None);
-    for m in reasoning_matches {
-        println!("Search Result - Category: {:?}, ID: {}, string='{}'", m.category, m.id, m.string());
-        // Also show the hex representation
-        let hex: Vec<String> = m.content.iter().map(|b| format!("0x{:02x}", b)).collect();
-        println!("  Hex: {:?}", hex);
+    println!("Successfully loaded tokenizer.");
+    println!("Total tokens: {}\n", special.all_tokens().len());
+
+    // Load chat template
+    let template_path = if let Some(p) = chat_template_path {
+        // Resolve relative paths against current directory
+        let path = Path::new(p);
+        if path.is_relative() {
+            let current_dir = std::env::current_dir().unwrap_or(Path::new(".").to_path_buf());
+            Some(current_dir.join(path).to_string_lossy().into_owned())
+        } else {
+            Some(p.to_string())
+        }
+    } else {
+        let tokenizer_dir = Path::new(&tokenizer_path).parent().unwrap_or(Path::new("."));
+        let jinja_path = tokenizer_dir.join("chat_template.jinja");
+        if jinja_path.exists() {
+            Some(jinja_path.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    };
+
+    if let Some(template_path) = template_path {
+        println!("--- Chat Template ---");
+        println!("Template path: {}", template_path);
+        
+        let chat_template = if template_path.ends_with(".json") {
+            load_chat_template_from_json(&template_path)
+        } else if template_path.ends_with(".jinja") {
+            load_chat_template_from_jinja(&template_path)
+        } else {
+            load_chat_template_from_jinja(&template_path).or_else(|| load_chat_template_from_json(&template_path))
+        };
+
+        match chat_template {
+            Some(template) => {
+                println!("Template loaded successfully!");
+                println!("Template length: {} characters", template.len());
+                
+                // Parse and display template sections
+                println!("\n--- Template Structure ---\n");
+                parse_template_structure(&template);
+            }
+            None => {
+                println!("No chat template found in: {}", template_path);
+            }
+        }
+        println!();
     }
 
-    println!("\nSuccessfully loaded tokenizer from: {}", tokenizer_path);
-    println!("Total tokens processed: {}\n", special.all_tokens().len());
-
-    // Test Eos
+    // Display special tokens by category
     println!("--- EOS Tokens ---");
     for token in special.eos() {
-        println!("EOS: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!("EOS IDs: {:?}", special.eos_ids());
-    println!("EOS Strings: {:?}", special.eos_strings());
-    println!();
-
-    // Test Pad
-    println!("--- PAD Tokens ---");
-    for token in special.pad() {
-        println!("PAD: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Bos
-    println!("--- BOS Tokens ---");
-    for token in special.bos() {
-        println!("BOS: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Tool
-    println!("--- TOOL Tokens ---");
-    for token in special.tool() {
-        println!("TOOL: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Role
-    println!("--- ROLE Tokens ---");
-    for token in special.role() {
-        println!("ROLE: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Mask
-    println!("--- MASK Tokens ---");
-    for token in special.mask() {
-        println!("MASK: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Reasoning
-    println!("--- REASONING Tokens ---");
-    for token in special.reasoning() {
-        println!("REASONING: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Other (Tokens that didn't match specific rules above, e.g., <unk>)
-    println!("--- OTHER Tokens ---");
-    for token in special.other() {
-        println!("OTHER: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test content_type
-    println!("--- CONTENT_TYPE Tokens ---");
-    for token in special.content_type() {
-        println!("CONTENT_TYPE: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Function
-    println!("--- FUNCTION Tokens ---");
-    for token in special.function() {
-        println!("FUNCTION: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Parameter
-    println!("--- PARAMETER Tokens ---");
-    for token in special.parameter() {
-        println!("PARAMETER: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Sep
-    println!("--- SEP Tokens ---");
-    for token in special.sep() {
-        println!("SEP: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test Cls
-    println!("--- CLS Tokens ---");
-    for token in special.cls() {
-        println!("CLS: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-    println!();
-
-    // Test tool start/end helpers
-    println!("--- Tool Start IDs ---");
-    println!("{:?}", special.tool_start_ids());
-    println!("--- Tool End IDs ---");
-    println!("{:?}", special.tool_end_ids());
-
-    // Additional search examples
-    println!("\n=== Additional Search Examples ===\n");
-
-    // Search by category only
-    println!("--- Search all EOS tokens ---");
-    let eos_results = special.search(None, None, Some(vllm_rs::utils::special_tokens::Category::Eos), None);
-    for token in eos_results {
-        println!("  EOS: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-
-    // Search by source (Added tokens)
-    println!("\n--- Search Added tokens ---");
-    let added_results = special.search(None, None, None, Some(vllm_rs::utils::special_tokens::VocabSource::Added));
-    for token in added_results {
-        println!("  Added: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-
-    // Search by ID
-    println!("\n--- Search by ID 2 ---");
-    let id_results = special.search(Some(2), None, None, None);
-    for token in id_results {
-        println!("  ID 2: category={:?} source={:?} string={}", token.category, token.source, token.string());
-    }
-
-    // Search by substring and category combined
-    println!("\n--- Search tokens containing 'end' in EOS category ---");
-    let combined_results = special.search(None, Some("end"), Some(vllm_rs::utils::special_tokens::Category::Eos), None);
-    for token in combined_results {
-        println!("  Token: id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
-    }
-
-    // Get all special tokens (Special or Added source)
-    println!("\n--- All Special/Added tokens ---");
-    for token in special.all_special() {
         println!("  id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
     }
+    println!();
 
-    // Print all tokens with full details
-    println!("\n=== All Tokens (Full Details) ===");
-    for token in special.all_tokens() {
+    println!("--- TOOL Tokens ---");
+    for token in special.tool() {
+        println!("  id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
+    }
+    println!();
+
+    println!("--- FUNCTION Tokens ---");
+    for token in special.function() {
+        println!("  id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
+    }
+    println!();
+
+    println!("--- PARAMETER Tokens ---");
+    for token in special.parameter() {
+        println!("  id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
+    }
+    println!();
+
+    println!("--- Reasoning Tokens ---");
+    for token in special.reasoning() {
+        println!("  id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
+    }
+    println!();
+
+    println!("--- Tool Start/End IDs ---");
+    println!("tool_start_ids: {:?}", special.tool_start_ids());
+    println!("tool_end_ids: {:?}", special.tool_end_ids());
+    println!();
+
+    println!("--- Reasoning Start/End IDs ---");
+    println!("reasoning_start_ids: {:?}", special.reasoning_start_ids());
+    println!("reasoning_end_ids: {:?}", special.reasoning_end_ids());
+    println!();
+
+    println!("=== All Tokens ===");
+    for token in special.all_special() {
         println!("id={} category={:?} source={:?} string={}", token.id, token.category, token.source, token.string());
     }
+}
+
+fn parse_template_structure(template: &str) {
+    // Find and display key structural blocks
+    let blocks = vec![
+        ("Iterators", vec!["{%- set", "{%- macro", "{% set"]),
+        ("Macros", vec!["{% macro", "{%- macro"]),
+        ("Tools", vec!["{% if tools", "{%- if tools"]),
+        ("System Message", vec!["system", "{%- if messages[0].role == 'system'"]),
+        ("User Message", vec!["{% elif message.role == \"user\"", "{%- elif message.role == \"user\""]),
+        ("Assistant Message", vec!["{% elif message.role == \"assistant\"", "{%- elif message.role == \"assistant\""]),
+        ("Tool Response", vec!["{% elif message.role == \"tool\"", "tool_response"]),
+        ("Thinking", vec!["{% think", "{{- '<‌think>"]),
+        ("Generation Prompt", vec!["{% if add_generation_prompt", "{{- '<‌|im_start|>assistant"]),
+    ];
+
+    for (block_name, keywords) in blocks {
+        println!("[=== {} ===]", block_name);
+        let found_lines: Vec<&str> = template
+            .lines()
+            .filter(|line| {
+                keywords.iter().any(|k| line.contains(k))
+            })
+            .collect();
+        
+        if !found_lines.is_empty() {
+            for line in found_lines {
+                println!("{}", line);
+            }
+        } else {
+            println!("  (no lines found with these keywords)");
+        }
+        println!();
+    }
+
+    // Show full template at the end
+    println!("[=== FULL TEMPLATE ({} chars) ===]", template.len());
+    println!("{}", template);
 }

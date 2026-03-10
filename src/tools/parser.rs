@@ -355,7 +355,7 @@ struct CalledFunctionParameters {
 
 fn contains_tool_call_prefix(prefix: &str) -> bool {
     prefix.contains("<tool_call>")
-        || prefix.contains("<｜tool▁call▁begin｜>")
+        || prefix.contains("<tool▁call▁begin>")
         || prefix.contains("<|python_tag|>")
         || prefix.contains("[TOOL_CALLS]")
 }
@@ -366,7 +366,7 @@ fn process_model_specific_message(message: &str) -> String {
 
     let deepseek_regex = DEEPSEEK_REGEX.get_or_init(|| {
         Regex::new(
-            r"(?s)<｜tool▁call▁begin｜>function<｜tool▁sep｜>(?P<name>[^\n]+)\n```json\n(?P<json>.+?)\n```<｜tool▁call▁end｜>",
+            r"(?s)<tool▁call▁begin>function<tool▁sep>(?P<name>[^\n]+)\n```json\n(?P<json>.+?)\n```<tool▁call▁end>",
         )
         .unwrap()
     });

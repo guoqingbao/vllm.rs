@@ -472,6 +472,45 @@ impl SpecialTokens {
             .cloned()
             .collect()
     }
+
+    /// Get pad tokens suitable for XML anchor usage
+    /// Uses last 2 pad tokens from the token set (sorted by ID)
+    /// Falls back to last 2 tokens from Other category if no pad tokens available
+    pub fn get_xml_anchor_pad_ids(&self) -> Vec<u32> {
+        // First try to get pad tokens
+        let pad_tokens: Vec<&SpecialToken> = self.token_set.iter()
+            .filter(|t| t.category == Category::Pad)
+            .collect();
+
+        if pad_tokens.len() >= 2 {
+            // Return last 2 pad token IDs (sorted by ID due to line 321 sort)
+            let len = pad_tokens.len();
+            return vec![pad_tokens[len - 2].id, pad_tokens[len - 1].id];
+        }
+
+        // Fallback: use last 2 Other category tokens
+        let other_tokens: Vec<&SpecialToken> = self.token_set.iter()
+            .filter(|t| t.category == Category::Other)
+            .collect();
+
+        if other_tokens.len() >= 2 {
+            let len = other_tokens.len();
+            return vec![other_tokens[len - 2].id, other_tokens[len - 1].id];
+        }
+
+        // If still not enough, just return empty
+        Vec::new()
+    }
+
+    /// Get pad tokens suitable for XML anchor usage as a tuple
+    pub fn get_xml_anchor_pad_tokens(&self) -> Option<(u32, u32)> {
+        let ids = self.get_xml_anchor_pad_ids();
+        if ids.len() >= 2 {
+            Some((ids[0], ids[1]))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -867,5 +906,99 @@ mod tests {
         };
 
         assert_eq!(special_tokens.tool_end_token().unwrap().id, 151658);
+    }
+
+    #[test]
+    fn test_get_xml_anchor_pad_ids_with_pad_tokens() {
+        // Test pad token selection when pad tokens are available
+        let special_tokens = SpecialTokens {
+            token_set: vec![
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248055,
+                    content: b"<|vision_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248056,
+                    content: b"<|image_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248057,
+                    content: b"<|video_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+            ],
+        };
+
+        let ids = special_tokens.get_xml_anchor_pad_ids();
+        // Last 2 pad tokens should be selected
+        assert_eq!(ids, vec![248056, 248057]);
+    }
+
+    #[test]
+    fn test_get_xml_anchor_pad_ids_fallback_to_other() {
+        // Test fallback to Other category when pad tokens unavailable
+        let special_tokens = SpecialTokens {
+            token_set: vec![
+                SpecialToken {
+                    category: Category::Other,
+                    id: 100,
+                    content: b"<other1>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Other,
+                    id: 101,
+                    content: b"<other2>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+            ],
+        };
+
+        let ids = special_tokens.get_xml_anchor_pad_ids();
+        // Last 2 Other tokens should be selected
+        assert_eq!(ids, vec![100, 101]);
+    }
+
+    #[test]
+    fn test_get_xml_anchor_pad_tokens() {
+        // Test tuple return when pad tokens available
+        let special_tokens = SpecialTokens {
+            token_set: vec![
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248055,
+                    content: b"<|vision_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248056,
+                    content: b"<|image_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+                SpecialToken {
+                    category: Category::Pad,
+                    id: 248057,
+                    content: b"<|video_pad|>".to_vec(),
+                    source: VocabSource::Special,
+                    normalized: false,
+                },
+            ],
+        };
+
+        let tokens = special_tokens.get_xml_anchor_pad_tokens();
+        assert_eq!(tokens, Some((248056, 248057)));
     }
 }

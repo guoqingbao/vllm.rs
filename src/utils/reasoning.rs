@@ -66,7 +66,7 @@ impl ReasoningEffort {
                 // No reasoning block - direct output only
                 // Minimal latency, no structured thinking
                 format!(r#"start: reasoning_block text
-text: /(?s:.*)/
+text: /[\x09\x0A\x0D\x20-\x7E]*?/
 reasoning_block: <[{}]> "\n" text "\n" <[{}]>
 "#, start_id, end_id)
             }
@@ -76,7 +76,7 @@ reasoning_block: <[{}]> "\n" text "\n" <[{}]>
                 // Uses non-greedy matching to prevent runaway generation
                 format!(r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
-thinkgram: /[^\n]{{1,300}}/
+thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,300}}/
 "#)
             }
             Self::Medium => {
@@ -85,7 +85,7 @@ thinkgram: /[^\n]{{1,300}}/
                 // Allows multiple steps but enforces sentence boundaries
                 format!(r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
-thinkgram: /(?s:[^.!?]+[.!?])+{{1,1200}}/
+thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,1200}}/
 "#)
             }
             Self::High => {
@@ -95,10 +95,10 @@ thinkgram: /(?s:[^.!?]+[.!?])+{{1,1200}}/
                 format!(r#"start: reasoning_block* analysis_block*
 reasoning_block: <[{start_id}]> "\n" : analysis_block analysis_content critique_phase critique_content thinkgram "\n" <[{end_id}]> "\n"
 analysis_block: "<ANALYZE>" "\n" analysis_content "\n" "</ANALYZE>" "\n"
-analysis_content: /(?s:.*){{1,2400}}/
+analysis_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,2400}}/
 critique_phase: "<CRITIQUE>" "\n" critique_content "\n" "</CRITIQUE>" "\n"
-critique_content: /(?s:.*){{1,1200}}/
-thinkgram: "<STRUCTUREDANSWER>" "\n" /(?s:.*){{1,3600}}/ "\n" "</STRUCTUREDANSWER>" "\n"
+critique_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,1200}}/
+thinkgram: "<STRUCTUREDANSWER>" "\n" /[\x09\x0A\x0D\x20-\x7E]*?{{1,3600}}/ "\n" "</STRUCTUREDANSWER>" "\n"
 "#)
             }
             Self::ChainOfThought => {
@@ -110,11 +110,11 @@ reasoning_block: <[{start_id}]> "\n" draft_phase verification_phase critique_pha
 draft_phase: /(?s:[^.!?]+[.!?])+/
 verification_phase: "<VERIFY>" "\n" verification_questions "\n" verification_answers "\n" "</VERIFY>" "\n"
 verification_questions: /(?s:[^.!?]+[.!?])+/
-verification_answers: /(?s:.*)/
+verification_answers: /[\x09\x0A\x0D\x20-\x7E]*?/
 critique_phase: "<CRITIQUE>" "\n" self_critique "\n" "</CRITIQUE>" "\n"
-self_critique: /(?s:.*)/
+self_critique: /[\x09\x0A\x0D\x20-\x7E]*?/
 final_phase: "<FINAL_ANSWER>" "\n" final_content "\n"
-final_content: /(?s:.*)/
+final_content: /[\x09\x0A\x0D\x20-\x7E]*?/
 "#)
             }
             #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]

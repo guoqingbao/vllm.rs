@@ -239,6 +239,26 @@ impl ChatTemplate {
             || lower.contains("[tool_calls]")
             || lower.contains("<‌tool_call>")
     }
+    /// Impregnate template with pad token anchors for XML end tags
+    /// Uses pad tokens from SpecialTokens::get_xml_anchor_pad_tokens()
+    /// Replaces </function> with </function> <pad_id> and </parameter> with </parameter> <pad_id>
+    pub fn impregnate_with_anchors(&mut self, pad_ids: &[u32]) {
+        let Some(template) = &mut self.chat_template else {
+            return;
+        };
+
+        if pad_ids.len() >= 2 {
+            // Use pad_ids[0] for </function> anchor
+            // Use pad_ids[1] for </parameter> anchor
+            let func_anchor = format!("<{}>", pad_ids[0]);
+            let param_anchor = format!("<{}>", pad_ids[1]);
+
+            // Replace </function> with </function> <pad_id>
+            *template = template.replace("</function>", &format!("</function> {}", func_anchor));
+            // Replace </parameter> with </parameter> <pad_id>
+            *template = template.replace("</parameter>", &format!("</parameter> {}", param_anchor));
+        }
+    }
 
     #[allow(dead_code)]
     fn clear_message(&mut self) {

@@ -663,7 +663,7 @@ mod guidance_tests {
             None,
             None,
             &special_tokens,
-            Some(ReasoningEffort::High),  // This creates WithReasoning wrapper
+            Some(ReasoningEffort::High),
         );
 
         let lark = get_lark_string(&result);

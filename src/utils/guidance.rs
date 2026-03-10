@@ -614,14 +614,45 @@ fn combine_rules(rules: Vec<String>) -> String {
     let mut combined = Vec::new();
     for (name, bodies) in rule_groups {
         if bodies.len() == 1 {
-            combined.push(format!("{}: {}", name, bodies[0]));
+            combined.push((name.clone(), format!("{}: {}", name, bodies[0])));
         } else {
             // Multiple definitions for same rule - combine with alternation
-            combined.push(format!("{}: {}", name, bodies.join(" | ")));
+            combined.push((name.clone(), format!("{}: {}", name, bodies.join(" | "))));
         }
     }
 
-    combined.join("\n")
+    // Sort rules: start first, then tool rules (tool_N), then alphabetically
+    combined.sort_by(|a, b| {
+        let name_a = a.0.as_str();
+        let name_b = b.0.as_str();
+        
+        // "start" always comes first
+        if name_a == "start" {
+            return std::cmp::Ordering::Less;
+        }
+        if name_b == "start" {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Tool rules (tool_N) come next, sorted by their numeric index
+        if name_a.starts_with("tool_") && name_b.starts_with("tool_") {
+            // Extract the numeric part
+            let num_a: u32 = name_a[5..].parse().unwrap_or(0);
+            let num_b: u32 = name_b[5..].parse().unwrap_or(0);
+            return num_a.cmp(&num_b);
+        }
+        if name_a.starts_with("tool_") {
+            return std::cmp::Ordering::Less;
+        }
+        if name_b.starts_with("tool_") {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Other rules sorted alphabetically
+        name_a.cmp(name_b)
+    });
+
+    combined.into_iter().map(|(_, rule)| rule).collect()
 }
 
 /// Combine grammar rules, deduplicating text: and eos: rules
@@ -669,14 +700,45 @@ fn combine_rules_dedup_text(rules: Vec<String>) -> String {
     let mut combined = Vec::new();
     for (name, bodies) in rule_groups {
         if bodies.len() == 1 {
-            combined.push(format!("{}: {}", name, bodies[0]));
+            combined.push((name.clone(), format!("{}: {}", name, bodies[0])));
         } else {
             // Multiple definitions for same rule - combine with alternation
-            combined.push(format!("{}: {}", name, bodies.join(" | ")));
+            combined.push((name.clone(), format!("{}: {}", name, bodies.join(" | "))));
         }
     }
 
-    combined.join("\n")
+    // Sort rules: start first, then tool rules (tool_N), then alphabetically
+    combined.sort_by(|a, b| {
+        let name_a = a.0.as_str();
+        let name_b = b.0.as_str();
+        
+        // "start" always comes first
+        if name_a == "start" {
+            return std::cmp::Ordering::Less;
+        }
+        if name_b == "start" {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Tool rules (tool_N) come next, sorted by their numeric index
+        if name_a.starts_with("tool_") && name_b.starts_with("tool_") {
+            // Extract the numeric part
+            let num_a: u32 = name_a[5..].parse().unwrap_or(0);
+            let num_b: u32 = name_b[5..].parse().unwrap_or(0);
+            return num_a.cmp(&num_b);
+        }
+        if name_a.starts_with("tool_") {
+            return std::cmp::Ordering::Less;
+        }
+        if name_b.starts_with("tool_") {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Other rules sorted alphabetically
+        name_a.cmp(name_b)
+    });
+
+    combined.into_iter().map(|(_, rule)| rule).collect()
 }
 
 /// Merge multiple TopLevelGrammar objects into one
