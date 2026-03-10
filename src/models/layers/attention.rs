@@ -477,18 +477,31 @@ impl NaiveAttention {
         let v = self.v_proj.forward(xs)?;
 
         let shape = (b, seq_len, self.num_heads, self.head_dim);
-        let q = q.reshape(shape)?.transpose(1, 2)?.contiguous()?;
-        let k = k.reshape(shape)?.transpose(1, 2)?.contiguous()?;
+        let q_packed = q
+            .reshape(((), self.num_heads, self.head_dim))?
+            .contiguous()?;
+        let k_packed = k
+            .reshape(((), self.num_heads, self.head_dim))?
+            .contiguous()?;
         let v = v.reshape(shape)?.transpose(1, 2)?.contiguous()?;
 
-        let (q, k) = if let Some(positions) = positions {
-            match emb.apply_rotary_emb_qkv(&q, &k, positions)? {
+        let (q_packed, k_packed) = if let Some(positions) = positions {
+            match emb.apply_rotary_emb_qkv(&q_packed, &k_packed, positions)? {
                 Some((q_new, k_new)) => (q_new, k_new),
-                None => (q, k), // In-place operation, keep originals
+                None => (q_packed, k_packed), // In-place operation, keep originals
             }
         } else {
-            (q, k)
+            (q_packed, k_packed)
         };
+
+        let q = q_packed
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
+        let k = k_packed
+            .reshape((b, seq_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?
+            .contiguous()?;
 
         let chunk_size = 1024;
         let mut attn_chunks = Vec::new();
