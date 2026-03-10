@@ -43,16 +43,16 @@ fn strip_null_from_required_fields(schema: Value) -> Value {
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect())
                 .unwrap_or_default();
-            
+
             // Clone the properties map to avoid borrow conflicts
             let mut props = map.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
-            
+
             // Process properties - collect fields that need null stripped
             let props_to_update: Vec<String> = props.iter()
                 .filter(|(name, _)| required_fields.contains(name))
                 .map(|(name, _)| name.clone())
                 .collect();
-            
+
             // Update properties with null stripped from required fields
             for name in props_to_update {
                 if let Some(prop) = props.get_mut(&name) {
@@ -70,16 +70,16 @@ fn strip_null_from_required_fields(schema: Value) -> Value {
                     }
                 }
             }
-            
+
             // Insert updated properties back into map
             map.insert("properties".to_string(), Value::Object(props));
-            
-            // Recursively process nested schemas
-            // For nested objects, we need to process their properties as well
-            for (key, value) in map.iter_mut() {
-                *value = strip_null_from_required_fields(value.clone());
-            }
-            
+
+            // DO NOT recursively process nested schemas - this causes stack overflow
+            // Per the comment below, nested objects within tool parameters are just
+            // JSON Schema types, not separate tool schemas.
+            //
+            // If recursive processing is needed for other cases, add depth tracking.
+            // For now, just return the modified map.
             Value::Object(map)
         }
         Value::Array(mut arr) => {

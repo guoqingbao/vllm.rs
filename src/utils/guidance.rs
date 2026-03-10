@@ -14,7 +14,7 @@ use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use serde_json::json;
 use crate::tools::schema::ToolGrammarBuilder;
 
-// Re-export reasoning types for convenience
+// Re-export reasoning types for convenience (without pyclass since it causes compilation issues)
 pub use crate::utils::reasoning::{ReasoningEffort, ThinkingGrammarBuilder, build_reasoning_grammar, thinking_grammar_with_reasoning_block};
 
 /// Error type for grammar-related errors
@@ -183,7 +183,7 @@ impl GrammarBuilder {
         // EOS token support is provided through compose_grammars() directly
         match self.alternatives.len() {
             0 => {
-                let lark = chat_text_expression();
+                let lark = chat_text_expression(false);
                 TopLevelGrammar::from_lark_utf8(&lark)
             }
             1 => {
@@ -211,7 +211,7 @@ pub enum GrammarComposers {
     Tool(TopLevelGrammar),
     ConstraintOrTool(TopLevelGrammar, TopLevelGrammar),
     ToolOrConstraint(TopLevelGrammar, TopLevelGrammar),
-    WithReasoning(TopLevelGrammar, Box<GrammarComposers>),
+    WithReasoning(TopLevelGrammar, TopLevelGrammar),
 }
 
 /// Builder for constructing GrammarComposers
@@ -276,7 +276,8 @@ impl GrammarComposerBuilder {
                 if tool_required {
                     GrammarComposers::Tool(self.tool_grammar.clone().unwrap())
                 } else {
-                    let lark = chat_text_expression_with_eos(special_tokens);
+                    let has_eos = special_tokens.eos_ids().len() > 0;
+                    let lark = chat_text_expression(has_eos);
                     let text_gram = TopLevelGrammar::from_lark_utf8(&lark);
                     GrammarComposers::ConstraintOrTool(text_gram, self.tool_grammar.clone().unwrap())
                 }
@@ -297,7 +298,6 @@ impl GrammarComposerBuilder {
         special_tokens: &SpecialTokens,
     ) -> GrammarComposers {
         match self.reasoning_effort {
-            Some(ReasoningEffort::None) => base,
             Some(effort) => {
                 let start_ids = special_tokens.reasoning_start_ids();
                 let end_ids = special_tokens.reasoning_end_ids();
@@ -308,9 +308,10 @@ impl GrammarComposerBuilder {
                 } else {
                     let start_id = start_ids[0];
                     let end_id = end_ids[0];
-                    let reasoning_lark = thinking_grammar_with_reasoning_block(start_id, end_id, None);
+                    let reasoning_lark = thinking_grammar_with_reasoning_block(start_id, end_id, Some(effort));
                     let reasoning_gram = TopLevelGrammar::from_lark_utf8(&reasoning_lark);
-                    GrammarComposers::WithReasoning(reasoning_gram, Box::new(base))
+                    let base_gram = base.to_grammar(special_tokens);
+                    GrammarComposers::WithReasoning(reasoning_gram, base_gram)
                 }
             }
             None => base,
@@ -325,9 +326,17 @@ impl GrammarComposerBuilder {
 
 impl GrammarComposers {
     pub fn to_grammar(&self, special_tokens: &SpecialTokens) -> TopLevelGrammar {
+        let base_grammar = self.build_base_grammar(special_tokens);
+
+        // Add eos? termination to ensure all grammars can terminate
+        add_eos_termination(&base_grammar, special_tokens)
+    }
+
+    fn build_base_grammar(&self, special_tokens: &SpecialTokens) -> TopLevelGrammar {
         match self {
             GrammarComposers::TextWithEos => {
-                let lark = chat_text_expression_with_eos(special_tokens);
+                let has_eos = special_tokens.eos_ids().len() > 0;
+                let lark = chat_text_expression(has_eos);
                 TopLevelGrammar::from_lark_utf8(&lark)
             }
             GrammarComposers::Constraint(c) => c.clone(),
@@ -339,11 +348,151 @@ impl GrammarComposers {
                 merge_top_level_grammars(vec![t.clone(), c.clone()], None, None)
             }
             GrammarComposers::WithReasoning(reasoning, inner) => {
-                let inner_gram = inner.to_grammar(special_tokens);
-                merge_top_level_grammars(vec![reasoning.clone(), inner_gram], None, None)
+                // Reasoning should come FIRST, then the inner (text/constraint/tool) follows
+                // Extract reasoning's start rule and prepend to inner's rules
+                let reasoning_lark = get_lark_from_top_level_grammar(reasoning);
+                let inner_lark = get_lark_from_top_level_grammar(inner);
+
+                // Parse both grammars
+                let reasoning_lines: Vec<&str> = reasoning_lark.lines().collect();
+                let inner_lines: Vec<&str> = inner_lark.lines().collect();
+
+                // Get inner's start rule
+                let inner_start = if let Some(line) = inner_lines.first() {
+                    line.trim().to_string()
+                } else {
+                    return inner.clone();
+                };
+
+                // Extract other rules from both grammars
+                let reasoning_other_rules = if reasoning_lines.len() > 1 {
+                    reasoning_lines[1..].join("\n")
+                } else {
+                    String::new()
+                };
+
+                let inner_other_rules = if inner_lines.len() > 1 {
+                    inner_lines[1..].join("\n")
+                } else {
+                    String::new()
+                };
+
+                // Build new sequential grammar: reasoning_block followed by inner's start
+                // Detect if reasoning uses shared text rule (for DRY - text rule defined once)
+                // let is_text_shared = reasoning_lark.contains("reasoning_block: <[") && reasoning_lark.contains("\"\\n\" text \"\\n\"");
+                // let reasoning_block = if is_text_shared {
+                //     "reasoning_block"  // Reasoning references shared text - no optional
+                // } else {
+                //     "reasoning_block ?"  // Simple reasoning block - optional
+                // };
+
+                let reasoning_block = "reasoning_block";
+
+                // Combine rules and let combine_rules() handle deduplication of text: and eos: rules
+                let all_rules = format!("{}\n{}", reasoning_other_rules, inner_other_rules);
+                let combined_rules = combine_rules_dedup_text(all_rules.lines().map(|s| s.to_string()).collect());
+
+                let final_grammar = format!("start: {} {}\n{}", reasoning_block, inner_start.replace("start: ", ""), combined_rules);
+
+                TopLevelGrammar::from_lark_utf8(&final_grammar)
             }
         }
     }
+}
+
+/// Build text pattern for chat conversations (without EOS)
+/// have_eos: when true, generates simple text rule; when false, uses stop="" fallback
+pub fn chat_text_expression(have_eos: bool) -> String {
+    // First check environment variable override
+    if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
+        return format!("{}", val);
+    }
+
+    if have_eos {
+        // Text pattern without EOS - just text rule
+        r#"start: text
+text: /(?s:.*)/"#.to_string()
+    } else {
+        // Fallback to stop="" when no EOS tokens available
+        r#"start: text
+text[stop=""]: /((?s).*?)/"#.to_string()
+    }
+}
+
+/// Build EOS pattern for text completion
+/// Returns just the EOS rule definition (not combined with text)
+pub fn eos_expression(special_tokens: &SpecialTokens) -> String {
+    let eos_token_ids = special_tokens.eos_ids();
+
+    if eos_token_ids.is_empty() {
+        String::new()
+    } else if eos_token_ids.len() == 1 {
+        format!("eos: <[{}]>\n", eos_token_ids[0])
+    } else {
+        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
+        let alternation = ids.join(" | ");
+        format!("eos: ( {} )", alternation)
+    }
+}
+
+/// Add eos? termination to a grammar, ensuring all paths can end with EOS
+/// This function modifies the start: rule to append optional EOS token alternation
+fn add_eos_termination(grammar: &TopLevelGrammar, special_tokens: &SpecialTokens) -> TopLevelGrammar {
+    let lark = get_lark_from_top_level_grammar(grammar);
+    let eos_rule = eos_expression(special_tokens);
+
+    // If no EOS tokens available, return original grammar
+    if eos_rule.is_empty() {
+        return grammar.clone();
+    }
+
+    // Parse lines to find start: rule
+    let lines: Vec<&str> = lark.lines().collect();
+    if lines.is_empty() {
+        return grammar.clone();
+    }
+
+    let first_line = if lines[0].trim().contains("eos?") {
+        lines[0].trim().replace("eos?", "")
+    } else {
+        lines[0].trim().to_string()
+    };
+
+    // Extract the current start RHS (everything after "start:")
+    let current_start_rhs = if let Some(rhs) = first_line.strip_prefix("start:") {
+        rhs.trim()
+    } else {
+        return grammar.clone();
+    };
+
+    // Build new start rule with eos? termination
+    // For multiple EOS tokens, use ( <[id1]> | <[id2]> )? format
+    let eos_token_ids = special_tokens.eos_ids();
+    let new_start_line = format!(r#"start: {current_start_rhs} eos?
+"#);
+    let eos_line = if eos_token_ids.len() > 1 {
+        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
+        let alternation = ids.join(" | ");
+        format!("eos:  ( {} )", alternation)
+    } else {
+        format!("eos: {}", eos_token_ids[0])
+    };
+
+    // Get existing rules (everything after first line)
+    let other_rules = if lines.len() > 1 {
+        // Filter out any existing eos: rules to avoid duplication
+        let filtered: Vec<_> = lines[1..].iter()
+            .filter(|line| !line.trim().starts_with("eos:"))
+            .map(|s| *s)
+            .collect();
+        filtered.join("\n")
+    } else {
+        String::new()
+    };
+
+    let final_grammar = format!("{}\n{}\n{}", new_start_line, other_rules, eos_line);
+
+    TopLevelGrammar::from_lark_utf8(&final_grammar)
 }
 
 /// Extension trait for TopLevelGrammar with built-in sanitization
@@ -475,6 +624,61 @@ fn combine_rules(rules: Vec<String>) -> String {
     combined.join("\n")
 }
 
+/// Combine grammar rules, deduplicating text: and eos: rules
+/// This ensures DRY - text rule is defined once and shared
+fn combine_rules_dedup_text(rules: Vec<String>) -> String {
+    if rules.is_empty() {
+        return String::new();
+    }
+
+    use std::collections::HashMap;
+    let mut rule_groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen_text = false;
+    let mut seen_eos = false;
+
+    for rule in rules {
+        let rule = rule.trim();
+        if rule.is_empty() {
+            continue;
+        }
+
+        if rule.starts_with("text:") && !seen_text {
+            seen_text = true;
+            let name = "text".to_string();
+            let body = rule.strip_prefix("text:").unwrap_or("").trim().to_string();
+            rule_groups.entry(name).or_default().push(body);
+        } else if rule.starts_with("eos:") && !seen_eos {
+            seen_eos = true;
+            let name = "eos".to_string();
+            let body = rule.strip_prefix("eos:").unwrap_or("").trim().to_string();
+            rule_groups.entry(name).or_default().push(body);
+        } else if !rule.starts_with("text:") && !rule.starts_with("eos:") {
+            // Find the rule name (before the first ":")
+            if let Some(colon_pos) = rule.find(':') {
+                let name = rule[..colon_pos].trim().to_string();
+                let body = rule[colon_pos + 1..].trim().to_string();
+                rule_groups.entry(name).or_default().push(body);
+            } else {
+                // Rule without colon - add as-is
+                rule_groups.entry("anonymous".to_string()).or_default().push(rule.to_string());
+            }
+        }
+    }
+
+    // Reconstruct rules, merging duplicates
+    let mut combined = Vec::new();
+    for (name, bodies) in rule_groups {
+        if bodies.len() == 1 {
+            combined.push(format!("{}: {}", name, bodies[0]));
+        } else {
+            // Multiple definitions for same rule - combine with alternation
+            combined.push(format!("{}: {}", name, bodies.join(" | ")));
+        }
+    }
+
+    combined.join("\n")
+}
+
 /// Merge multiple TopLevelGrammar objects into one
 /// This creates a single Lark grammar with alternation at the start rule level
 /// Each sub-grammar's rules are combined directly without rule_N indirection
@@ -555,7 +759,7 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
 ///
 /// ## Binary Token Matching with llguidance Matcher
 ///
-/// When working with Qwen-style tool tokens (e.g., `<‌tool_call>`), llguidance uses
+/// When working with Qwen-style tool tokens (e.g., ``), llguidance uses
 /// a **byte-level lexer approach** with the following key concepts:
 ///
 /// ### 1. Token-Based, Not Byte-Based
@@ -571,11 +775,11 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
 /// - Tokenizers like Qwen may embed special tokens as bytes like `[\xFF, b'[', b'1', b'2', b']']`
 ///
 /// ### 3. Qwen Tool Call Format Example
-/// For models like Qwen3 that use `<‌tool_call>` delimiters:
+/// For models like Qwen3 that use `` delimiters:
 ///
 /// ```lark
 /// start: tool*
-/// tool: "<‌tool_call>" "\n" func "\n" "<‌/tool_call>" ("\n")*
+/// tool: "" "\n" func "\n" "" ("\n")*
 /// func: %json {"type":"object","properties":{"name":...}}
 /// ```
 ///
@@ -627,54 +831,6 @@ pub fn build_tool_call_tag(start_token_ids: &std::collections::HashSet<u32>, sta
 pub fn build_tool_call_end_tag(end_token_ids: &std::collections::HashSet<u32>, end_token_str: &str) -> String {
     build_special_token_tag(end_token_ids, end_token_str)
 }
-
-/// Build TEXT pattern with explicit EOS token IDs using <[id]> syntax
-/// The EOS tokens are alternated as optional termination: TEXT eos?
-pub fn chat_text_expression_with_eos(special_tokens: &SpecialTokens) -> String {
-    let eos_token_ids = special_tokens.eos_ids();
-
-    // First check environment variable override
-    if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
-        return format!("{}", val);
-    }
-
-    // Build EOS alternation pattern using <[id]> syntax for token IDs
-    // LHS must be lowercase - literal tokens aren't allowed in TERMINAL rules
-    let eos_pattern = if eos_token_ids.is_empty() {
-        // Fallback to stop="" when no EOS tokens available
-        r#"start: text
-text[stop=""]: /((?s).*?)/"#.to_string()
-    } else if eos_token_ids.len() == 1 {
-        format!(r#"start: text_with_eos
-text_with_eos: TEXT eos?
-TEXT: /(?s:.*)/
-eos: <[{}]>"#, eos_token_ids[0])
-    } else {
-        let ids: Vec<String> = eos_token_ids.iter().map(|id| format!("<[{}]>", id)).collect();
-        let eos_alternation = ids.join(" | ");
-        format!(r#"start: text_with_eos
-text_with_eos: TEXT eos?
-TEXT: /(?s:.*)/
-eos: {}"#, eos_alternation)
-    };
-
-    eos_pattern
-}
-
-pub fn chat_text_expression() -> String {
-    // First check environment variable override
-    if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
-        return format!("{}", val);
-    }
-
-    // Use a rule (lowercase) with stop="" attribute for proper EOS termination
-    // The stop="" tells llguidance to allow EOS token as a valid termination point
-    // Options go after the rule name, before the colon: text[stop=""]: /pattern/
-    r#"start: text
-text[stop=""]: /((?s).*?)/"#.to_string()
-}
-
-
 
 /// Compose grammars based on constraint and tool settings
 /// Returns a single TopLevelGrammar with proper precedence
@@ -733,7 +889,9 @@ pub fn load_toktrie_from_path(path: impl AsRef<std::path::Path>) -> Result<TokTr
 
 /// WS regex pattern for Lark grammars - matches whitespace including spaces, tabs, newlines, carriage returns
 pub fn lark_ws_regex() -> &'static str {
-    "/[ \\\\t\\\\r\\\\n]+/"
+    "/[ \\\\t\\\
+\\\
+]+/"
 }
 
 /// Build Lark grammar string for tool calls
@@ -745,7 +903,7 @@ pub fn build_tool_call_lark(tools: &[Tool], schema_map: &std::sync::Arc<std::col
         obj_rules.push_str(&format!("obj_{}: %json {}\n", name.replace("-", "_"), schema_str));
     }
 
-    format!("{start} _WS? json_array _WS? {end}\njson_array: \"[\" obj (\",\" obj)* \"]\"\nobj:\n_WS: {}\n{}", lark_ws_regex(), obj_rules.trim_end())
+    format!("{} _WS? json_array _WS? {}\njson_array: \"[\" obj (\",\" obj)* \"]\"\nobj:\n_WS: {}\n{}", start, end, lark_ws_regex(), obj_rules.trim_end())
 }
 
 /// Cache for precomputed mask slices to avoid expensive re-computation
@@ -945,10 +1103,10 @@ pub fn _batch_mask_bias(
     vocab_size: usize,
 ) -> candle_core::Result<Tensor> {
     let batch_size = masks.len();
-    
+
     // Create bias vector initialized to -inf
     let mut bias_data = vec![f32::NEG_INFINITY; batch_size * vocab_size];
-    
+
     // Fill in allowed tokens using sparse iteration
     // masks is Vec<(batch_idx, SimpleVob)> where batch_idx is the sequence position in the batch
     for (batch_idx, mask) in masks.iter() {
@@ -958,10 +1116,10 @@ pub fn _batch_mask_bias(
             }
         });
     }
-    
+
     // Create bias tensor on same device as logits
     let bias_tensor = Tensor::from_vec(bias_data, (batch_size, vocab_size), logits.device())?;
-    
+
     // GPU tensor addition (no CPU copy)
     logits.broadcast_add(&bias_tensor)
 }
@@ -981,7 +1139,7 @@ pub fn _early_exit_validate(
 ) -> candle_core::Result<()> {
     for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
         let token = tokens[seq_idx];
-        
+
         if let Some(state) = guidance_states.get_mut(seq_id) {
             // Stage 1: Validate token
             if state.validate_token(token) {
@@ -989,9 +1147,9 @@ pub fn _early_exit_validate(
                 state.commit_token(token).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 continue;
             }
-            
+
             crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
-            
+
             // Stage 2: Token is invalid, compute mask and re-sample
             let mask = match state.compute_mask_or_eos() {
                 Ok(m) => m,
@@ -1000,9 +1158,9 @@ pub fn _early_exit_validate(
                     continue;
                 }
             };
-            
+
             crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
-            
+
             // Build bias vector using sparse iteration
             let mut acc = vec![f32::NEG_INFINITY; vocab_size];
             mask.iter_set_entries(|idx| {
@@ -1010,36 +1168,36 @@ pub fn _early_exit_validate(
                     acc[idx] = 0.0;
                 }
             });
-            
+
             // Get current sequence's logits as 1D tensor - MUST CLONE to avoid cross-contamination
             let row_start = seq_idx * vocab_size;
             let row_end = row_start + vocab_size;
             let logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
             let mut row_vec = logits_vec.clone();  // Clone to avoid modifying original
             let row = &mut row_vec[row_start..row_end];
-            
+
             // Apply bias directly to this sequence's row
             for tok in 0..vocab_size {
                 if acc[tok] != 0.0 {
                     row[tok] = f32::NEG_INFINITY;
                 }
             }
-            
+
             // Create 1D tensor for just this sequence
             let biased_row = Tensor::from_vec(row_vec[row_start..row_end].to_vec(), (vocab_size,), logits.device())?;
-            
+
             // Re-sample just this sequence from the biased 1D logits
             let re_sampled = logit_processor.sample_with_strategy(&biased_row, sampling)?;
             tokens[seq_idx] = re_sampled[0];  // 1D output, first (only) element
-            
+
             crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
-            
+
             // Commit the re-sampled token
             state.commit_token(tokens[seq_idx]).map_err(|e| candle_core::Error::Msg(e.to_string()))?;
         } else {
             crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
         }
     }
-    
+
     Ok(())
 }

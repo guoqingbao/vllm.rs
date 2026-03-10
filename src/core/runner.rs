@@ -1191,37 +1191,6 @@ impl ModelRunner {
                 }),
         };
 
-        // Apply penalties using cached values (same for all sequences in batch)
-        let has_any_penalty =
-            cached_params.frequency_penalty.is_some() || cached_params.presence_penalty.is_some();
-
-        let logits = if !is_prefill && has_any_penalty {
-            let seq_tokens = self.seq_tokens.write();
-            let reference_tokens: Vec<Vec<u32>> = seq_ids
-                .iter()
-                .map(|id| {
-                    if let Some(tokens) = seq_tokens.get(&id) {
-                        if tokens.len() > 128 {
-                            tokens[tokens.len().saturating_sub(128)..].to_vec()
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
-                    }
-                })
-                .collect();
-
-            self.logit_processor.apply_batch_repeat_penalty(
-                logits,
-                vec![cached_params.frequency_penalty.unwrap_or(0.0); batch_size],
-                vec![cached_params.presence_penalty.unwrap_or(0.0); batch_size],
-                reference_tokens,
-            )?
-        } else {
-            logits.to_owned()
-        };
-
         let logits = if let Some(factory) = &self.llg_factory {
             let mut guidance_states = self.guidance_states.write();
             let mut guidance_failed = self.guidance_failed.write();
@@ -1319,7 +1288,7 @@ impl ModelRunner {
                         }
                     }
                 }
-                Tensor::from_vec(logits_vec, logits.shape(), &self.device)?
+                let masked_logits = Tensor::from_vec(logits_vec, logits.shape(), &self.device)?;
                 /*
                 // Use optimized batch mask bias function
                 batch_mask_bias(
@@ -1328,12 +1297,45 @@ impl ModelRunner {
                     vocab_size,
                 )?
                 */
+                masked_logits
             } else {
-                logits
+                logits.clone()
             }
 
         } else {
-            logits
+            logits.clone()
+        };
+
+        // Apply penalties using cached values (same for all sequences in batch)
+        // This is done AFTER LLG masking so penalties only affect tokens allowed by grammar
+        let has_any_penalty =
+            cached_params.frequency_penalty.is_some() || cached_params.presence_penalty.is_some();
+
+        let logits = if !is_prefill && has_any_penalty {
+            let seq_tokens = self.seq_tokens.write();
+            let reference_tokens: Vec<Vec<u32>> = seq_ids
+                .iter()
+                .map(|id| {
+                    if let Some(tokens) = seq_tokens.get(&id) {
+                        if tokens.len() > 128 {
+                            tokens[tokens.len().saturating_sub(128)..].to_vec()
+                        } else {
+                            vec![]
+                        }
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect();
+
+            self.logit_processor.apply_batch_repeat_penalty(
+                &logits,
+                vec![cached_params.frequency_penalty.unwrap_or(0.0); batch_size],
+                vec![cached_params.presence_penalty.unwrap_or(0.0); batch_size],
+                reference_tokens,
+            )?
+        } else {
+            logits.to_owned()
         };
 
         let mut tokens = self

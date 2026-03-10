@@ -390,6 +390,7 @@ impl SamplingParams {
             thinking,
             grammar_json,
             grammar,
+            reasoning_effort: None,
         }
     }
 
@@ -409,6 +410,7 @@ impl SamplingParams {
             thinking: None,
             grammar_json: None,
             grammar: None,
+            reasoning_effort: None,
         }
     }
 

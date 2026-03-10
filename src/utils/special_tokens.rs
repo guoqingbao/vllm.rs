@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use image::EncodableLayout;
 use tokenizers::tokenizer::Tokenizer;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
@@ -139,7 +138,7 @@ macro_rules! filter_by_category {
     };
 }
 
-macro_rules! filter_by_category_source {
+macro_rules! _filter_by_category_source {
     ($self:ident, $cat:ident, $src:ident) => {
         $self.token_set.iter()
             .filter(|t| t.category == Category::$cat && t.source == VocabSource::$src)
@@ -226,7 +225,7 @@ impl SpecialTokens {
         source: Option<VocabSource>,
     ) -> Vec<SpecialToken> {
         let mut results = Vec::new();
-        
+
         for token in &self.token_set {
             // Filter by ID if specified
             if let Some(target_id) = id {
@@ -234,7 +233,7 @@ impl SpecialTokens {
                     continue;
                 }
             }
-            
+
             // Filter by substring if specified
             if let Some(sub) = substring {
                 let token_str = token.string();
@@ -242,24 +241,24 @@ impl SpecialTokens {
                     continue;
                 }
             }
-            
+
             // Filter by category if specified
             if let Some(cat) = category {
                 if token.category != cat {
                     continue;
                 }
             }
-            
+
             // Filter by source if specified
             if let Some(src) = source {
                 if token.source != src {
                     continue;
                 }
             }
-            
+
             results.push(token.clone());
         }
-        
+
         results
     }
 
@@ -398,12 +397,12 @@ impl SpecialTokens {
     /// Returns None if either token is not found, enabling graceful fallback
     pub fn tool_tokens(&self) -> Option<(SpecialToken, SpecialToken)> {
         let tools = self.tool();
-        
+
         // For Llama-style tokens where both are start tokens (don't end with ]),
         // pair them based on their order in the tool list
         let start = self.tool_start_token();
         let end = self.tool_end_token();
-        
+
         if start.is_some() && end.is_some() {
             start.and_then(|s| end.map(|e| (s, e)))
         } else if tools.len() >= 2 {
@@ -494,12 +493,12 @@ mod tests {
     #[test]
     fn test_categorize_special_tokens() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Check that we have some tokens stored
-            assert!(!special_tokens.eos().is_empty() || 
+            assert!(!special_tokens.eos().is_empty() ||
                     !special_tokens.pad().is_empty());
         }
     }
@@ -507,17 +506,17 @@ mod tests {
     #[test]
     fn test_token_uniqueness() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Check that no category has duplicate IDs
             let all_ids: Vec<u32> = special_tokens.eos_ids()
                 .into_iter()
                 .chain(special_tokens.pad_ids())
                 .chain(special_tokens.bos_ids())
                 .collect();
-            
+
             let unique_ids: HashSet<u32> = all_ids.iter().cloned().collect();
             assert_eq!(all_ids.len(), unique_ids.len(), "Duplicate token IDs found");
         }
@@ -526,13 +525,13 @@ mod tests {
     #[test]
     fn test_search_by_id() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Search for a specific ID
             let results = special_tokens.search(Some(2), None, None, None);
-            
+
             // Each result should have the matching ID
             for result in &results {
                 assert_eq!(result.id, 2);
@@ -543,13 +542,13 @@ mod tests {
     #[test]
     fn test_search_by_content() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Search for tokens containing "end"
             let results = special_tokens.search(None, Some("end"), None, None);
-            
+
             // Each result should contain the search string
             for result in &results {
                 assert!(result.string().contains("end"));
@@ -560,13 +559,13 @@ mod tests {
     #[test]
     fn test_search_by_category() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Search for EOS tokens
             let results = special_tokens.search(None, None, Some(Category::Eos), None);
-            
+
             // Each result should be an EOS token
             for result in &results {
                 assert_eq!(result.category, Category::Eos);
@@ -577,13 +576,13 @@ mod tests {
     #[test]
     fn test_search_by_source() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Search for tokens with Added source
             let results = special_tokens.search(None, None, None, Some(VocabSource::Added));
-            
+
             // Each result should have Added source
             for result in &results {
                 assert_eq!(result.source, VocabSource::Added);
@@ -594,13 +593,13 @@ mod tests {
     #[test]
     fn test_combined_search() {
         let tokenizer = Tokenizer::from_file("tests/fixtures/tokenizer.json").ok();
-        
+
         if let Some(tok) = tokenizer {
             let special_tokens = SpecialTokens::new(&tok);
-            
+
             // Search for EOS tokens with specific substring
             let results = special_tokens.search(None, Some("end"), Some(Category::Eos), None);
-            
+
             // Each result should match all criteria
             for result in &results {
                 assert_eq!(result.category, Category::Eos);
@@ -627,18 +626,18 @@ mod tests {
             source: VocabSource::Added,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
-        
+
         // Test tool_tokens() returns the pair
         let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
         assert_eq!(result_start.id, 151657);
         assert_eq!(result_end.id, 151658);
         assert_eq!(result_start.string(), "<tool_call>");
         assert_eq!(result_end.string(), "</tool_call>");
-        
+
         // Test tool_start_ids() and tool_end_ids()
         assert_eq!(special_tokens.tool_start_ids(), vec![151657]);
         assert_eq!(special_tokens.tool_end_ids(), vec![151658]);
@@ -654,11 +653,11 @@ mod tests {
             source: VocabSource::Added,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token],
         };
-        
+
         assert!(special_tokens.tool_tokens().is_none());
     }
 
@@ -679,11 +678,11 @@ mod tests {
             source: VocabSource::Special,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
-        
+
         let (result_start, result_end) = special_tokens.tool_tokens().expect("Should have tool tokens");
         assert_eq!(result_start.id, 9);
         assert_eq!(result_end.id, 10);
@@ -710,11 +709,11 @@ mod tests {
             source: VocabSource::Special,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
-        
+
         let (result_start, result_end) = special_tokens.tool_tokens()
             .expect("Should have tool tokens (paired by order)");
         assert_eq!(result_start.id, 128010);
@@ -743,7 +742,7 @@ mod tests {
                 },
             ],
         };
-        
+
         let start_ids: HashSet<u32> = special_tokens.tool_start_ids_set();
         assert_eq!(start_ids.len(), 1);
         assert!(start_ids.contains(&151657));
@@ -769,7 +768,7 @@ mod tests {
                 },
             ],
         };
-        
+
         let end_ids: HashSet<u32> = special_tokens.tool_end_ids_set();
         assert_eq!(end_ids.len(), 1);
         assert!(end_ids.contains(&151658));
@@ -837,11 +836,11 @@ mod tests {
             source: VocabSource::Added,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
-        
+
         assert_eq!(special_tokens.tool_start_token().unwrap().id, 151657);
     }
 
@@ -862,11 +861,11 @@ mod tests {
             source: VocabSource::Added,
             normalized: false,
         };
-        
+
         let special_tokens = SpecialTokens {
             token_set: vec![start_token.clone(), end_token.clone()],
         };
-        
+
         assert_eq!(special_tokens.tool_end_token().unwrap().id, 151658);
     }
 }

@@ -123,7 +123,7 @@ fn main() {
     println!("{:?}", special.tool_start_ids());
     println!("--- Tool End IDs ---");
     println!("{:?}", special.tool_end_ids());
-    
+
     // Additional search examples
     println!("\n=== Additional Search Examples ===\n");
 

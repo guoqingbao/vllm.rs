@@ -530,10 +530,11 @@ pub async fn chat_completion(
         let engine = data.engine.read();
         let special_tokens = &engine.special_tokens;
         // Get reasoning_effort from request if provided
-        let reasoning_effort = request.reasoning_effort.as_ref().map(|s| {
-            ReasoningEffort::from_str(s.to_string())
-        });
-        
+        let reasoning_effort = request
+            .reasoning_effort
+            .clone()
+            .map(ReasoningEffort::from_str);
+
         let llg_grammar = compose_grammars(
             constraint_grammars,
             tool_gram,

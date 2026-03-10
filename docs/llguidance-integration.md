@@ -188,7 +188,6 @@ sequenceDiagram
 
     Pipeline->>API: Return completion with tokens
     API->>User: Stream or return final response
-    end
 ```
 
 ### Key Data Structures
@@ -394,6 +393,105 @@ Response to Client
 ---
 
 ## 3. GRAMMAR CONSTRUCTION
+
+### Grammar Composition Logic
+
+The GrammarComposerBuilder provides a declarative way to construct complex grammar compositions:
+
+```rust
+pub struct GrammarComposerBuilder {
+    constraint_grammars: Vec<TopLevelGrammar>,
+    tool_grammar: Option<TopLevelGrammar>,
+    has_tools: bool,
+    tool_choice_required: bool,
+    forced_tool_name: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
+}
+```
+
+#### Composition Decision Tree
+
+```mermaid
+graph TD
+    A[Request Received] --> B{constraint_grammars empty?}
+    B -->|Yes| C{tool_grammar present?}
+    B -->|No| D[Constraint Grammar]
+    C -->|Yes| E{tool_choice_required?}
+    C -->|No| F[TextWithEos]
+    E -->|Yes| G[Tool Only]
+    E -->|No| H[ConstraintOrTool]
+    D --> I{tool_grammar present?}
+    I -->|Yes| J[ConstraintOrTool]
+    I -->|No| K[Constraint Only]
+    F --> L[Add EOS termination]
+    G --> L
+    H --> L
+    J --> L
+    K --> L
+```
+
+#### GrammarComposers Enum
+
+```rust
+pub enum GrammarComposers {
+    TextWithEos,
+    Constraint(TopLevelGrammar),
+    Tool(TopLevelGrammar),
+    ConstraintOrTool(TopLevelGrammar, TopLevelGrammar),
+    ToolOrConstraint(TopLevelGrammar, TopLevelGrammar),
+    WithReasoning(TopLevelGrammar, TopLevelGrammar),
+}
+```
+
+### Inference Control Flow
+
+The data flow from server to runner:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    participant Engine
+    participant Runner
+    participant GuidanceState
+    participant Matcher
+    participant Scheduler
+    participant BlockManager
+
+    Client->>Server: POST /v1/chat/completions
+    Server->>Server: compose_grammars()
+    Server->>Engine: generate_stream()
+    Engine->>Engine: build_llg_factory()
+    Engine->>GuidanceState: new_from_grammar()
+    GuidanceState->>Matcher: create_parser(grammar)
+    Matcher->>Matcher: Initialize TokenParser, EarleyParser, Lexer
+    Engine->>Engine: generate_stream() continues...
+
+    loop Token Generation
+        Engine->>Runner: sample()
+        Runner->>Runner: validate_sequence_for_grammar()
+        Runner->>GuidanceState: compute_mask()
+        GuidanceState->>Matcher: matcher.compute_mask()
+        Matcher->>Matcher: Return SimpleVob
+        alt Mask valid
+            Runner->>Runner: Apply mask to logits
+            Runner->>Runner: Sample token
+            Runner->>GuidanceState: commit_token()
+            GuidanceState->>Matcher: consume_token()
+        else Mask invalid
+            Runner->>Scheduler: rollback_sequence()
+            Scheduler->>BlockManager: rollback_to_seq_tokens()
+            Scheduler->>GuidanceState: rollback_to()
+            GuidanceState->>Matcher: rollback()
+        end
+    end
+
+    Server->>Client: Return completion
+```
+
+---
+
+## 4. GRAMMAR CONSTRUCTION
 
 ### Overview
 
@@ -722,7 +820,221 @@ json_array: "[" obj ("," obj)* "]"
 
 ---
 
-## 4. API REFERENCE
+## 4. REASONING EFFORT
+
+### Overview
+
+The guided inference system supports multiple reasoning effort levels through the `ReasoningEffort` enum. Each level implements a different reasoning strategy optimized for specific use cases:
+
+| Level | Description | Use Case |
+|-------|-------------|----------|
+| `None` | No structured reasoning - direct output only | Fast generation, low latency |
+| `Low` | Constrained single-paragraph reasoning (~150 chars max) | Fast Thinking, reduces hallucination |
+| `Medium` | Standard multi-step Chain-of-Thought (CoT) | Balanced reasoning depth |
+| `High` | Adversarial analysis with self-correction phases | Complex tasks requiring error checking |
+| `ChainOfThought` | Best-of-breed CoVe + Self-Critique | Maximum accuracy for fact-sensitive tasks |
+
+### Reasoning Effort Levels
+
+#### `ReasoningEffort::Low` - Fast Thinking
+
+Implements "Fast Thinking" with tight length constraints (~150 chars max). This reduces hallucination risk by limiting the generation space.
+
+```lark
+start: reasoning_block
+reasoning_block: <[START_ID]> "\n" thinkgram "\n" <[END_ID]> "\n"
+thinkgram: /^[^\n]{1,150}/
+```
+
+#### `ReasoningEffort::Medium` - Standard CoT
+
+Implements Wei et al. (2022) baseline with sentence-based termination. Allows multiple steps but enforces sentence boundaries.
+
+```lark
+start: reasoning_block
+reasoning_block: <[START_ID]> "\n" thinkgram "\n" <[END_ID]> "\n"
+thinkgram: /(?s:[^.!?]+[.!?])+/  # Multiple sentences
+```
+
+#### `ReasoningEffort::High` - Adversarial Analysis
+
+Implements Cheng & Su (2025) adversarial critique pattern. Forces explicit error checking before final output.
+
+```lark
+start: reasoning_block* analysis_block*
+reasoning_block: <[START_ID]> "\n" thinkgram "\n" <[END_ID]> "\n"
+analysis_block: "<ANALYZE>" "\n" analysis_content "\n" "</ANALYZE>" "\n"
+thinkgram: /(?s:[^.!?]+[.!?])+/
+analysis_content: /(?s:.*)/
+```
+
+#### `ReasoningEffort::ChainOfThought` - CoVe Pattern
+
+Combines Madaan et al. (2024) Chain-of-Verification with adversarial self-correction. Maximum accuracy for complex/fact-sensitive tasks.
+
+```lark
+start: cots*
+cots: <[START_ID]> "\n" draft_phase verification_phase critique_phase final_phase "\n" <[END_ID]> "\n"
+draft_phase: /(?s:[^.!?]+[.!?])+/
+verification_phase: "<VERIFY>" "\n" verification_questions "\n" verification_answers "\n" "</VERIFY>" "\n"
+verification_questions: /(?s:[^.!?]+[.!?])+/
+verification_answers: /(?s:.*)/
+critique_phase: "<CRITIQUE>" "\n" self_critique "\n" "</CRITIQUE>" "\n"
+self_critique: /(?s:.*)/
+final_phase: "<FINAL_ANSWER>" "\n" final_content
+final_content: /(?s:.*)/
+```
+
+### API Reference
+
+#### `ReasoningEffort` Enum
+**Location**: [`src/utils/reasoning.rs:16-39`](src/utils/reasoning.rs:16-39)
+
+```rust
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Low,
+    Medium,
+    High,
+    ChainOfThought,
+}
+```
+
+#### `ThinkingGrammarBuilder`
+**Location**: [`src/utils/reasoning.rs:143-178`](src/utils/reasoning.rs:143-178)
+
+```rust
+pub struct ThinkingGrammarBuilder {
+    start_id: u32,
+    end_id: u32,
+    effort: Option<ReasoningEffort>,
+}
+```
+
+**Methods**:
+- `ThinkingGrammarBuilder::new(start_id, end_id, effort)` - Create new builder
+- `ThinkingGrammarBuilder::from_string(start_id, end_id)` - Create from string IDs
+- `build()` - Generate Lark grammar string
+- `build_grammar()` - Generate TopLevelGrammar
+
+#### `build_reasoning_grammar()`
+**Location**: [`src/utils/reasoning.rs:183-218`](src/utils/reasoning.rs:183-218)
+
+Wraps a base composer with reasoning blocks when reasoning effort is enabled.
+
+```rust
+pub fn build_reasoning_grammar(
+    base_grammar: TopLevelGrammar,
+    reasoning_effort: ReasoningEffort,
+    special_tokens: &SpecialTokens,
+) -> TopLevelGrammar
+```
+
+---
+
+## 6. API REFERENCE
+
+### GrammarComposerBuilder
+
+**Location**: [`src/utils/guidance.rs:218-325`](src/utils/guidance.rs:218-325)
+
+A builder pattern for constructing complex grammar compositions with multiple alternatives.
+
+```rust
+pub struct GrammarComposerBuilder {
+    constraint_grammars: Vec<TopLevelGrammar>,
+    tool_grammar: Option<TopLevelGrammar>,
+    has_tools: bool,
+    tool_choice_required: bool,
+    forced_tool_name: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
+}
+```
+
+#### Methods
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Create a new builder instance |
+| `constraints(grammars)` | Set constraint grammars |
+| `tool_grammar(grammar)` | Set optional tool grammar |
+| `tool_required(required)` | Set tool_choice_required flag |
+| `forced_tool_name(name)` | Set specific tool to force |
+| `reasoning_effort(effort)` | Set reasoning effort level |
+| `build(special_tokens)` | Build final TopLevelGrammar |
+| `into_composer(special_tokens)` | Build GrammarComposers enum |
+
+#### GrammarComposers Enum
+
+**Location**: [`src/utils/guidance.rs:208-215`](src/utils/guidance.rs:208-215)
+
+```rust
+#[derive(Clone, Debug)]
+pub enum GrammarComposers {
+    TextWithEos,
+    Constraint(TopLevelGrammar),
+    Tool(TopLevelGrammar),
+    ConstraintOrTool(TopLevelGrammar, TopLevelGrammar),
+    ToolOrConstraint(TopLevelGrammar, TopLevelGrammar),
+    WithReasoning(TopLevelGrammar, TopLevelGrammar),
+}
+```
+
+### ToolGrammarBuilder
+
+**Location**: [`src/tools/schema.rs:138-359`](src/tools/schema.rs:138-359)
+
+A builder for constructing tool call grammars with either JSON or XML format.
+
+```rust
+pub struct ToolGrammarBuilder {
+    tools: Vec<Tool>,
+    start_tag: String,
+    end_tag: String,
+    start_is_special: bool,
+    end_is_special: bool,
+    start_token_ids: Option<HashSet<u32>>,
+    end_token_ids: Option<HashSet<u32>>,
+}
+```
+
+#### Methods
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Create a new builder instance |
+| `tools(tools)` | Set the list of tools |
+| `start_tag(tag)` | Set the start tag string |
+| `end_tag(tag)` | Set the end tag string |
+| `start_is_special(is_special)` | Mark start tag as special |
+| `end_is_special(is_special)` | Mark end tag as special |
+| `start_token_ids(ids)` | Set start token IDs for special token syntax |
+| `end_token_ids(ids)` | Set end token IDs for special token syntax |
+| `build_json()` | Build JSON format tool grammar |
+| `build_xml()` | Build XML format tool grammar |
+
+#### Example Usage
+
+```rust
+// Build JSON tool grammar with token IDs
+let grammar = ToolGrammarBuilder::new()
+    .tools(&my_tools)
+    .start_tag("")
+    .end_tag("")
+    .start_token_ids(Some(start_ids))
+    .end_token_ids(Some(end_ids))
+    .build_json();
+
+// Build XML tool grammar with special tags
+let grammar = ToolGrammarBuilder::new()
+    .tools(&my_tools)
+    .start_tag("<tool>")
+    .end_tag("</tool>")
+    .start_is_special(true)
+    .end_is_special(true)
+    .build_xml();
+```
 
 ### Grammar Fragment Building Functions
 
@@ -1021,12 +1333,12 @@ Returns the TEXT pattern with explicit EOS token IDs for free-form text matching
 ```rust
 pub fn chat_text_expression_with_eos(special_tokens: &SpecialTokens) -> String {
     let eos_token_ids = special_tokens.eos_ids();
-    
+
     // First check environment variable override
     if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_TEXT") {
         return format!("{}", val);
     }
-    
+
     // Build EOS alternation pattern using <[id]> syntax for token IDs
     if eos_token_ids.is_empty() {
         // Fallback to stop="" when no EOS tokens available
@@ -1532,6 +1844,112 @@ Or via structured_outputs:
 
 ---
 
+### Example 7: Custom Lark Grammar with Reasoning
+
+```json
+{
+    "messages": [{"role": "user", "content": "Solve this math problem"}],
+    "structured_outputs": {
+        "grammar": "start: reasoning_block text\nreasoning_block: <[151660]> thinkgram <[151661]>\nthinkgram: /(?s:[^.!?]+[.!?])+/\ntext: /(?s:.*)/"
+    },
+    "reasoning_effort": "high"
+}
+```
+
+**Generated Lark Grammar**:
+```lark
+start: reasoning_block text
+text: /(?s:.*)/
+reasoning_block: <[151660]> thinkgram <[151661]>
+thinkgram: /(?s:[^.!?]+[.!?])+/
+```
+
+---
+
+### Example 8: Structured Outputs with JSON Schema
+
+```json
+{
+    "messages": [{"role": "user", "content": "Generate a product review"}],
+    "structured_outputs": {
+        "json": {
+            "type": "object",
+            "properties": {
+                "product_name": {"type": "string"},
+                "rating": {"type": "integer", "minimum": 1, "maximum": 5},
+                "review": {"type": "string"},
+                "recommend": {"type": "boolean"}
+            },
+            "required": ["product_name", "rating", "review", "recommend"]
+        }
+    }
+}
+```
+
+**Generated JSON Schema Grammar**:
+```lark
+start: obj
+obj: %json {"type":"object","properties":{...},"required":["product_name","rating","review","recommend"]}
+```
+
+---
+
+### Example 9: Multiple Constraints with Tool Calls
+
+```json
+{
+    "messages": [{"role": "user", "content": "What's the weather? Call a tool if needed."}],
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}
+        }
+    }],
+    "structured_outputs": {
+        "choice": ["tool", "text"]
+    },
+    "enable_tool_grammar": true
+}
+```
+
+**Composed Grammar**:
+```lark
+start: ( text | tool_call )+
+text: /(?s:.*)/
+tool_call: <tool> tool_obj </tool>
+tool_obj: %json {"type":"object",...}
+obj_get_weather: %json {"type":"object",...}
+obj: obj_get_weather
+```
+
+---
+
+### Example 10: Regular Expression with Forced Tool
+
+```json
+{
+    "messages": [{"role": "user", "content": "Search for something"}],
+    "tools": [{"type": "function", "function": {"name": "search", ...}}],
+    "structured_outputs": {
+        "regex": "^search: .*"
+    },
+    "tool_choice": {"type": "function", "function": {"name": "search"}}
+}
+```
+
+**Composed Grammar**:
+```lark
+start: ( text | tool_call )+
+text: /(?s:.*)/
+tool_call: <tool> tool_obj </tool>
+tool_obj: %json {"type":"object","properties":{"name":{"type":"string"},...}}
+obj_search: %json {...}
+obj: obj_search
+```
+
+---
+
 ## 6. MATHEMATICAL FOUNDATIONS
 
 ### Token Validation Probability
@@ -1853,6 +2271,56 @@ For each test, verify:
 
 ---
 
+## 17. TEST COVERAGE
+
+### Overview
+
+The guided inference implementation includes comprehensive test coverage across all major components:
+
+| File | Test Coverage | Description |
+|------|---------------|-------------|
+| [`src/utils/guidance_tests.rs`](src/utils/guidance_tests.rs) | 20+ tests | Grammar composition, reasoning effort, tool grammar construction |
+| [`src/tools/schema.rs`](src/tools/schema.rs) | 20+ tests | JSON/XML tool grammar, schema sanitization, structural_tag parsing |
+| [`src/server/mod.rs`](src/server/mod.rs) | 10+ tests | Constraint building, response_format handling |
+
+### Test Categories
+
+1. **Grammar Composition Tests**
+   - `test_grammar_builder_single_alternative` - Single alternative grammar
+   - `test_grammar_builder_multiple_alternatives` - Multiple alternatives with direct alternation
+   - `test_merge_top_level_grammars_direct_alternation` - Verify no rule_N indirection
+   - `test_merge_top_level_grammars_with_text_and_tool` - TEXT | tool_call alternation
+   - `test_permutation_*` (1-11) - All grammar composition scenarios
+
+2. **Reasoning Effort Tests**
+   - `test_thinking_grammar_builder_new` - Builder with effort level
+   - `test_thinking_grammar_builder_from_string` - Builder from string IDs
+   - `test_thinking_grammar_builder_build_grammar` - Grammar generation
+
+3. **Tool Grammar Tests**
+   - `test_build_xml_tool_lark_grammar_qwen3_coder_*` - XML format with various params
+   - `test_tool_grammar_builder_build_json_*` - JSON format with token IDs
+   - `test_tool_grammar_builder_build_xml_*` - XML format with multiple tools
+
+4. **Constraint Building Tests**
+   - `test_grammar_fragment_from_structured_outputs_*` - All constraint types
+   - `test_grammar_fragment_from_response_format_json_schema` - Response format handling
+
+5. **Token ID Tests**
+   - `test_lark_special_token_single_id` - Single token ID conversion
+   - `test_lark_special_token_multiple_ids` - Multiple token IDs
+   - `test_lark_special_token_empty` - Empty token ID set
+
+### Test Philosophy
+
+The extensive test coverage follows these principles:
+
+1. **Test in the same file as the code** - All tests reside in the same file as the code they qualify
+2. **Comprehensive permutation testing** - 11 test permutations covering all grammar composition scenarios
+3. **Edge case coverage** - Tests for empty inputs, special tags, token IDs, nested parameters
+4. **Integration testing** - End-to-end tests verify the complete data flow
+5. **No infinite recursion** - `test_with_reasoning_no_infinite_recursion` verifies the fix for the previous stack overflow issue
+
 ## 14. TOKEN ID BASED LARK GRAMMAR CALL GRAPH
 
 ### Overview
@@ -2020,7 +2488,7 @@ The function [`chat_text_expression_with_eos()`](src/utils/guidance.rs:485) in g
 ```rust
 pub fn chat_text_expression_with_eos(special_tokens: &SpecialTokens) -> String {
     let eos_token_ids = special_tokens.eos_ids();
-    
+
     let eos_pattern = if eos_token_ids.is_empty() {
         // Fallback to stop="" when no EOS tokens available
         r#"start: text
@@ -2038,7 +2506,7 @@ text_with_eos: TEXT eos?
 TEXT: /(?s:.*)/
 eos: {}"#, eos_alternation)
     };
-    
+
     eos_pattern
 }
 ```
@@ -2120,7 +2588,7 @@ fn a() { let x = vec![1,2,3]; }  ← Contains '<' characters
 
 When the mask encounters `<`, it:
 1. Checks if next character is `/` → closing tag
-2. Checks if next character is letter → opening tag  
+2. Checks if next character is letter → opening tag
 3. **Preempts content generation** before the actual `</‌parameter>`
 
 ### Recommended Solution: Avoid XML Parameters for Tool Calls

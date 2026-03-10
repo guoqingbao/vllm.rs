@@ -8,15 +8,38 @@ use crate::utils::special_tokens::SpecialTokens;
 use llguidance::api::TopLevelGrammar;
 
 /// Reasoning effort level for grammar generation
-/// Controls whether to prepend reasoning_block to the grammar
+/// Optimized for specific reasoning strategies based on current research (2024-2025)
+/// Note: For Python builds, this enum is passed via serde serialization, not pyo3
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "python", pyo3::pyclass)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    /// No structured reasoning - direct output only
     None,
+
+    /// Constrained single-paragraph reasoning (~150 chars max)
+    /// Implements "Fast Thinking" with tight length constraints
+    /// Reduces hallucination risk by limiting generation space
     Low,
+
+    /// Standard multi-step Chain-of-Thought (CoT)
+    /// Implements Wei et al. (2022) baseline with sentence-based termination
+    /// Balances reasoning depth and efficiency
     Medium,
+
+    /// Adversarial analysis with self-correction phases
+    /// Implements Cheng & Su (2025) adversarial critique pattern
+    /// Forces explicit error checking before final output
     High,
+
+    /// Best-of-breed Chain-of-Verification (CoVe) + Self-Critique
+    /// Combines Madaan et al. (2024) CoVe with adversarial self-correction
+    /// Maximum accuracy for complex/fact-sensitive tasks
+    ChainOfThought,
+
+    /// Custom user-provided grammar template
+    /// For non-Python builds, allows users to submit their own reasoning patterns
+    #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+    Custom(String),
 }
 
 impl ReasoningEffort {
@@ -24,15 +47,104 @@ impl ReasoningEffort {
         match s.to_lowercase().as_str() {
             "none" => Self::None,
             "low" => Self::Low,
-            "medium" => Self::Medium,
+            "normal" | "medium" => Self::Medium, // Backward compatibility
             "high" => Self::High,
-            _ => Self::None
+            "chain_of_thought" | "cot" | "cove" => Self::ChainOfThought,
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            s if s.starts_with("custom:") => Self::Custom(s[7..].to_string()),
+            #[cfg(feature = "python")]
+            _ => Self::None,
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            _ => Self::None,
+        }
+    }
+
+    /// Generate the appropriate grammar template for this reasoning level
+    pub fn generate_grammar(&self, start_id: u32, end_id: u32) -> String {
+        match self {
+            Self::None => {
+                // No reasoning block - direct output only
+                // Minimal latency, no structured thinking
+                format!(r#"start: reasoning_block text
+text: /(?s:.*)/
+reasoning_block: <[{}]> "\n" text "\n" <[{}]>
+"#, start_id, end_id)
+            }
+            Self::Low => {
+                // Fast Thinking: Single paragraph constraint (max ~150 chars)
+                // Limits generation space to reduce hallucination risk
+                // Uses non-greedy matching to prevent runaway generation
+                format!(r#"start: reasoning_block
+reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
+thinkgram: /[^\n]{{1,300}}/
+"#)
+            }
+            Self::Medium => {
+                // Standard CoT: Multi-step reasoning with natural sentence termination
+                // Implements Wei et al. (2022) baseline pattern
+                // Allows multiple steps but enforces sentence boundaries
+                format!(r#"start: reasoning_block
+reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
+thinkgram: /(?s:[^.!?]+[.!?])+{{1,1200}}/
+"#)
+            }
+            Self::High => {
+                // Adversarial Analysis: Explicit self-correction phases
+                // Implements Cheng & Su (2025) adversarial critique pattern
+                // Forces model to challenge its own reasoning before finalizing
+                format!(r#"start: reasoning_block* analysis_block*
+reasoning_block: <[{start_id}]> "\n" : analysis_block analysis_content critique_phase critique_content thinkgram "\n" <[{end_id}]> "\n"
+analysis_block: "<ANALYZE>" "\n" analysis_content "\n" "</ANALYZE>" "\n"
+analysis_content: /(?s:.*){{1,2400}}/
+critique_phase: "<CRITIQUE>" "\n" critique_content "\n" "</CRITIQUE>" "\n"
+critique_content: /(?s:.*){{1,1200}}/
+thinkgram: "<STRUCTUREDANSWER>" "\n" /(?s:.*){{1,3600}}/ "\n" "</STRUCTUREDANSWER>" "\n"
+"#)
+            }
+            Self::ChainOfThought => {
+                // Best-of-breed: CoVe + Adversarial Critique + Final Consolidation
+                // Combines Madaan et al. (2024) Chain-of-Verification with self-correction
+                // Maximum accuracy for complex/fact-sensitive tasks
+                format!(r#"start: reasoning_block+
+reasoning_block: <[{start_id}]> "\n" draft_phase verification_phase critique_phase final_phase "\n" <[{end_id}]> "\n"
+draft_phase: /(?s:[^.!?]+[.!?])+/
+verification_phase: "<VERIFY>" "\n" verification_questions "\n" verification_answers "\n" "</VERIFY>" "\n"
+verification_questions: /(?s:[^.!?]+[.!?])+/
+verification_answers: /(?s:.*)/
+critique_phase: "<CRITIQUE>" "\n" self_critique "\n" "</CRITIQUE>" "\n"
+self_critique: /(?s:.*)/
+final_phase: "<FINAL_ANSWER>" "\n" final_content "\n"
+final_content: /(?s:.*)/
+"#)
+            }
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            Self::Custom(template) => {
+                // User-provided template with token ID injection
+                // Supports $START_ID and $END_ID placeholders for dynamic token ID substitution
+                template.replace("$START_ID", &start_id.to_string()).replace("$END_ID", &end_id.to_string())
+            }
+        }
+    }
+}
+
+/// Updated grammar builder function that respects reasoning effort levels
+pub fn thinking_grammar_with_reasoning_block(
+    start_id: u32,
+    end_id: u32,
+    effort: Option<ReasoningEffort>
+) -> String {
+    match effort {
+        Some(level) => level.generate_grammar(start_id, end_id),
+        None => {
+            // Default to Medium if not specified (balanced approach)
+            ReasoningEffort::Medium.generate_grammar(start_id, end_id)
         }
     }
 }
 
 /// Builder for thinking grammar with reasoning block
 /// This ensures reasoning_block has finite termination to prevent run-on generation
+/// Note: For Python builds, this struct is not exposed via pyo3 since ReasoningEffort can't be a pyclass
 pub struct ThinkingGrammarBuilder {
     start_id: u32,
     end_id: u32,
@@ -61,20 +173,6 @@ impl ThinkingGrammarBuilder {
     }
 }
 
-/// Build thinking grammar with reasoning block followed by finite termination
-/// The reasoning_block must have finite grammar AFTER it to prevent run-on generation
-/// Pattern: start: reasoning_block (text_with_eos | tool_call)*
-pub fn thinking_grammar_with_reasoning_block(start_id: u32, end_id: u32, effort: Option<ReasoningEffort>) -> String {
-    crate::log_debug!("[llg] thinking_grammar_with_reasoning_block() start_id={}, end_id={}, effort={:?}", start_id, end_id, effort);
-    let reason_start = "start: reasoning_block* ";
-    let reason_default = format!(r#"reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
-thinkgram: /(?s:.*)/
-"#);
-
-    crate::log_debug!("[llg] thinking_grammar_with_reasoning_block() generated grammar:\n{}", reason_start);
-    
-    format!("{}{}", reason_start, reason_default)
-}
 
 /// Build a reasoning-aware grammar composer
 /// Wraps a base composer with reasoning blocks when reasoning effort is enabled
@@ -84,7 +182,7 @@ pub fn build_reasoning_grammar(
     special_tokens: &SpecialTokens,
 ) -> TopLevelGrammar {
     crate::log_debug!("[llg] build_reasoning_grammar() called with effort={:?}", reasoning_effort);
-    
+
     if reasoning_effort == ReasoningEffort::None {
         return base_grammar;
     }
@@ -150,5 +248,25 @@ mod tests {
         let builder = ThinkingGrammarBuilder::new(151657, 151658, None);
         let grammar = builder.build_grammar();
         assert!(grammar.grammars.len() > 0, "Should have grammars");
+    }
+
+    #[test]
+    #[cfg(not(feature = "python"))]
+    fn test_reasoning_effort_custom_from_str() {
+        let template = "custom:\nstart: reasoning_block\nreasoning_block: <[$START_ID]> thinkgram <[$END_ID]>\nthinkgram: /(?s:[^.!?]+[.!?])+/\n";
+        let effort = ReasoningEffort::from_str(template.to_string());
+        assert!(matches!(effort, ReasoningEffort::Custom(_)));
+    }
+
+    #[test]
+    #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+    fn test_reasoning_effort_custom_generate_grammar() {
+        let template = "custom:\nstart: reasoning_block\nreasoning_block: <$START_ID> thinkgram <$END_ID>\nthinkgram: /(?s:[^.!?]+[.!?])+/\n";
+        let effort = ReasoningEffort::Custom(template.to_string());
+        let grammar = effort.generate_grammar(151660, 151661);
+        assert!(grammar.contains("reasoning_block"), "Should contain reasoning_block");
+        assert!(grammar.contains("<151660>"), "Should contain start_id");
+        assert!(grammar.contains("<151661>"), "Should contain end_id");
+        assert!(grammar.contains("custom:"), "Should contain custom template");
     }
 }

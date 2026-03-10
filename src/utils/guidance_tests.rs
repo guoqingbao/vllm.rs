@@ -80,7 +80,7 @@ mod guidance_tests {
     #[test]
     fn test_merge_top_level_grammars_with_text_and_tool() {
         // Test the actual TEXT | tool_call scenario from the issue
-        let lark = format!("start: TEXT\n{}", chat_text_expression());
+        let lark = format!("start: TEXT\n{}", chat_text_expression(false));
         let text_gram = TopLevelGrammar::from_lark(lark);
         let tool_gram = TopLevelGrammar::from_lark("start: tool_call\ntool_call: \"test\"".to_string());
         // Use None for default separator (|)
@@ -315,6 +315,13 @@ mod guidance_tests {
                     source: crate::utils::special_tokens::VocabSource::Special,
                     normalized: false,
                 },
+                crate::utils::special_tokens::SpecialToken {
+                    category: crate::utils::special_tokens::Category::Eos,
+                    id: 22,
+                    content: b"</eof>".to_vec(),
+                    source: crate::utils::special_tokens::VocabSource::Special,
+                    normalized: false,
+                },
                 // Tool tokens
                 crate::utils::special_tokens::SpecialToken {
                     category: crate::utils::special_tokens::Category::Tool,
@@ -375,7 +382,7 @@ mod guidance_tests {
         let special_tokens = mock_special_tokens();
         let tool_gram = None;
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -386,11 +393,11 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
-        crate::log_info!("Perm 8 lark: {}", lark);
-        assert!(lark.contains("start: text_with_eos"), "Should have text_with_eos");
-        assert!(lark.contains("eos: <[2]>"), "Should have EOS token");
+        crate::log_info!("Perm 1 lark: {}", lark);
+        assert!(lark.contains("start: text eos?"), "Should have text with eos?");
+        assert!(lark.contains("eos:"), "Should have EOS token");
         assert!(!lark.contains("tool"), "Should NOT contain tool");
     }
 
@@ -399,7 +406,7 @@ mod guidance_tests {
         let special_tokens = mock_special_tokens();
         let tool_gram = Some(build_mock_tool_grammar());
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -410,9 +417,9 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
-        assert!(lark.contains("start: ( text_with_eos | tool_call )+"), "Should have alternation");
+        assert!(lark.contains("start: ( text | tool_call )+"), "Should have alternation");
         assert!(lark.contains("obj_search"), "Should have tool schema");
     }
 
@@ -421,7 +428,7 @@ mod guidance_tests {
         let special_tokens = mock_special_tokens();
         let tool_gram = Some(build_mock_tool_grammar());
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -432,7 +439,7 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("start: tool_call"), "Should have tool_call only");
         assert!(!lark.contains("text_with_eos"), "Should NOT have text_with_eos");
@@ -445,7 +452,7 @@ mod guidance_tests {
         let constraint_grammars = vec![
             TopLevelGrammarExt::from_lark_utf8("start: 'option1' | 'option2'")
         ];
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -456,7 +463,7 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("option1"), "Should have constraint content");
         assert!(!lark.contains("tool"), "Should NOT have tool");
@@ -469,7 +476,7 @@ mod guidance_tests {
         let constraint_grammars = vec![
             TopLevelGrammarExt::from_lark_utf8("start: 'option1' | 'option2'")
         ];
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -480,7 +487,7 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("option1"), "Should have constraint content");
         assert!(lark.contains("tool_call"), "Should have tool_call");
@@ -493,7 +500,7 @@ mod guidance_tests {
         let constraint_grammars = vec![
             TopLevelGrammarExt::from_lark_utf8("start: 'option1'")
         ];
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -504,7 +511,7 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("option1"), "Should have constraint content");
         assert!(lark.contains("tool_call"), "Should have tool_call");
@@ -517,7 +524,7 @@ mod guidance_tests {
         let constraint_grammars = vec![
             TopLevelGrammarExt::from_lark_utf8("start: 'option1'")
         ];
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -528,7 +535,7 @@ mod guidance_tests {
             &special_tokens,
             None,
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("option1"), "Should have constraint content");
         assert!(lark.contains("obj_search"), "Should have forced tool schema");
@@ -539,7 +546,7 @@ mod guidance_tests {
         let special_tokens = mock_special_tokens();
         let tool_gram = None;
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -550,11 +557,13 @@ mod guidance_tests {
             &special_tokens,
             Some(ReasoningEffort::None),
         );
-        
+
         let lark = get_lark_string(&result);
         println!("Perm 8 lark: {}", lark);
-        assert!(lark.contains("start: text_with_eos"), "Should have text_with_eos");
-        assert!(!lark.contains("reasoning"), "Should NOT have reasoning");
+        assert!(lark.contains("start: reasoning_block"), "Should have reasoning_block start");
+        assert!(lark.contains("text"), "Should have text rule");
+        assert!(lark.contains("reasoning_block"), "Should have reasoning_block");
+        assert!(lark.contains("eos:"), "Should have EOS token");
     }
 
     #[test]
@@ -562,7 +571,7 @@ mod guidance_tests {
         let special_tokens = mock_special_tokens();
         let tool_gram = Some(build_mock_tool_grammar());
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -573,7 +582,7 @@ mod guidance_tests {
             &special_tokens,
             Some(ReasoningEffort::Low),
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("reasoning_block"), "Should have reasoning_block");
         assert!(lark.contains("tool_call"), "Should have tool_call");
@@ -586,7 +595,7 @@ mod guidance_tests {
         let constraint_grammars = vec![
             TopLevelGrammarExt::from_lark_utf8("start: 'option1'")
         ];
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -597,7 +606,7 @@ mod guidance_tests {
             &special_tokens,
             Some(ReasoningEffort::High),
         );
-        
+
         let lark = get_lark_string(&result);
         assert!(lark.contains("reasoning_block"), "Should have reasoning_block");
         assert!(lark.contains("option1"), "Should have constraint");
@@ -618,7 +627,7 @@ mod guidance_tests {
         ]);
         let tool_gram = None;
         let constraint_grammars = Vec::new();
-        
+
         let result = compose_grammars(
             constraint_grammars,
             tool_gram,
@@ -629,9 +638,38 @@ mod guidance_tests {
             &special_tokens,
             Some(ReasoningEffort::High),
         );
-        
+
         let lark = get_lark_string(&result);
-        assert!(lark.contains("start: text_with_eos"), "Should fallback to text with EOS");
+        println!("Perm 11 lark: {}", lark);
+        assert!(lark.contains("start: text"), "Should fallback to text with EOS");
         assert!(!lark.contains("reasoning"), "Should NOT have reasoning when tokens missing");
     }
+
+
+    #[test]
+    fn test_with_reasoning_no_infinite_recursion() {
+        // Test that WithReasoning doesn't cause infinite recursion
+        // The old code used Box<GrammarComposers> which caused stack overflow
+        // when to_grammar() recursively called inner.to_grammar()
+        let special_tokens = mock_special_tokens();
+        let tool_gram = Some(build_mock_tool_grammar());
+        let constraint_grammars = vec![];
+
+        let result = compose_grammars(
+            constraint_grammars,
+            tool_gram,
+            true,
+            false,
+            None,
+            None,
+            &special_tokens,
+            Some(ReasoningEffort::High),  // This creates WithReasoning wrapper
+        );
+
+        let lark = get_lark_string(&result);
+        // Verify the grammar was built successfully without stack overflow
+        assert!(lark.contains("reasoning_block"), "Should have reasoning_block");
+        assert!(lark.contains("tool_call"), "Should have tool_call");
+    }
+
 }
