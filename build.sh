@@ -188,8 +188,7 @@ chmod 755 "$DEST_DIR/completion.py"
 # Build or publish Python package with maturin
 echo "Building Python extension with maturin..."
 
-FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-attn\b//g' | xargs)
-FEATURES=$(echo "$FEATURES" | sed -E 's/\bflash-context\b//g' | xargs)
+FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashattn\b//g' | xargs)
 FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashinfer\b//g' | xargs)
 
 echo "Python extension features: $FEATURES"

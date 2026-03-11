@@ -10,8 +10,8 @@ vllm_rs = { path = "../../", package = "vllm-rs" }
 
 [features]
 cuda = ["vllm_rs/cuda"]
-flash-attn = ["vllm_rs/flash-attn"]
-flash-context = ["vllm_rs/flash-context"]
+flashattn = ["vllm_rs/flashattn"]
+flashinfer = ["vllm_rs/flashinfer"]
 graph = ["vllm_rs/graph"]
 nccl = ["vllm_rs/nccl"]
 metal = ["vllm_rs/metal"]

@@ -154,7 +154,7 @@ impl KVCacheAllocator {
 
         let kv_fraction = econfig
             .kv_fraction
-            .unwrap_or(if cfg!(feature = "flash-attn") {
+            .unwrap_or(if cfg!(feature = "flashattn") {
                 0.7
             } else {
                 0.5
@@ -605,7 +605,7 @@ impl KVCacheAllocator {
     // Tensor Allocation Methods
     //==========================================================================
 
-    /// Calculate flash-context KV block shape: [num_blocks, block_size, num_kv_heads, head_size]
+    /// Calculate flashattn KV block shape: [num_blocks, block_size, num_kv_heads, head_size]
     fn calculate_flash_key_value_block_shape(&self) -> (usize, usize, usize) {
         (self.block_size, self.kv_heads_per_shard(), self.head_dim)
     }
@@ -668,10 +668,10 @@ impl KVCacheAllocator {
             cache_dtype
         );
 
-        if cfg!(feature = "flashinfer") || cfg!(feature = "flash-context") {
+        if cfg!(feature = "flashinfer") || cfg!(feature = "flashattn") {
             assert!(
                 !self.fp8_kvcache,
-                "fp8 kvcache is not compatible with flashinfer or flash-context feature!"
+                "fp8 kvcache is not compatible with flashinfer or flashattn feature!"
             );
 
             let kv_shape = self.calculate_flash_key_value_block_shape();
