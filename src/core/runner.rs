@@ -1,6 +1,7 @@
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
+use crate::models::layers::linear::set_fp8_linear_is_prefill;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
@@ -611,6 +612,7 @@ impl ModelRunner {
         };
         let images = images.as_ref();
 
+        let _ = set_fp8_linear_is_prefill(is_prefill);
         let logits = crate::model_call!(
             &self.model,
             forward,
@@ -636,6 +638,7 @@ impl ModelRunner {
     pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {
         let (input_ids, positions, input_metadata) = self.prepare_prefill(seqs)?;
 
+        let _ = set_fp8_linear_is_prefill(true);
         let hidden = crate::model_call!(
             &self.model,
             forward_embedding,
@@ -741,7 +744,7 @@ impl ModelRunner {
             let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
             let seqlen_k = if self.config.prefix_cache.unwrap_or(false)
                 || (seq.num_cached_tokens > 0
-                    && (cfg!(feature = "flash-context") || cfg!(feature = "flashinfer")))
+                    && (cfg!(feature = "flashattn") || cfg!(feature = "flashinfer")))
             {
                 seq.num_cached_tokens + num_tokens
             } else {

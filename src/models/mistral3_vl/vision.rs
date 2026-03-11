@@ -174,14 +174,11 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         k: &Tensor,
         positions: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
-        let (_b_sz, _h, _seq_len, _n_embd) = q.dims4()?;
-        let (cos, sin) = (
-            &self.cos.index_select(positions, 0)?,
-            &self.sin.index_select(positions, 0)?,
-        );
-        let q_embed = candle_nn::rotary_emb::rope(q, cos, sin)?;
-        let k_embed = candle_nn::rotary_emb::rope(k, cos, sin)?;
-        Ok(Some((q_embed, k_embed)))
+        use attention_rs::fused_rope::FusedRope;
+        let (_tokens, _h, _n_embd) = q.dims3()?;
+        let (_k_tokens, _k_h, _k_embd) = k.dims3()?;
+        FusedRope::apply_inplace(q, k, &self.cos, &self.sin, positions, false)?;
+        Ok(None)
     }
 
     fn get_original_max_position_embeddings(&self) -> Option<usize> {

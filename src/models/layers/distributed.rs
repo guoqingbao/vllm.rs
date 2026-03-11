@@ -600,17 +600,21 @@ impl MergedParallelColumnLinear {
                     };
 
                     #[cfg(feature = "cutlass")]
-                    let merged_scale = if sm_version >= 100 {
-                        merged_scale.t()?
+                    let merged_scale_cutlass = if sm_version >= 100 {
+                        Some(merged_scale.t()?)
                     } else if sm_version >= 90 {
-                        merged_scale.t()?.contiguous()?
+                        Some(merged_scale.t()?.contiguous()?)
                     } else {
-                        merged_scale
+                        None
                     };
+
+                    #[cfg(not(feature = "cutlass"))]
+                    let merged_scale_cutlass = None;
 
                     let linear = LinearX::LnFp8(LnFp8 {
                         weight: merged_weight,
                         weight_scale: merged_scale,
+                        weight_scale_cutlass: merged_scale_cutlass,
                         bias: None,
                         weight_block_size: block_size.clone(),
                         sm_version,

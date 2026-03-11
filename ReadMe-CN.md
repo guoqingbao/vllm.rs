@@ -39,6 +39,7 @@
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
+| **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -73,7 +74,7 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ, FP8-blockwise 量化格式) 和 **GGUF** 格式。
 
-所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flash-context`特性）。
+所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flashinfer` 或 `flashattn` 特性）。
 
 ---
 ## 📚 文档
@@ -93,8 +94,8 @@
 
 ## 📘 使用方法（Python）
 ### 📦 使用 pip 安装
-- 💡 **CUDA 计算能力 < 8.0**（例如 V100）需要**手动编译** （不支持 `flash-attn`；或可使用 **Rust 模式**）。
-- 💡 **预编译包** 默认启用了`flash-context` 特性，若使用 **FP8 KV Cache**，须移除 `flash-context`后手动编译。
+- 💡 **CUDA 计算能力 < 8.0**（例如 V100）需要**手动编译** （不支持 `flashattn`；或可使用 **Rust 模式**）。
+- 💡 **预编译包** 默认启用了`flashattn` 或 `flashinfer` 特性，若使用 **FP8 KV Cache**，须将其移除后手动编译。
 
 > 🍎 Metal（macOS）
 ```shell
@@ -113,7 +114,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper（SM90+）/ Blackwell（SM120+）
 
-从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.2) 下载 wheel，解压后安装 `.whl` 包。
+从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.8) 下载 wheel，解压后安装 `.whl` 包。
 
 
 ### 🌐✨ API Server + ChatGPT风格内置网页
@@ -149,7 +150,7 @@ python3 -m pip install vllm_rs
 
    ```bash
    # 同时将权重量化为Q4K格式，启用最长上下文：
-   python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
+   python3 -m vllm_rs.server --w /path/Qwen3.5-122B-A10B --isq q4k --d 0,1 --port 8000 --max-model-len 262144 --max-num-seqs 1 --ui-server --prefix-cache
    ```
   </details>
 
@@ -159,7 +160,7 @@ python3 -m pip install vllm_rs
 
 ```bash
 # CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
-vllm-rs --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
 vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
@@ -171,7 +172,7 @@ vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 
 ```bash
 # 使用内置ChatUI上传或提及图片url (格式 '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.5-35B-A3B-FP8 --ui-server --prefix-cache
 ```
 
   <details>
@@ -195,22 +196,11 @@ python3 -m vllm_rs.server --w /home/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4-Marlin
 
 ```bash
 cd vllm.rs
-# 使用以下构建方式之一
+# 将 `sm_80` 更改至你当前的硬件特性，如 sm_75 (V100), sm_80 (A100), sm_86 (RTX4090), sm_90 (Hopper), sm_100/sm_120 (Blackwell); 将 CUDA 版本号 `12.9.0` 更改为与当前主机驱动匹配的版本; 将最后一个参数 `0` 更改为 `1` 启用Rust中国区镜像（适用于中国大陆）
+./build_docker.sh "cuda,nccl,graph,flashinfer,cutlass,python" sm_80 12.9.0 0
 
-# 将 `sm_80` 更改至你当前的硬件特性，如 sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
-
-# 添加 `cutlass` 特性以支持fp8模型 (Qwen3系列, sm90+)，使用CUDA 13 镜像
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
-
-# #传 1 启用Rust中国区镜像（适用于中国大陆）
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
-
-# 传入 `--prod` 以构建生产镜像（使用 `Dockerfile.prod`）
-./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
-
-# 新增（使用FlashInfer后端）
-./build_docker.sh "cuda,nccl,flashinfer,graph,cutlass,python" sm_90 13.0.0
+# 还可以使用 `flash attention` 后端, 以及传入 `--prod` 以构建生产镜像
+./build_docker.sh --prod "cuda,nccl,graph,flashattn,cutlass,python" sm_90 13.0.0
 ```
    </details>
 
@@ -233,7 +223,7 @@ sudo apt-get install -y git build-essential libssl-dev pkg-config
 
 安装 CUDA Toolkit：
 ```sh
-# CUDA 12.9
+# CUDA 12.9 （版本号<= 本机驱动版本）
 apt-get update
 apt-get install -y \
   cuda-nvcc-12-9 \
@@ -247,14 +237,12 @@ apt-get install -y libnccl2 libnccl-dev
 编译 vLLM.rs
 ```shell
 # 只有单卡的情况下去掉 `nccl`
-# V100及较老的机型去掉 `flash-attn,flash-context`
-# CUDA下只去掉`flash-context`可使用FP8 KVCache
-# 添加 `cutlass`特性以支持FP8模型 (适用于sm90+)
+# 使用FP8 KVCache 或 V100及较老的机型去掉 `flashattn/flashinfer` 和 `cutlass`特性
 # 默认安装进/usr/local/bin，使用`--dst`更改安装目录
-./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
+./build.sh --install --features cuda,nccl,graph,flashinfer,cutlass
 
-# 新增（使用FlashInfer后端）
-./build.sh --install --features cuda,nccl,flashinfer,graph,cutlass
+# 使用Flash Attention后端
+./build.sh --install --features cuda,nccl,graph,flashattn,cutlass
 ```
   </details>
 
@@ -313,7 +301,7 @@ cargo install --features metal
     <summary>未量化模型运行为Q4K量化模型，同时使用FP8 KVCache</summary>
 
    ```bash
-   # 编译时去除`flash-context`以使用fp8 kvcache
+   # 编译时去除`flashinfer` 或 `flashattn` 以使用fp8 kvcache
    vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --server --port 8000 --fp8-kvcache
    ```
   </details>
@@ -338,7 +326,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3
 
    无需指定`port`，因为此服务器不直接接收用户请求，KvCache大小由`--max-model-len`和`--max-num-seqs`控制。
    ```bash
-   # PD服务器使用`flash-context`加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
+   # PD服务器使用`flashinfer` 或 `flashattn` 加快处理长文本prefill（PD服务器启动非量化模型可获得最佳吞吐率）
    vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --pd-server
    ```
 
@@ -399,22 +387,19 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 2. **构建 Python 包**
 
 ```bash
-# Naive CUDA (只能用于单卡推理) 
-maturin build --release --features cuda,python
-
-# Naive CUDA (+CUDA Graph, 实验阶段)
+# Naive CUDA (不带NCCL，只能用于单卡推理) 
 maturin build --release --features cuda,graph,python
 
-# CUDA (支持Context-cache与FP8 KV Cache，不使用Flash attention) 
-./build.sh --release --features cuda,nccl,python
+# CUDA (支持FP8 KV Cache，默认使用Paged attention) 
+./build.sh --release --features cuda,nccl,graph,python
 
-# CUDA (+Flash attention，仅prefill时启用) 
-./build.sh --release --features cuda,nccl,flash-attn,python
+# CUDA (Flashinfer后端，编译时间3m+) 
+./build.sh --release --features cuda,nccl,flashattn,python
 
-# CUDA (+Flash attention，prefill/decoding均使用Flash attention，编译时间最长) 
-./build.sh --release --features cuda,nccl,flash-context,python
+# CUDA (Flash attention后端，编译时间5m+) 
+./build.sh --release --features cuda,nccl,flashattn,python
 
-# macOS（Metal, 支持Context-cache与FP8 KV Cache，但不支持多GPU推理）
+# macOS（Metal, 支持FP8 KV Cache，但不支持多GPU推理）
 maturin build --release --features metal,python
 
 ```
@@ -446,7 +431,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 |
 | `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |
-| `--fp8-kvcache`       | 使用FP8 KV Cache (flash-context没有启用时生效)                 |
+| `--fp8-kvcache`       | 使用FP8 KV Cache (flashinfer/flashattn 没有启用时生效)                 |
 | `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.2，取值0.1 - 10.0)              |
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|
@@ -499,6 +484,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Claude/Anthropic API 兼容服务器**
 * [x] **支持CUDA 13**
 * [x] **支持FlashInfer后端**
+* [x] **支持DeepGEMM后端 (Hopper)**
 * [ ] TentorRT-LLM 后端
 
 ## 📚 参考项目

@@ -3,7 +3,8 @@ use crate::utils::config::RopeScalingValue;
 use candle_core::{DType, Device, Result, Tensor};
 
 pub trait ApplyRotaryEmbedding {
-    /// Apply rotary embedding to Q and K tensors.
+    /// Apply rotary embedding to packed Q and K tensors with shape
+    /// `[tokens, heads, head_dim]`.
     /// Returns:
     /// - `Ok(None)` when in-place operation was performed (CUDA, non-partial)
     /// - `Ok(Some((q, k)))` when new tensors are returned (partial rotary or non-CUDA)
@@ -79,34 +80,21 @@ impl ApplyRotaryEmbedding for RotaryEmbedding {
         positions: &Tensor,
     ) -> Result<Option<(Tensor, Tensor)>> {
         use attention_rs::fused_rope::FusedRope;
+        let (_tokens, _q_heads, _head_dim) = q.dims3()?;
+        let (_k_tokens, _k_heads, _k_head_dim) = k.dims3()?;
 
         // Handle partial rotary (rotary_dim < head_dim) - must return new tensors
         if let Some(rotary_dim) = self.rotary_dim {
-            use candle_core::D;
-            let cos = self.cos.index_select(positions, 0)?;
-            let sin = self.sin.index_select(positions, 0)?;
-
-            let q_rot = q.narrow(D::Minus1, 0, rotary_dim)?.contiguous()?;
-            let q_pass = q
-                .narrow(D::Minus1, rotary_dim, q.dim(D::Minus1)? - rotary_dim)?
-                .contiguous()?;
-            let k_rot = k.narrow(D::Minus1, 0, rotary_dim)?.contiguous()?;
-            let k_pass = k
-                .narrow(D::Minus1, rotary_dim, k.dim(D::Minus1)? - rotary_dim)?
-                .contiguous()?;
-
-            // Use candle_nn for partial rotary
-            let func = if self.is_rope_i {
-                candle_nn::rotary_emb::rope_i
-            } else {
-                candle_nn::rotary_emb::rope
-            };
-            let q_rot = func(&q_rot, &cos, &sin)?;
-            let k_rot = func(&k_rot, &cos, &sin)?;
-
-            let q_embed = Tensor::cat(&[&q_rot, &q_pass], D::Minus1)?.contiguous()?;
-            let k_embed = Tensor::cat(&[&k_rot, &k_pass], D::Minus1)?.contiguous()?;
-            return Ok(Some((q_embed, k_embed)));
+            FusedRope::apply_inplace_partial(
+                q,
+                k,
+                &self.cos,
+                &self.sin,
+                positions,
+                self.is_rope_i,
+                rotary_dim,
+            )?;
+            return Ok(None);
         }
 
         // Full rotary embedding - use fused kernel with position selection
