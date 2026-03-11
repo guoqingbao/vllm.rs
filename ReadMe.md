@@ -39,6 +39,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
+| **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -116,7 +117,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper (SM90+) / Blackwell (SM120+)
 
-Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.2), unzip it, then install the `.whl`
+Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.8), unzip it, then install the `.whl`
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 

@@ -39,6 +39,7 @@
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
+| **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -113,7 +114,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper（SM90+）/ Blackwell（SM120+）
 
-从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.2) 下载 wheel，解压后安装 `.whl` 包。
+从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.8) 下载 wheel，解压后安装 `.whl` 包。
 
 
 ### 🌐✨ API Server + ChatGPT风格内置网页
