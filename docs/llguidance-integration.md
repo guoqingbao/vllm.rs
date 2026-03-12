@@ -260,29 +260,6 @@ curl -sXPOST localhost:8000/v1/chat/completions \
   }'
 ```
 
-Alternative schema example:
-
-```bash
-curl -sXPOST localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "messages": [{"role":"user","content":"Generate a user profile"}],
-    "structured_outputs": {
-      "json": {
-        "type": "object",
-        "properties": {
-          "name": {"type": "string"},
-          "age": {"type": "integer", "minimum": 0, "maximum": 150},
-          "email": {"type": "string", "pattern": "^[a-z]+@[a-z]+\\.[a-z]+$"}
-        },
-        "required": ["name", "age", "email"],
-        "additionalProperties": false
-      }
-    },
-    "max_tokens": 500
-  }'
-```
-
 Expected behavior:
 - output is valid JSON
 - required fields are present
