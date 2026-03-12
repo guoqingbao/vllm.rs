@@ -1,5 +1,6 @@
 use crate::models::layers::distributed::{
-    kv_head_shard, Comm, ReplicatedLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    kv_head_shard, shard, Comm, MergedParallelColumnLinear, ReplicatedLinear,
+    TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::others::{rms_norm, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
@@ -7,14 +8,22 @@ use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
 use candle_core::{DType, Result, Tensor};
+use either::Either;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+enum QkvProjection {
+    Separate {
+        q_proj: TensorParallelColumnLinear,
+        k_proj: TensorParallelColumnLinear,
+        v_proj: TensorParallelColumnLinear,
+    },
+    Packed(MergedParallelColumnLinear),
+}
+
 pub struct Attention {
-    q_proj: TensorParallelColumnLinear,
-    k_proj: TensorParallelColumnLinear,
-    v_proj: TensorParallelColumnLinear,
+    qkv_proj: QkvProjection,
     o_proj: TensorParallelRowLinear,
     q_norm: Option<NormX>,
     k_norm: Option<NormX>,
@@ -29,6 +38,309 @@ pub struct Attention {
 }
 
 impl Attention {
+    fn normalize_sharded_2d(
+        t: Tensor,
+        shard: candle_nn::var_builder::Shard,
+        global_dim0: usize,
+        global_dim1: usize,
+        name: &str,
+    ) -> Result<Tensor> {
+        if shard.world_size <= 1 {
+            return Ok(t);
+        }
+        if shard.dim > 1 {
+            candle_core::bail!("unexpected shard dim {} for {}", shard.dim, name);
+        }
+        let (d0, d1) = t.dims2()?;
+        if shard.dim == 0 {
+            let local = global_dim0 / shard.world_size;
+            if d0 == local {
+                return Ok(t);
+            }
+            if d0 == global_dim0 {
+                return t.narrow(0, shard.rank * local, local)?.contiguous();
+            }
+            candle_core::bail!(
+                "unexpected {} shape ({}, {}), shard dim 0 expects local {} or global {}",
+                name,
+                d0,
+                d1,
+                local,
+                global_dim0
+            );
+        }
+
+        let local = global_dim1 / shard.world_size;
+        if d1 == local {
+            return Ok(t);
+        }
+        if d1 == global_dim1 {
+            return t.narrow(1, shard.rank * local, local)?.contiguous();
+        }
+        candle_core::bail!(
+            "unexpected {} shape ({}, {}), shard dim 1 expects local {} or global {}",
+            name,
+            d0,
+            d1,
+            local,
+            global_dim1
+        );
+    }
+
+    fn normalize_sharded_1d(
+        t: Tensor,
+        shard: candle_nn::var_builder::Shard,
+        global_dim: usize,
+        name: &str,
+    ) -> Result<Tensor> {
+        if shard.world_size <= 1 {
+            return Ok(t);
+        }
+        let d0 = t.dim(0)?;
+        let local = global_dim / shard.world_size;
+        if d0 == local {
+            return Ok(t);
+        }
+        if d0 == global_dim {
+            return t.narrow(0, shard.rank * local, local)?.contiguous();
+        }
+        candle_core::bail!(
+            "unexpected {} shape ({}), expects local {} or global {}",
+            name,
+            d0,
+            local,
+            global_dim
+        );
+    }
+
+    fn load_sharded_bias(
+        vb: &VarBuilderX,
+        out_dim: usize,
+        shard: candle_nn::var_builder::Shard,
+        dtype: DType,
+    ) -> Result<Option<Tensor>> {
+        let bias = match &vb.0 {
+            Either::Left(inner) => {
+                inner.get_with_hints_dtype((out_dim,), "bias", shard, DType::F32)
+            }
+            Either::Right(_) => return Ok(None),
+        };
+        let Ok(bias) = bias else {
+            return Ok(None);
+        };
+        let bias = Self::normalize_sharded_1d(bias, shard, out_dim, "bias")?;
+        if bias.dtype() != dtype {
+            Ok(Some(bias.to_dtype(dtype)?))
+        } else {
+            Ok(Some(bias))
+        }
+    }
+
+    fn try_load_sharded_fp8_weight_scale(
+        vb: &VarBuilderX,
+        out_dim: usize,
+        in_dim: usize,
+        shard: candle_nn::var_builder::Shard,
+        block_size: &[usize],
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        if !vb.has_key("weight_scale") && !vb.has_key("weight_scale_inv") {
+            return Ok(None);
+        }
+
+        let by = block_size[0];
+        let bx = block_size[1];
+        let scale_dim0 = out_dim.div_ceil(by);
+        let scale_dim1 = in_dim.div_ceil(bx);
+
+        let weight = match vb.get_with_hints_dtype((out_dim, in_dim), "weight", shard, DType::U8) {
+            Ok(weight) => weight,
+            Err(_) => return Ok(None),
+        };
+        let weight = Self::normalize_sharded_2d(weight, shard, out_dim, in_dim, "weight")?;
+
+        let weight_scale = match vb.get_with_hints_dtype(
+            (scale_dim0, scale_dim1),
+            "weight_scale",
+            shard,
+            DType::F32,
+        ) {
+            Ok(scale) => scale,
+            Err(_) => match vb.get_with_hints_dtype(
+                (scale_dim0, scale_dim1),
+                "weight_scale_inv",
+                shard,
+                DType::F32,
+            ) {
+                Ok(scale) => scale,
+                Err(_) => return Ok(None),
+            },
+        };
+        let weight_scale = Self::normalize_sharded_2d(
+            weight_scale,
+            shard,
+            scale_dim0,
+            scale_dim1,
+            "weight_scale",
+        )?;
+
+        Ok(Some((weight, weight_scale)))
+    }
+
+    fn try_load_packed_qkv(
+        vb: &VarBuilderX,
+        hidden_size: usize,
+        q_out_dim: usize,
+        kv_out_dim: usize,
+        attention_bias: bool,
+        comm: Rc<Comm>,
+        kv_shard: candle_nn::var_builder::Shard,
+        dtype: DType,
+        quant_cfg: &Option<crate::utils::config::QuantConfig>,
+        quant: &Option<String>,
+    ) -> Result<Option<QkvProjection>> {
+        if vb.is_qvar_builder() || quant.is_some() {
+            return Ok(None);
+        }
+
+        let q_shard = shard(0, comm.rank(), comm.world_size());
+        let q_vb = vb.pp("q_proj");
+        let k_vb = vb.pp("k_proj");
+        let v_vb = vb.pp("v_proj");
+
+        let is_fp8_quant = quant_cfg
+            .as_ref()
+            .map(|cfg| cfg.quant_method == "fp8")
+            .unwrap_or(false);
+        if let Some(cfg) = quant_cfg {
+            if cfg.quant_method != "fp8" {
+                return Ok(None);
+            }
+        }
+
+        if is_fp8_quant {
+            let Some(block_size) = quant_cfg
+                .as_ref()
+                .and_then(|cfg| cfg.weight_block_size.clone())
+            else {
+                candle_core::bail!("LnFp8: weight_block_size must be configured for packed qkv");
+            };
+            if block_size.len() != 2 {
+                candle_core::bail!("LnFp8: weight_block_size must have 2 elements");
+            }
+
+            let Some((q_weight, q_scale)) = Self::try_load_sharded_fp8_weight_scale(
+                &q_vb,
+                q_out_dim,
+                hidden_size,
+                q_shard,
+                &block_size,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some((k_weight, k_scale)) = Self::try_load_sharded_fp8_weight_scale(
+                &k_vb,
+                kv_out_dim,
+                hidden_size,
+                kv_shard,
+                &block_size,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some((v_weight, v_scale)) = Self::try_load_sharded_fp8_weight_scale(
+                &v_vb,
+                kv_out_dim,
+                hidden_size,
+                kv_shard,
+                &block_size,
+            )?
+            else {
+                return Ok(None);
+            };
+
+            let local_q = q_weight.dim(0)?;
+            let local_k = k_weight.dim(0)?;
+            let local_v = v_weight.dim(0)?;
+            let by = block_size[0];
+            let q_global_start = q_shard.rank * local_q;
+            let k_global_start = q_out_dim + kv_shard.rank * local_k;
+            let v_global_start = q_out_dim + kv_out_dim + kv_shard.rank * local_v;
+            if q_global_start % by != 0 || k_global_start % by != 0 || v_global_start % by != 0 {
+                return Ok(None);
+            }
+
+            let packed_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
+            let packed_scale = Tensor::cat(&[&q_scale, &k_scale, &v_scale], 0)?;
+            let packed_bias = if attention_bias {
+                let q_bias = Self::load_sharded_bias(&q_vb, q_out_dim, q_shard, dtype)?;
+                let k_bias = Self::load_sharded_bias(&k_vb, kv_out_dim, kv_shard, dtype)?;
+                let v_bias = Self::load_sharded_bias(&v_vb, kv_out_dim, kv_shard, dtype)?;
+                match (q_bias, k_bias, v_bias) {
+                    (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[&qb, &kb, &vb], 0)?),
+                    (None, None, None) => None,
+                    _ => return Ok(None),
+                }
+            } else {
+                None
+            };
+
+            #[cfg(feature = "cuda")]
+            let sm_version = attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?)
+                .unwrap_or(0) as usize;
+
+            #[cfg(not(feature = "cuda"))]
+            let sm_version = 0;
+
+            let merged = MergedParallelColumnLinear::from_packed_local_fp8(
+                packed_weight,
+                packed_scale,
+                packed_bias,
+                block_size,
+                sm_version,
+                vec![local_q, local_k, local_v],
+            )?;
+            return Ok(Some(QkvProjection::Packed(merged)));
+        }
+
+        if quant_cfg.is_some() {
+            return Ok(None);
+        }
+
+        let q_weight =
+            q_vb.get_with_hints_dtype((q_out_dim, hidden_size), "weight", q_shard, dtype)?;
+        let k_weight =
+            k_vb.get_with_hints_dtype((kv_out_dim, hidden_size), "weight", kv_shard, dtype)?;
+        let v_weight =
+            v_vb.get_with_hints_dtype((kv_out_dim, hidden_size), "weight", kv_shard, dtype)?;
+
+        let local_q = q_weight.dim(0)?;
+        let local_k = k_weight.dim(0)?;
+        let local_v = v_weight.dim(0)?;
+        let packed_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
+
+        let packed_bias = if attention_bias {
+            let q_bias = Self::load_sharded_bias(&q_vb, q_out_dim, q_shard, dtype)?;
+            let k_bias = Self::load_sharded_bias(&k_vb, kv_out_dim, kv_shard, dtype)?;
+            let v_bias = Self::load_sharded_bias(&v_vb, kv_out_dim, kv_shard, dtype)?;
+            match (q_bias, k_bias, v_bias) {
+                (Some(qb), Some(kb), Some(vb)) => Some(Tensor::cat(&[&qb, &kb, &vb], 0)?),
+                (None, None, None) => None,
+                _ => return Ok(None),
+            }
+        } else {
+            None
+        };
+
+        let merged = MergedParallelColumnLinear::from_packed_local(
+            packed_weight,
+            packed_bias,
+            vec![local_q, local_k, local_v],
+            &None,
+        )?;
+        Ok(Some(QkvProjection::Packed(merged)))
+    }
+
     pub fn new(
         vb: VarBuilderX,
         comm: Rc<Comm>,
@@ -99,54 +411,74 @@ impl Attention {
         let attention_heads = num_heads / world_size;
         let (kv_heads, kv_shard) = kv_head_shard(num_kv_heads, comm.rank(), world_size)?;
 
-        let q_proj = TensorParallelColumnLinear::load_with_hints(
+        let qkv_proj = if let Some(packed) = Self::try_load_packed_qkv(
+            &vb,
             hidden_size,
             q_out_dim,
+            num_kv_heads * head_dim,
             attention_bias,
-            if is_qvar_builder {
-                vb.pp(key_map["q_proj"])
-            } else {
-                vb.pp("q_proj")
-            },
             comm.clone(),
+            kv_shard,
+            dtype,
             &config.quantization_config,
             &config.quant,
-            dtype,
-        )?;
-        let k_proj = TensorParallelColumnLinear::load_with_shard(
-            hidden_size,
-            num_kv_heads * head_dim,
-            attention_bias,
-            if is_qvar_builder {
-                vb.pp(key_map["k_proj"])
-            } else {
-                vb.pp("k_proj")
-            },
-            kv_shard,
-            &config.quantization_config,
-            &config.quant,
-            dtype,
-        )?;
-        //v_proj requires higher precision format
-        let q8_0_qunat = Some("q8_0".to_string());
-        let v_proj = TensorParallelColumnLinear::load_with_shard(
-            hidden_size,
-            num_kv_heads * head_dim,
-            attention_bias,
-            if is_qvar_builder {
-                vb.pp(key_map["v_proj"])
-            } else {
-                vb.pp("v_proj")
-            },
-            kv_shard,
-            &config.quantization_config,
-            if config.quant.is_some() && config.quantization_config.is_none() {
-                &q8_0_qunat
-            } else {
-                &None
-            },
-            dtype,
-        )?;
+        )? {
+            packed
+        } else {
+            let q_proj = TensorParallelColumnLinear::load_with_hints(
+                hidden_size,
+                q_out_dim,
+                attention_bias,
+                if is_qvar_builder {
+                    vb.pp(key_map["q_proj"])
+                } else {
+                    vb.pp("q_proj")
+                },
+                comm.clone(),
+                &config.quantization_config,
+                &config.quant,
+                dtype,
+            )?;
+            let k_proj = TensorParallelColumnLinear::load_with_shard(
+                hidden_size,
+                num_kv_heads * head_dim,
+                attention_bias,
+                if is_qvar_builder {
+                    vb.pp(key_map["k_proj"])
+                } else {
+                    vb.pp("k_proj")
+                },
+                kv_shard,
+                &config.quantization_config,
+                &config.quant,
+                dtype,
+            )?;
+            // v_proj requires higher precision format
+            let q8_0_qunat = Some("q8_0".to_string());
+            let v_proj = TensorParallelColumnLinear::load_with_shard(
+                hidden_size,
+                num_kv_heads * head_dim,
+                attention_bias,
+                if is_qvar_builder {
+                    vb.pp(key_map["v_proj"])
+                } else {
+                    vb.pp("v_proj")
+                },
+                kv_shard,
+                &config.quantization_config,
+                if config.quant.is_some() && config.quantization_config.is_none() {
+                    &q8_0_qunat
+                } else {
+                    &None
+                },
+                dtype,
+            )?;
+            QkvProjection::Separate {
+                q_proj,
+                k_proj,
+                v_proj,
+            }
+        };
 
         let o_proj = TensorParallelRowLinear::load_with_hints(
             num_heads * head_dim,
@@ -205,9 +537,7 @@ impl Attention {
         };
 
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv_proj,
             o_proj,
             q_norm,
             k_norm,
@@ -242,9 +572,27 @@ impl Attention {
     ) -> Result<Tensor> {
         let (seq_len, _) = xs.dims2()?;
 
-        let q_raw = self.q_proj.forward(xs)?;
-        let k = self.k_proj.forward(xs)?;
-        let v = self.v_proj.forward(xs)?;
+        let (q_raw, k, v) = match &self.qkv_proj {
+            QkvProjection::Separate {
+                q_proj,
+                k_proj,
+                v_proj,
+            } => (
+                q_proj.forward(xs)?,
+                k_proj.forward(xs)?,
+                v_proj.forward(xs)?,
+            ),
+            QkvProjection::Packed(qkv_proj) => {
+                let qkv = qkv_proj.forward(xs)?;
+                if qkv.len() != 3 {
+                    candle_core::bail!(
+                        "Expected 3 outputs from packed qkv projection, got {}",
+                        qkv.len()
+                    );
+                }
+                (qkv[0].clone(), qkv[1].clone(), qkv[2].clone())
+            }
+        };
 
         let local_q_dim = self.num_heads * self.head_dim;
         let (q_linear, gate) = if self.attn_output_gate {

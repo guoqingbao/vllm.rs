@@ -83,9 +83,3 @@ goose
 # Log into files (in folder ./log)
 export VLLM_RS_CHAT_LOGGER=1
 ```
-
-2. Use custom tool prompt (for example, to guide tool use)
-
-```shell
-./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache --tool-prompt ./example/tool_prompt.json
-```

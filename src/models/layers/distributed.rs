@@ -1,5 +1,5 @@
 use crate::models::layers::linear::{
-    linear_b_x as linear_b, linear_no_bias_x as linear, LinearX as Linear,
+    linear_b_x as linear_b, linear_no_bias_x as linear, LinearX as Linear, LnFp8,
 };
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
@@ -76,6 +76,58 @@ impl MergedParallelColumnLinear {
             output_splits: None,
         }
     }
+
+    pub fn from_packed_local(
+        weight: Tensor,
+        bias: Option<Tensor>,
+        output_splits: Vec<usize>,
+        quant: &Option<String>,
+    ) -> Result<Self> {
+        let linear = Linear::new(weight, None, quant)?;
+        let tp_linear = TensorParallelColumnLinear { linear };
+        Ok(Self {
+            linears: vec![tp_linear],
+            biases: vec![bias],
+            output_splits: Some(output_splits),
+        })
+    }
+
+    pub fn from_packed_local_fp8(
+        weight: Tensor,
+        weight_scale: Tensor,
+        bias: Option<Tensor>,
+        weight_block_size: Vec<usize>,
+        sm_version: usize,
+        output_splits: Vec<usize>,
+    ) -> Result<Self> {
+        #[cfg(feature = "cutlass")]
+        let weight_scale_cutlass = if sm_version >= 100 {
+            Some(weight_scale.t()?)
+        } else if sm_version >= 90 {
+            Some(weight_scale.t()?.contiguous()?)
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "cutlass"))]
+        let weight_scale_cutlass = None;
+
+        let linear = Linear::LnFp8(LnFp8 {
+            weight,
+            weight_scale,
+            weight_scale_cutlass,
+            bias: None,
+            weight_block_size,
+            sm_version,
+        });
+        let tp_linear = TensorParallelColumnLinear { linear };
+        Ok(Self {
+            linears: vec![tp_linear],
+            biases: vec![bias],
+            output_splits: Some(output_splits),
+        })
+    }
+
     pub fn forward(&self, x: &Tensor) -> Result<Vec<Tensor>> {
         if let Some(output_splits) = &self.output_splits {
             if self.linears.len() != 1 {
