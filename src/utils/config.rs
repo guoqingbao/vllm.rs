@@ -5,28 +5,169 @@ use crate::utils::guidance::ReasoningEffort;
 use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
-use serde::de::Error;
-use serde::{Deserialize, Serialize};
+use serde::de::value::SeqAccessDeserializer;
+use serde::de::{Deserializer, Visitor};
+use serde::ser::Error as _;
+use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
+use std::fmt;
 
-#[cfg(not(feature = "python"))]
-impl SamplingParams {
-    /// Convert grammar to constraint for GuidanceState construction
-    /// Prioritizes constraint field, falls back to grammar field
-    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
-        self.grammar.clone()
+#[derive(Debug, Clone)]
+pub enum EosTokenId {
+    Single(u32),
+    Multiple(Vec<u32>),
+}
+
+impl<'de> Deserialize<'de> for EosTokenId {
+    fn deserialize<D>(deserializer: D) -> Result<EosTokenId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            // For JSON: deserialize as "untagged" using a visitor
+            struct EosTokenIdVisitor;
+
+            impl<'de> Visitor<'de> for EosTokenIdVisitor {
+                type Value = EosTokenId;
+
+                fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                    formatter.write_str("a u32 or a sequence of u32s")
+                }
+
+                // Handle a single number
+                fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                    Ok(EosTokenId::Single(v as u32))
+                }
+
+                // Handle an array of numbers
+                fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+                where
+                    A: serde::de::SeqAccess<'de>,
+                {
+                    let vals = Vec::<u32>::deserialize(SeqAccessDeserializer::new(seq))?;
+                    Ok(EosTokenId::Multiple(vals))
+                }
+            }
+
+            deserializer.deserialize_any(EosTokenIdVisitor)
+        } else {
+            // For Bincode: deserialize as "tagged"
+            let bincode_id = BincodeEosTokenId::deserialize(deserializer)?;
+            let id = match bincode_id {
+                BincodeEosTokenId::Single(v) => EosTokenId::Single(v),
+                BincodeEosTokenId::Multiple(v) => EosTokenId::Multiple(v),
+            };
+            Ok(id)
+        }
     }
 }
 
-#[cfg(feature = "python")]
-impl SamplingParams {
-    /// Convert grammar to constraint for GuidanceState construction
-    pub fn to_constraint(&self) -> Option<TopLevelGrammar> {
-        self.grammar.clone()
+impl Serialize for EosTokenId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if serializer.is_human_readable() {
+            // For JSON: serialize as "untagged"
+            match self {
+                EosTokenId::Single(v) => v.serialize(serializer),
+                EosTokenId::Multiple(v) => v.serialize(serializer),
+            }
+        } else {
+            // For Bincode: serialize as "tagged"
+            let bincode_id = match self {
+                EosTokenId::Single(v) => BincodeEosTokenId::Single(*v),
+                EosTokenId::Multiple(v) => BincodeEosTokenId::Multiple(v.clone()),
+            };
+            bincode_id.serialize(serializer)
+        }
     }
 }
 
-// EosTokenId enum has been replaced with direct Vec<u32> for simplicity
+impl EosTokenId {
+    /// Merge `other` into `self`, returning the combined token set.
+    /// - Single + Single => Multiple([a, b])
+    /// - Single + Multiple => Multiple([a, ...])
+    /// - Multiple + Single => Multiple([... , b])
+    /// - Multiple + Multiple => Multiple([... , ...])
+    pub fn merge(self, other: EosTokenId) -> EosTokenId {
+        let mut out = self.into_vec();
+        out.extend(other.into_vec());
+        EosTokenId::Multiple(out)
+    }
+
+    /// Like merge, but de-duplicates while preserving first-seen order.
+    pub fn merge_dedup(self, other: EosTokenId) -> EosTokenId {
+        use std::collections::HashSet;
+
+        let mut seen = HashSet::<u32>::new();
+        let mut out = Vec::<u32>::new();
+
+        for id in self.into_vec().into_iter().chain(other.into_vec()) {
+            if seen.insert(id) {
+                out.push(id);
+            }
+        }
+        EosTokenId::Multiple(out)
+    }
+
+    pub fn to_vec(&self) -> Vec<u32> {
+        match self {
+            EosTokenId::Single(x) => vec![*x],
+            EosTokenId::Multiple(v) => v.clone(),
+        }
+    }
+
+    fn into_vec(self) -> Vec<u32> {
+        match self {
+            EosTokenId::Single(x) => vec![x],
+            EosTokenId::Multiple(v) => v,
+        }
+    }
+}
+
+fn serialize_optional_grammar<S>(
+    grammar: &Option<TopLevelGrammar>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        grammar.serialize(serializer)
+    } else {
+        let encoded = grammar
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(S::Error::custom)?;
+        encoded.serialize(serializer)
+    }
+}
+
+fn deserialize_optional_grammar<'de, D>(
+    deserializer: D,
+) -> Result<Option<TopLevelGrammar>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if deserializer.is_human_readable() {
+        Option::<TopLevelGrammar>::deserialize(deserializer)
+    } else {
+        let encoded = Option::<String>::deserialize(deserializer)?;
+        encoded
+            .map(|json| serde_json::from_str(&json).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
+// To make the "tagged" logic work for bincode, we need a separate
+// definition of the enum with derived traits. We keep it private inside this module.
+#[derive(Serialize, Deserialize)]
+enum BincodeEosTokenId {
+    Single(u32),
+    Multiple(Vec<u32>),
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MoEConfig {
@@ -91,8 +232,7 @@ pub struct Config {
     pub final_logit_softcapping: Option<f64>,
     pub tie_word_embeddings: Option<bool>,
     pub bos_token_id: Option<usize>,
-    #[serde(deserialize_with = "deserialize_eos_token_id")]
-    pub eos_token_id: Option<Vec<u32>>,
+    pub eos_token_id: Option<EosTokenId>,
     pub use_sliding_window: Option<bool>,
     pub sliding_window: Option<usize>,
     pub max_window_layers: Option<usize>,
@@ -123,55 +263,10 @@ impl Config {
             (None, None) => None,
             (None, Some(e)) => Some(e.clone()),
             (Some(e), None) => Some(e),
-            (Some(e), Some(other)) => {
-                let mut merged = e.clone();
-                merged.extend(other.clone());
-                Some(merged)
-            }
+            (Some(e), Some(other)) => Some(e.merge(other.clone())),
         };
     }
 }
-
-// Custom deserializer for eos_token_id to handle both integer and array formats
-fn deserialize_eos_token_id<'de, D>(deserializer: D) -> Result<Option<Vec<u32>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    match Option::<serde_json::Value>::deserialize(deserializer)? {
-        Some(serde_json::Value::Number(n)) => {
-            if let Some(id) = n.as_u64() {
-                Ok(Some(vec![id as u32]))
-            } else {
-                Err(serde::de::Error::custom(
-                    "eos_token_id must be a positive integer",
-                ))
-            }
-        }
-        Some(serde_json::Value::Array(arr)) => {
-            let ids: Result<Vec<u32>, D::Error> = arr
-                .into_iter()
-                .map(|v| {
-                    if let Some(id) = v.as_u64() {
-                        Ok(id as u32)
-                    } else {
-                        Err(D::Error::custom(
-                            "eos_token_id array must contain only unsigned integers",
-                        ))
-                    }
-                })
-                .collect();
-            Ok(Some(ids?))
-        }
-        Some(serde_json::Value::Null) => Ok(None),
-        Some(v) => Err(serde::de::Error::custom(format!(
-            "Expected integer or array for eos_token_id, got {:?}",
-            v
-        ))),
-        None => Ok(None),
-    }
-}
-
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EngineConfig {
@@ -214,8 +309,6 @@ pub struct EngineConfig {
     pub tool_prompt_template: Option<String>,
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
-    /// Allow client-submitted constraints via HTTP API
-    pub allow_constraint_api: bool,
     /// Whether to automatically build LLG grammar from tools
     pub enable_tool_grammar: bool,
 }
@@ -296,8 +389,6 @@ pub struct EngineConfig {
     #[pyo3(get, set)]
     pub pd_client_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
-    pub allow_constraint_api: bool,
-    #[pyo3(get, set)]
     pub enable_tool_grammar: bool,
 }
 
@@ -333,7 +424,6 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
-        allow_constraint_api: bool,
         enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
@@ -385,7 +475,6 @@ impl EngineConfig {
             tool_prompt_template,
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
-            allow_constraint_api,
             enable_tool_grammar,
         }
     }
@@ -414,7 +503,8 @@ pub struct SamplingParams {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
-    // stop_token_ids removed - use SpecialTokens for stop detection
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>, // enable reasoning
     /// Tool mode for tool call handling.
@@ -423,7 +513,13 @@ pub struct SamplingParams {
     pub mcp_mode: Option<bool>,
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
+    #[serde(
+        serialize_with = "serialize_optional_grammar",
+        deserialize_with = "deserialize_optional_grammar"
+    )]
     pub grammar: Option<TopLevelGrammar>,
+    #[serde(default)]
+    pub grammar_json: Option<String>,
     /// Reasoning effort level for OpenAI-compatible reasoning API
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
@@ -452,15 +548,21 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(default)]
     pub stop_sequences: Option<Vec<String>>,
-    // stop_token_ids removed - use SpecialTokens for stop detection
+    #[serde(skip)]
+    pub stop_token_ids: Option<Vec<Vec<u32>>>,
     /// Tool mode for tool call handling.
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[pyo3(get, set)]
     pub mcp_mode: Option<bool>,
     #[pyo3(get, set)]
+    #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
     /// Grammar constraint as TopLevelGrammar for RPC serialization
     #[serde(default)]
+    #[serde(
+        serialize_with = "serialize_optional_grammar",
+        deserialize_with = "deserialize_optional_grammar"
+    )]
     pub grammar: Option<TopLevelGrammar>,
     /// Grammar constraint as JSON string for Python API
     #[pyo3(get, set)]
@@ -495,8 +597,10 @@ impl SamplingParams {
             presence_penalty,
             mcp_mode: None,
             stop_sequences: None,
-            grammar: None,
+            stop_token_ids: None,
             thinking,
+            grammar: None,
+            grammar_json: None,
             reasoning_effort,
         }
     }
@@ -513,14 +617,15 @@ impl SamplingParams {
             presence_penalty: None,
             mcp_mode: None,
             stop_sequences: None,
-            grammar: None,
+            stop_token_ids: None,
             thinking: None,
+            grammar: None,
+            grammar_json: None,
             reasoning_effort: None,
         }
     }
 }
 
-#[cfg(not(feature = "python"))]
 impl Default for SamplingParams {
     fn default() -> Self {
         Self {
@@ -534,27 +639,7 @@ impl Default for SamplingParams {
             presence_penalty: None,
             mcp_mode: None,
             stop_sequences: None,
-            grammar: None,
-            thinking: None,
-            reasoning_effort: None,
-        }
-    }
-}
-
-#[cfg(feature = "python")]
-impl Default for SamplingParams {
-    fn default() -> Self {
-        Self {
-            temperature: None,
-            max_tokens: Some(16384),
-            ignore_eos: false,
-            top_k: None,
-            top_p: None,
-            session_id: None,
-            frequency_penalty: None,
-            presence_penalty: None,
-            mcp_mode: None,
-            stop_sequences: None,
+            stop_token_ids: None,
             thinking: None,
             grammar: None,
             grammar_json: None,
@@ -590,8 +675,8 @@ pub struct GenerationConfig {
     /// Randomness of sampling.
     /// rec. default = 1
     pub temperature: Option<f32>,
-    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.
-    /// rec. default = 1
+    /// Cumulative prob of the top tokens to consider, must be in (0, 1]. Set 1 to consider all toks.  
+    /// rec. default = 1    
     pub top_p: Option<f32>,
     /// Control the number of top tokens to consider, set -1 to consider all.
     /// rec. default = -1
@@ -601,7 +686,7 @@ pub struct GenerationConfig {
     pub presence_penalty: Option<f32>,
 
     pub bos_token_id: Option<usize>,
-    pub eos_token_id: Option<Vec<u32>>,
+    pub eos_token_id: Option<EosTokenId>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]

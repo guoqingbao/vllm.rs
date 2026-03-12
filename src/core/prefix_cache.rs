@@ -323,37 +323,6 @@ impl PrefixCache {
         self.access_counter
     }
 
-    /// Remove a hash from the cache and update parent/children bookkeeping
-    /// Returns the removed block_id if found
-    pub fn remove_hash(&mut self, hash: &u64) -> Option<usize> {
-        let entry = self.entries.remove(hash)?;
-        let block_id = entry.block_id;
-
-        // Update parent's children count
-        if let Some(parent_hash) = entry.parent {
-            if let Some(parent_entry) = self.entries.get_mut(&parent_hash) {
-                parent_entry.children -= 1;
-                if parent_entry.children == 0 {
-                    self.leaf_set.insert(parent_hash);
-                    self.touch_leaf(parent_hash);
-                }
-            }
-        }
-
-        // Remove from leaf set
-        self.leaf_set.remove(&hash);
-
-        Some(block_id)
-    }
-
-    /// Find the hash associated with a block_id
-    pub fn hash_for_block(&self, block_id: usize) -> Option<u64> {
-        self.entries
-            .iter()
-            .find(|(_, entry)| entry.block_id == block_id)
-            .map(|(hash, _)| *hash)
-    }
-
     fn hash_block(parent_hash: u64, tokens: &[u32]) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         parent_hash.hash(&mut hasher);

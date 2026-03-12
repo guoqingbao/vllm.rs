@@ -201,11 +201,6 @@ pub fn build_reasoning_grammar(
     reasoning_effort: ReasoningEffort,
     special_tokens: &SpecialTokens,
 ) -> TopLevelGrammar {
-    crate::log_debug!(
-        "[llg] build_reasoning_grammar() called with effort={:?}",
-        reasoning_effort
-    );
-
     if reasoning_effort == ReasoningEffort::None {
         return base_grammar;
     }
@@ -223,10 +218,6 @@ pub fn build_reasoning_grammar(
 
     let start_id = reasoning_start_ids[0];
     let end_id = reasoning_end_ids[0];
-    crate::log_info!(
-        "[llg] build_reasoning_grammar() adding reasoning block with effort={:?}",
-        reasoning_effort
-    );
     let reasoning_lark = thinking_grammar_with_reasoning_block(start_id, end_id, None);
     let reasoning_gram = TopLevelGrammar::from_lark(reasoning_lark);
 

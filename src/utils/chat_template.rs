@@ -1,5 +1,4 @@
 use crate::tools::Tool;
-use crate::utils::special_tokens::SpecialTokens;
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
@@ -130,11 +129,11 @@ pub struct ChatTemplate {
 
 impl ChatTemplate {
     pub fn collect_escape_tokens(tokenizer: &Tokenizer, tool_markers: &[&str]) -> Vec<String> {
-        let special_tokens = SpecialTokens::new(tokenizer);
-        let mut tokens = special_tokens
-            .all_special()
-            .into_iter()
-            .map(|t| t.string())
+        let mut tokens = tokenizer
+            .get_added_tokens_decoder()
+            .into_values()
+            .filter(|added| added.special)
+            .map(|added| added.content)
             .collect::<Vec<_>>();
 
         for marker in tool_markers {
@@ -225,39 +224,6 @@ impl ChatTemplate {
 
     pub fn escape_text(&self, content: &str) -> String {
         escape_special_tokens_in_text(content, &self.escape_tokens, &self.preserve_tokens)
-    }
-
-    pub fn supports_tools(&self) -> bool {
-        let Some(template) = &self.chat_template else {
-            return false;
-        };
-        let lower = template.to_lowercase();
-        lower.contains("tools")
-            || lower.contains("tool_calls")
-            || lower.contains("[available_tools]")
-            || lower.contains("<tools")
-            || lower.contains("[tool_calls]")
-            || lower.contains("<‌tool_call>")
-    }
-    /// Impregnate template with pad token anchors for XML end tags
-    /// Uses pad tokens from SpecialTokens::get_xml_anchor_pad_tokens()
-    /// Replaces </function> with </function> <pad_id> and </parameter> with </parameter> <pad_id>
-    pub fn impregnate_with_anchors(&mut self, pad_ids: &[u32]) {
-        let Some(template) = &mut self.chat_template else {
-            return;
-        };
-
-        if pad_ids.len() >= 2 {
-            // Use pad_ids[0] for </function> anchor
-            // Use pad_ids[1] for </parameter> anchor
-            let func_anchor = format!("<{}>", pad_ids[0]);
-            let param_anchor = format!("<{}>", pad_ids[1]);
-
-            // Replace </function> with </function> <pad_id>
-            *template = template.replace("</function>", &format!("</function> {}", func_anchor));
-            // Replace </parameter> with </parameter> <pad_id>
-            *template = template.replace("</parameter>", &format!("</parameter> {}", param_anchor));
-        }
     }
 
     #[allow(dead_code)]

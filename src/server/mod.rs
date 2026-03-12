@@ -1,5 +1,6 @@
 // src/server/mod.rs
 use clap::Parser;
+use llguidance::api::TopLevelGrammar;
 use serde::{Deserialize, Serialize};
 pub mod claude_server;
 pub mod logger;
@@ -7,16 +8,19 @@ pub mod parser;
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
+use crate::server::parser::ToolConfig;
 use crate::server::streaming::Streamer;
 use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
+use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
-use crate::utils::config::EngineConfig;
-use crate::utils::guidance::TopLevelGrammarExt;
+use crate::utils::config::{EngineConfig, SamplingParams};
+use crate::utils::guidance::{compose_grammars, GuidanceTokens, TopLevelGrammarExt};
 use crate::utils::image::{
     compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
     ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
 };
+use crate::utils::reasoning::ReasoningEffort;
 use axum::http::{self, StatusCode};
 use axum::response::{IntoResponse, Sse};
 use axum::routing::{get, post};
@@ -33,6 +37,26 @@ use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StopSequences {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_stop_sequences<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<StopSequences>::deserialize(deserializer)?;
+    Ok(value.map(|stop| match stop {
+        StopSequences::One(single) => vec![single],
+        StopSequences::Many(many) => many,
+    }))
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
@@ -45,7 +69,11 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
-    #[serde(default, alias = "stop_sequences")]
+    #[serde(
+        default,
+        alias = "stop_sequences",
+        deserialize_with = "deserialize_stop_sequences"
+    )]
     pub stop: Option<Vec<String>>,
     pub stream: Option<bool>,
     pub session_id: Option<String>,
@@ -172,8 +200,6 @@ pub struct ExtraBody {
 pub fn grammar_fragment_from_structured_outputs(
     structured: &StructuredOutputs,
 ) -> Result<Option<llguidance::api::TopLevelGrammar>> {
-    crate::log_debug!("[llg] grammar_fragment_from_structured_outputs() called");
-
     let mut selected: Option<llguidance::api::TopLevelGrammar> = None;
     let mut constraint_count = 0;
 
@@ -184,7 +210,6 @@ pub fn grammar_fragment_from_structured_outputs(
                 crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
                 return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
             }
-            crate::log_debug!("[llg] Building choice grammar from: {:?}", choice);
             let choice_gram = crate::tools::schema::build_choice_lark_grammar(choice)
                 .map_err(|e| candle_core::Error::msg(e))?;
             selected = Some(choice_gram);
@@ -197,7 +222,6 @@ pub fn grammar_fragment_from_structured_outputs(
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        crate::log_debug!("[llg] Building regex grammar: {}", regex);
         let regex_gram = TopLevelGrammarExt::from_regex_ascii(regex);
         selected = Some(regex_gram);
     }
@@ -208,7 +232,6 @@ pub fn grammar_fragment_from_structured_outputs(
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        crate::log_debug!("[llg] Building JSON schema grammar");
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(schema);
         let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
             .map_err(|e| candle_core::Error::msg(e.to_string()))?;
@@ -221,7 +244,6 @@ pub fn grammar_fragment_from_structured_outputs(
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        crate::log_debug!("[llg] Using Lark grammar from structured_outputs.grammar");
         let lark_gram = TopLevelGrammarExt::from_lark_utf8(grammar);
         selected = Some(lark_gram);
     }
@@ -232,7 +254,6 @@ pub fn grammar_fragment_from_structured_outputs(
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        crate::log_debug!("[llg] Building tool call grammar from structural_tag");
         let (start, end, schema) = crate::tools::schema::parse_structural_tag(tag)
             .map_err(|e| candle_core::Error::msg(e))?;
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
@@ -254,21 +275,12 @@ pub fn grammar_fragment_from_structured_outputs(
         return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
     }
 
-    crate::log_info!(
-        "[llg] grammar_fragment_from_structured_outputs() completed with grammar: {:?}",
-        selected.is_some()
-    );
     Ok(selected)
 }
 
 pub fn grammar_fragment_from_response_format(
     response_format: &ResponseFormat,
 ) -> Result<Option<llguidance::api::TopLevelGrammar>> {
-    crate::log_debug!(
-        "[llg] grammar_fragment_from_response_format() called with type: {}",
-        response_format.format_type
-    );
-
     match response_format.format_type.as_str() {
         "json_schema" => {
             let Some(schema) = response_format.json_schema.as_ref() else {
@@ -279,26 +291,217 @@ pub fn grammar_fragment_from_response_format(
                     "response_format.json_schema is required",
                 ));
             };
-            crate::log_debug!("[llg] Building JSON schema grammar from response_format");
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
             let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
                 .map_err(|e| candle_core::Error::msg(e.to_string()))?;
-            crate::log_info!(
-                "[llg] grammar_fragment_from_response_format() completed with grammar"
-            );
+            Ok(Some(json_gram))
+        }
+        "json_object" => {
+            let json_gram = TopLevelGrammarExt::from_json_schema_utf8(json!({
+                "type": "object"
+            }))
+            .map_err(|e| candle_core::Error::msg(e.to_string()))?;
             Ok(Some(json_gram))
         }
         other => {
             crate::log_error!(
-                "[llg] Unsupported response_format type '{}'; only 'json_schema' is supported",
+                "[llg] Unsupported response_format type '{}'; only 'json_schema' and 'json_object' are supported",
                 other
             );
             Err(candle_core::Error::msg(format!(
-                "Unsupported response_format type '{}'; only 'json_schema' is supported",
+                "Unsupported response_format type '{}'; only 'json_schema' and 'json_object' are supported",
                 other
             )))
         }
     }
+}
+
+fn structured_outputs_kind(structured: &StructuredOutputs) -> &'static str {
+    if structured
+        .choice
+        .as_ref()
+        .is_some_and(|choice| !choice.is_empty())
+    {
+        "choice"
+    } else if structured.regex.is_some() {
+        "regex"
+    } else if structured.json.is_some() {
+        "json"
+    } else if structured.grammar.is_some() {
+        "grammar"
+    } else if structured.structural_tag.is_some() {
+        "structural_tag"
+    } else {
+        "unknown"
+    }
+}
+
+pub fn collect_openai_constraint_grammar(
+    request: &ChatCompletionRequest,
+) -> Result<Option<TopLevelGrammar>> {
+    let mut selected: Option<TopLevelGrammar> = None;
+
+    let mut try_set = |grammar: TopLevelGrammar, source: &str, kind: &str| -> Result<()> {
+        if selected.is_some() {
+            return Err(candle_core::Error::msg(
+                "only one of structured_outputs, response_format, or constraint may be set",
+            ));
+        }
+        selected = Some(grammar);
+        crate::log_info!(
+            "[llg] Request constraint selected: source={} type={}",
+            source,
+            kind
+        );
+        Ok(())
+    };
+
+    if let Some(structured) = request.structured_outputs.as_ref().or_else(|| {
+        request
+            .extra_body
+            .as_ref()
+            .and_then(|body| body.structured_outputs.as_ref())
+    }) {
+        if let Some(grammar) = grammar_fragment_from_structured_outputs(structured)? {
+            try_set(
+                grammar,
+                "structured_outputs",
+                structured_outputs_kind(structured),
+            )?;
+        }
+    }
+
+    if let Some(response_format) = request.response_format.as_ref() {
+        if let Some(grammar) = grammar_fragment_from_response_format(response_format)? {
+            try_set(
+                grammar,
+                "response_format",
+                response_format.format_type.as_str(),
+            )?;
+        }
+    }
+
+    if let Some(grammar_str) = request.constraint.as_ref() {
+        let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
+        let grammar = match constraint_type {
+            "regex" => TopLevelGrammarExt::from_regex_ascii(grammar_str),
+            "lark" => TopLevelGrammarExt::from_lark_utf8(grammar_str),
+            "json_schema" | "json" => {
+                let value: serde_json::Value =
+                    serde_json::from_str(grammar_str).map_err(candle_core::Error::wrap)?;
+                let value = crate::tools::schema::sanitize_schema_for_llguidance(&value);
+                TopLevelGrammarExt::from_json_schema_utf8(value)
+                    .map_err(candle_core::Error::wrap)?
+            }
+            other => {
+                return Err(candle_core::Error::msg(format!(
+                    "unknown constraint_type '{}'",
+                    other
+                )));
+            }
+        };
+        try_set(grammar, "constraint", constraint_type)?;
+    }
+
+    Ok(selected)
+}
+
+pub fn build_guided_decoding_grammar(
+    guidance_tokens: &GuidanceTokens,
+    tool_config: &ToolConfig,
+    tools: &[Tool],
+    tool_parser_name: &str,
+    enable_tool_grammar: bool,
+    constraint_grammar: Option<TopLevelGrammar>,
+    tool_choice_required: bool,
+    forced_tool_name: Option<String>,
+    max_tokens: usize,
+    reasoning_effort: Option<ReasoningEffort>,
+) -> Option<TopLevelGrammar> {
+    let constraint_enabled = constraint_grammar.is_some();
+    let reasoning_enabled = reasoning_effort
+        .as_ref()
+        .is_some_and(|effort| *effort != ReasoningEffort::None);
+    let tool_grammar_kind = if enable_tool_grammar && !tools.is_empty() {
+        Some(if tool_parser_name == "qwen_coder" {
+            "xml"
+        } else {
+            "json"
+        })
+    } else {
+        None
+    };
+    let tool_grammar = if enable_tool_grammar && !tools.is_empty() {
+        let builder = ToolGrammarBuilder::new().tools(tools);
+        let grammar = if tool_parser_name == "qwen_coder" {
+            builder
+                .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                .build_xml()
+        } else {
+            builder
+                .start_tag(&tool_config.start_token_str)
+                .end_tag(&tool_config.end_token_str)
+                .start_is_special(tool_config.start_is_special)
+                .end_is_special(tool_config.end_is_special)
+                .start_token_ids(Some(tool_config.start_token_ids.clone()))
+                .end_token_ids(Some(tool_config.end_token_ids.clone()))
+                .build_json()
+        };
+        Some(grammar)
+    } else {
+        None
+    };
+
+    if constraint_grammar.is_none() && tool_grammar.is_none() && !reasoning_enabled {
+        return None;
+    }
+
+    crate::log_info!(
+        "[llg] Guided decoding enabled: constraint={} tool_grammar={} tool_format={} parser={} max_tokens={} reasoning={}",
+        constraint_enabled,
+        tool_grammar.is_some(),
+        tool_grammar_kind.unwrap_or("none"),
+        tool_parser_name,
+        max_tokens,
+        reasoning_effort
+            .as_ref()
+            .map(|effort| format!("{effort:?}"))
+            .unwrap_or_else(|| "none".to_string())
+    );
+
+    Some(compose_grammars(
+        constraint_grammar.into_iter().collect(),
+        tool_grammar,
+        !tools.is_empty(),
+        tool_choice_required,
+        forced_tool_name,
+        Some(max_tokens),
+        guidance_tokens,
+        reasoning_effort,
+    ))
+}
+
+pub fn normalize_reasoning_controls(params: &mut SamplingParams, guidance_tokens: &GuidanceTokens) {
+    let reasoning_enabled = params
+        .reasoning_effort
+        .as_ref()
+        .is_some_and(|effort| *effort != ReasoningEffort::None);
+    if !reasoning_enabled {
+        return;
+    }
+
+    let has_reasoning_tokens = !guidance_tokens.reasoning_start_ids.is_empty()
+        && !guidance_tokens.reasoning_end_ids.is_empty();
+    if !has_reasoning_tokens {
+        crate::log_warn!(
+            "[llg] reasoning_effort requested but current model/tokenizer does not expose reasoning tokens; disabling reasoning grammar"
+        );
+        params.reasoning_effort = None;
+        return;
+    }
+
+    params.thinking = Some(true);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -803,10 +1006,6 @@ pub struct Args {
     /// MCP server arguments (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = None)]
     pub mcp_args: Option<Vec<String>>,
-
-    /// Allow client-submitted constraints via HTTP API
-    #[arg(long, default_value = "false")]
-    pub allow_constraint_api: bool,
 
     /// Whether to automatically build LLG grammar from tools
     #[arg(long, default_value = "false")]
@@ -1469,6 +1668,34 @@ mod tests {
     }
 
     #[test]
+    fn test_chat_completion_stop_parsing() {
+        let json = r#"{"messages":[{"role":"user","content":"hi"}],"stop":["END"]}"#;
+        let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.stop, Some(vec!["END".to_string()]));
+    }
+
+    #[test]
+    fn test_chat_completion_stop_string_parsing() {
+        let json = r#"{"messages":[{"role":"user","content":"hi"}],"stop":"END"}"#;
+        let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.stop, Some(vec!["END".to_string()]));
+    }
+
+    #[test]
+    fn test_collect_openai_constraint_grammar_rejects_multiple_sources() {
+        let request: ChatCompletionRequest = serde_json::from_str(
+            r#"{
+                "messages":[{"role":"user","content":"hi"}],
+                "structured_outputs":{"choice":["a"]},
+                "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object"}}}
+            }"#,
+        )
+        .unwrap();
+        let result = collect_openai_constraint_grammar(&request);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_grammar_fragment_from_structured_outputs_choice() {
         let so = StructuredOutputs {
             choice: Some(vec!["option1".to_string(), "option2".to_string()]),
@@ -1566,6 +1793,17 @@ mod tests {
     }
 
     #[test]
+    fn test_grammar_fragment_from_response_format_json_object() {
+        let rf = ResponseFormat {
+            format_type: "json_object".to_string(),
+            json_schema: None,
+        };
+        let result = grammar_fragment_from_response_format(&rf);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
     fn test_grammar_fragment_from_response_format_missing_json_schema() {
         let rf = ResponseFormat {
             format_type: "json_schema".to_string(),
@@ -1600,5 +1838,205 @@ mod tests {
         // The grammar was created via ComposedGrammar - just verify it's Some
         let grammar = result.unwrap();
         assert!(grammar.is_some());
+    }
+
+    #[test]
+    fn test_build_guided_decoding_grammar_reasoning_only() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: vec![101],
+            reasoning_end_ids: vec![102],
+        };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
+
+        let grammar = build_guided_decoding_grammar(
+            &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
+            false,
+            None,
+            false,
+            None,
+            64,
+            Some(ReasoningEffort::Low),
+        );
+
+        let grammar = grammar.expect("reasoning-only guided grammar should be built");
+        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        assert!(lark.contains("reasoning_block"), "should include reasoning");
+        assert!(lark.contains("text"), "should still include base text");
+    }
+
+    #[test]
+    fn test_build_guided_decoding_grammar_reasoning_with_choice_constraint() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: vec![101],
+            reasoning_end_ids: vec![102],
+        };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
+        let constraint =
+            TopLevelGrammar::from_lark_utf8(r#"start: "positive" | "negative" | "neutral""#);
+
+        let grammar = build_guided_decoding_grammar(
+            &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
+            false,
+            Some(constraint),
+            false,
+            None,
+            64,
+            Some(ReasoningEffort::Low),
+        )
+        .expect("reasoning + choice guided grammar should be built");
+
+        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        assert!(
+            lark.contains("start: reasoning_block"),
+            "start rule should sequence reasoning first: {lark}"
+        );
+        assert!(
+            lark.contains(r#""positive" | "negative" | "neutral""#),
+            "choice constraint should remain grouped: {lark}"
+        );
+        assert!(
+            lark.contains("\nreasoning_block:"),
+            "reasoning rule definition should remain on its own line: {lark}"
+        );
+        assert!(
+            lark.contains("\nthinkgram:"),
+            "reasoning helper rules should remain intact: {lark}"
+        );
+    }
+
+    #[test]
+    fn test_build_guided_decoding_grammar_json_schema_constraint_with_reasoning() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: vec![101],
+            reasoning_end_ids: vec![102],
+        };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
+        let constraint = TopLevelGrammar::from_json_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"}
+            },
+            "required": ["label"],
+            "additionalProperties": false
+        }));
+
+        let grammar = build_guided_decoding_grammar(
+            &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
+            false,
+            Some(constraint),
+            false,
+            None,
+            64,
+            Some(ReasoningEffort::Low),
+        )
+        .expect("reasoning + json-schema guided grammar should be built");
+
+        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        assert!(
+            lark.contains("@reasoning @inner"),
+            "wrapper should reference reasoning and inner subgrammars: {lark}"
+        );
+        assert!(
+            !lark.contains("none have lark_grammar"),
+            "wrapper must not stringify non-lark grammars: {lark}"
+        );
+        assert!(
+            grammar
+                .grammars
+                .iter()
+                .any(|g| g.name.as_deref() == Some("inner") && g.json_schema.is_some()),
+            "json-schema constraint should be preserved as nested grammar"
+        );
+    }
+
+    #[test]
+    fn test_build_guided_decoding_grammar_json_schema_constraint_without_reasoning() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: Vec::new(),
+            reasoning_end_ids: Vec::new(),
+        };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
+        let constraint = TopLevelGrammar::from_json_schema(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"}
+            },
+            "required": ["label"],
+            "additionalProperties": false
+        }));
+
+        let grammar = build_guided_decoding_grammar(
+            &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
+            false,
+            Some(constraint),
+            false,
+            None,
+            64,
+            None,
+        )
+        .expect("json-schema guided grammar should be built");
+
+        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        assert!(
+            lark.contains("@inner eos?"),
+            "EOS wrapper should reference the nested constraint grammar: {lark}"
+        );
+        assert!(
+            grammar
+                .grammars
+                .iter()
+                .any(|g| g.name.as_deref() == Some("inner") && g.json_schema.is_some()),
+            "json-schema constraint should be preserved as nested grammar"
+        );
+    }
+
+    #[test]
+    fn test_normalize_reasoning_controls_enables_thinking() {
+        let mut params = SamplingParams::new_with_max_tokens(32);
+        params.thinking = Some(false);
+        params.reasoning_effort = Some(ReasoningEffort::Low);
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: vec![101],
+            reasoning_end_ids: vec![102],
+        };
+
+        normalize_reasoning_controls(&mut params, &guidance_tokens);
+
+        assert_eq!(params.thinking, Some(true));
+        assert_eq!(params.reasoning_effort, Some(ReasoningEffort::Low));
+    }
+
+    #[test]
+    fn test_normalize_reasoning_controls_disables_unsupported_reasoning() {
+        let mut params = SamplingParams::new_with_max_tokens(32);
+        params.thinking = Some(false);
+        params.reasoning_effort = Some(ReasoningEffort::High);
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: vec![2],
+            reasoning_start_ids: Vec::new(),
+            reasoning_end_ids: Vec::new(),
+        };
+
+        normalize_reasoning_controls(&mut params, &guidance_tokens);
+
+        assert_eq!(params.thinking, Some(false));
+        assert_eq!(params.reasoning_effort, None);
     }
 }

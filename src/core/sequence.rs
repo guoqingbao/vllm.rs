@@ -29,13 +29,6 @@ impl fmt::Display for SequenceStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct RollbackSnapshot {
-    pub block_table: Vec<u32>,
-    pub num_cached_tokens: usize,
-    pub mamba_prefix_hash: Option<u64>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Sequence {
     pub id: usize,
     pub created_time: usize,
@@ -54,10 +47,6 @@ pub struct Sequence {
     pub is_tool_call_end: bool,
     pub hit_stop_sequence: bool,
     pub stop_sequence: Option<String>,
-    /// Snapshot for rollback on speculative decoding mismatch
-    pub rollback_snapshot: Option<RollbackSnapshot>,
-    /// Rollback counter for guidance constraints to prevent infinite loops
-    pub guidance_rollback_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -190,8 +179,6 @@ impl Sequence {
             is_tool_call_end: false,
             hit_stop_sequence: false,
             stop_sequence: None,
-            rollback_snapshot: None,
-            guidance_rollback_count: 0,
         }
     }
 
@@ -247,23 +234,5 @@ impl Sequence {
 
     pub fn clear_block_table(&mut self) {
         self.block_table.clear();
-    }
-
-    /// Save current state as rollback snapshot
-    pub fn save_rollback_snapshot(&mut self) {
-        self.rollback_snapshot = Some(RollbackSnapshot {
-            block_table: self.block_table.clone(),
-            num_cached_tokens: self.num_cached_tokens,
-            mamba_prefix_hash: self.mamba_prefix_hash,
-        });
-    }
-
-    /// Restore from rollback snapshot
-    pub fn restore_from_snapshot(&mut self) {
-        if let Some(snapshot) = self.rollback_snapshot.take() {
-            self.block_table = snapshot.block_table;
-            self.num_cached_tokens = snapshot.num_cached_tokens;
-            self.mamba_prefix_hash = snapshot.mamba_prefix_hash;
-        }
     }
 }

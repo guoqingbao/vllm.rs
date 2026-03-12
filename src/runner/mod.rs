@@ -7,7 +7,6 @@ use crate::utils::downloader::ModelPaths;
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use candle_core::DType;
 use interprocess::local_socket::Stream as LocalStream;
-use rmp_serde;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -254,7 +253,7 @@ pub fn send_local(
     let serialized = if use_json {
         serde_json::to_vec(message).expect("JSON serialization failed")
     } else {
-        rmp_serde::to_vec(message).expect("RMP serialization failed")
+        bincode::serialize(message).expect("Bincode serialization failed")
     };
 
     for stream in streams.iter_mut() {
@@ -286,7 +285,7 @@ pub fn receive_local(stream: &mut LocalStream, use_json: bool) -> std::io::Resul
     let message: MessageType = if use_json {
         serde_json::from_slice(&serialized).expect("JSON deserialization failed")
     } else {
-        rmp_serde::from_slice(&serialized).expect("RMP deserialization failed")
+        bincode::deserialize(&serialized).expect("Bincode deserialization failed")
     };
 
     // Send acknowledgment

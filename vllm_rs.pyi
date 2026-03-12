@@ -75,6 +75,7 @@ class EngineConfig:
     mcp_config: Optional[str]
     mcp_command: Optional[str]
     mcp_args: Optional[str]
+    enable_tool_grammar: Optional[bool]
 
 @dataclass
 class SamplingParams:

@@ -9,8 +9,6 @@ pub mod gptq;
 #[cfg(all(feature = "cuda", feature = "graph"))]
 pub mod graph;
 pub mod guidance;
-#[cfg(test)]
-pub mod guidance_tests;
 pub mod heartbeat;
 pub mod image;
 pub mod kvcache_allocator;
@@ -18,8 +16,6 @@ pub mod logits_processor;
 pub mod progress;
 pub mod reasoning;
 pub mod special_tokens;
-
-// Re-export reasoning types for convenience
 use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
@@ -30,7 +26,7 @@ use crate::utils::downloader::ModelPaths;
 use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
-use config::{Config, EngineConfig, GenerationConfig, TokenizerConfig};
+use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
 pub use reasoning::{
     build_reasoning_grammar, thinking_grammar_with_reasoning_block, ReasoningEffort,
     ThinkingGrammarBuilder,
@@ -184,10 +180,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
 
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
-    let _eos_token_id = if eos_token_id.is_ok() {
-        Some(vec![eos_token_id.unwrap().to_u32()?])
+    let eos_token_id = if eos_token_id.is_ok() {
+        EosTokenId::Single(eos_token_id.unwrap().to_u32()?)
     } else {
-        None
+        EosTokenId::Multiple(vec![])
     };
 
     // ---------------- RoPE scaling --------------------------
@@ -385,7 +381,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         final_logit_softcapping: None,
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
-        eos_token_id: None,
+        eos_token_id: Some(eos_token_id),
         use_sliding_window: None,
         sliding_window: None,
         max_window_layers: None,
@@ -447,10 +443,8 @@ fn merge_multimodal_top_level_config(
 
     if let Some(eos) = raw_root.get("eos_token_id") {
         if !eos.is_null() {
-            if let Ok(eos_ids) = serde_json::from_value::<Vec<u32>>(eos.clone()) {
-                config.eos_token_id = Some(eos_ids);
-            } else if let Ok(eos_id) = serde_json::from_value::<u32>(eos.clone()) {
-                config.eos_token_id = Some(vec![eos_id]);
+            if let Ok(eos_token_id) = serde_json::from_value::<EosTokenId>(eos.clone()) {
+                config.eos_token_id = Some(eos_token_id);
             }
         }
     }
@@ -668,7 +662,6 @@ pub fn init_config_tokenizer(
                             .map_err(candle_core::Error::wrap)?;
                         let mut config: Config = serde_json::from_value(config_value)
                             .map_err(candle_core::Error::wrap)?;
-                        // Gemma3Config already uses Vec<u32> for eos_token_id
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }

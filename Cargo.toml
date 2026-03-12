@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
@@ -36,7 +36,6 @@ interprocess = "2.2.2"
 serde-big-array = "0.5.1"
 bincode = { version = "1.3.1" }
 twox-hash = "2.1.1"
-rmp-serde = "1.3.1"
 rand = "0.9.0"
 rayon="1.10.0"
 clap = { version = "4.4.7", features = ["derive"] }
@@ -90,7 +89,3 @@ python = ["pyo3"]
 [[bin]]
 name = "runner"
 path = "src/runner/runner.rs"
-
-[[bin]]
-name = "special-tokens-extraction"
-path = "example/special-tokens-extraction/src/main.rs"

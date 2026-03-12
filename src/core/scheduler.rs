@@ -5,10 +5,8 @@ use super::{
     prefix_cache::PrefixCacheConfig,
     sequence::{Sequence, SequenceStatus},
 };
-use crate::tools::parser::prefix_could_be_tool;
 use crate::transfer::{PdConfig, PdRole};
-use crate::utils::config::{Config, EngineConfig};
-use crate::utils::special_tokens::SpecialTokens;
+use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
 use std::collections::VecDeque;
@@ -48,6 +46,16 @@ pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
 const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.5;
 const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.75;
 const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.35;
+
+fn is_complete_tool_json(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get("name").is_some() && map.get("arguments").is_some()
+        }
+        serde_json::Value::Array(items) => items.iter().all(is_complete_tool_json),
+        _ => false,
+    }
+}
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -112,13 +120,7 @@ fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
 }
 
 impl Scheduler {
-    /// Create a new Scheduler with SpecialTokens for EOS detection
-    pub fn new(
-        runners: Arc<RwLock<RunnerType>>,
-        econfig: &EngineConfig,
-        config: &Config,
-        special_tokens: Arc<SpecialTokens>,
-    ) -> Self {
+    pub fn new(runners: Arc<RwLock<RunnerType>>, econfig: &EngineConfig, config: &Config) -> Self {
         let prefix_cache_cfg = build_prefix_cache_config(econfig);
         Self {
             waiting: VecDeque::new(),
@@ -139,8 +141,11 @@ impl Scheduler {
                     .unwrap_or(false),
             ),
             next_seq_id: 0,
-            // Use SpecialTokens for EOS token IDs - this is the single source of truth
-            eos_token_id: special_tokens.eos_ids(),
+            eos_token_id: match &config.eos_token_id {
+                Some(EosTokenId::Single(eos)) => vec![*eos],
+                Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
+                _ => vec![],
+            },
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
             tool_call_start_token_ids: Vec::new(),
@@ -188,81 +193,6 @@ impl Scheduler {
         self.next_seq_id += 1;
         self.waiting.push_back(seq);
         id
-    }
-
-    /// Check if the sequence has grammar validation failures
-    /// Uses ModelRunner::validate_sequence_for_grammar() to validate the entire output_ids sequence
-    /// Returns true if validation failed and rollback is needed
-    fn should_rollback_for_grammar(&mut self, seq_id: usize, output_ids: &[u32]) -> bool {
-        let runners = self.block_manager.get_runners();
-        let runners_guard = runners.read();
-
-        if let RunnerType::Thread(model_runner) = &*runners_guard {
-            if let Some(valid_count) =
-                model_runner.validate_sequence_for_grammar(seq_id, output_ids)
-            {
-                return valid_count < output_ids.len();
-            }
-        }
-
-        false
-    }
-
-    /// Rollback a sequence to a specific token position
-    /// This is called from postprocess() when grammar validation fails
-    /// The sequence is truncated and cache states are rolled back
-    pub fn rollback_sequence(&mut self, seq_id: usize, target_tokens: usize) -> Result<()> {
-        const MAX_ROLLBACK_ATTEMPTS: usize = 3;
-
-        // Find the sequence
-        let seq = self
-            .running
-            .iter_mut()
-            .find(|s| s.id == seq_id)
-            .ok_or_else(|| candle_core::Error::msg(format!("Sequence {} not found", seq_id)))?;
-
-        seq.guidance_rollback_count += 1;
-
-        if seq.guidance_rollback_count > MAX_ROLLBACK_ATTEMPTS {
-            crate::log_error!(
-                "[Seq {}] Exceeded {} rollback attempts, marking as errored",
-                seq_id,
-                MAX_ROLLBACK_ATTEMPTS
-            );
-            seq.status = SequenceStatus::Finished;
-            return Ok(());
-        }
-
-        // Save current state as rollback snapshot (if not already saved)
-        if seq.rollback_snapshot.is_none() {
-            seq.save_rollback_snapshot();
-        }
-
-        // Get target block count
-        let target_blocks = target_tokens.div_ceil(self.block_manager.get_block_size());
-
-        // Truncate Sequence state
-        seq.token_ids.truncate(target_tokens);
-        seq.block_table.truncate(target_blocks);
-        seq.num_cached_tokens = target_blocks * self.block_manager.get_block_size();
-
-        // Rollback BlockManager (KV cache + prefix cache)
-        self.block_manager
-            .rollback_to_seq_tokens(seq, target_tokens)?;
-
-        // Rollback ModelRunner (llguidance FSM + Mamba state)
-        let runners = self.block_manager.get_runners().clone();
-        {
-            let runners_guard = runners.read();
-            if let RunnerType::Thread(model_runner) = &*runners_guard {
-                model_runner.rollback_sequence_for_guidance(seq_id, target_tokens)?;
-            }
-        }
-
-        // Update sequence status for reprocessing
-        seq.status = SequenceStatus::Running;
-
-        Ok(())
     }
 
     pub fn is_finished(&self) -> bool {
@@ -616,38 +546,6 @@ impl Scheduler {
                     self.block_manager.deallocate(seq);
                     continue;
                 }
-            }
-
-            // Check for grammar validation failures using llguidance
-            // Validate the entire output_ids sequence
-            let seq = &self.running[idx];
-            let seq_id = seq.id;
-            let output_ids = seq.output_ids.clone();
-
-            if self.should_rollback_for_grammar(seq_id, &output_ids) {
-                let target_tokens = output_ids.len();
-                let target_blocks = target_tokens.div_ceil(self.block_manager.get_block_size());
-                let target_tokens_aligned = target_blocks * self.block_manager.get_block_size();
-
-                crate::log_info!(
-                    "[Seq {}] Grammar validation failed, rolling back to {} tokens ({} blocks)",
-                    seq_id,
-                    target_tokens_aligned,
-                    target_blocks
-                );
-
-                // Trigger rollback
-                if let Err(e) = self.rollback_sequence(seq_id, target_tokens_aligned) {
-                    crate::log_error!(
-                        "[Seq {}] Rollback failed: {}. Finishing sequence.",
-                        seq_id,
-                        e
-                    );
-                    let seq = &mut self.running[idx];
-                    seq.status = SequenceStatus::Finished;
-                    self.block_manager.deallocate(seq);
-                }
-                continue;
             }
 
             let matched_stop_sequence_idx =
@@ -1249,7 +1147,7 @@ impl Scheduler {
     /// Check if the given token is a tool call end token
     /// This supports both:
     /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
-    /// 2. JSON end token "}" combined with prefix_could_be_tool validation
+    /// 2. JSON end token "}" combined with complete tool JSON validation
     pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
         // 1. Check for explicit tool call end tokens (XML style)
         if self.tool_call_end_token_ids.contains(&token) {
@@ -1277,12 +1175,7 @@ impl Scheduler {
                 if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
                     let trimmed = decoded.trim();
                     if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if val.is_object() || val.is_array() {
-                            return true;
-                        }
-                    } else {
-                        let (_could_be, is_complete) = prefix_could_be_tool(trimmed);
-                        if is_complete {
+                        if is_complete_tool_json(&val) {
                             return true;
                         }
                     }
@@ -1292,16 +1185,37 @@ impl Scheduler {
 
         false
     }
+    fn stop_sequence_match_index(&self, token: u32, seq: &Sequence) -> Option<usize> {
+        let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
+            return None;
+        };
+        if stop_sequences.is_empty() {
+            return None;
+        }
 
-    /// Get the EOS token IDs from the scheduler
-    pub fn eos_token_ids(&self) -> &[u32] {
-        &self.eos_token_id
-    }
+        for (idx, stop) in stop_sequences.iter().enumerate() {
+            if stop.is_empty() {
+                continue;
+            }
+            if stop.len() == 1 {
+                if stop[0] == token {
+                    return Some(idx);
+                }
+                continue;
+            }
 
-    fn stop_sequence_match_index(&self, _token: u32, seq: &Sequence) -> Option<usize> {
-        // Stop sequence matching now uses SpecialTokens
-        // The actual matching is done via SpecialTokens.search()
-        seq.sampling_params.stop_sequences.as_ref()?;
+            let prior_len = seq.output_ids.len();
+            if stop.len() - 1 > prior_len {
+                continue;
+            }
+            let start_idx = prior_len + 1 - stop.len();
+            if seq.output_ids[start_idx..] == stop[..stop.len() - 1]
+                && stop[stop.len() - 1] == token
+            {
+                return Some(idx);
+            }
+        }
+
         None
     }
 }

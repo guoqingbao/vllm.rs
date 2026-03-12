@@ -1,4 +1,5 @@
 use crate::serde_default;
+use crate::utils::config::EosTokenId;
 use crate::utils::config::QuantConfig;
 use crate::utils::config::RopeScalingValue;
 use candle_nn::Activation;
@@ -99,7 +100,7 @@ pub struct Gemma3Config {
     pub vision_config: VisionConfig,
     pub image_token_index: usize,
     pub mm_tokens_per_image: usize,
-    pub eos_token_id: Option<Vec<u32>>,
+    pub eos_token_id: Option<EosTokenId>,
     #[serde(default = "has_vision")]
     pub has_vision: bool,
 }

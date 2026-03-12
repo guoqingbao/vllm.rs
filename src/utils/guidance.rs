@@ -20,6 +20,22 @@ pub use crate::utils::reasoning::{
     ThinkingGrammarBuilder,
 };
 
+#[derive(Clone, Debug, Default)]
+pub struct GuidanceTokens {
+    pub eos_token_ids: Vec<u32>,
+    pub reasoning_start_ids: Vec<u32>,
+    pub reasoning_end_ids: Vec<u32>,
+}
+
+pub fn extract_guidance_tokens(tokenizer: &Tokenizer, eos_token_ids: Vec<u32>) -> GuidanceTokens {
+    let special_tokens = SpecialTokens::new(tokenizer);
+    GuidanceTokens {
+        eos_token_ids,
+        reasoning_start_ids: special_tokens.reasoning_start_ids(),
+        reasoning_end_ids: special_tokens.reasoning_end_ids(),
+    }
+}
+
 /// Error type for grammar-related errors
 #[derive(Debug, thiserror::Error)]
 pub enum GrammarError {
@@ -265,12 +281,12 @@ impl GrammarComposerBuilder {
         self
     }
 
-    pub fn into_composer(self, special_tokens: &SpecialTokens) -> GrammarComposers {
-        let base = self.build_base_composer(special_tokens);
-        self.build_with_reasoning(base, special_tokens)
+    pub fn into_composer(self, guidance_tokens: &GuidanceTokens) -> GrammarComposers {
+        let base = self.build_base_composer(guidance_tokens);
+        self.build_with_reasoning(base, guidance_tokens)
     }
 
-    fn build_base_composer(&self, special_tokens: &SpecialTokens) -> GrammarComposers {
+    fn build_base_composer(&self, guidance_tokens: &GuidanceTokens) -> GrammarComposers {
         let tool_required = self.tool_choice_required || self.forced_tool_name.is_some();
 
         match (
@@ -282,7 +298,7 @@ impl GrammarComposerBuilder {
                 if tool_required {
                     GrammarComposers::Tool(self.tool_grammar.clone().unwrap())
                 } else {
-                    let has_eos = special_tokens.eos_ids().len() > 0;
+                    let has_eos = !guidance_tokens.eos_token_ids.is_empty();
                     let lark = chat_text_expression(has_eos);
                     let text_gram = TopLevelGrammar::from_lark_utf8(&lark);
                     GrammarComposers::ConstraintOrTool(
@@ -302,12 +318,13 @@ impl GrammarComposerBuilder {
     fn build_with_reasoning(
         self,
         base: GrammarComposers,
-        special_tokens: &SpecialTokens,
+        guidance_tokens: &GuidanceTokens,
     ) -> GrammarComposers {
         match self.reasoning_effort {
+            Some(ReasoningEffort::None) => base,
             Some(effort) => {
-                let start_ids = special_tokens.reasoning_start_ids();
-                let end_ids = special_tokens.reasoning_end_ids();
+                let start_ids = &guidance_tokens.reasoning_start_ids;
+                let end_ids = &guidance_tokens.reasoning_end_ids;
 
                 if start_ids.is_empty() || end_ids.is_empty() {
                     crate::log_warn!(
@@ -321,7 +338,7 @@ impl GrammarComposerBuilder {
                     let reasoning_lark =
                         thinking_grammar_with_reasoning_block(start_id, end_id, Some(effort));
                     let reasoning_gram = TopLevelGrammar::from_lark_utf8(&reasoning_lark);
-                    let base_gram = base.to_grammar(special_tokens);
+                    let base_gram = base.to_grammar(guidance_tokens);
                     GrammarComposers::WithReasoning(reasoning_gram, base_gram)
                 }
             }
@@ -329,90 +346,47 @@ impl GrammarComposerBuilder {
         }
     }
 
-    pub fn build(self, special_tokens: &SpecialTokens) -> TopLevelGrammar {
-        let composer = self.into_composer(special_tokens);
-        composer.to_grammar(special_tokens)
+    pub fn build(self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
+        let composer = self.into_composer(guidance_tokens);
+        composer.to_grammar(guidance_tokens)
     }
 }
 
 impl GrammarComposers {
-    pub fn to_grammar(&self, special_tokens: &SpecialTokens) -> TopLevelGrammar {
-        let base_grammar = self.build_base_grammar(special_tokens);
+    pub fn to_grammar(&self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
+        let base_grammar = self.build_base_grammar(guidance_tokens);
 
         // Add eos? termination to ensure all grammars can terminate
-        add_eos_termination(&base_grammar, special_tokens)
+        add_eos_termination(&base_grammar, &guidance_tokens.eos_token_ids)
     }
 
-    fn build_base_grammar(&self, special_tokens: &SpecialTokens) -> TopLevelGrammar {
+    fn build_base_grammar(&self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
         match self {
             GrammarComposers::TextWithEos => {
-                let has_eos = special_tokens.eos_ids().len() > 0;
+                let has_eos = !guidance_tokens.eos_token_ids.is_empty();
                 let lark = chat_text_expression(has_eos);
                 TopLevelGrammar::from_lark_utf8(&lark)
             }
             GrammarComposers::Constraint(c) => c.clone(),
             GrammarComposers::Tool(t) => t.clone(),
-            GrammarComposers::ConstraintOrTool(c, t) => {
-                merge_top_level_grammars(vec![c.clone(), t.clone()], None, None)
-            }
-            GrammarComposers::ToolOrConstraint(t, c) => {
-                merge_top_level_grammars(vec![t.clone(), c.clone()], None, None)
-            }
-            GrammarComposers::WithReasoning(reasoning, inner) => {
-                // Reasoning should come FIRST, then the inner (text/constraint/tool) follows
-                // Extract reasoning's start rule and prepend to inner's rules
-                let reasoning_lark = get_lark_from_top_level_grammar(reasoning);
-                let inner_lark = get_lark_from_top_level_grammar(inner);
-
-                // Parse both grammars
-                let reasoning_lines: Vec<&str> = reasoning_lark.lines().collect();
-                let inner_lines: Vec<&str> = inner_lark.lines().collect();
-
-                // Get inner's start rule
-                let inner_start = if let Some(line) = inner_lines.first() {
-                    line.trim().to_string()
-                } else {
-                    return inner.clone();
-                };
-
-                // Extract other rules from both grammars
-                let reasoning_other_rules = if reasoning_lines.len() > 1 {
-                    reasoning_lines[1..].join("\n")
-                } else {
-                    String::new()
-                };
-
-                let inner_other_rules = if inner_lines.len() > 1 {
-                    inner_lines[1..].join("\n")
-                } else {
-                    String::new()
-                };
-
-                // Build new sequential grammar: reasoning_block followed by inner's start
-                // Detect if reasoning uses shared text rule (for DRY - text rule defined once)
-                // let is_text_shared = reasoning_lark.contains("reasoning_block: <[") && reasoning_lark.contains("\"\\n\" text \"\\n\"");
-                // let reasoning_block = if is_text_shared {
-                //     "reasoning_block"  // Reasoning references shared text - no optional
-                // } else {
-                //     "reasoning_block ?"  // Simple reasoning block - optional
-                // };
-
-                let reasoning_block = "reasoning_block";
-
-                // Combine rules and let combine_rules() handle deduplication of text: and eos: rules
-                let all_rules = format!("{}\n{}", reasoning_other_rules, inner_other_rules);
-                let combined_rules =
-                    combine_rules_dedup_text(all_rules.lines().map(|s| s.to_string()).collect());
-
-                let final_grammar = format!(
-                    "start: {} {}\n{}",
-                    reasoning_block,
-                    inner_start.replace("start: ", ""),
-                    combined_rules
-                );
-
-                TopLevelGrammar::from_lark_utf8(&final_grammar)
-            }
+            GrammarComposers::ConstraintOrTool(c, t) => wrap_with_subgrammars(
+                "( @constraint | @tool )",
+                None,
+                &[("constraint", c), ("tool", t)],
+                None,
+            ),
+            GrammarComposers::ToolOrConstraint(t, c) => wrap_with_subgrammars(
+                "( @tool | @constraint )",
+                None,
+                &[("tool", t), ("constraint", c)],
+                None,
+            ),
+            GrammarComposers::WithReasoning(reasoning, inner) => wrap_with_subgrammars(
+                "@reasoning @inner",
+                None,
+                &[("reasoning", reasoning), ("inner", inner)],
+                None,
+            ),
         }
     }
 }
@@ -440,9 +414,7 @@ text[stop=""]: /((?s).*?)/"#
 
 /// Build EOS pattern for text completion
 /// Returns just the EOS rule definition (not combined with text)
-pub fn eos_expression(special_tokens: &SpecialTokens) -> String {
-    let eos_token_ids = special_tokens.eos_ids();
-
+pub fn eos_expression(eos_token_ids: &[u32]) -> String {
     if eos_token_ids.is_empty() {
         String::new()
     } else if eos_token_ids.len() == 1 {
@@ -459,17 +431,37 @@ pub fn eos_expression(special_tokens: &SpecialTokens) -> String {
 
 /// Add eos? termination to a grammar, ensuring all paths can end with EOS
 /// This function modifies the start: rule to append optional EOS token alternation
-fn add_eos_termination(
-    grammar: &TopLevelGrammar,
-    special_tokens: &SpecialTokens,
-) -> TopLevelGrammar {
-    let lark = get_lark_from_top_level_grammar(grammar);
-    let eos_rule = eos_expression(special_tokens);
-
-    // If no EOS tokens available, return original grammar
-    if eos_rule.is_empty() {
+fn add_eos_termination(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLevelGrammar {
+    if eos_token_ids.is_empty() {
         return grammar.clone();
     }
+
+    let is_simple_lark = grammar.grammars.len() == 1
+        && grammar
+            .grammars
+            .first()
+            .and_then(|g| g.lark_grammar.as_ref())
+            .is_some();
+
+    if !is_simple_lark {
+        let eos_line = if eos_token_ids.len() > 1 {
+            let ids: Vec<String> = eos_token_ids
+                .iter()
+                .map(|id| format!("<[{}]>", id))
+                .collect();
+            format!("eos: ( {} )", ids.join(" | "))
+        } else {
+            format!("eos: <[{}]>", eos_token_ids[0])
+        };
+        return wrap_with_subgrammars(
+            "@inner eos?",
+            Some(eos_line.as_str()),
+            &[("inner", grammar)],
+            grammar.max_tokens,
+        );
+    }
+
+    let lark = get_lark_from_top_level_grammar(grammar);
 
     // Parse lines to find start: rule
     let lines: Vec<&str> = lark.lines().collect();
@@ -492,7 +484,6 @@ fn add_eos_termination(
 
     // Build new start rule with eos? termination
     // For multiple EOS tokens, use ( <[id1]> | <[id2]> )? format
-    let eos_token_ids = special_tokens.eos_ids();
     let new_start_line = format!(
         r#"start: {current_start_rhs} eos?
 "#
@@ -505,7 +496,7 @@ fn add_eos_termination(
         let alternation = ids.join(" | ");
         format!("eos:  ( {} )", alternation)
     } else {
-        format!("eos: {}", eos_token_ids[0])
+        format!("eos: <[{}]>", eos_token_ids[0])
     };
 
     // Get existing rules (everything after first line)
@@ -526,6 +517,33 @@ fn add_eos_termination(
     TopLevelGrammar::from_lark_utf8(&final_grammar)
 }
 
+fn wrap_with_subgrammars(
+    start_rhs: &str,
+    extra_rules: Option<&str>,
+    subgrammars: &[(&str, &TopLevelGrammar)],
+    max_tokens: Option<usize>,
+) -> TopLevelGrammar {
+    let mut wrapper_lark = format!("start: {}", start_rhs);
+    if let Some(extra_rules) = extra_rules {
+        let extra_rules = extra_rules.trim();
+        if !extra_rules.is_empty() {
+            wrapper_lark.push('\n');
+            wrapper_lark.push_str(extra_rules);
+        }
+    }
+
+    let mut wrapped = TopLevelGrammar::from_lark_utf8(&wrapper_lark);
+    wrapped.max_tokens = max_tokens;
+    for (name, grammar) in subgrammars {
+        let mut nested = (*grammar).clone();
+        if let Some(first) = nested.grammars.first_mut() {
+            first.name = Some((*name).to_string());
+        }
+        wrapped.grammars.extend(nested.grammars);
+    }
+    wrapped
+}
+
 /// Extension trait for TopLevelGrammar with built-in sanitization
 /// This ensures all grammar construction paths sanitize inputs consistently
 pub trait TopLevelGrammarExt: Sized {
@@ -541,7 +559,7 @@ pub trait TopLevelGrammarExt: Sized {
 
 impl TopLevelGrammarExt for TopLevelGrammar {
     fn from_regex_ascii(regex: &str) -> Self {
-        let sanitized = sanitize_to_ascii(regex);
+        let sanitized = sanitize_utf8_valid(regex);
         Self::from_regex(&sanitized)
     }
 
@@ -683,96 +701,11 @@ fn combine_rules(rules: Vec<String>) -> String {
         name_a.cmp(name_b)
     });
 
-    combined.into_iter().map(|(_, rule)| rule).collect()
-}
-
-/// Combine grammar rules, deduplicating text: and eos: rules
-/// This ensures DRY - text rule is defined once and shared
-fn combine_rules_dedup_text(rules: Vec<String>) -> String {
-    if rules.is_empty() {
-        return String::new();
-    }
-
-    use std::collections::HashMap;
-    let mut rule_groups: HashMap<String, Vec<String>> = HashMap::new();
-    let mut seen_text = false;
-    let mut seen_eos = false;
-
-    for rule in rules {
-        let rule = rule.trim();
-        if rule.is_empty() {
-            continue;
-        }
-
-        if rule.starts_with("text:") && !seen_text {
-            seen_text = true;
-            let name = "text".to_string();
-            let body = rule.strip_prefix("text:").unwrap_or("").trim().to_string();
-            rule_groups.entry(name).or_default().push(body);
-        } else if rule.starts_with("eos:") && !seen_eos {
-            seen_eos = true;
-            let name = "eos".to_string();
-            let body = rule.strip_prefix("eos:").unwrap_or("").trim().to_string();
-            rule_groups.entry(name).or_default().push(body);
-        } else if !rule.starts_with("text:") && !rule.starts_with("eos:") {
-            // Find the rule name (before the first ":")
-            if let Some(colon_pos) = rule.find(':') {
-                let name = rule[..colon_pos].trim().to_string();
-                let body = rule[colon_pos + 1..].trim().to_string();
-                rule_groups.entry(name).or_default().push(body);
-            } else {
-                // Rule without colon - add as-is
-                rule_groups
-                    .entry("anonymous".to_string())
-                    .or_default()
-                    .push(rule.to_string());
-            }
-        }
-    }
-
-    // Reconstruct rules, merging duplicates
-    let mut combined = Vec::new();
-    for (name, bodies) in rule_groups {
-        if bodies.len() == 1 {
-            combined.push((name.clone(), format!("{}: {}", name, bodies[0])));
-        } else {
-            // Multiple definitions for same rule - combine with alternation
-            combined.push((name.clone(), format!("{}: {}", name, bodies.join(" | "))));
-        }
-    }
-
-    // Sort rules: start first, then tool rules (tool_N), then alphabetically
-    combined.sort_by(|a, b| {
-        let name_a = a.0.as_str();
-        let name_b = b.0.as_str();
-
-        // "start" always comes first
-        if name_a == "start" {
-            return std::cmp::Ordering::Less;
-        }
-        if name_b == "start" {
-            return std::cmp::Ordering::Greater;
-        }
-
-        // Tool rules (tool_N) come next, sorted by their numeric index
-        if name_a.starts_with("tool_") && name_b.starts_with("tool_") {
-            // Extract the numeric part
-            let num_a: u32 = name_a[5..].parse().unwrap_or(0);
-            let num_b: u32 = name_b[5..].parse().unwrap_or(0);
-            return num_a.cmp(&num_b);
-        }
-        if name_a.starts_with("tool_") {
-            return std::cmp::Ordering::Less;
-        }
-        if name_b.starts_with("tool_") {
-            return std::cmp::Ordering::Greater;
-        }
-
-        // Other rules sorted alphabetically
-        name_a.cmp(name_b)
-    });
-
-    combined.into_iter().map(|(_, rule)| rule).collect()
+    combined
+        .into_iter()
+        .map(|(_, rule)| rule)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Merge multiple TopLevelGrammar objects into one
@@ -811,13 +744,7 @@ pub fn merge_top_level_grammars(
     let mut all_other_rules = Vec::new();
 
     for lark in lark_parts.iter() {
-        crate::log_debug!("[llg] parse_lark_grammar() input: {}", &lark);
         let (start_rhs, other_rules) = parse_lark_grammar(lark);
-        crate::log_debug!(
-            "[llg] parse_lark_grammar() -> start_rhs='{}', other_rules_count={}",
-            start_rhs,
-            other_rules.len()
-        );
         combined_start_rhs.push(start_rhs);
         all_other_rules.extend(other_rules);
     }
@@ -828,7 +755,7 @@ pub fn merge_top_level_grammars(
     // Build new grammar with direct alternation at start
     let start_separator = format!(" {} ", &sep);
     let start_alternation = combined_start_rhs.join(&start_separator);
-    let final_grammar = format!("start: ( {} )+\n{}", start_alternation, combined_rules);
+    let final_grammar = format!("start: ( {} )\n{}", start_alternation, combined_rules);
 
     let mut top_gram = TopLevelGrammar::from_lark(final_grammar);
     top_gram.max_tokens = max_tokens;
@@ -900,12 +827,8 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
 /// - `mask.is_allowed(tok)` checks if token ID `tok` is in the allowed set
 /// - The logits are modified to give -inf to disallowed tokens
 /// - Sampling then only picks from allowed tokens
-/// Sanitize string for Lark grammar - only allow ASCII characters
 fn lark_quote(value: &str) -> String {
-    // Strip non-ASCII characters to prevent grammar parser errors
-    let sanitized: String = value.chars().filter(|c| c.is_ascii()).collect();
-    let escaped = sanitized.replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{}\"", escaped)
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 /// Build special token syntax for Lark grammar using token IDs
@@ -952,7 +875,7 @@ pub fn compose_grammars(
     tool_choice_required: bool,
     forced_tool_name: Option<String>,
     max_tokens: Option<usize>,
-    special_tokens: &SpecialTokens,
+    guidance_tokens: &GuidanceTokens,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> TopLevelGrammar {
     let builder = GrammarComposerBuilder::new()
@@ -962,7 +885,7 @@ pub fn compose_grammars(
         .forced_tool_name(forced_tool_name)
         .reasoning_effort(reasoning_effort);
 
-    let mut grammar = builder.build(special_tokens);
+    let mut grammar = builder.build(guidance_tokens);
     grammar.max_tokens = max_tokens;
     grammar
 }
@@ -1073,12 +996,8 @@ impl GuidanceState {
         factory: Arc<ParserFactory>,
         grammar: &TopLevelGrammar,
     ) -> Result<Self> {
-        crate::log_debug!("[llg] GuidanceState::new_from_grammar() called");
-        crate::log_trace!("[llg] Creating parser from grammar");
         let parser = factory.create_parser(grammar.clone())?;
-        crate::log_trace!("[llg] Creating Matcher from parser");
         let matcher = Matcher::new(Ok(parser));
-        crate::log_info!("[llg] GuidanceState created successfully for grammar");
 
         Ok(Self {
             matcher,
@@ -1090,31 +1009,19 @@ impl GuidanceState {
 
     /// Compute mask with caching for performance
     pub fn compute_mask(&mut self) -> Result<Option<SimpleVob>> {
-        crate::log_trace!("[llg] compute_mask() called");
-
         if self.matcher.is_stopped() {
-            crate::log_trace!("[llg] compute_mask() - matcher stopped, returning None");
             return Ok(None);
         }
         let mask = self.matcher.compute_mask()?;
-        crate::log_trace!(
-            "[llg] compute_mask() - mask computed with {} valid tokens",
-            mask.len()
-        );
         Ok(Some(mask))
     }
 
     /// Commit token and track for speculative decoding recovery
     pub fn commit_token(&mut self, token: u32) -> Result<()> {
-        crate::log_trace!("[llg] commit_token(token={})", token);
-
         if !self.matcher.is_stopped() {
             self.matcher.consume_token(token)?;
-            crate::log_trace!("[llg] Token {} consumed successfully", token);
             self.llm_tokens.push(token);
             self.llm_bytes += 4;
-        } else {
-            crate::log_trace!("[llg] commit_token() - matcher stopped, skipping");
         }
         Ok(())
     }
@@ -1145,11 +1052,7 @@ impl GuidanceState {
             return true;
         }
         let result = self.matcher.validate_tokens(&[token]).unwrap_or(0);
-        let is_valid = result == 1;
-        if !is_valid {
-            crate::log_debug!("[llg] Token {} rejected by grammar", token);
-        }
-        is_valid
+        result == 1
     }
 
     /// Compute mask or return EOS token set if stopped
@@ -1167,30 +1070,18 @@ impl GuidanceState {
 
     /// Fast-forward and consume tokens guaranteed to be accepted by the grammar
     pub fn consume_ff_tokens(&mut self) -> Result<Vec<u32>, anyhow::Error> {
-        crate::log_debug!("[llg] consume_ff_tokens() called");
-
         if self.matcher.is_stopped() {
-            crate::log_trace!("[llg] consume_ff_tokens() - matcher stopped, returning empty");
             return Ok(Vec::new());
         }
 
         let ff_tokens = self.matcher.compute_ff_tokens();
-        crate::log_debug!(
-            "[llg] compute_ff_tokens() returned {} tokens",
-            ff_tokens.len()
-        );
 
         for &token in &ff_tokens {
-            crate::log_trace!("[llg] Consuming FF token {}", token);
             self.matcher.consume_token(token)?;
             self.llm_tokens.push(token);
             self.llm_bytes += 4;
         }
 
-        crate::log_debug!(
-            "[llg] consume_ff_tokens() - successfully consumed {} tokens",
-            ff_tokens.len()
-        );
         Ok(ff_tokens)
     }
 
@@ -1292,12 +1183,6 @@ pub fn _early_exit_validate(
                 continue;
             }
 
-            crate::log_debug!(
-                "[llg] Token {} is invalid, computing mask for seq {}",
-                token,
-                seq_id
-            );
-
             // Stage 2: Token is invalid, compute mask and re-sample
             let mask = match state.compute_mask_or_eos() {
                 Ok(m) => m,
@@ -1310,8 +1195,6 @@ pub fn _early_exit_validate(
                     continue;
                 }
             };
-
-            crate::log_debug!("[llg] Applying bias to logits for seq {}", seq_id);
 
             // Build bias vector using sparse iteration
             let mut acc = vec![f32::NEG_INFINITY; vocab_size];
@@ -1346,18 +1229,10 @@ pub fn _early_exit_validate(
             let re_sampled = logit_processor.sample_with_strategy(&biased_row, sampling)?;
             tokens[seq_idx] = re_sampled[0]; // 1D output, first (only) element
 
-            crate::log_debug!(
-                "[llg] Consuming re-sampled token {} for seq {}",
-                tokens[seq_idx],
-                seq_id
-            );
-
             // Commit the re-sampled token
             state
                 .commit_token(tokens[seq_idx])
                 .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-        } else {
-            crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
         }
     }
 

@@ -8,7 +8,6 @@ use interprocess::local_socket::{
 };
 use interprocess::TryClone;
 use parking_lot::{Mutex, RwLock};
-use rmp_serde;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -382,9 +381,9 @@ impl Communicator {
 }
 
 /// Generic, standardized function to send a message.
-/// Uses a 4-byte LE length prefix followed by rmp data.
+/// Uses a 4-byte LE length prefix followed by bincode data.
 fn send_message_generic(stream: &mut (impl Read + Write), msg: &TransferMessage) -> Result<bool> {
-    let serialized: Vec<u8> = rmp_serde::to_vec(msg).map_err(candle_core::Error::wrap)?;
+    let serialized: Vec<u8> = bincode::serialize(msg).map_err(candle_core::Error::wrap)?;
     let len = serialized.len() as u32;
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(&serialized)?;
@@ -393,7 +392,7 @@ fn send_message_generic(stream: &mut (impl Read + Write), msg: &TransferMessage)
 }
 
 /// Generic, standardized function to receive a message.
-/// Reads a 4-byte LE length prefix then rmp data.
+/// Reads a 4-byte LE length prefix then bincode data.
 fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferMessage> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -407,6 +406,6 @@ fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferM
     let mut msg_buf = vec![0u8; len];
     stream.read_exact(&mut msg_buf)?;
 
-    let msg = rmp_serde::from_slice(&msg_buf).map_err(candle_core::Error::wrap)?;
+    let msg = bincode::deserialize(&msg_buf).map_err(candle_core::Error::wrap)?;
     Ok(msg)
 }

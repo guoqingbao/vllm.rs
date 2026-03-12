@@ -19,15 +19,13 @@ use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
-use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
-use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
+use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
+use crate::utils::guidance::{build_llg_factory, extract_guidance_tokens, GuidanceTokens};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::kvcache_allocator::KVCacheAllocator;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
-use crate::utils::reasoning::ReasoningEffort;
-use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use crate::{log_info, log_warn};
@@ -102,11 +100,7 @@ pub struct LLMEngine {
     pub model_type: ModelType,
     pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
-    /// SpecialTokens parsed once at engine initialization
-    /// Contains EOS, BOS, and other special token IDs and their string representations
-    pub special_tokens: Arc<SpecialTokens>,
-    /// XML anchor pad IDs for template impregnation
-    xml_anchor_pad_ids: Vec<u32>,
+    pub guidance_tokens: GuidanceTokens,
 }
 
 impl LLMEngine {
@@ -114,13 +108,6 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        let toktrie = match load_toktrie_from_path(&model_pathes.get_tokenizer_filename()) {
-            Ok(trie) => Some(Arc::new(trie)),
-            Err(e) => {
-                crate::log_warn!("Failed to load tokenizer trie: {}", e);
-                None
-            }
-        };
         let llg_factory = match build_llg_factory(tokenizer.clone(), config.vocab_size) {
             Ok(f) => Some(f),
             Err(e) => {
@@ -129,28 +116,29 @@ impl LLMEngine {
             }
         };
 
-        if toktrie.is_none() {
-            crate::log_warn!("Guided decoding (legacy) disabled: tokenizer trie unavailable.");
-        }
-
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
         let (mut econfig, use_runner) =
             prepare_engine_config(econfig, &config, &config_tokenizer, &mut generation_cfg);
         config.fp8_kvcache = econfig.fp8_kvcache;
 
-        // Initialize SpecialTokens early to use for EOS token extraction
-        let special_tokens = SpecialTokens::new(&tokenizer);
-
         // In case config file missing bos and eos configuration
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
-            // Extract EOS tokens from SpecialTokens (single source of truth)
-            let eos_ids: Vec<u32> = special_tokens.eos_ids();
-            if !eos_ids.is_empty() {
-                config.eos_token_id = Some(eos_ids);
+            if let Some(eos) = &config_tokenizer.eos_token {
+                if let Some(token) = tokenizer.get_vocab(true).get(eos).copied() {
+                    config.eos_token_id = Some(EosTokenId::Single(token));
+                };
             }
         }
+        let guidance_tokens = extract_guidance_tokens(
+            &tokenizer,
+            config
+                .eos_token_id
+                .as_ref()
+                .map(EosTokenId::to_vec)
+                .unwrap_or_default(),
+        );
         assert!(
             config.architectures.is_some() && config.architectures.as_ref().unwrap().len() == 1,
             "Only one architecture is supported at the moment!"
@@ -406,35 +394,29 @@ impl LLMEngine {
         }
         let runners = Arc::new(RwLock::new(runners));
 
-        let special_tokens = Arc::new(special_tokens);
-        let pad_ids = special_tokens.get_xml_anchor_pad_ids();
-        let mut scheduler =
-            Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
+        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
 
-        // Initialize tool call end tokens using SpecialTokens for idiomatic access
-        let tool_call_start_ids: Vec<u32> = special_tokens.tool_start_ids();
-        let tool_call_end_ids: Vec<u32> = special_tokens.tool_end_ids();
+        // Preserve model-specific tool token detection for non-guided paths.
+        let mut tool_config = ToolConfig::for_model_type(&model_type);
+        tool_config.validate_with_tokenizer(&tokenizer, &model_type);
+        let tool_call_start_ids = tool_config.tool_call_start_ids(&tokenizer);
+        let tool_call_end_ids = tool_config.tool_call_end_ids(&tokenizer);
 
         if !tool_call_start_ids.is_empty() {
             scheduler.set_tool_call_start_tokens(tool_call_start_ids.clone());
             log_info!(
-                "Tool call start token IDs set from SpecialTokens: {:?}",
+                "Tool call start token IDs set to: {:?}",
                 tool_call_start_ids
             );
         } else {
-            log_info!(
-                "Tool call start token IDs not set (no tool start tokens found in tokenizer)"
-            );
+            log_info!("Tool call start token IDs not set (no reliable start token)");
         }
 
         if !tool_call_end_ids.is_empty() {
             scheduler.set_tool_call_end_tokens(tool_call_end_ids.clone());
-            log_info!(
-                "Tool call end token IDs set from SpecialTokens: {:?}",
-                tool_call_end_ids
-            );
+            log_info!("Tool call end token IDs set to: {:?}", tool_call_end_ids);
         } else {
-            log_info!("Tool call end token IDs not set (no tool end tokens found in tokenizer)");
+            log_info!("Tool call end token IDs not set (no reliable end token)");
         }
 
         // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
@@ -458,7 +440,10 @@ impl LLMEngine {
             true,
             true,
         );
-        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(&tokenizer, &[]);
+        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(
+            &tokenizer,
+            &[&tool_config.start_token_str, &tool_config.end_token_str],
+        );
         template.set_escape_tokens(escaped_special_tokens);
 
         let img_cfg = get_image_config(model_type.clone(), &config)?;
@@ -470,39 +455,6 @@ impl LLMEngine {
             archs[0].to_string()
         } else {
             "default".to_string()
-        };
-
-        // Create tool config from special tokens for backward compatibility
-        // Use idiomatic tool_tokens() method that returns Option<(SpecialToken, SpecialToken)>
-        let tool_config = match special_tokens.tool_tokens() {
-            Some((start_token, end_token)) => {
-                log_info!(
-                    "Tool tokens extracted from SpecialTokens: start={:?} ({:?}), end={:?} ({:?})",
-                    start_token.id,
-                    start_token.string(),
-                    end_token.id,
-                    end_token.string()
-                );
-                ToolConfig {
-                    start_token_ids: HashSet::from_iter(vec![start_token.id]),
-                    end_token_ids: HashSet::from_iter(vec![end_token.id]),
-                    start_token_str: start_token.string(),
-                    end_token_str: end_token.string(),
-                    start_is_special: false,
-                    end_is_special: false,
-                }
-            }
-            None => {
-                log_info!("Tool tokens not found in SpecialTokens, falling back to empty config");
-                ToolConfig {
-                    start_token_ids: HashSet::new(),
-                    end_token_ids: HashSet::new(),
-                    start_token_str: "".to_string(),
-                    end_token_str: "".to_string(),
-                    start_is_special: false,
-                    end_is_special: false,
-                }
-            }
         };
 
         let engine = Arc::new(RwLock::new(Self {
@@ -527,8 +479,7 @@ impl LLMEngine {
             tool_config,
             img_cfg,
             model_name,
-            special_tokens,
-            xml_anchor_pad_ids: pad_ids,
+            guidance_tokens,
         }));
 
         Self::start_engine(engine.clone());
@@ -586,14 +537,31 @@ impl LLMEngine {
         }
 
         if let Some(stop_sequences) = &params.stop_sequences {
+            let mut stop_token_ids = Vec::new();
             let mut resolved_stop_sequences = Vec::new();
             for sequence in stop_sequences {
                 if sequence.is_empty() {
                     continue;
                 }
-                resolved_stop_sequences.push(sequence.clone());
+                match self.tokenizer.encode(sequence.as_str(), false) {
+                    Ok(encoding) => {
+                        let ids = encoding.get_ids();
+                        if !ids.is_empty() {
+                            stop_token_ids.push(ids.to_vec());
+                            resolved_stop_sequences.push(sequence.clone());
+                        }
+                    }
+                    Err(err) => {
+                        crate::log_warn!(
+                            "Failed to encode stop sequence '{}': {:?}",
+                            sequence,
+                            err
+                        );
+                    }
+                }
             }
-            if !resolved_stop_sequences.is_empty() {
+            if !stop_token_ids.is_empty() {
+                params.stop_token_ids = Some(stop_token_ids);
                 params.stop_sequences = Some(resolved_stop_sequences);
             }
         }
@@ -1090,42 +1058,7 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
-        // Add anchors
-        prompt_template.impregnate_with_anchors(&self.xml_anchor_pad_ids);
-
-        // Automatically enable thinking when reasoning_effort is set to a value other than None
-        // User's explicit thinking parameter takes precedence if set
-        let enable_thinking = params.thinking.unwrap_or({
-            #[cfg(feature = "python")]
-            {
-                // When python feature is enabled, reasoning_effort is a String
-                // Convert it to ReasoningEffort enum for matching
-                // Custom variant is not available in Python builds
-                if let Some(ref effort_str) = params.reasoning_effort {
-                    matches!(
-                        ReasoningEffort::from_str(effort_str.clone()),
-                        ReasoningEffort::Low
-                            | ReasoningEffort::Medium
-                            | ReasoningEffort::High
-                            | ReasoningEffort::ChainOfThought
-                    )
-                } else {
-                    false
-                }
-            }
-            #[cfg(not(feature = "python"))]
-            {
-                matches!(
-                    params.reasoning_effort,
-                    Some(ReasoningEffort::Low)
-                        | Some(ReasoningEffort::Medium)
-                        | Some(ReasoningEffort::High)
-                        | Some(ReasoningEffort::ChainOfThought)
-                        | Some(ReasoningEffort::Custom(_))
-                )
-            }
-        });
-        prompt_template.set_enable_thinking(enable_thinking);
+        prompt_template.set_enable_thinking(params.thinking.unwrap_or(false));
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template
@@ -1659,9 +1592,5 @@ impl LLMEngine {
     /// Get a clone of the chat template for external use (e.g., tokenization without generation)
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
-    }
-
-    pub fn template_supports_tools(&self) -> bool {
-        self.template.supports_tools()
     }
 }
