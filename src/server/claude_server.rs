@@ -1456,7 +1456,6 @@ pub async fn messages(
             &tool_config,
             &sanitized_tools,
             &tool_parser_name,
-            engine_config.enable_tool_grammar,
             None,
             tool_choice_required,
             forced_tool_name.clone(),

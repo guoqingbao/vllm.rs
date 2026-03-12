@@ -406,12 +406,12 @@ pub fn collect_openai_constraint_grammar(
     Ok(selected)
 }
 
+#[allow(unused_variables)]
 pub fn build_guided_decoding_grammar(
     guidance_tokens: &GuidanceTokens,
     tool_config: &ToolConfig,
     tools: &[Tool],
     tool_parser_name: &str,
-    enable_tool_grammar: bool,
     constraint_grammar: Option<TopLevelGrammar>,
     tool_choice_required: bool,
     forced_tool_name: Option<String>,
@@ -422,46 +422,14 @@ pub fn build_guided_decoding_grammar(
     let reasoning_enabled = reasoning_effort
         .as_ref()
         .is_some_and(|effort| *effort != ReasoningEffort::None);
-    let tool_grammar_kind = if enable_tool_grammar && !tools.is_empty() {
-        Some(if tool_parser_name == "qwen_coder" {
-            "xml"
-        } else {
-            "json"
-        })
-    } else {
-        None
-    };
-    let tool_grammar = if enable_tool_grammar && !tools.is_empty() {
-        let builder = ToolGrammarBuilder::new().tools(tools);
-        let grammar = if tool_parser_name == "qwen_coder" {
-            builder
-                .start_token_ids(Some(tool_config.start_token_ids.clone()))
-                .end_token_ids(Some(tool_config.end_token_ids.clone()))
-                .build_xml()
-        } else {
-            builder
-                .start_tag(&tool_config.start_token_str)
-                .end_tag(&tool_config.end_token_str)
-                .start_is_special(tool_config.start_is_special)
-                .end_is_special(tool_config.end_is_special)
-                .start_token_ids(Some(tool_config.start_token_ids.clone()))
-                .end_token_ids(Some(tool_config.end_token_ids.clone()))
-                .build_json()
-        };
-        Some(grammar)
-    } else {
-        None
-    };
 
-    if constraint_grammar.is_none() && tool_grammar.is_none() && !reasoning_enabled {
+    if !constraint_enabled && !reasoning_enabled {
         return None;
     }
 
     crate::log_info!(
-        "[llg] Guided decoding enabled: constraint={} tool_grammar={} tool_format={} parser={} max_tokens={} reasoning={}",
+        "[llg] Guided decoding enabled: constraint={} parser={} max_tokens={} reasoning={}",
         constraint_enabled,
-        tool_grammar.is_some(),
-        tool_grammar_kind.unwrap_or("none"),
         tool_parser_name,
         max_tokens,
         reasoning_effort
@@ -472,7 +440,6 @@ pub fn build_guided_decoding_grammar(
 
     Some(compose_grammars(
         constraint_grammar.into_iter().collect(),
-        tool_grammar,
         !tools.is_empty(),
         tool_choice_required,
         forced_tool_name,
@@ -1006,10 +973,6 @@ pub struct Args {
     /// MCP server arguments (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = None)]
     pub mcp_args: Option<Vec<String>>,
-
-    /// Whether to automatically build LLG grammar from tools
-    #[arg(long, default_value = "false")]
-    pub enable_tool_grammar: bool,
 }
 
 /// Result of executing tool calls via MCP
@@ -1854,7 +1817,6 @@ mod tests {
             &tool_config,
             &[],
             "qwen_coder",
-            false,
             None,
             false,
             None,
@@ -1884,7 +1846,6 @@ mod tests {
             &tool_config,
             &[],
             "qwen_coder",
-            false,
             Some(constraint),
             false,
             None,
@@ -1934,7 +1895,6 @@ mod tests {
             &tool_config,
             &[],
             "qwen_coder",
-            false,
             Some(constraint),
             false,
             None,
@@ -1951,51 +1911,6 @@ mod tests {
         assert!(
             !lark.contains("none have lark_grammar"),
             "wrapper must not stringify non-lark grammars: {lark}"
-        );
-        assert!(
-            grammar
-                .grammars
-                .iter()
-                .any(|g| g.name.as_deref() == Some("inner") && g.json_schema.is_some()),
-            "json-schema constraint should be preserved as nested grammar"
-        );
-    }
-
-    #[test]
-    fn test_build_guided_decoding_grammar_json_schema_constraint_without_reasoning() {
-        let guidance_tokens = GuidanceTokens {
-            eos_token_ids: vec![2],
-            reasoning_start_ids: Vec::new(),
-            reasoning_end_ids: Vec::new(),
-        };
-        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
-        let constraint = TopLevelGrammar::from_json_schema(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "label": {"type": "string"}
-            },
-            "required": ["label"],
-            "additionalProperties": false
-        }));
-
-        let grammar = build_guided_decoding_grammar(
-            &guidance_tokens,
-            &tool_config,
-            &[],
-            "qwen_coder",
-            false,
-            Some(constraint),
-            false,
-            None,
-            64,
-            None,
-        )
-        .expect("json-schema guided grammar should be built");
-
-        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
-        assert!(
-            lark.contains("@inner eos?"),
-            "EOS wrapper should reference the nested constraint grammar: {lark}"
         );
         assert!(
             grammar

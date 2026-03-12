@@ -211,7 +211,6 @@ async fn main() -> Result<()> {
         tool_prompt_template,
         None, // pd_server_prefix_cache_ratio
         None, // pd_client_prefix_cache_ratio
-        args.enable_tool_grammar,
     );
 
     let engine = LLMEngine::new(&econfig, dtype)?;

@@ -870,7 +870,6 @@ pub fn build_tool_call_end_tag(
 /// and handles the alternation/composition logic
 pub fn compose_grammars(
     constraint_grammars: Vec<TopLevelGrammar>,
-    tool_grammar: Option<TopLevelGrammar>,
     has_tools: bool,
     tool_choice_required: bool,
     forced_tool_name: Option<String>,
@@ -880,7 +879,6 @@ pub fn compose_grammars(
 ) -> TopLevelGrammar {
     let builder = GrammarComposerBuilder::new()
         .constraints(constraint_grammars)
-        .tool_grammar(tool_grammar)
         .tool_required(has_tools && tool_choice_required)
         .forced_tool_name(forced_tool_name)
         .reasoning_effort(reasoning_effort);

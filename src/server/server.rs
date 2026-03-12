@@ -397,7 +397,6 @@ pub async fn chat_completion(
             &tool_config,
             &sanitized_tools,
             &tool_parser_name,
-            engine_config.enable_tool_grammar,
             constraint_grammar,
             tool_choice_required,
             forced_tool_name.clone(),

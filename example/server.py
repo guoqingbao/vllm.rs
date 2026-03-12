@@ -40,7 +40,6 @@ def parse_args():
     parser.add_argument("--enforce-parser", type=str, default=None)
     parser.add_argument("--pd-server-prefix-cache-ratio", type=float, default=None)
     parser.add_argument("--pd-client-prefix-cache-ratio", type=float, default=None)
-    parser.add_argument("--enable-tool-grammar", action="store_true")
 
     args = parser.parse_args()
     if args.pd_server and args.ui_server:
@@ -120,7 +119,6 @@ def run_server(args):
         mcp_args=args.mcp_args,
         pd_server_prefix_cache_ratio=args.pd_server_prefix_cache_ratio,
         pd_client_prefix_cache_ratio=args.pd_client_prefix_cache_ratio,
-        enable_tool_grammar=args.enable_tool_grammar,
     )
 
     engine = Engine(cfg, args.dtype)
