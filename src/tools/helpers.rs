@@ -40,7 +40,8 @@ pub fn sanitize_tools_for_llguidance(tools: &[Tool]) -> Vec<Tool> {
 
 fn sanitize_tool_schema(tool: &Tool) -> Tool {
     let mut tool = tool.clone();
-    tool.function.parameters = crate::tools::schema::sanitize_schema_for_llguidance(&tool.function.parameters);
+    tool.function.parameters =
+        crate::tools::schema::sanitize_schema_for_llguidance(&tool.function.parameters);
     tool
 }
 

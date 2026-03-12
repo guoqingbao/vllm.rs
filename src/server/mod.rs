@@ -8,6 +8,7 @@ pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
 use crate::server::streaming::Streamer;
+use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::EngineConfig;
@@ -28,7 +29,6 @@ use parking_lot::RwLock;
 use rustchatui::start_ui_server;
 use serde_json::json;
 use std::collections::HashMap;
-use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
 use std::path::Path;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -169,7 +169,9 @@ pub struct ExtraBody {
 // TopLevelGrammar conversion functions
 // Client grammars are composed via merge_top_level_grammars alongside TEXT and tool grammars.
 
-pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) -> Result<Option<llguidance::api::TopLevelGrammar>> {
+pub fn grammar_fragment_from_structured_outputs(
+    structured: &StructuredOutputs,
+) -> Result<Option<llguidance::api::TopLevelGrammar>> {
     crate::log_debug!("[llg] grammar_fragment_from_structured_outputs() called");
 
     let mut selected: Option<llguidance::api::TopLevelGrammar> = None;
@@ -252,28 +254,45 @@ pub fn grammar_fragment_from_structured_outputs(structured: &StructuredOutputs) 
         return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
     }
 
-    crate::log_info!("[llg] grammar_fragment_from_structured_outputs() completed with grammar: {:?}", selected.is_some());
+    crate::log_info!(
+        "[llg] grammar_fragment_from_structured_outputs() completed with grammar: {:?}",
+        selected.is_some()
+    );
     Ok(selected)
 }
 
-pub fn grammar_fragment_from_response_format(response_format: &ResponseFormat) -> Result<Option<llguidance::api::TopLevelGrammar>> {
-    crate::log_debug!("[llg] grammar_fragment_from_response_format() called with type: {}", response_format.format_type);
+pub fn grammar_fragment_from_response_format(
+    response_format: &ResponseFormat,
+) -> Result<Option<llguidance::api::TopLevelGrammar>> {
+    crate::log_debug!(
+        "[llg] grammar_fragment_from_response_format() called with type: {}",
+        response_format.format_type
+    );
 
     match response_format.format_type.as_str() {
         "json_schema" => {
             let Some(schema) = response_format.json_schema.as_ref() else {
-                crate::log_error!("[llg] response_format.json_schema is required for type=json_schema");
-                return Err(candle_core::Error::msg("response_format.json_schema is required"));
+                crate::log_error!(
+                    "[llg] response_format.json_schema is required for type=json_schema"
+                );
+                return Err(candle_core::Error::msg(
+                    "response_format.json_schema is required",
+                ));
             };
             crate::log_debug!("[llg] Building JSON schema grammar from response_format");
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
             let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
                 .map_err(|e| candle_core::Error::msg(e.to_string()))?;
-            crate::log_info!("[llg] grammar_fragment_from_response_format() completed with grammar");
+            crate::log_info!(
+                "[llg] grammar_fragment_from_response_format() completed with grammar"
+            );
             Ok(Some(json_gram))
         }
         other => {
-            crate::log_error!("[llg] Unsupported response_format type '{}'; only 'json_schema' is supported", other);
+            crate::log_error!(
+                "[llg] Unsupported response_format type '{}'; only 'json_schema' is supported",
+                other
+            );
             Err(candle_core::Error::msg(format!(
                 "Unsupported response_format type '{}'; only 'json_schema' is supported",
                 other

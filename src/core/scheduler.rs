@@ -198,7 +198,9 @@ impl Scheduler {
         let runners_guard = runners.read();
 
         if let RunnerType::Thread(model_runner) = &*runners_guard {
-            if let Some(valid_count) = model_runner.validate_sequence_for_grammar(seq_id, output_ids) {
+            if let Some(valid_count) =
+                model_runner.validate_sequence_for_grammar(seq_id, output_ids)
+            {
                 return valid_count < output_ids.len();
             }
         }
@@ -213,7 +215,9 @@ impl Scheduler {
         const MAX_ROLLBACK_ATTEMPTS: usize = 3;
 
         // Find the sequence
-        let seq = self.running.iter_mut()
+        let seq = self
+            .running
+            .iter_mut()
             .find(|s| s.id == seq_id)
             .ok_or_else(|| candle_core::Error::msg(format!("Sequence {} not found", seq_id)))?;
 
@@ -222,7 +226,8 @@ impl Scheduler {
         if seq.guidance_rollback_count > MAX_ROLLBACK_ATTEMPTS {
             crate::log_error!(
                 "[Seq {}] Exceeded {} rollback attempts, marking as errored",
-                seq_id, MAX_ROLLBACK_ATTEMPTS
+                seq_id,
+                MAX_ROLLBACK_ATTEMPTS
             );
             seq.status = SequenceStatus::Finished;
             return Ok(());
@@ -242,7 +247,8 @@ impl Scheduler {
         seq.num_cached_tokens = target_blocks * self.block_manager.get_block_size();
 
         // Rollback BlockManager (KV cache + prefix cache)
-        self.block_manager.rollback_to_seq_tokens(seq, target_tokens)?;
+        self.block_manager
+            .rollback_to_seq_tokens(seq, target_tokens)?;
 
         // Rollback ModelRunner (llguidance FSM + Mamba state)
         let runners = self.block_manager.get_runners().clone();

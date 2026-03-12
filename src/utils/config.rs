@@ -1,12 +1,12 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
-use llguidance::api::TopLevelGrammar;
 #[cfg(not(feature = "python"))]
 use crate::utils::guidance::ReasoningEffort;
+use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
-use serde::{Deserialize, Serialize};
 use serde::de::Error;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(not(feature = "python"))]
@@ -143,7 +143,9 @@ where
             if let Some(id) = n.as_u64() {
                 Ok(Some(vec![id as u32]))
             } else {
-                Err(serde::de::Error::custom("eos_token_id must be a positive integer"))
+                Err(serde::de::Error::custom(
+                    "eos_token_id must be a positive integer",
+                ))
             }
         }
         Some(serde_json::Value::Array(arr)) => {
@@ -153,7 +155,9 @@ where
                     if let Some(id) = v.as_u64() {
                         Ok(id as u32)
                     } else {
-                        Err(D::Error::custom("eos_token_id array must contain only unsigned integers"))
+                        Err(D::Error::custom(
+                            "eos_token_id array must contain only unsigned integers",
+                        ))
                     }
                 })
                 .collect();
@@ -331,7 +335,7 @@ impl EngineConfig {
         pd_client_prefix_cache_ratio: Option<f32>,
         allow_constraint_api: bool,
         enable_tool_grammar: bool,
-      ) -> Self {
+    ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
             device_ids.push(0);
@@ -377,14 +381,14 @@ impl EngineConfig {
             pd_config,
             mcp_command,
             mcp_config,
-             mcp_args,
-             tool_prompt_template,
-             pd_server_prefix_cache_ratio,
-             pd_client_prefix_cache_ratio,
-             allow_constraint_api,
-             enable_tool_grammar,
-          }
-      }
+            mcp_args,
+            tool_prompt_template,
+            pd_server_prefix_cache_ratio,
+            pd_client_prefix_cache_ratio,
+            allow_constraint_api,
+            enable_tool_grammar,
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

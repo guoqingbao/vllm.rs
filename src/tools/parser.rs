@@ -5,7 +5,7 @@
 
 use super::{new_tool_call, ToolCall};
 use regex::Regex;
-use serde::{de::{Deserializer, MapAccess, Visitor}};
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::OnceLock;
@@ -166,8 +166,8 @@ impl ToolParser {
                     }
 
                     if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                         calls.extend(self.value_to_tool_call(&parsed, call_id));
-                     }
+                        calls.extend(self.value_to_tool_call(&parsed, call_id));
+                    }
                 }
             }
         }
@@ -186,11 +186,11 @@ impl ToolParser {
 
         // Simple approach: try to parse the entire text as JSON first
         if let Ok(parsed) = serde_json::from_str::<Value>(text.trim()) {
-             let parsed_calls = self.value_to_tool_call(&parsed, call_id);
-             if parsed_calls.is_some() {
-                 return Some(vec![parsed_calls.unwrap()]);
-             }
-         }
+            let parsed_calls = self.value_to_tool_call(&parsed, call_id);
+            if parsed_calls.is_some() {
+                return Some(vec![parsed_calls.unwrap()]);
+            }
+        }
 
         // Look for JSON blocks in the text
         let mut depth = 0;
@@ -398,13 +398,13 @@ fn process_model_specific_message(message: &str) -> String {
                 .unwrap_or_default();
             let json_str = caps.name("json").map(|m| m.as_str().trim()).unwrap_or("{}");
             let arguments: Value =
-                  serde_json::from_str(json_str).unwrap_or_else(|_| Value::Object(Map::new()));
-              let args_str = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
-              calls.push(new_tool_call(
-                  format!("call_{}", calls.len()),
-                  name,
-                  args_str,
-              ));
+                serde_json::from_str(json_str).unwrap_or_else(|_| Value::Object(Map::new()));
+            let args_str = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+            calls.push(new_tool_call(
+                format!("call_{}", calls.len()),
+                name,
+                args_str,
+            ));
         }
         serde_json::to_string(&calls).unwrap_or_else(|_| message.to_string())
     } else {
@@ -430,11 +430,7 @@ fn json_value_to_tool_call(value: &Value, call_id: &mut usize) -> Option<ToolCal
         serde_json::to_string(arguments).ok()?
     };
 
-    let call = new_tool_call(
-        format!("call_{}", call_id),
-        name,
-        args_str,
-    );
+    let call = new_tool_call(format!("call_{}", call_id), name, args_str);
     *call_id += 1;
     Some(call)
 }
@@ -470,29 +466,21 @@ pub fn parse_tool_calls_from_text(text: &str, call_id: &mut usize) -> Vec<ToolCa
     let processed = fix_broken_json(&processed);
 
     if let Ok(deser) = serde_json::from_str::<CalledFunctionParameters>(&processed) {
-         let args = serde_json::to_string(&deser.parameters).unwrap_or_else(|_| "{}".to_string());
-         let call = new_tool_call(
-             format!("call_{}", call_id),
-             deser.name,
-             args,
-         );
-         *call_id += 1;
-         return vec![call];
-     }
+        let args = serde_json::to_string(&deser.parameters).unwrap_or_else(|_| "{}".to_string());
+        let call = new_tool_call(format!("call_{}", call_id), deser.name, args);
+        *call_id += 1;
+        return vec![call];
+    }
 
     if let Ok(deser) = serde_json::from_str::<Vec<CalledFunctionParameters>>(&processed) {
-         let mut out = Vec::new();
-         for item in deser {
-             let args = serde_json::to_string(&item.parameters).unwrap_or_else(|_| "{}".to_string());
-             out.push(new_tool_call(
-                 format!("call_{}", call_id),
-                 item.name,
-                 args,
-             ));
-             *call_id += 1;
-         }
-         return out;
-     }
+        let mut out = Vec::new();
+        for item in deser {
+            let args = serde_json::to_string(&item.parameters).unwrap_or_else(|_| "{}".to_string());
+            out.push(new_tool_call(format!("call_{}", call_id), item.name, args));
+            *call_id += 1;
+        }
+        return out;
+    }
 
     Vec::new()
 }
@@ -590,15 +578,11 @@ fn parse_function_tag_tool_call(inner: &str, call_id: &mut usize) -> Option<Tool
     }
 
     let args = Value::Object(params);
-     let args_str = serde_json::to_string(&args).ok()?;
+    let args_str = serde_json::to_string(&args).ok()?;
 
-     let call = new_tool_call(
-         format!("call_{}", call_id),
-         func_name.to_string(),
-         args_str,
-     );
-     *call_id += 1;
-     Some(call)
+    let call = new_tool_call(format!("call_{}", call_id), func_name.to_string(), args_str);
+    *call_id += 1;
+    Some(call)
 }
 
 #[cfg(test)]
@@ -688,7 +672,17 @@ qux
         let calls = parser.parse(text);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "my_tool");
-        assert!(calls[0].clone().function.arguments.unwrap().contains("\"foo\""));
-        assert!(calls[0].clone().function.arguments.unwrap().contains("\"baz\""));
+        assert!(calls[0]
+            .clone()
+            .function
+            .arguments
+            .unwrap()
+            .contains("\"foo\""));
+        assert!(calls[0]
+            .clone()
+            .function
+            .arguments
+            .unwrap()
+            .contains("\"baz\""));
     }
 }

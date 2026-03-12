@@ -348,7 +348,8 @@ impl PrefixCache {
 
     /// Find the hash associated with a block_id
     pub fn hash_for_block(&self, block_id: usize) -> Option<u64> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .find(|(_, entry)| entry.block_id == block_id)
             .map(|(hash, _)| *hash)
     }

@@ -65,47 +65,57 @@ impl ReasoningEffort {
             Self::None => {
                 // No reasoning block - direct output only
                 // Minimal latency, no structured thinking
-                format!(r#"start: reasoning_block text
+                format!(
+                    r#"start: reasoning_block text
 text: /[\x09\x0A\x0D\x20-\x7E]*?/
 reasoning_block: <[{}]> "\n" text "\n" <[{}]>
-"#, start_id, end_id)
+"#,
+                    start_id, end_id
+                )
             }
             Self::Low => {
                 // Fast Thinking: Single paragraph constraint (max ~150 chars)
                 // Limits generation space to reduce hallucination risk
                 // Uses non-greedy matching to prevent runaway generation
-                format!(r#"start: reasoning_block
+                format!(
+                    r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
 thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,300}}/
-"#)
+"#
+                )
             }
             Self::Medium => {
                 // Standard CoT: Multi-step reasoning with natural sentence termination
                 // Implements Wei et al. (2022) baseline pattern
                 // Allows multiple steps but enforces sentence boundaries
-                format!(r#"start: reasoning_block
+                format!(
+                    r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
 thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,1200}}/
-"#)
+"#
+                )
             }
             Self::High => {
                 // Adversarial Analysis: Explicit self-correction phases
                 // Implements Cheng & Su (2025) adversarial critique pattern
                 // Forces model to challenge its own reasoning before finalizing
-                format!(r#"start: reasoning_block* analysis_block*
+                format!(
+                    r#"start: reasoning_block* analysis_block*
 reasoning_block: <[{start_id}]> "\n" : analysis_block analysis_content critique_phase critique_content thinkgram "\n" <[{end_id}]> "\n"
 analysis_block: "<ANALYZE>" "\n" analysis_content "\n" "</ANALYZE>" "\n"
 analysis_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,2400}}/
 critique_phase: "<CRITIQUE>" "\n" critique_content "\n" "</CRITIQUE>" "\n"
 critique_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,1200}}/
 thinkgram: "<STRUCTUREDANSWER>" "\n" /[\x09\x0A\x0D\x20-\x7E]*?{{1,3600}}/ "\n" "</STRUCTUREDANSWER>" "\n"
-"#)
+"#
+                )
             }
             Self::ChainOfThought => {
                 // Best-of-breed: CoVe + Adversarial Critique + Final Consolidation
                 // Combines Madaan et al. (2024) Chain-of-Verification with self-correction
                 // Maximum accuracy for complex/fact-sensitive tasks
-                format!(r#"start: reasoning_block+
+                format!(
+                    r#"start: reasoning_block+
 reasoning_block: <[{start_id}]> "\n" draft_phase verification_phase critique_phase final_phase "\n" <[{end_id}]> "\n"
 draft_phase: /(?s:[^.!?]+[.!?])+/
 verification_phase: "<VERIFY>" "\n" verification_questions "\n" verification_answers "\n" "</VERIFY>" "\n"
@@ -115,13 +125,16 @@ critique_phase: "<CRITIQUE>" "\n" self_critique "\n" "</CRITIQUE>" "\n"
 self_critique: /[\x09\x0A\x0D\x20-\x7E]*?/
 final_phase: "<FINAL_ANSWER>" "\n" final_content "\n"
 final_content: /[\x09\x0A\x0D\x20-\x7E]*?/
-"#)
+"#
+                )
             }
             #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
             Self::Custom(template) => {
                 // User-provided template with token ID injection
                 // Supports $START_ID and $END_ID placeholders for dynamic token ID substitution
-                template.replace("$START_ID", &start_id.to_string()).replace("$END_ID", &end_id.to_string())
+                template
+                    .replace("$START_ID", &start_id.to_string())
+                    .replace("$END_ID", &end_id.to_string())
             }
         }
     }
@@ -131,7 +144,7 @@ final_content: /[\x09\x0A\x0D\x20-\x7E]*?/
 pub fn thinking_grammar_with_reasoning_block(
     start_id: u32,
     end_id: u32,
-    effort: Option<ReasoningEffort>
+    effort: Option<ReasoningEffort>,
 ) -> String {
     match effort {
         Some(level) => level.generate_grammar(start_id, end_id),
@@ -153,12 +166,20 @@ pub struct ThinkingGrammarBuilder {
 
 impl ThinkingGrammarBuilder {
     pub fn new(start_id: u32, end_id: u32, effort: Option<ReasoningEffort>) -> Self {
-        Self { start_id, end_id, effort }
+        Self {
+            start_id,
+            end_id,
+            effort,
+        }
     }
 
     /// Create thinking grammar from string token IDs
     pub fn from_string(start_id: u32, end_id: u32) -> Self {
-        Self { start_id, end_id, effort: None }
+        Self {
+            start_id,
+            end_id,
+            effort: None,
+        }
     }
 
     /// Build the thinking grammar Lark string
@@ -173,7 +194,6 @@ impl ThinkingGrammarBuilder {
     }
 }
 
-
 /// Build a reasoning-aware grammar composer
 /// Wraps a base composer with reasoning blocks when reasoning effort is enabled
 pub fn build_reasoning_grammar(
@@ -181,7 +201,10 @@ pub fn build_reasoning_grammar(
     reasoning_effort: ReasoningEffort,
     special_tokens: &SpecialTokens,
 ) -> TopLevelGrammar {
-    crate::log_debug!("[llg] build_reasoning_grammar() called with effort={:?}", reasoning_effort);
+    crate::log_debug!(
+        "[llg] build_reasoning_grammar() called with effort={:?}",
+        reasoning_effort
+    );
 
     if reasoning_effort == ReasoningEffort::None {
         return base_grammar;
@@ -200,17 +223,16 @@ pub fn build_reasoning_grammar(
 
     let start_id = reasoning_start_ids[0];
     let end_id = reasoning_end_ids[0];
-    crate::log_info!("[llg] build_reasoning_grammar() adding reasoning block with effort={:?}", reasoning_effort);
+    crate::log_info!(
+        "[llg] build_reasoning_grammar() adding reasoning block with effort={:?}",
+        reasoning_effort
+    );
     let reasoning_lark = thinking_grammar_with_reasoning_block(start_id, end_id, None);
     let reasoning_gram = TopLevelGrammar::from_lark(reasoning_lark);
 
     // Merge reasoning block with base grammar
     // The reasoning block comes first, then the base grammar
-    crate::utils::guidance::merge_top_level_grammars(
-        vec![reasoning_gram, base_grammar],
-        None,
-        None,
-    )
+    crate::utils::guidance::merge_top_level_grammars(vec![reasoning_gram, base_grammar], None, None)
 }
 
 #[cfg(test)]
@@ -219,18 +241,36 @@ mod tests {
 
     #[test]
     fn test_reasoning_effort_from_str() {
-        assert_eq!(ReasoningEffort::from_str("none".to_string()), ReasoningEffort::None);
-        assert_eq!(ReasoningEffort::from_str("low".to_string()), ReasoningEffort::Low);
-        assert_eq!(ReasoningEffort::from_str("medium".to_string()), ReasoningEffort::Medium);
-        assert_eq!(ReasoningEffort::from_str("high".to_string()), ReasoningEffort::High);
-        assert_eq!(ReasoningEffort::from_str("invalid".to_string()), ReasoningEffort::None);
+        assert_eq!(
+            ReasoningEffort::from_str("none".to_string()),
+            ReasoningEffort::None
+        );
+        assert_eq!(
+            ReasoningEffort::from_str("low".to_string()),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            ReasoningEffort::from_str("medium".to_string()),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            ReasoningEffort::from_str("high".to_string()),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            ReasoningEffort::from_str("invalid".to_string()),
+            ReasoningEffort::None
+        );
     }
 
     #[test]
     fn test_thinking_grammar_builder() {
         let builder = ThinkingGrammarBuilder::new(151657, 151658, None);
         let lark = builder.build();
-        assert!(lark.contains("reasoning_block"), "Should contain reasoning_block");
+        assert!(
+            lark.contains("reasoning_block"),
+            "Should contain reasoning_block"
+        );
         assert!(lark.contains("<[151657]"), "Should contain start token ID");
         assert!(lark.contains("<[151658]"), "Should contain end token ID");
     }
@@ -264,9 +304,15 @@ mod tests {
         let template = "custom:\nstart: reasoning_block\nreasoning_block: <$START_ID> thinkgram <$END_ID>\nthinkgram: /(?s:[^.!?]+[.!?])+/\n";
         let effort = ReasoningEffort::Custom(template.to_string());
         let grammar = effort.generate_grammar(151660, 151661);
-        assert!(grammar.contains("reasoning_block"), "Should contain reasoning_block");
+        assert!(
+            grammar.contains("reasoning_block"),
+            "Should contain reasoning_block"
+        );
         assert!(grammar.contains("<151660>"), "Should contain start_id");
         assert!(grammar.contains("<151661>"), "Should contain end_id");
-        assert!(grammar.contains("custom:"), "Should contain custom template");
+        assert!(
+            grammar.contains("custom:"),
+            "Should contain custom template"
+        );
     }
 }

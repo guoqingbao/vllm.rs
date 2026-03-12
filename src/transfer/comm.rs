@@ -1,6 +1,5 @@
 // src/core/transfer/comm.rs
 use super::{FinishedPrefillData, PdConfig, PdRole, TransferMessage};
-use rmp_serde;
 use candle_core::Result;
 use interprocess::local_socket::traits::Listener;
 use interprocess::local_socket::traits::Stream;
@@ -9,6 +8,7 @@ use interprocess::local_socket::{
 };
 use interprocess::TryClone;
 use parking_lot::{Mutex, RwLock};
+use rmp_serde;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

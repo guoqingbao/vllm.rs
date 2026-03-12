@@ -372,9 +372,9 @@ impl SamplingParams {
         grammar_json: Option<String>,
     ) -> Self {
         // Convert grammar_json to TopLevelGrammar if present
-        let grammar = grammar_json.as_ref().and_then(|s| {
-            serde_json::from_str::<TopLevelGrammar>(s).ok()
-        });
+        let grammar = grammar_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str::<TopLevelGrammar>(s).ok());
 
         Self {
             temperature,
@@ -416,7 +416,9 @@ impl SamplingParams {
 
     #[getter]
     fn grammar_json(&self) -> Option<String> {
-        self.grammar.as_ref().and_then(|g| serde_json::to_string(g).ok())
+        self.grammar
+            .as_ref()
+            .and_then(|g| serde_json::to_string(g).ok())
     }
 
     #[setter]

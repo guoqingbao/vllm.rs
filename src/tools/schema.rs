@@ -4,10 +4,10 @@
 //! Provides helpers for working with JSON Schema in tool definitions.
 
 use crate::tools::Tool;
+use crate::utils::guidance::{GrammarError, GrammarResult, TopLevelGrammarExt};
+use llguidance::api::TopLevelGrammar;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use crate::utils::guidance::{TopLevelGrammarExt, GrammarError, GrammarResult};
-use llguidance::api::TopLevelGrammar;
 
 /// Remove JSON Schema features that llguidance doesn't support.
 /// Currently strips all "format" fields recursively.
@@ -23,9 +23,12 @@ fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
             }
             Value::Object(out)
         }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(sanitize_schema_for_llguidance_recursive).collect())
-        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(sanitize_schema_for_llguidance_recursive)
+                .collect(),
+        ),
         _ => schema.clone(),
     }
 }
@@ -39,16 +42,23 @@ fn strip_null_from_required_fields(schema: Value) -> Value {
             let required_fields: Vec<String> = map
                 .get("required")
                 .and_then(|r| r.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             // Clone the properties map to avoid borrow conflicts
-            let mut props = map.get("properties").and_then(|p| p.as_object()).cloned().unwrap_or_default();
+            let mut props = map
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .cloned()
+                .unwrap_or_default();
 
             // Process properties - collect fields that need null stripped
-            let props_to_update: Vec<String> = props.iter()
+            let props_to_update: Vec<String> = props
+                .iter()
                 .filter(|(name, _)| required_fields.contains(name))
                 .map(|(name, _)| name.clone())
                 .collect();
@@ -83,7 +93,8 @@ fn strip_null_from_required_fields(schema: Value) -> Value {
             Value::Object(map)
         }
         Value::Array(mut arr) => {
-            arr.iter_mut().for_each(|v| *v = strip_null_from_required_fields(v.clone()));
+            arr.iter_mut()
+                .for_each(|v| *v = strip_null_from_required_fields(v.clone()));
             Value::Array(arr)
         }
         _ => schema,
@@ -102,10 +113,7 @@ pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
 /// Sanitize string for Lark grammar - only allow ASCII characters
 fn lark_quote(value: &str) -> String {
     // Strip non-ASCII characters to prevent grammar parser errors
-    let sanitized: String = value
-        .chars()
-        .filter(|c| c.is_ascii())
-        .collect();
+    let sanitized: String = value.chars().filter(|c| c.is_ascii()).collect();
     let escaped = sanitized.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{}\"", escaped)
 }
@@ -124,10 +132,7 @@ fn lark_special_token(token_ids: &HashSet<u32>) -> String {
 fn _lark_literal(value: &str, is_special: bool) -> String {
     if is_special && value.starts_with('<') && value.ends_with('>') {
         // Only allow ASCII special tags
-        let sanitized: String = value
-            .chars()
-            .filter(|c| c.is_ascii())
-            .collect();
+        let sanitized: String = value.chars().filter(|c| c.is_ascii()).collect();
         sanitized
     } else {
         lark_quote(value)
@@ -197,8 +202,13 @@ impl ToolGrammarBuilder {
     pub fn build_json(self) -> TopLevelGrammar {
         let mut rules = Vec::new();
 
-        let start_tag = self.get_tag_or_token_id(&self.start_tag, &self.start_token_ids, self.start_is_special);
-        let end_tag = self.get_tag_or_token_id(&self.end_tag, &self.end_token_ids, self.end_is_special);
+        let start_tag = self.get_tag_or_token_id(
+            &self.start_tag,
+            &self.start_token_ids,
+            self.start_is_special,
+        );
+        let end_tag =
+            self.get_tag_or_token_id(&self.end_tag, &self.end_token_ids, self.end_is_special);
 
         rules.push("start: tool_call".to_string());
         rules.push(format!("tool_call: {} tool_obj {}", start_tag, end_tag));
@@ -216,12 +226,18 @@ impl ToolGrammarBuilder {
         } else {
             rules.extend(self.tools.iter().enumerate().map(|(_i, t)| {
                 let name = t.function.name.replace("-", "_");
-                format!("obj_{name}: %json {}", serde_json::to_string(&t.function.parameters).unwrap_or_default())
+                format!(
+                    "obj_{name}: %json {}",
+                    serde_json::to_string(&t.function.parameters).unwrap_or_default()
+                )
             }));
 
-            let obj_names = self.tools.iter().map(|t| {
-                format!("obj_{}", t.function.name.replace("-", "_"))
-            }).collect::<Vec<_>>().join(" | ");
+            let obj_names = self
+                .tools
+                .iter()
+                .map(|t| format!("obj_{}", t.function.name.replace("-", "_")))
+                .collect::<Vec<_>>()
+                .join(" | ");
             rules.push(format!("obj: {}", obj_names));
         }
 
@@ -234,7 +250,10 @@ impl ToolGrammarBuilder {
 
     /// Build Lark expression for valid XML parameter content
     fn build_xml_value_expression(schema: &serde_json::Value) -> String {
-        let param_type = schema.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+        let param_type = schema
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("string");
 
         match param_type {
             "string" => {
@@ -247,7 +266,7 @@ impl ToolGrammarBuilder {
                     // Binary anchors like <[151656]> handle parameter termination via token ID
                     // matching, so we can safely match any character including <
                 }
-            },
+            }
             "integer" => r"/-?[0-9]+/".to_string(),
             "number" => r"/-?[0-9]+(\.[0-9]+)?/".to_string(),
             "boolean" => r"/^(true|false)$/".to_string(),
@@ -259,7 +278,7 @@ impl ToolGrammarBuilder {
 
     /// Build Lark expression for XML tool schema content
     /// Uses structured tag parsing with ASCII-restricted value patterns
-    /// 
+    ///
     /// Guards against:
     /// 1. String literals being tokenized differently than expected
     /// 2. Non-greedy patterns matching too much content
@@ -268,49 +287,71 @@ impl ToolGrammarBuilder {
         let mut rules: Vec<String> = Vec::new();
 
         // Build envelope tag using token IDs when available
-        let envelope_start_tag = self.get_envelope_tag(&self.start_tag, &self.start_token_ids, self.start_is_special);
-        let envelope_end_tag = self.get_envelope_tag(&self.end_tag, &self.end_token_ids, self.end_is_special);
+        let envelope_start_tag = self.get_envelope_tag(
+            &self.start_tag,
+            &self.start_token_ids,
+            self.start_is_special,
+        );
+        let envelope_end_tag =
+            self.get_envelope_tag(&self.end_tag, &self.end_token_ids, self.end_is_special);
 
-        let tool_rule_names: Vec<String> = (0..self.tools.len()).map(|i| format!("tool_{i}")).collect();
-        
+        let tool_rule_names: Vec<String> =
+            (0..self.tools.len()).map(|i| format!("tool_{i}")).collect();
+
         // GUARD 1: Use string literals for XML inner structure (function/parameter tags)
         // The stream parser detects these using text matching in the buffer
         rules.push("start: tool_call".to_string());
-        rules.push(format!("tool_call: {} tool_content {}", envelope_start_tag, envelope_end_tag));
-        
+        rules.push(format!(
+            "tool_call: {} tool_content {}",
+            envelope_start_tag, envelope_end_tag
+        ));
+
         // For each tool, generate XML structure with string literals for tags
         for (tool_idx, tool) in self.tools.iter().enumerate() {
-            let tool_name_ascii: String = tool.function.name.chars().filter(|c| c.is_ascii()).collect();
+            let tool_name_ascii: String = tool
+                .function
+                .name
+                .chars()
+                .filter(|c| c.is_ascii())
+                .collect();
             let func_start = lark_quote(&format!("<function={}>", tool_name_ascii));
             let func_end = lark_quote("</function>");
             let params_schema = &tool.function.parameters;
             let props = params_schema.get("properties").and_then(|p| p.as_object());
-            let required_params: Vec<String> = params_schema.get("required")
+            let required_params: Vec<String> = params_schema
+                .get("required")
                 .and_then(|r| r.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             if let Some(props) = props {
                 let mut param_rules_vec: Vec<String> = Vec::new();
 
                 for (param_idx, (param_name, schema)) in props.iter().enumerate() {
-                    let param_name_ascii: String = param_name.chars().filter(|c| c.is_ascii()).collect();
+                    let param_name_ascii: String =
+                        param_name.chars().filter(|c| c.is_ascii()).collect();
                     let param_tag = lark_quote(&format!("<parameter={}>", param_name_ascii));
                     let param_end = lark_quote("</parameter>");
                     let value_rule = format!("value_{tool_idx}_{param_idx}");
                     let param_rule = format!("param_{tool_idx}_{param_idx}");
 
-                    // GUARD 2: ASCII-only value pattern that excludes < and > 
+                    // GUARD 2: ASCII-only value pattern that excludes < and >
                     // /[^<\x3C\x3E]+/ prevents the value from consuming closing tags
                     let value_expr = Self::build_xml_value_expression(schema);
                     rules.push(format!("{value_rule}: {value_expr}"));
-                    
+
                     // GUARD 3: Binary anchor tokens after closing tags
                     // These provide explicit termination for llguidance Matcher
                     // Use pad IDs when available, fall back to string literal
                     if param_idx == 0 {
                         // First param - use envelope_end_tag as anchor
-                        param_rules_vec.push(format!("{param_tag} {value_rule} {param_end} {envelope_end_tag}"));
+                        param_rules_vec.push(format!(
+                            "{param_tag} {value_rule} {param_end} {envelope_end_tag}"
+                        ));
                     } else {
                         param_rules_vec.push(format!("{param_tag} {value_rule} {param_end}"));
                     }
@@ -318,12 +359,16 @@ impl ToolGrammarBuilder {
 
                 // Combine parameters, making optional ones wrapped in ()?
                 let params_expr = param_rules_vec.join(" ");
-                
+
                 // GUARD 3: Add binary anchor after function end
-                rules.push(format!("tool_{tool_idx}: {func_start} {params_expr} {func_end} {envelope_end_tag}"));
+                rules.push(format!(
+                    "tool_{tool_idx}: {func_start} {params_expr} {func_end} {envelope_end_tag}"
+                ));
             } else {
                 // No parameters - just function tags with anchor
-                rules.push(format!("tool_{tool_idx}: {func_start} {func_end} {envelope_end_tag}"));
+                rules.push(format!(
+                    "tool_{tool_idx}: {func_start} {func_end} {envelope_end_tag}"
+                ));
             }
         }
 
@@ -336,9 +381,13 @@ impl ToolGrammarBuilder {
         TopLevelGrammar::from_lark_utf8(&lark)
     }
 
-
     /// Get envelope tag (start/end) using token IDs when available, falling back to string literals
-    fn get_envelope_tag(&self, tag: &str, token_ids: &Option<HashSet<u32>>, is_special: bool) -> String {
+    fn get_envelope_tag(
+        &self,
+        tag: &str,
+        token_ids: &Option<HashSet<u32>>,
+        is_special: bool,
+    ) -> String {
         if let Some(ids) = token_ids {
             if !ids.is_empty() {
                 return lark_special_token(ids);
@@ -354,10 +403,21 @@ impl ToolGrammarBuilder {
         }
     }
 
-    fn get_tag_or_token_id(&self, tag: &str, token_ids: &Option<HashSet<u32>>, is_special: bool) -> String {
+    fn get_tag_or_token_id(
+        &self,
+        tag: &str,
+        token_ids: &Option<HashSet<u32>>,
+        is_special: bool,
+    ) -> String {
         if let Some(ids) = token_ids {
             if !ids.is_empty() {
-                return format!("<{}>", ids.iter().map(|id| format!("[{}]", id)).collect::<Vec<_>>().join(","));
+                return format!(
+                    "<{}>",
+                    ids.iter()
+                        .map(|id| format!("[{}]", id))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
             }
         }
 
@@ -373,27 +433,54 @@ impl ToolGrammarBuilder {
         let mut rules: Vec<String> = Vec::new();
 
         // Build envelope tag using pad IDs for anchors
-        let envelope_start_tag = self.get_envelope_tag(&self.start_tag, &self.start_token_ids, self.start_is_special);
-        let envelope_end_tag = self.get_envelope_tag(&self.end_tag, &self.end_token_ids, self.end_is_special);
+        let envelope_start_tag = self.get_envelope_tag(
+            &self.start_tag,
+            &self.start_token_ids,
+            self.start_is_special,
+        );
+        let envelope_end_tag =
+            self.get_envelope_tag(&self.end_tag, &self.end_token_ids, self.end_is_special);
 
         // Add pad tokens as XML anchors for </function> and </parameter>
-        let func_anchor = if pad_ids.len() >= 1 { format!("<[{}]>", pad_ids[0]) } else { "</function>".to_string() };
-        let param_anchor = if pad_ids.len() >= 2 { format!("<[{}]>", pad_ids[1]) } else { "</parameter>".to_string() };
+        let func_anchor = if pad_ids.len() >= 1 {
+            format!("<[{}]>", pad_ids[0])
+        } else {
+            "</function>".to_string()
+        };
+        let param_anchor = if pad_ids.len() >= 2 {
+            format!("<[{}]>", pad_ids[1])
+        } else {
+            "</parameter>".to_string()
+        };
 
-        let tool_rule_names: Vec<String> = (0..self.tools.len()).map(|i| format!("tool_{i}")).collect();
+        let tool_rule_names: Vec<String> =
+            (0..self.tools.len()).map(|i| format!("tool_{i}")).collect();
         rules.push("start: tool_call".to_string());
-        rules.push(format!("tool_call: {} tool_content {}", envelope_start_tag, envelope_end_tag));
+        rules.push(format!(
+            "tool_call: {} tool_content {}",
+            envelope_start_tag, envelope_end_tag
+        ));
 
         // Get required params from schema
         let get_required_params = |params_schema: &serde_json::Value| -> Vec<String> {
-            params_schema.get("required")
+            params_schema
+                .get("required")
                 .and_then(|r| r.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
 
         for (tool_idx, tool) in self.tools.iter().enumerate() {
-            let tool_name_ascii: String = tool.function.name.chars().filter(|c| c.is_ascii()).collect();
+            let tool_name_ascii: String = tool
+                .function
+                .name
+                .chars()
+                .filter(|c| c.is_ascii())
+                .collect();
             let func_start = lark_quote(&format!("<function={}>", tool_name_ascii));
             let func_end = format!("{} {}", lark_quote("</function>"), func_anchor);
             let params_schema = &tool.function.parameters;
@@ -404,7 +491,8 @@ impl ToolGrammarBuilder {
                 let mut param_rules_vec: Vec<String> = Vec::new();
 
                 for (param_idx, (param_name, schema)) in props.iter().enumerate() {
-                    let param_name_ascii: String = param_name.chars().filter(|c| c.is_ascii()).collect();
+                    let param_name_ascii: String =
+                        param_name.chars().filter(|c| c.is_ascii()).collect();
                     let param_tag = lark_quote(&format!("<parameter={}>", param_name_ascii));
                     let param_end = format!("{} {}", lark_quote("</parameter>"), param_anchor);
                     let value_rule = format!("value_{tool_idx}_{param_idx}");
@@ -413,7 +501,9 @@ impl ToolGrammarBuilder {
                     // Determine the Lark expression for valid XML content based on schema type
                     let value_expr = Self::build_xml_value_expression(schema);
                     rules.push(format!("{value_rule}: {value_expr}"));
-                    rules.push(format!("{param_rule}: {param_tag} {value_rule} {param_end}"));
+                    rules.push(format!(
+                        "{param_rule}: {param_tag} {value_rule} {param_end}"
+                    ));
 
                     // Add to param_rules_vec with ? for optional, bare for required
                     if required_params.contains(param_name) {
@@ -424,7 +514,9 @@ impl ToolGrammarBuilder {
                 }
 
                 let params_expr = param_rules_vec.join(" ");
-                rules.push(format!("tool_{tool_idx}: {func_start} {params_expr} {func_end}"));
+                rules.push(format!(
+                    "tool_{tool_idx}: {func_start} {params_expr} {func_end}"
+                ));
             } else {
                 // No parameters - just function tags
                 rules.push(format!("tool_{tool_idx}: {func_start} {func_end}"));
@@ -436,7 +528,10 @@ impl ToolGrammarBuilder {
         rules.push(format!("tool_content: {tool_variants}"));
 
         let lark = rules.join("\n") + "\n";
-        crate::log_debug!("[llg] ToolGrammarBuilder::build_xml_with_anchors lark: {}", &lark);
+        crate::log_debug!(
+            "[llg] ToolGrammarBuilder::build_xml_with_anchors lark: {}",
+            &lark
+        );
         TopLevelGrammar::from_lark_utf8(&lark)
     }
 }
@@ -712,13 +807,17 @@ pub mod common {
 /// Build a Lark grammar for choice constraints (structured outputs choice field)
 pub fn build_choice_lark_grammar(choices: &[String]) -> GrammarResult<TopLevelGrammar> {
     if choices.is_empty() {
-        return Err(GrammarError::InvalidGrammar("structured_outputs.choice must include at least one option".to_string()));
+        return Err(GrammarError::InvalidGrammar(
+            "structured_outputs.choice must include at least one option".to_string(),
+        ));
     }
 
     let mut parts = Vec::with_capacity(choices.len());
     for choice in choices {
         if choice.is_empty() {
-            return Err(GrammarError::InvalidGrammar("structured_outputs.choice cannot contain empty strings".to_string()));
+            return Err(GrammarError::InvalidGrammar(
+                "structured_outputs.choice cannot contain empty strings".to_string(),
+            ));
         }
         parts.push(lark_quote(choice));
     }
@@ -757,15 +856,19 @@ fn normalize_tag_pair(tag: &str) -> Result<(String, String), String> {
 
 /// Parse structural_tag for structured outputs
 pub fn parse_structural_tag(value: &Value) -> Result<(String, String, Value), String> {
-    let obj = value.as_object().ok_or_else(|| {
-        "structured_outputs.structural_tag must be an object".to_string()
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "structured_outputs.structural_tag must be an object".to_string())?;
 
-    let schema = obj.get("schema").cloned().ok_or_else(|| {
-        "structured_outputs.structural_tag.schema is required".to_string()
-    })?;
+    let schema = obj
+        .get("schema")
+        .cloned()
+        .ok_or_else(|| "structured_outputs.structural_tag.schema is required".to_string())?;
 
-    let start = obj.get("start_tag").or_else(|| obj.get("start")).or_else(|| obj.get("tag"));
+    let start = obj
+        .get("start_tag")
+        .or_else(|| obj.get("start"))
+        .or_else(|| obj.get("tag"));
     let end = obj.get("end_tag").or_else(|| obj.get("end"));
 
     let (start_tag, end_tag) = match (start, end) {
@@ -778,9 +881,15 @@ pub fn parse_structural_tag(value: &Value) -> Result<(String, String, Value), St
             })?;
             (start.to_string(), end.to_string())
         }
-        (Some(tag), None) if obj.contains_key("tag") => normalize_tag_pair(tag.as_str().ok_or_else(|| "structured_outputs.structural_tag.tag must be a string".to_string())?)?,
+        (Some(tag), None) if obj.contains_key("tag") => {
+            normalize_tag_pair(tag.as_str().ok_or_else(|| {
+                "structured_outputs.structural_tag.tag must be a string".to_string()
+            })?)?
+        }
         _ => {
-            return Err("structured_outputs.structural_tag requires tag or start_tag/end_tag".to_string());
+            return Err(
+                "structured_outputs.structural_tag requires tag or start_tag/end_tag".to_string(),
+            );
         }
     };
 
@@ -821,7 +930,9 @@ mod tests {
         });
         let sanitized = sanitize_schema_for_llguidance(&schema);
         assert!(sanitized["properties"]["url"].get("format").is_none());
-        assert!(sanitized["properties"]["nested"]["properties"]["id"].get("format").is_none());
+        assert!(sanitized["properties"]["nested"]["properties"]["id"]
+            .get("format")
+            .is_none());
     }
 
     #[test]
@@ -860,9 +971,15 @@ mod tests {
         assert_eq!(sanitized["properties"]["command"]["type"], "string");
         // Optional fields should keep null in their type
         assert!(sanitized["properties"]["cwd"]["type"].is_array());
-        assert!(sanitized["properties"]["cwd"]["type"].as_array().unwrap().contains(&Value::String("null".to_string())));
+        assert!(sanitized["properties"]["cwd"]["type"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("null".to_string())));
         assert!(sanitized["properties"]["env"]["type"].is_array());
-        assert!(sanitized["properties"]["env"]["type"].as_array().unwrap().contains(&Value::String("null".to_string())));
+        assert!(sanitized["properties"]["env"]["type"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::String("null".to_string())));
     }
 
     // Note: We do NOT recursively process nested properties within tool parameter schemas
@@ -966,71 +1083,119 @@ mod tests {
     #[test]
     fn test_build_xml_tool_lark_grammar_qwen3_coder_required_only() {
         // Test Qwen3-Coder XML tool format with required attributes only
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
         let lark_str = get_lark_from_top_level_grammar(&grammar);
         println!("{}", &lark_str);
 
         // Qwen3Coder uses XML format with start: tool_call
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<function=search>"), "Should contain function tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<function=search>"),
+            "Should contain function tag"
+        );
         assert!(lark_str.contains("tool_0:"), "Should contain tool_0 rule");
     }
 
     #[test]
     fn test_build_xml_tool_lark_grammar_qwen3_coder_optional() {
         // Test Qwen3-Coder XML tool format with optional attributes
-        let tools = vec![
-            crate::tools::ToolBuilder::new("get_weather".to_string(), "Get weather".to_string())
-                .param("city", "string", "City name", true)
-                .param("units", "string", "Temperature units (optional)", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "get_weather".to_string(),
+            "Get weather".to_string(),
+        )
+        .param("city", "string", "City name", true)
+        .param("units", "string", "Temperature units (optional)", false)
+        .build()];
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<function=get_weather>"), "Should contain function tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<function=get_weather>"),
+            "Should contain function tag"
+        );
         assert!(lark_str.contains("city"), "Should contain city parameter");
-        assert!(lark_str.contains("units"), "Should contain optional units parameter");
+        assert!(
+            lark_str.contains("units"),
+            "Should contain optional units parameter"
+        );
     }
 
     #[test]
     fn test_build_xml_tool_lark_grammar_qwen3_coder_deep_parameters() {
         // Test Qwen3-Coder XML tool format with nested/complex parameters
-        let tools = vec![
-            crate::tools::ToolBuilder::new("edit_file".to_string(), "Edit a file with complex parameters".to_string())
-                .param("file_path", "string", "Path to the file", true)
-                .param("old_string", "string", "String to replace", true)
-                .param("new_string", "string", "Replacement string", true)
-                .param("replace_all", "boolean", "Replace all occurrences", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "edit_file".to_string(),
+            "Edit a file with complex parameters".to_string(),
+        )
+        .param("file_path", "string", "Path to the file", true)
+        .param("old_string", "string", "String to replace", true)
+        .param("new_string", "string", "Replacement string", true)
+        .param("replace_all", "boolean", "Replace all occurrences", false)
+        .build()];
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
         let lark_str = get_lark_from_top_level_grammar(&grammar);
         println!("XML Grammar:\n{}", &lark_str);
 
         // Verify the grammar contains XML structure
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
         // Note: <function=...> uses U+200C (zero-width non-joiner) which is invisible
-        assert!(lark_str.contains("function="), "Should contain function tag with attribute");
+        assert!(
+            lark_str.contains("function="),
+            "Should contain function tag with attribute"
+        );
 
         // Verify all parameter tags are present
         // Note: <parameter=...> uses U+200C (zero-width non-joiner) which is invisible
-        assert!(lark_str.contains("parameter=file_path"), "Should contain file_path parameter tag");
-        assert!(lark_str.contains("parameter=old_string"), "Should contain old_string parameter tag");
-        assert!(lark_str.contains("parameter=new_string"), "Should contain new_string parameter tag");
-        assert!(lark_str.contains("parameter=replace_all"), "Should contain replace_all parameter tag");
+        assert!(
+            lark_str.contains("parameter=file_path"),
+            "Should contain file_path parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=old_string"),
+            "Should contain old_string parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=new_string"),
+            "Should contain new_string parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=replace_all"),
+            "Should contain replace_all parameter tag"
+        );
 
         // Verify parameter rules reference the correct types
-        assert!(lark_str.contains("value_0_0:"), "Should have value_0_0 rule for first param");
-        assert!(lark_str.contains("value_0_1:"), "Should have value_0_1 rule for second param");
-        assert!(lark_str.contains("value_0_2:"), "Should have value_0_2 rule for third param");
-        assert!(lark_str.contains("value_0_3:"), "Should have value_0_3 rule for fourth param");
+        assert!(
+            lark_str.contains("value_0_0:"),
+            "Should have value_0_0 rule for first param"
+        );
+        assert!(
+            lark_str.contains("value_0_1:"),
+            "Should have value_0_1 rule for second param"
+        );
+        assert!(
+            lark_str.contains("value_0_2:"),
+            "Should have value_0_2 rule for third param"
+        );
+        assert!(
+            lark_str.contains("value_0_3:"),
+            "Should have value_0_3 rule for fourth param"
+        );
 
         // Verify tool rule has all parameters
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
@@ -1039,9 +1204,12 @@ mod tests {
     #[test]
     fn test_xml_grammar_required_params_no_wrapper() {
         // Test that XML grammar puts required params directly without (...) * wrapper
-        let tools = vec![crate::tools::ToolBuilder::new("search_tool".to_string(), "Search tool".to_string())
-            .param("query", "string", "Search query", true)      // REQUIRED - should appear as bare rule reference
-            .build()];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search_tool".to_string(),
+            "Search tool".to_string(),
+        )
+        .param("query", "string", "Search query", true) // REQUIRED - should appear as bare rule reference
+        .build()];
 
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
         let lark_str = get_lark_from_top_level_grammar(&grammar);
@@ -1056,10 +1224,13 @@ mod tests {
     #[test]
     fn test_xml_grammar_optional_params_wrapped() {
         // Test that XML grammar wraps optional params with (...) * syntax
-        let tools = vec![crate::tools::ToolBuilder::new("mixed_tool".to_string(), "Mixed params".to_string())
-            .param("required_param", "string", "Required", true)      // REQUIRED
-            .param("optional_param", "string", "Optional", false)     // OPTIONAL
-            .build()];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "mixed_tool".to_string(),
+            "Mixed params".to_string(),
+        )
+        .param("required_param", "string", "Required", true) // REQUIRED
+        .param("optional_param", "string", "Optional", false) // OPTIONAL
+        .build()];
 
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
         let lark_str = get_lark_from_top_level_grammar(&grammar);
@@ -1073,9 +1244,12 @@ mod tests {
     #[test]
     fn test_xml_tool_call_structure_validates() {
         // Full end-to-end: verify XML grammar produces valid llguidance TopLevelGrammar structure
-        let tools = vec![crate::tools::ToolBuilder::new("formatter".to_string(), "Formatter".to_string())
-            .param("text", "string", "Text to format", true)
-            .build()];
+        let tools =
+            vec![
+                crate::tools::ToolBuilder::new("formatter".to_string(), "Formatter".to_string())
+                    .param("text", "string", "Text to format", true)
+                    .build(),
+            ];
 
         let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
 
@@ -1088,11 +1262,12 @@ mod tests {
     #[test]
     fn test_tool_grammar_builder_build_json_single_tool() {
         // Test ToolGrammarBuilder.build_json() with a single tool
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1104,8 +1279,14 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify basic structure
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("obj_search:"), "Should contain obj_search rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("obj_search:"),
+            "Should contain obj_search rule"
+        );
         assert!(lark_str.contains("query"), "Should contain query parameter");
     }
 
@@ -1131,21 +1312,34 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify all tools are present
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("obj_search:"), "Should contain obj_search rule");
-        assert!(lark_str.contains("obj_weather:"), "Should contain obj_weather rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("obj_search:"),
+            "Should contain obj_search rule"
+        );
+        assert!(
+            lark_str.contains("obj_weather:"),
+            "Should contain obj_weather rule"
+        );
         // Verify obj alternation includes both tools
-        assert!(lark_str.contains("obj: obj_search | obj_weather"), "Should have obj alternation");
+        assert!(
+            lark_str.contains("obj: obj_search | obj_weather"),
+            "Should have obj alternation"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_with_token_ids() {
         // Test ToolGrammarBuilder.build_json() with token IDs
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let mut start_ids = HashSet::new();
         start_ids.insert(151657);
         let mut end_ids = HashSet::new();
@@ -1164,19 +1358,29 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify token IDs are used
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<[151657]>"), "Should contain start token ID");
-        assert!(lark_str.contains("<[151658]>"), "Should contain end token ID");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should contain start token ID"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should contain end token ID"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_with_special_tags() {
         // Test ToolGrammarBuilder.build_json() with special tags
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1188,20 +1392,30 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify special tags are used as-is
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<tool>"), "Should contain special start tag");
-        assert!(lark_str.contains("</tool>"), "Should contain special end tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<tool>"),
+            "Should contain special start tag"
+        );
+        assert!(
+            lark_str.contains("</tool>"),
+            "Should contain special end tag"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_required_optional() {
         // Test ToolGrammarBuilder.build_json() with mix of required/optional params
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .param("max_results", "integer", "Max results", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .param("max_results", "integer", "Max results", false)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1213,11 +1427,23 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify both params are in schema, and required array is correct
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("obj_search:"), "Should contain obj_search rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("obj_search:"),
+            "Should contain obj_search rule"
+        );
         assert!(lark_str.contains("query"), "Should contain query parameter");
-        assert!(lark_str.contains("max_results"), "Should contain max_results parameter");
-        assert!(lark_str.contains("\"required\""), "Should have required array");
+        assert!(
+            lark_str.contains("max_results"),
+            "Should contain max_results parameter"
+        );
+        assert!(
+            lark_str.contains("\"required\""),
+            "Should have required array"
+        );
     }
 
     // === ToolGrammarBuilder XML Mode Tests ===
@@ -1225,11 +1451,12 @@ mod tests {
     #[test]
     fn test_tool_grammar_builder_build_xml_single_tool() {
         // Test ToolGrammarBuilder.build_xml() with a single tool
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1241,11 +1468,26 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify XML structure
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("tool_call:"), "Should have tool_call rule");
-        assert!(lark_str.contains("function=search"), "Should contain function tag");
-        assert!(lark_str.contains("parameter=query"), "Should contain parameter tag");
-        assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("tool_call:"),
+            "Should have tool_call rule"
+        );
+        assert!(
+            lark_str.contains("function=search"),
+            "Should contain function tag"
+        );
+        assert!(
+            lark_str.contains("parameter=query"),
+            "Should contain parameter tag"
+        );
+        assert!(
+            lark_str.contains("param_0_0:"),
+            "Should have param_0_0 rule"
+        );
     }
 
     #[test]
@@ -1270,22 +1512,32 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify all tools are present
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
         assert!(lark_str.contains("tool_0:"), "Should contain tool_0 rule");
         assert!(lark_str.contains("tool_1:"), "Should contain tool_1 rule");
-        assert!(lark_str.contains("tool_content:"), "Should have tool_content rule");
+        assert!(
+            lark_str.contains("tool_content:"),
+            "Should have tool_content rule"
+        );
         // Verify tool_content has alternation
-        assert!(lark_str.contains("tool_content: tool_0 | tool_1"), "Should have tool alternation");
+        assert!(
+            lark_str.contains("tool_content: tool_0 | tool_1"),
+            "Should have tool alternation"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_xml_with_token_ids() {
         // Test ToolGrammarBuilder.build_xml() with token IDs
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let mut start_ids = HashSet::new();
         start_ids.insert(151657);
         let mut end_ids = HashSet::new();
@@ -1304,19 +1556,29 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify token IDs are used for envelope tags
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<[151657]>"), "Should contain start token ID");
-        assert!(lark_str.contains("<[151658]>"), "Should contain end token ID");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should contain start token ID"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should contain end token ID"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_xml_with_special_tags() {
         // Test ToolGrammarBuilder.build_xml() with special tags
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1328,20 +1590,30 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify special tags are used as-is
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("<tool>"), "Should contain special start tag");
-        assert!(lark_str.contains("</tool>"), "Should contain special end tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("<tool>"),
+            "Should contain special start tag"
+        );
+        assert!(
+            lark_str.contains("</tool>"),
+            "Should contain special end tag"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_xml_required_optional() {
         // Test ToolGrammarBuilder.build_xml() with mix of required/optional params
-        let tools = vec![
-            crate::tools::ToolBuilder::new("search".to_string(), "Search the web".to_string())
-                .param("query", "string", "Search query", true)
-                .param("max_results", "integer", "Max results", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "search".to_string(),
+            "Search the web".to_string(),
+        )
+        .param("query", "string", "Search query", true)
+        .param("max_results", "integer", "Max results", false)
+        .build()];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1353,26 +1625,42 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify both params are present
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 rule (query - required)");
-        assert!(lark_str.contains("param_0_1:"), "Should have param_0_1 rule (max_results - optional)");
-        assert!(lark_str.contains("parameter=query"), "Should contain query parameter tag");
-        assert!(lark_str.contains("parameter=max_results"), "Should contain max_results parameter tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("param_0_0:"),
+            "Should have param_0_0 rule (query - required)"
+        );
+        assert!(
+            lark_str.contains("param_0_1:"),
+            "Should have param_0_1 rule (max_results - optional)"
+        );
+        assert!(
+            lark_str.contains("parameter=query"),
+            "Should contain query parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=max_results"),
+            "Should contain max_results parameter tag"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_xml_no_parameters() {
         // Test ToolGrammarBuilder.build_xml() with tool that has no parameters
-        let tools = vec![
-            crate::tools::ToolBuilder::new("hello".to_string(), "Say hello".to_string())
-                .param("query", "string", "Search query", true)
-                .parameters_schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }))
-                .build(),
-        ];
+        let tools =
+            vec![
+                crate::tools::ToolBuilder::new("hello".to_string(), "Say hello".to_string())
+                    .param("query", "string", "Search query", true)
+                    .parameters_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }))
+                    .build(),
+            ];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1384,22 +1672,29 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify tool with no parameters still generates valid grammar
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("function=hello"), "Should contain function tag");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("function=hello"),
+            "Should contain function tag"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_no_parameters() {
         // Test ToolGrammarBuilder.build_json() with tool that has no parameters
-        let tools = vec![
-            crate::tools::ToolBuilder::new("hello".to_string(), "Say hello".to_string())
-                .parameters_schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }))
-                .build(),
-        ];
+        let tools =
+            vec![
+                crate::tools::ToolBuilder::new("hello".to_string(), "Say hello".to_string())
+                    .parameters_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }))
+                    .build(),
+            ];
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
             .start_tag("<tool>")
@@ -1411,8 +1706,14 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify tool with no parameters still generates valid grammar
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("obj_hello:"), "Should contain obj_hello rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("obj_hello:"),
+            "Should contain obj_hello rule"
+        );
     }
 
     #[test]
@@ -1429,9 +1730,15 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify grammar is still valid with no tools
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
         // With no tools, obj should be a generic object
-        assert!(lark_str.contains("obj: %json"), "Should have obj rule with generic schema");
+        assert!(
+            lark_str.contains("obj: %json"),
+            "Should have obj rule with generic schema"
+        );
     }
 
     #[test]
@@ -1448,16 +1755,25 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify grammar is still valid with no tools
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("tool_content:"), "Should have tool_content rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("tool_content:"),
+            "Should have tool_content rule"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_structure_validates() {
         // Full end-to-end: verify JSON grammar produces valid llguidance TopLevelGrammar structure
-        let tools = vec![crate::tools::ToolBuilder::new("calculator".to_string(), "Calculator".to_string())
-            .param("expression", "string", "Math expression", true)
-            .build()];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "calculator".to_string(),
+            "Calculator".to_string(),
+        )
+        .param("expression", "string", "Math expression", true)
+        .build()];
 
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
@@ -1474,9 +1790,12 @@ mod tests {
     #[test]
     fn test_tool_grammar_builder_build_xml_structure_validates() {
         // Full end-to-end: verify XML grammar produces valid llguidance TopLevelGrammar structure
-        let tools = vec![crate::tools::ToolBuilder::new("formatter".to_string(), "Formatter".to_string())
-            .param("text", "string", "Text to format", true)
-            .build()];
+        let tools =
+            vec![
+                crate::tools::ToolBuilder::new("formatter".to_string(), "Formatter".to_string())
+                    .param("text", "string", "Text to format", true)
+                    .build(),
+            ];
 
         let grammar = ToolGrammarBuilder::new()
             .tools(&tools)
@@ -1496,16 +1815,17 @@ mod tests {
     fn test_tool_grammar_builder_build_xml_complex_full_schema() {
         // Test ToolGrammarBuilder.build_xml() with complex nested schema
         // and model-specific envelope tags with token IDs
-        let tools = vec![
-            crate::tools::ToolBuilder::new("edit_file".to_string(), "Edit a file".to_string())
-                .param("file_path", "string", "Path to the file", true)
-                .param("old_string", "string", "String to replace", true)
-                .param("new_string", "string", "Replacement string", true)
-                .param("max_replacements", "integer", "Maximum replacements", false)
-                .param("context", "object", "Context object", false)
-                .param("tags", "array", "Optional tags array", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "edit_file".to_string(),
+            "Edit a file".to_string(),
+        )
+        .param("file_path", "string", "Path to the file", true)
+        .param("old_string", "string", "String to replace", true)
+        .param("new_string", "string", "Replacement string", true)
+        .param("max_replacements", "integer", "Maximum replacements", false)
+        .param("context", "object", "Context object", false)
+        .param("tags", "array", "Optional tags array", false)
+        .build()];
 
         // Build XML grammar with token IDs for envelope tags
         let mut start_ids = HashSet::new();
@@ -1527,73 +1847,167 @@ mod tests {
         // println!("{}", &lark_str);
 
         // Validate envelope layer (token IDs)
-        assert!(lark_str.contains("<[151657]>"), "Should have start token ID envelope");
-        assert!(lark_str.contains("<[151658]>"), "Should have end token ID envelope");
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should have start token ID envelope"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should have end token ID envelope"
+        );
 
         // Validate tool_call structure
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("tool_call:"), "Should have tool_call rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("tool_call:"),
+            "Should have tool_call rule"
+        );
 
         // Validate tool_content alternation
-        assert!(lark_str.contains("tool_content: tool_0"), "Should have tool_content with tool_0");
+        assert!(
+            lark_str.contains("tool_content: tool_0"),
+            "Should have tool_content with tool_0"
+        );
 
         // Validate function tag layer
-        assert!(lark_str.contains("function=edit_file"), "Should have function tag");
-        assert!(lark_str.contains("function="), "Should have function tag pattern");
+        assert!(
+            lark_str.contains("function=edit_file"),
+            "Should have function tag"
+        );
+        assert!(
+            lark_str.contains("function="),
+            "Should have function tag pattern"
+        );
 
         // Validate parameter tags and rules
-        assert!(lark_str.contains("parameter=file_path"), "Should have file_path parameter tag");
-        assert!(lark_str.contains("parameter=old_string"), "Should have old_string parameter tag");
-        assert!(lark_str.contains("parameter=new_string"), "Should have new_string parameter tag");
-        assert!(lark_str.contains("parameter=max_replacements"), "Should have max_replacements parameter tag");
-        assert!(lark_str.contains("parameter=context"), "Should have context parameter tag");
-        assert!(lark_str.contains("parameter=tags"), "Should have tags parameter tag");
+        assert!(
+            lark_str.contains("parameter=file_path"),
+            "Should have file_path parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=old_string"),
+            "Should have old_string parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=new_string"),
+            "Should have new_string parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=max_replacements"),
+            "Should have max_replacements parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=context"),
+            "Should have context parameter tag"
+        );
+        assert!(
+            lark_str.contains("parameter=tags"),
+            "Should have tags parameter tag"
+        );
 
         // Validate param rules with correct types
-        assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 rule (file_path - required)");
-        assert!(lark_str.contains("param_0_1:"), "Should have param_0_1 rule (old_string - required)");
-        assert!(lark_str.contains("param_0_2:"), "Should have param_0_2 rule (new_string - required)");
-        assert!(lark_str.contains("param_0_3:"), "Should have param_0_3 rule (max_replacements - optional)");
-        assert!(lark_str.contains("param_0_4:"), "Should have param_0_4 rule (context - optional)");
-        assert!(lark_str.contains("param_0_5:"), "Should have param_0_5 rule (tags - optional)");
+        assert!(
+            lark_str.contains("param_0_0:"),
+            "Should have param_0_0 rule (file_path - required)"
+        );
+        assert!(
+            lark_str.contains("param_0_1:"),
+            "Should have param_0_1 rule (old_string - required)"
+        );
+        assert!(
+            lark_str.contains("param_0_2:"),
+            "Should have param_0_2 rule (new_string - required)"
+        );
+        assert!(
+            lark_str.contains("param_0_3:"),
+            "Should have param_0_3 rule (max_replacements - optional)"
+        );
+        assert!(
+            lark_str.contains("param_0_4:"),
+            "Should have param_0_4 rule (context - optional)"
+        );
+        assert!(
+            lark_str.contains("param_0_5:"),
+            "Should have param_0_5 rule (tags - optional)"
+        );
 
         // Validate value rules with regex patterns for each type
-        assert!(lark_str.contains("value_0_0:"), "Should have value_0_0 rule for file_path");
-        assert!(lark_str.contains("value_0_1:"), "Should have value_0_1 rule for old_string");
-        assert!(lark_str.contains("value_0_2:"), "Should have value_0_2 rule for new_string");
-        assert!(lark_str.contains("value_0_3:"), "Should have value_0_3 rule for max_replacements");
-        assert!(lark_str.contains("value_0_4:"), "Should have value_0_4 rule for context");
-        assert!(lark_str.contains("value_0_5:"), "Should have value_0_5 rule for tags");
+        assert!(
+            lark_str.contains("value_0_0:"),
+            "Should have value_0_0 rule for file_path"
+        );
+        assert!(
+            lark_str.contains("value_0_1:"),
+            "Should have value_0_1 rule for old_string"
+        );
+        assert!(
+            lark_str.contains("value_0_2:"),
+            "Should have value_0_2 rule for new_string"
+        );
+        assert!(
+            lark_str.contains("value_0_3:"),
+            "Should have value_0_3 rule for max_replacements"
+        );
+        assert!(
+            lark_str.contains("value_0_4:"),
+            "Should have value_0_4 rule for context"
+        );
+        assert!(
+            lark_str.contains("value_0_5:"),
+            "Should have value_0_5 rule for tags"
+        );
 
         // Validate required params are bare (no ? wrapper)
-        assert!(lark_str.contains("param_0_0 "), "file_path should be bare (required)");
-        assert!(lark_str.contains("param_0_1 "), "old_string should be bare (required)");
-        assert!(lark_str.contains("param_0_2 "), "new_string should be bare (required)");
+        assert!(
+            lark_str.contains("param_0_0 "),
+            "file_path should be bare (required)"
+        );
+        assert!(
+            lark_str.contains("param_0_1 "),
+            "old_string should be bare (required)"
+        );
+        assert!(
+            lark_str.contains("param_0_2 "),
+            "new_string should be bare (required)"
+        );
 
         // Validate optional params have ? wrapper
-        assert!(lark_str.contains("(param_0_3)?"), "max_replacements should be optional");
-        assert!(lark_str.contains("(param_0_4)?"), "context should be optional");
+        assert!(
+            lark_str.contains("(param_0_3)?"),
+            "max_replacements should be optional"
+        );
+        assert!(
+            lark_str.contains("(param_0_4)?"),
+            "context should be optional"
+        );
         assert!(lark_str.contains("(param_0_5)?"), "tags should be optional");
 
         // Validate tool rule structure
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
-        assert!(lark_str.contains("tool_0: \"<function=edit_file>\""), "Should have tool_0 with function tags");
+        assert!(
+            lark_str.contains("tool_0: \"<function=edit_file>\""),
+            "Should have tool_0 with function tags"
+        );
     }
 
     #[test]
     fn test_tool_grammar_builder_build_json_complex_full_schema() {
         // Test ToolGrammarBuilder.build_json() with complex nested schema
         // and model-specific envelope tags with token IDs
-        let tools = vec![
-            crate::tools::ToolBuilder::new("edit_file".to_string(), "Edit a file".to_string())
-                .param("file_path", "string", "Path to the file", true)
-                .param("old_string", "string", "String to replace", true)
-                .param("new_string", "string", "Replacement string", true)
-                .param("max_replacements", "integer", "Maximum replacements", false)
-                .param("context", "object", "Context object", false)
-                .param("tags", "array", "Optional tags array", false)
-                .build(),
-        ];
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "edit_file".to_string(),
+            "Edit a file".to_string(),
+        )
+        .param("file_path", "string", "Path to the file", true)
+        .param("old_string", "string", "String to replace", true)
+        .param("new_string", "string", "Replacement string", true)
+        .param("max_replacements", "integer", "Maximum replacements", false)
+        .param("context", "object", "Context object", false)
+        .param("tags", "array", "Optional tags array", false)
+        .build()];
 
         // Build JSON grammar with token IDs for envelope tags
         let mut start_ids = HashSet::new();
@@ -1614,35 +2028,86 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Validate envelope layer (token IDs)
-        assert!(lark_str.contains("<[151657]>"), "Should have start token ID envelope");
-        assert!(lark_str.contains("<[151658]>"), "Should have end token ID envelope");
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should have start token ID envelope"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should have end token ID envelope"
+        );
 
         // Validate tool_call structure
-        assert!(lark_str.contains("start: tool_call"), "Should have start: tool_call");
-        assert!(lark_str.contains("tool_call:"), "Should have tool_call rule");
+        assert!(
+            lark_str.contains("start: tool_call"),
+            "Should have start: tool_call"
+        );
+        assert!(
+            lark_str.contains("tool_call:"),
+            "Should have tool_call rule"
+        );
 
         // Validate tool_obj structure with name and arguments
         assert!(lark_str.contains("tool_obj:"), "Should have tool_obj rule");
-        assert!(lark_str.contains("\"name\""), "Should have name in tool_obj");
-        assert!(lark_str.contains("\"arguments\""), "Should have arguments in tool_obj");
+        assert!(
+            lark_str.contains("\"name\""),
+            "Should have name in tool_obj"
+        );
+        assert!(
+            lark_str.contains("\"arguments\""),
+            "Should have arguments in tool_obj"
+        );
 
         // Validate obj rule references the tool
-        assert!(lark_str.contains("obj_edit_file:"), "Should have obj_edit_file rule");
-        assert!(lark_str.contains("obj: obj_edit_file"), "Should have obj alternation");
+        assert!(
+            lark_str.contains("obj_edit_file:"),
+            "Should have obj_edit_file rule"
+        );
+        assert!(
+            lark_str.contains("obj: obj_edit_file"),
+            "Should have obj alternation"
+        );
 
         // Validate JSON schema contains all parameters
-        assert!(lark_str.contains("file_path"), "Should contain file_path in schema");
-        assert!(lark_str.contains("old_string"), "Should contain old_string in schema");
-        assert!(lark_str.contains("new_string"), "Should contain new_string in schema");
-        assert!(lark_str.contains("max_replacements"), "Should contain max_replacements in schema");
-        assert!(lark_str.contains("context"), "Should contain context in schema");
+        assert!(
+            lark_str.contains("file_path"),
+            "Should contain file_path in schema"
+        );
+        assert!(
+            lark_str.contains("old_string"),
+            "Should contain old_string in schema"
+        );
+        assert!(
+            lark_str.contains("new_string"),
+            "Should contain new_string in schema"
+        );
+        assert!(
+            lark_str.contains("max_replacements"),
+            "Should contain max_replacements in schema"
+        );
+        assert!(
+            lark_str.contains("context"),
+            "Should contain context in schema"
+        );
         assert!(lark_str.contains("tags"), "Should contain tags in schema");
 
         // Validate required parameters in JSON schema
-        assert!(lark_str.contains("\"required\""), "Should have required array");
-        assert!(lark_str.contains("file_path"), "Should have file_path in required");
-        assert!(lark_str.contains("old_string"), "Should have old_string in required");
-        assert!(lark_str.contains("new_string"), "Should have new_string in required");
+        assert!(
+            lark_str.contains("\"required\""),
+            "Should have required array"
+        );
+        assert!(
+            lark_str.contains("file_path"),
+            "Should have file_path in required"
+        );
+        assert!(
+            lark_str.contains("old_string"),
+            "Should have old_string in required"
+        );
+        assert!(
+            lark_str.contains("new_string"),
+            "Should have new_string in required"
+        );
     }
 
     #[test]
@@ -1678,27 +2143,66 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Validate envelope layer
-        assert!(lark_str.contains("<[151657]>"), "Should have start token ID envelope");
-        assert!(lark_str.contains("<[151658]>"), "Should have end token ID envelope");
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should have start token ID envelope"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should have end token ID envelope"
+        );
 
         // Validate tool_content alternation with both tools
-        assert!(lark_str.contains("tool_content: tool_0 | tool_1"), "Should have tool alternation");
+        assert!(
+            lark_str.contains("tool_content: tool_0 | tool_1"),
+            "Should have tool alternation"
+        );
 
         // Validate tool_0 (search) structure
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
-        assert!(lark_str.contains("function=search"), "Should have search function tag");
-        assert!(lark_str.contains("parameter=query"), "Should have query parameter");
-        assert!(lark_str.contains("parameter=max_results"), "Should have max_results parameter");
-        assert!(lark_str.contains("param_0_0:"), "Should have param_0_0 (query - required)");
-        assert!(lark_str.contains("param_0_1:"), "Should have param_0_1 (max_results - optional)");
+        assert!(
+            lark_str.contains("function=search"),
+            "Should have search function tag"
+        );
+        assert!(
+            lark_str.contains("parameter=query"),
+            "Should have query parameter"
+        );
+        assert!(
+            lark_str.contains("parameter=max_results"),
+            "Should have max_results parameter"
+        );
+        assert!(
+            lark_str.contains("param_0_0:"),
+            "Should have param_0_0 (query - required)"
+        );
+        assert!(
+            lark_str.contains("param_0_1:"),
+            "Should have param_0_1 (max_results - optional)"
+        );
 
         // Validate tool_1 (weather) structure
         assert!(lark_str.contains("tool_1:"), "Should have tool_1 rule");
-        assert!(lark_str.contains("function=weather"), "Should have weather function tag");
-        assert!(lark_str.contains("parameter=city"), "Should have city parameter");
-        assert!(lark_str.contains("parameter=units"), "Should have units parameter");
-        assert!(lark_str.contains("param_1_0:"), "Should have param_1_0 (city - required)");
-        assert!(lark_str.contains("param_1_1:"), "Should have param_1_1 (units - optional)");
+        assert!(
+            lark_str.contains("function=weather"),
+            "Should have weather function tag"
+        );
+        assert!(
+            lark_str.contains("parameter=city"),
+            "Should have city parameter"
+        );
+        assert!(
+            lark_str.contains("parameter=units"),
+            "Should have units parameter"
+        );
+        assert!(
+            lark_str.contains("param_1_0:"),
+            "Should have param_1_0 (city - required)"
+        );
+        assert!(
+            lark_str.contains("param_1_1:"),
+            "Should have param_1_1 (units - optional)"
+        );
     }
 
     #[test]
@@ -1734,24 +2238,54 @@ mod tests {
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Validate envelope layer
-        assert!(lark_str.contains("<[151657]>"), "Should have start token ID envelope");
-        assert!(lark_str.contains("<[151658]>"), "Should have end token ID envelope");
+        assert!(
+            lark_str.contains("<[151657]>"),
+            "Should have start token ID envelope"
+        );
+        assert!(
+            lark_str.contains("<[151658]>"),
+            "Should have end token ID envelope"
+        );
 
         // Validate obj alternation with both tools
-        assert!(lark_str.contains("obj: obj_search | obj_weather"), "Should have obj alternation");
+        assert!(
+            lark_str.contains("obj: obj_search | obj_weather"),
+            "Should have obj alternation"
+        );
 
         // Validate obj_search structure
-        assert!(lark_str.contains("obj_search:"), "Should have obj_search rule");
-        assert!(lark_str.contains("query"), "Should have query in obj_search");
-        assert!(lark_str.contains("max_results"), "Should have max_results in obj_search");
+        assert!(
+            lark_str.contains("obj_search:"),
+            "Should have obj_search rule"
+        );
+        assert!(
+            lark_str.contains("query"),
+            "Should have query in obj_search"
+        );
+        assert!(
+            lark_str.contains("max_results"),
+            "Should have max_results in obj_search"
+        );
 
         // Validate obj_weather structure
-        assert!(lark_str.contains("obj_weather:"), "Should have obj_weather rule");
+        assert!(
+            lark_str.contains("obj_weather:"),
+            "Should have obj_weather rule"
+        );
         assert!(lark_str.contains("city"), "Should have city in obj_weather");
-        assert!(lark_str.contains("units"), "Should have units in obj_weather");
+        assert!(
+            lark_str.contains("units"),
+            "Should have units in obj_weather"
+        );
 
         // Validate required parameters in both schemas
-        assert!(lark_str.contains("\"required\":[\"query\"]"), "Should have query in required for search");
-        assert!(lark_str.contains("\"required\":[\"city\"]"), "Should have city in required for weather");
+        assert!(
+            lark_str.contains("\"required\":[\"query\"]"),
+            "Should have query in required for search"
+        );
+        assert!(
+            lark_str.contains("\"required\":[\"city\"]"),
+            "Should have city in required for weather"
+        );
     }
 }

@@ -1,9 +1,9 @@
 use crate::tools::Tool;
+use crate::utils::special_tokens::SpecialTokens;
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use tokenizers::Tokenizer;
-use crate::utils::special_tokens::SpecialTokens;
 
 #[cfg(feature = "python")]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]

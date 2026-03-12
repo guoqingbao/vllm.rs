@@ -11,7 +11,6 @@ use crate::utils::graph::{
 };
 use crate::utils::guidance::{GuidanceState, ParserFactory};
 // use crate::utils::guidance::{GuidanceState, ParserFactory, batch_mask_bias, early_exit_validate};
-use toktrie::SimpleVob;
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -41,6 +40,7 @@ use parking_lot::RwLock;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use toktrie::SimpleVob;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -422,15 +422,15 @@ impl ModelRunner {
             cached_sampling: RwLock::new(None),
             seq_tokens: RwLock::new(HashMap::new()),
             restored_prefix_sequences: RwLock::new(HashSet::new()),
-             guidance_states: RwLock::new(HashMap::new()),
-              guidance_failed: RwLock::new(HashSet::new()),
-              guidance_mismatch: RwLock::new(HashSet::new()),
-              llg_factory,
-             transfer,
-             is_first_rank: comm.rank() == 0,
-             model_type,
-         })
-     }
+            guidance_states: RwLock::new(HashMap::new()),
+            guidance_failed: RwLock::new(HashSet::new()),
+            guidance_mismatch: RwLock::new(HashSet::new()),
+            llg_factory,
+            transfer,
+            is_first_rank: comm.rank() == 0,
+            model_type,
+        })
+    }
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
         loop {
@@ -1304,7 +1304,6 @@ impl ModelRunner {
             } else {
                 logits.clone()
             }
-
         } else {
             logits.clone()
         };
@@ -1351,11 +1350,19 @@ impl ModelRunner {
             for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
                 let token = tokens[seq_idx];
 
-                crate::log_trace!("[llg] Processing seq {} (idx {}): token {}", seq_id, seq_idx, token);
+                crate::log_trace!(
+                    "[llg] Processing seq {} (idx {}): token {}",
+                    seq_id,
+                    seq_idx,
+                    token
+                );
 
                 if let Some(state) = guidance_states.get_mut(seq_id) {
                     if state.is_finished() {
-                        crate::log_trace!("[llg] Matcher is stopped for seq {}, skipping validation", seq_id);
+                        crate::log_trace!(
+                            "[llg] Matcher is stopped for seq {}, skipping validation",
+                            seq_id
+                        );
                         continue;
                     }
 
@@ -1363,15 +1370,25 @@ impl ModelRunner {
                     crate::log_trace!("[llg] Token {} validation result: {}", token, valid);
 
                     if valid {
-                        crate::log_trace!("[llg] Token {} is valid, consuming for seq {}", token, seq_id);
+                        crate::log_trace!(
+                            "[llg] Token {} is valid, consuming for seq {}",
+                            token,
+                            seq_id
+                        );
                         let _ = state.commit_token(token);
                     } else {
-                        crate::log_debug!("[llg] Token {} is invalid, computing mask for seq {}", token, seq_id);
+                        crate::log_debug!(
+                            "[llg] Token {} is invalid, computing mask for seq {}",
+                            token,
+                            seq_id
+                        );
                         let mask = match state.compute_mask_or_eos() {
                             Ok(m) => m,
                             Err(e) => {
                                 crate::log_error!(
-                                    "[llg] Unable to compute mask for token {} due to {}", token, e
+                                    "[llg] Unable to compute mask for token {} due to {}",
+                                    token,
+                                    e
                                 );
                                 continue;
                             }
@@ -1395,34 +1412,44 @@ impl ModelRunner {
                         }
 
                         // Create tensor with correct shape for re-sampling
-                        let biased_tensor = Tensor::from_vec(row_vec, logits.shape(), logits.device())?;
+                        let biased_tensor =
+                            Tensor::from_vec(row_vec, logits.shape(), logits.device())?;
 
-                        crate::log_debug!("[llg] Re-sampling with biased logits for seq {}", seq_id);
+                        crate::log_debug!(
+                            "[llg] Re-sampling with biased logits for seq {}",
+                            seq_id
+                        );
 
                         // Use sample_with_strategy with proper cached params
-                        let re_sampled = self.logit_processor.sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
+                        let re_sampled = self
+                            .logit_processor
+                            .sample_with_strategy(&biased_tensor, &cached_params.sampling)?;
                         tokens[seq_idx] = re_sampled[seq_idx];
 
-                        crate::log_debug!("[llg] Consuming re-sampled token {} for seq {}", tokens[seq_idx], seq_id);
+                        crate::log_debug!(
+                            "[llg] Consuming re-sampled token {} for seq {}",
+                            tokens[seq_idx],
+                            seq_id
+                        );
                         let _ = state.commit_token(tokens[seq_idx]);
                     }
                 } else {
                     crate::log_debug!("[llg] No guidance state for seq {}", seq_id);
                 }
-            /*
-            // Use optimized early exit validation
-            let vocab_size = logits.dim(1)?;
-            early_exit_validate(
-                &mut guidance_states,
-                &seq_ids,
-                &mut tokens,
-                &logits,
-                vocab_size,
-                factory,
-                &cached_params.sampling,
-                &self.logit_processor,
-            )?
-            */
+                /*
+                // Use optimized early exit validation
+                let vocab_size = logits.dim(1)?;
+                early_exit_validate(
+                    &mut guidance_states,
+                    &seq_ids,
+                    &mut tokens,
+                    &logits,
+                    vocab_size,
+                    factory,
+                    &cached_params.sampling,
+                    &self.logit_processor,
+                )?
+                */
             }
         }
 
@@ -1624,7 +1651,11 @@ impl ModelRunner {
 
     /// Validate a sequence's output_ids against the grammar using llguidance
     /// Returns Some(valid_token_count) if guidance exists, None if no constraint
-    pub fn validate_sequence_for_grammar(&self, seq_id: usize, output_ids: &[u32]) -> Option<usize> {
+    pub fn validate_sequence_for_grammar(
+        &self,
+        seq_id: usize,
+        output_ids: &[u32],
+    ) -> Option<usize> {
         let mut guidance_states = self.guidance_states.write();
         let state = guidance_states.get_mut(&seq_id)?;
         match state.validate_tokens(output_ids) {
@@ -1635,7 +1666,11 @@ impl ModelRunner {
 
     /// Rollback guidance state for a sequence
     /// This is called from Scheduler::rollback_sequence() to reset llguidance FSM state
-    pub fn rollback_sequence_for_guidance(&self, seq_id: usize, target_tokens: usize) -> Result<()> {
+    pub fn rollback_sequence_for_guidance(
+        &self,
+        seq_id: usize,
+        target_tokens: usize,
+    ) -> Result<()> {
         let mut guidance_states = self.guidance_states.write();
         let mut guidance_failed = self.guidance_failed.write();
         let mut guidance_mismatch = self.guidance_mismatch.write();
@@ -1646,7 +1681,10 @@ impl ModelRunner {
             match state.rollback_to(target_tokens, target_bytes) {
                 Ok(()) => {}
                 Err(e) => {
-                    return Err(candle_core::Error::Msg(format!("Guidance rollback failed: {}", e)));
+                    return Err(candle_core::Error::Msg(format!(
+                        "Guidance rollback failed: {}",
+                        e
+                    )));
                 }
             }
         }

@@ -964,7 +964,11 @@ impl BlockManager {
 
     /// Rollback a sequence to a specific token position, releasing blocks beyond that point.
     /// This is used for speculative decoding mismatch recovery.
-    pub fn rollback_to_seq_tokens(&mut self, seq: &mut Sequence, target_tokens: usize) -> Result<()> {
+    pub fn rollback_to_seq_tokens(
+        &mut self,
+        seq: &mut Sequence,
+        target_tokens: usize,
+    ) -> Result<()> {
         let current_tokens = seq.len();
         if target_tokens >= current_tokens {
             return Ok(()); // Nothing to rollback

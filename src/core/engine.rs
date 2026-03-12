@@ -20,14 +20,14 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, ModelType, SamplingParams};
-use crate::utils::reasoning::ReasoningEffort;
-use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::guidance::{build_llg_factory, load_toktrie_from_path};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::kvcache_allocator::KVCacheAllocator;
 use crate::utils::progress::{progress_worker, ProgressReporter};
 use crate::utils::progress::{spawn_progress_thread, ProgressLike};
+use crate::utils::reasoning::ReasoningEffort;
+use crate::utils::special_tokens::SpecialTokens;
 use crate::utils::{chat_template::ChatTemplate, prepare_engine_config};
 use crate::utils::{get_runner_path, init_config_tokenizer, spawn_runner};
 use crate::{log_info, log_warn};
@@ -408,7 +408,8 @@ impl LLMEngine {
 
         let special_tokens = Arc::new(special_tokens);
         let pad_ids = special_tokens.get_xml_anchor_pad_ids();
-        let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
+        let mut scheduler =
+            Scheduler::new(runners.clone(), &econfig, &config, special_tokens.clone());
 
         // Initialize tool call end tokens using SpecialTokens for idiomatic access
         let tool_call_start_ids: Vec<u32> = special_tokens.tool_start_ids();
@@ -421,12 +422,17 @@ impl LLMEngine {
                 tool_call_start_ids
             );
         } else {
-            log_info!("Tool call start token IDs not set (no tool start tokens found in tokenizer)");
+            log_info!(
+                "Tool call start token IDs not set (no tool start tokens found in tokenizer)"
+            );
         }
 
         if !tool_call_end_ids.is_empty() {
             scheduler.set_tool_call_end_tokens(tool_call_end_ids.clone());
-            log_info!("Tool call end token IDs set from SpecialTokens: {:?}", tool_call_end_ids);
+            log_info!(
+                "Tool call end token IDs set from SpecialTokens: {:?}",
+                tool_call_end_ids
+            );
         } else {
             log_info!("Tool call end token IDs not set (no tool end tokens found in tokenizer)");
         }
@@ -452,10 +458,7 @@ impl LLMEngine {
             true,
             true,
         );
-        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(
-            &tokenizer,
-            &[],
-        );
+        let escaped_special_tokens = ChatTemplate::collect_escape_tokens(&tokenizer, &[]);
         template.set_escape_tokens(escaped_special_tokens);
 
         let img_cfg = get_image_config(model_type.clone(), &config)?;
@@ -1661,5 +1664,4 @@ impl LLMEngine {
     pub fn template_supports_tools(&self) -> bool {
         self.template.supports_tools()
     }
-
 }
