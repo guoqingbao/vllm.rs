@@ -39,6 +39,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
+| **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -74,7 +75,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 Supports both **Safetensor** (including GPTQ, AWQ and FP8-blockwise formats) and **GGUF** formats.
 
-All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flash-context`).
+All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flashinfer` or `flashattn`).
 
 ---
 ## 📚 Guides
@@ -83,8 +84,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Tool Parsing](docs/tool_parsing.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
 - [Work with Claude Code](docs/claude_code.md)
-- [Work with OpenCode](docs/open_code.md)
-- [Work with Goose AI Agent](docs/goose.md)
+- [Work with OpenCode](docs/opencode.md)
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Prefix cache](docs/prefix-cache.md)
@@ -95,10 +95,10 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ## 📘 Usage in Python
 
 ### 📦 Install with pip
-- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**
-  (no `flash-attn` support; alternatively use **Rust mode**).
-- 💡 The **prebuilt wheel** is built with the `flash-context` feature enabled.
-  To use **FP8 KV Cache**, you must **build manually** (remove the `flash-context` build flag).
+- 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**  
+  (no `flashattn` and `flashinfer` support; alternatively use **Rust mode**).
+- 💡 The **prebuilt wheel** is built with the `flashinfer` backend.  
+  To use **FP8 KV Cache**, you must **build manually** (remove the `flashinfer` or `flashattn` build flag).
 
 
 > 🍎 Metal (macOS)
@@ -117,7 +117,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper (SM90+) / Blackwell (SM120+)
 
-Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.2), unzip it, then install the `.whl`
+Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.8), unzip it, then install the `.whl`
 
 ### 🌐✨ API Server + Built-in ChatGPT-like Web Server
 
@@ -143,7 +143,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --u
     <summary>Multi-GPU + Safetensors model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.5-122B-A10B --d 0,1 --ui-server --prefix-cache
 ```
 
   </details>
@@ -162,17 +162,17 @@ python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,
     <summary>FP8 Model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
 ```
 
   </details>
 
   <details open>
-    <summary>Multimodal model (Qwen3 VL, with images)</summary>
+    <summary>Multimodal model (Qwen3.5, with images)</summary>
 
 ```bash
 # Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3-VL-8B-Instruct --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.5-35B-A3B --ui-server --prefix-cache
 ```
 
   </details>
@@ -196,22 +196,12 @@ See [**More Python Examples →**](python/ReadMe.md)
 
 ```bash
 cd vllm.rs
-# Use one of the following build methods
+# change `sm_80` to your hardware spec, e.g., sm_75 (V100), sm_80 (A100), sm_86 (RTX4096), sm_90 (Hopper), sm_100/sm_120 (Blackwell); change CUDA version `12.9.0` to match your host driver; change last parameter `0` to `1` to enable rust crate mirror (Chinese Mainland)
+./build_docker.sh "cuda,nccl,graph,flashinfer,cutlass,python" sm_80 12.9.0 0
 
-# change `sm_80` to your hardware spec, e.g., sm_75 (V100), sm_80 (A100), sm_90 (Hopper), sm_100/sm_120 (Blackwell)
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80
+# You can also use `flash attention` backend, use `--prod` to build the production image 
+./build_docker.sh --prod "cuda,nccl,graph,flashattn,cutlass,python" sm_90 13.0.0
 
-# +cutlass feature for optimized fp8 models (Qwen3 series, sm90+) with CUDA 13
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
-
-# Pass 1 to enable rust crate mirror (Chinese Mainland)
-./build_docker.sh "cuda,nccl,graph,flash-attn,flash-context,python" sm_80 12.9.0 1
-
-# Pass `--prod` to build the production image (uses `Dockerfile.prod`)
-./build_docker.sh --prod "cuda,nccl,graph,flash-attn,flash-context,cutlass,python" sm_90 13.0.0
-
-# New（Use FlashInfer backend）
-./build_docker.sh "cuda,nccl,flashinfer,graph,cutlass,python" sm_90 13.0.0
 ```
   </details>
 
@@ -236,7 +226,7 @@ sudo apt-get install -y git build-essential libssl-dev pkg-config
 Install CUDA toolkit (optional)
 
 ```sh
-# CUDA 12.9
+# CUDA 12.9 (<= Host Driver Version)
 sudo apt-get install -y \
   cuda-nvcc-12-9 \
   cuda-nvrtc-dev-12-9 \
@@ -250,13 +240,14 @@ sudo apt-get install -y libnccl2 libnccl-dev
 Install vLLM.rs
 ```shell
 # Remove `nccl` for single-gpu usage
-# Remove `flash-attn,flash-context` for V100 or older hardware
 # Add `cutlass` for sm90+ (fp8 models)
 # Use `--dst` to change installation folder
-sudo ./build.sh --install --features cuda,nccl,graph,flash-attn,flash-context
+./build.sh --install --features cuda,nccl,graph,flashinfer,cutlass
 
-# New（Use FlashInfer backend）
-./build.sh --install --features cuda,nccl,flashinfer,graph,cutlass
+# Use Flash Attention backend
+./build.sh --install --features cuda,nccl,graph,flashattn,cutlass
+
+# Remove `flashinfer` or `flashattn` for V100 or older hardware
 ```
   </details>
 
@@ -309,11 +300,11 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 
 ```bash
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
-vllm-rs --m Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
 # Or Qwen3-Next 80B
 vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
 # MacOS/Metal (Dense)
-vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -322,8 +313,8 @@ vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
     <summary>ISQ model + FP8 KvCache</summary>
 
   ```bash
-  # CUDA: Disabled flash-context feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,flash-attn --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --isq q4k --fp8-kvcache
+  # CUDA: Disabled flashinfer/flashattn feature to use fp8-kvcache
+  ./run.sh --release --features cuda,nccl,graph,cutlass --d 0 --m Qwen/Qwen3.5-35B-A3B --isq q4k --fp8-kvcache
   # MacOS/Metal
   vllm-rs --ui-server --w /path/Qwen3-4B --isq q6k
   ```
@@ -386,8 +377,8 @@ PD Disaggregation separates prefill (prompt processing) and decode (token genera
   The size of KvCache is controlled by `--max-model-len` and `--max-num-seqs`.
 
   ```bash
-  # Build with `flash-context` for maximum speed in long-context prefill
-  # Use unquantized model to obtain maximum prefill speed (~3000 tokens/s)
+  # Build with `flashinfer` or `flashattn` for maximum speed in long-context prefill
+  # Use unquantized model to obtain maximum prefill speed
   vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --pd-server
   ```
 
@@ -484,22 +475,19 @@ pip install maturin[patchelf]  # For Linux/Windows
 2. **Build the Python package**
 
 ```bash
-# Naive CUDA (single GPU only)
+# Naive CUDA (No NCCL, single GPU only) 
 maturin build --release --features cuda,python
 
-# Naive CUDA (+CUDA Graph, experimental)
-./build.sh --release --features cuda,graph,python
+# CUDA (with FP8 KV Cache, use Paged Attention, compatible with V100) 
+./build.sh --release --features cuda,nccl,graph,python
 
-# CUDA (with prefix-cache and FP8 KV Cache, no Flash Attention, compatible with V100)
-./build.sh --release --features cuda,nccl,python
+# CUDA (Use Flash Attention backend) 
+./build.sh --release --features cuda,nccl,graph,flashattn,cutlass,python
 
-# CUDA (+Flash Attention, only used in prefill stage)
-./build.sh --release --features cuda,nccl,flash-attn,python
+# CUDA (Use Flashinfer backend) 
+./build.sh --release --features cuda,nccl,graph,flashinfer,cutlass,python
 
-# CUDA (+cutlass (sm90+), +Flash Attention for decoding, +high prefill throughput, long time to build)
-./build.sh --release --features cuda,nccl,flash-attn,flash-context,cutlass,python
-
-# macOS (Metal, single GPU only, with prefix-cache and FP8 kvcache)
+# macOS (Metal, single GPU only, with FP8 kvcache support)
 maturin build --release --features metal,python
 ```
 
@@ -531,7 +519,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition |
 | `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |
-| `--fp8-kvcache`       | Use FP8 KV Cache (when flash-context not enabled)                 |
+| `--fp8-kvcache`       | Use FP8 KV Cache (when flashinfer and flashattn not enabled)                 |
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.2, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
@@ -587,7 +575,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] **Claude/Anthropic-compatible API Server**
 * [x] **Support CUDA 13**
 * [x] **Support FlashInfer backend**
-* [ ] TentorRT-LLM
+* [x] **Support DeepGEMM backend (Hopper)**
+* [ ] TentorRT-LLM 
 ---
 
 ## 📚 References

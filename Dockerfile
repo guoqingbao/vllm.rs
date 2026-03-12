@@ -57,7 +57,7 @@ ENV CUDA_COMPUTE_CAP="${CUDA_COMPUTE_CAP}" \
     RAYON_NUM_THREADS="${RAYON_NUM_THREADS}"
 
 ARG BUILD_FEATURES
-ARG WITH_FEATURES="cuda,nccl,graph,python,flash-attn,flash-context"
+ARG WITH_FEATURES="cuda,nccl,graph,python,flashinfer,cutlass"
 
 WORKDIR /vllm.rs
 COPY . .

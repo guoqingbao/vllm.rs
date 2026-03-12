@@ -321,18 +321,9 @@ impl Phi4Attention {
         let (seq_len, _) = xs.dims2()?;
 
         let qkv = self.qkv_proj.forward(xs)?;
-        let q = qkv[0]
-            .reshape((1, seq_len, self.num_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let k = qkv[1]
-            .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
-        let v = qkv[2]
-            .reshape((1, seq_len, self.num_kv_heads, self.head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?;
+        let q = qkv[0].reshape((seq_len, self.num_heads, self.head_dim))?;
+        let k = qkv[1].reshape((seq_len, self.num_kv_heads, self.head_dim))?;
+        let v = qkv[2].reshape((seq_len, self.num_kv_heads, self.head_dim))?;
 
         let (q, k) = match self
             .rotary_emb

@@ -1,11 +1,7 @@
 use candle_core::{DType, Device, Tensor};
 
-#[cfg(any(
-    feature = "flash-attn",
-    feature = "flash-context",
-    feature = "flashinfer"
-))] // If flash-attn or metal is enabled, we don't implement this function.
-    // The actual implementation would be embedded in the flash or metal attention kernel.
+#[cfg(any(feature = "flashattn", feature = "flashinfer"))] // If flashattn or metal is enabled, we don't implement this function.
+                                                           // The actual implementation would be embedded in the flash or metal attention kernel.
 pub fn get_attention_causal_mask(
     _: &Device,
     _: DType,
@@ -18,11 +14,7 @@ pub fn get_attention_causal_mask(
 }
 
 #[allow(unreachable_code)]
-#[cfg(not(any(
-    feature = "flash-attn",
-    feature = "flash-context",
-    feature = "flashinfer"
-)))]
+#[cfg(not(any(feature = "flashattn", feature = "flashinfer")))]
 fn get_causal_mask_internal(
     device: &Device,
     dtype: DType,
@@ -35,11 +27,7 @@ fn get_causal_mask_internal(
     mask.unsqueeze(0)?.unsqueeze(0)
 }
 
-#[cfg(not(any(
-    feature = "flash-attn",
-    feature = "flash-context",
-    feature = "flashinfer"
-)))]
+#[cfg(not(any(feature = "flashattn", feature = "flashinfer")))]
 pub fn get_attention_causal_mask(
     device: &Device,
     dtype: DType,

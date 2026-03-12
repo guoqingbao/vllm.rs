@@ -3,15 +3,15 @@
 This guide walks through building and running vLLM.rs across CUDA/Metal, different model formats, multi-rank, PD Disaggregation, and OpenAI-compatible APIs. Commands assume repo root and `./run.sh` (wrapper around `cargo build/run`).
 
 ## Build & features
-- **Backends**: `--features cuda[,nccl,graph,flash-attn,flash-context]` or `--features metal`. CPU-only is supported but slow.
-- **Quant/accel toggles**: `--fp8-kvcache` (KV in FP8, CUDA), `--flash-context` (Ampere+, long compile), `--prefix-cache` (prefix KV reuse).
+- **Backends**: `--features cuda[,nccl,graph,flashinfer,cutlass]` or `--features metal`. CPU-only is supported but slow.
+- **Quant/accel toggles**: `fp8-kvcache` (KV in FP8, CUDA), `flashattn` or `flashinfer` (Ampere+, long compile), `--prefix-cache` (prefix KV reuse).
 - **Python bindings**: add feature `python` when building wheels (`./build.sh --features python`).
 
 ### Build (CUDA)
 ```shell
 # Remove `nccl` for single-gpu usage
-# Remove `flash-attn,flash-context` for V100 or older hardware
-./build.sh --release --features cuda,nccl,graph,flash-attn,flash-context
+# Remove `flashattn`, `flashinfer` and `cutlass` for V100 or older hardware
+./build.sh --release --features cuda,nccl,graph,flashinfer,cutlass
 ```
 
 ### Build (Metal)
@@ -58,7 +58,7 @@ Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA
   ```bash
   target/release/vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --max-num-seqs 2 --kv-fraction 0.5
   ```
-- **Graph capture (Ampere+)**: add `--features graph,flash-context` for fastest long-context prefill/decoding (compilation time increases).
+- **Graph capture (Ampere+)**: add `--features graph,flashinfer` for fastest long-context prefill/decoding (compilation time increases).
 
 ## 5) PD Disaggregation (prefill/decoding split)
 - **PD server (prefill host, usually memory-rich)**  
