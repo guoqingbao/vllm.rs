@@ -174,6 +174,12 @@ That separation avoids changing prompt rendering for request types that do not s
 
 Present guided decoding from the simplest use case to the most constrained one.
 
+### Running the server
+```shell
+# Optional: Use `--enable-tool-grammar` to auto-build LLG grammar from tools (force model follow given tool schema)
+./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3.5-35B-A3B-FP8/ --ui-server --d 0 --prefix-cache
+```
+
 ### Quick map
 
 | Goal | Request surface | Typical type |
@@ -609,25 +615,6 @@ Check:
 - base constraint still applies
 - warning indicates reasoning tokens were not found
 
-### Runner RPC compatibility
-
-Use any guided-decoding request while running with process runners enabled.
-
-Check:
-- the request does not panic in runner IPC
-- guided output still follows the grammar
-
-This specifically validates the binary serialization wrapper for `SamplingParams.grammar`.
-
-## Developer Validation
-
-These are code-level checks, not user-facing examples.
-
-```bash
-cargo check --features cuda --lib
-cargo test --features cuda --lib server::tests -- --nocapture
-cargo test --features cuda --lib tools::schema::tests -- --nocapture
-```
 
 ## Known Boundaries
 

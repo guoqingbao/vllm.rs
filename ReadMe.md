@@ -83,6 +83,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Docker Build](docs/docker.md)
 - [Tool Parsing](docs/tool_parsing.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
+- [Structured Outputs](docs/llguidance-integration.md)
 - [Work with Claude Code](docs/claude_code.md)
 - [Work with OpenCode](docs/opencode.md)
 - [Embedding](docs/embeddings.md)
@@ -323,23 +324,11 @@ vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
 
 ---
 
-## 🔌 LLGuidance Support (Structured Outputs & Constraints)
-
+## 🔌 Guided decoding (Structured Outputs & Constraints)
 vLLM.rs now supports structured output and constraint-based generation via llguidance:
 
 - **Tool Call Optimization**: Use `--enable-tool-grammar` to auto-build LLG grammar from tools, forcing model to output JSON matching tool parameter schemas
-- **Custom Constraints**: Use `--allow-constraint-api` to allow clients to submit Lark/Regex/JSON Schema constraints via OpenAI-compatible structured_outputs/response_format
-- **Regex Constraints**: Enforce output formats like phone numbers (`^number\s\d{3}-\d{3}-\d{4}$`)
-- **JSON Schema Constraints**: Enforce structured output via response_format or structured_outputs
-
-**Usage Examples:**
-```bash
-# Enable tool grammar (auto-builds LLG grammar from MCP tools)
-vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --enable-tool-grammar --ui-server
-
-# Enable client constraints API (accepts structured_outputs/response_format)
-vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --allow-constraint-api --ui-server
-```
+- **Custom Constraints**: allow clients to submit Lark/Regex/JSON Schema constraints via OpenAI-compatible structured_outputs/response_format
 
 See [**Structured Outputs Documentation →**](docs/llguidance-integration.md)
 

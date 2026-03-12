@@ -82,6 +82,7 @@
 - [Docker构建](docs/docker.md)
 - [工具调用解析](docs/tool_parsing.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
+- [结构化输出文档](docs/llguidance-integration.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)
 - [OpenCode使用vLLM.rs后端](docs/open_code.md)
 - [Goose AI Agent使用vLLM.rs后端](docs/goose.md)
@@ -313,18 +314,7 @@ cargo install --features metal
 vLLM.rs 现在支持通过 llguidance 库实现结构化输出和约束生成：
 
 - **工具调用优化**：使用 `--enable-tool-grammar` 启用工具调用语法，强制模型输出符合工具参数schema的JSON结构
-- **自定义约束**：使用 `--allow-constraint-api` 允许客户端通过 structured_outputs 或 response_format 提交 Lark/Regex/JSON Schema 约束
-- **正则表达式约束**：强制输出符合特定格式（如电话号码、日期等）
-- **JSON Schema 约束**：通过 OpenAI 兼容的 response_format 或 structured_outputs 提交自定义约束
-
-**使用示例：**
-```bash
-# 启用工具调用语法（自动从 MCP 工具构建 LLG 语法）
-vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --enable-tool-grammar --ui-server
-
-# 启用客户端约束API（允许OpenAI风格的structured_outputs/response_format）
-vllm-rs --m Qwen/Qwen3-30B-A3B-Instruct --allow-constraint-api --ui-server
-```
+- **自定义约束**：允许客户端通过 structured_outputs 或 response_format 提交 Lark/Regex/JSON Schema 约束
 
 查看 [**结构化输出文档 →**](docs/llguidance-integration.md)
 
