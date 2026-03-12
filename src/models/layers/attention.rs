@@ -120,7 +120,9 @@ impl Attention {
         dtype: DType,
     ) -> Result<Option<Tensor>> {
         let bias = match &vb.0 {
-            Either::Left(inner) => inner.get((out_dim,), "bias"),
+            Either::Left(inner) => {
+                inner.get_with_hints_dtype((out_dim,), "bias", shard, DType::F32)
+            }
             Either::Right(_) => return Ok(None),
         };
         let Ok(bias) = bias else {
@@ -134,19 +136,26 @@ impl Attention {
         }
     }
 
-    fn load_sharded_fp8_weight_scale(
+    fn try_load_sharded_fp8_weight_scale(
         vb: &VarBuilderX,
         out_dim: usize,
         in_dim: usize,
         shard: candle_nn::var_builder::Shard,
         block_size: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
+    ) -> Result<Option<(Tensor, Tensor)>> {
+        if !vb.has_key("weight_scale") && !vb.has_key("weight_scale_inv") {
+            return Ok(None);
+        }
+
         let by = block_size[0];
         let bx = block_size[1];
         let scale_dim0 = out_dim.div_ceil(by);
         let scale_dim1 = in_dim.div_ceil(bx);
 
-        let weight = vb.get_with_hints_dtype((out_dim, in_dim), "weight", shard, DType::U8)?;
+        let weight = match vb.get_with_hints_dtype((out_dim, in_dim), "weight", shard, DType::U8) {
+            Ok(weight) => weight,
+            Err(_) => return Ok(None),
+        };
         let weight = Self::normalize_sharded_2d(weight, shard, out_dim, in_dim, "weight")?;
 
         let weight_scale = match vb.get_with_hints_dtype(
@@ -156,18 +165,15 @@ impl Attention {
             DType::F32,
         ) {
             Ok(scale) => scale,
-            Err(_) => vb
-                .get_with_hints_dtype(
-                    (scale_dim0, scale_dim1),
-                    "weight_scale_inv",
-                    shard,
-                    DType::F32,
-                )
-                .map_err(|_| {
-                    candle_core::Error::Msg(
-                        "LnFp8: Missing weight_scale or weight_scale_inv".into(),
-                    )
-                })?,
+            Err(_) => match vb.get_with_hints_dtype(
+                (scale_dim0, scale_dim1),
+                "weight_scale_inv",
+                shard,
+                DType::F32,
+            ) {
+                Ok(scale) => scale,
+                Err(_) => return Ok(None),
+            },
         };
         let weight_scale = Self::normalize_sharded_2d(
             weight_scale,
@@ -177,7 +183,7 @@ impl Attention {
             "weight_scale",
         )?;
 
-        Ok((weight, weight_scale))
+        Ok(Some((weight, weight_scale)))
     }
 
     fn try_load_packed_qkv(
@@ -222,27 +228,36 @@ impl Attention {
                 candle_core::bail!("LnFp8: weight_block_size must have 2 elements");
             }
 
-            let (q_weight, q_scale) = Self::load_sharded_fp8_weight_scale(
+            let Some((q_weight, q_scale)) = Self::try_load_sharded_fp8_weight_scale(
                 &q_vb,
                 q_out_dim,
                 hidden_size,
                 q_shard,
                 &block_size,
-            )?;
-            let (k_weight, k_scale) = Self::load_sharded_fp8_weight_scale(
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some((k_weight, k_scale)) = Self::try_load_sharded_fp8_weight_scale(
                 &k_vb,
                 kv_out_dim,
                 hidden_size,
                 kv_shard,
                 &block_size,
-            )?;
-            let (v_weight, v_scale) = Self::load_sharded_fp8_weight_scale(
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some((v_weight, v_scale)) = Self::try_load_sharded_fp8_weight_scale(
                 &v_vb,
                 kv_out_dim,
                 hidden_size,
                 kv_shard,
                 &block_size,
-            )?;
+            )?
+            else {
+                return Ok(None);
+            };
 
             let local_q = q_weight.dim(0)?;
             let local_k = k_weight.dim(0)?;

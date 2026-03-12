@@ -15,7 +15,7 @@ Claude Code -> vLLM.rs (Anthropic-compatible)
 ./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1 --prefix-cache
 
 # Different model
-./run.sh --features cuda,nccl,graph,flashattn,cutlass --release --m miromind-ai/MiroThinker-v1.5-30B --d 0,1 --server --prefix-cache
+./run.sh --features cuda,nccl,graph,flashattn,cutlass --release --m Qwen/Qwen3.5-27B-FP8 --d 0 --server --prefix-cache
 
 # Python
 python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-Next-FP8 --d 0,1 --prefix-cache
@@ -93,10 +93,4 @@ curl http://127.0.0.1:8000/v1/messages \
 ```shell
 # Log into files (in folder ./log)
 export VLLM_RS_CHAT_LOGGER=1
-```
-
-2. Use custom tool prompt (for example, to guide tool use)
-
-```shell
-./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3-30B-A3B-Instruct-2507 --d 0,1 --ui-server --prefix-cache --tool-prompt ./example/tool_prompt.json
 ```
