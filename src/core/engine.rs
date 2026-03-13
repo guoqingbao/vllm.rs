@@ -44,17 +44,13 @@ use rayon::iter::ParallelIterator;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
-    time::Duration,
-};
 use tokenizers::Tokenizer;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::{task, time::sleep};
 pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1132,40 +1128,6 @@ impl LLMEngine {
     ) -> Result<Vec<GenerationOutput>> {
         let decoded_tokens = Arc::new(AtomicUsize::new(0));
         let decode_start_time = Arc::new(AtomicUsize::new(0));
-        let decode_start_time_clone = Arc::clone(&decode_start_time);
-
-        // Spawn a background reporting task
-        let decoded_tokens_clone = decoded_tokens.clone();
-        let reporter = task::spawn(async move {
-            let mut last_logged = 0;
-            loop {
-                sleep(Duration::from_secs(5)).await;
-                let start_time = decode_start_time_clone.load(Ordering::SeqCst);
-                if start_time > 0 {
-                    let count = decoded_tokens_clone.load(Ordering::Relaxed);
-                    if count == last_logged {
-                        crate::log_info!("Finalizing...");
-                        break;
-                    }
-                    last_logged = count;
-
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as usize;
-
-                    let elapsed = (now - start_time) as f32 / 1000.0;
-
-                    let s = format!(
-                        "[Non-Streaming] {} tokens in {:.2}s ({:.2} tokens/s)",
-                        count,
-                        elapsed,
-                        count as f32 / elapsed
-                    );
-                    eprintln!("{}", String::from(s).yellow());
-                }
-            }
-        });
 
         // Create futures for each receiver (do NOT spawn detached tasks)
         let tasks = receivers
@@ -1277,9 +1239,6 @@ impl LLMEngine {
 
         // Wait for all decoding tasks
         let outputs = join_all(tasks).await;
-
-        // Wait for final reporter update (1s grace)
-        reporter.await.unwrap();
 
         // Collect successful outputs
         let results: Vec<_> = outputs.into_iter().filter_map(|r| r).collect();
