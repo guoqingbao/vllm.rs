@@ -1193,137 +1193,153 @@ impl ModelRunner {
                 }),
         };
 
-        let (guided_logits, guided_seq_ids) = if let Some(factory) = &self.llg_factory {
-            let mut guidance_states = self.guidance_states.write();
-            let mut guidance_failed = self.guidance_failed.write();
-            let mut guidance_mismatch = self.guidance_mismatch.write();
-            let mut modified = false;
-            let vocab_size = logits.dim(1)?;
+        let has_guided_sequences = seq_ids.iter().enumerate().any(|(i, _)| {
+            let sampling_params = match &seqs {
+                Seqs::SeqRefs(refs) => &refs[i].sampling_params,
+                Seqs::DecodeVec(vec) => &vec[i].sampling_params,
+            };
+            sampling_params.grammar.is_some()
+        });
 
-            // We only materialize logits on CPU if at least one constraint mask applies.
+        let (guided_logits, guided_seq_ids) = if has_guided_sequences {
+            if let Some(factory) = &self.llg_factory {
+                let mut guidance_states = self.guidance_states.write();
+                let mut guidance_failed = self.guidance_failed.write();
+                let mut guidance_mismatch = self.guidance_mismatch.write();
+                let mut modified = false;
+                let vocab_size = logits.dim(1)?;
 
-            // We'll collect masks first to minimize holding locks or complex logic inside the loop.
-            let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
-            let mut failed_seq_ids = Vec::new();
-            let mut guided_seq_ids = HashSet::new();
+                // We only materialize logits on CPU if at least one constraint mask applies.
 
-            for (i, id) in seq_ids.iter().enumerate() {
-                let sampling_params = match &seqs {
-                    Seqs::SeqRefs(refs) => &refs[i].sampling_params,
-                    Seqs::DecodeVec(vec) => &vec[i].sampling_params,
-                };
+                // We'll collect masks first to minimize holding locks or complex logic inside the loop.
+                let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
+                let mut failed_seq_ids = Vec::new();
+                let mut guided_seq_ids = HashSet::new();
 
-                if guidance_failed.contains(id) {
-                    continue;
-                }
+                for (i, id) in seq_ids.iter().enumerate() {
+                    let sampling_params = match &seqs {
+                        Seqs::SeqRefs(refs) => &refs[i].sampling_params,
+                        Seqs::DecodeVec(vec) => &vec[i].sampling_params,
+                    };
 
-                // Use grammar directly from sampling_params
-                let grammar = match sampling_params.grammar.as_ref() {
-                    Some(g) => g,
-                    None => continue,
-                };
-                guided_seq_ids.insert(*id);
-
-                let state = match guidance_states.entry(*id) {
-                    Entry::Occupied(entry) => entry.into_mut(),
-                    Entry::Vacant(entry) => {
-                        match GuidanceState::new_from_grammar(factory.clone(), grammar) {
-                            Ok(state) => entry.insert(state),
-                            Err(err) => {
-                                guidance_failed.insert(*id);
-                                crate::log_warn!(
-                                    "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
-                                    id,
-                                    err
-                                );
-                                continue;
-                            }
-                        }
-                    }
-                };
-
-                match state.compute_mask_or_eos() {
-                    Ok(mask) => {
-                        masks.push((i, *id, mask));
-                        modified = true;
-                    }
-                    Err(err) => {
-                        if guidance_failed.insert(*id) {
-                            crate::log_warn!(
-                                "[Seq {}] Failed to compute guidance mask: {}. Disabling constraints for this sequence.",
-                                id,
-                                err
-                            );
-                        }
-                        failed_seq_ids.push(*id);
-                    }
-                }
-            }
-
-            for seq_id in failed_seq_ids {
-                let _ = guidance_states.remove(&seq_id);
-            }
-
-            let logits = if modified {
-                // Now we must convert to Vec, modify, and update logits
-                let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-
-                for (seq_idx, seq_id, mask) in masks {
-                    let start = seq_idx * vocab_size;
-                    let end = start + vocab_size;
-                    let row = &mut logits_vec[start..end];
-                    let mask_len = mask.len();
-
-                    // Apply mask: set disallowed to -inf
-                    // This iterates entire vocab, but check is fast
-                    if mask_len == 0 {
-                        if guidance_failed.insert(seq_id) {
-                            crate::log_warn!(
-                                "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
-                                seq_id
-                            );
-                        }
+                    if guidance_failed.contains(id) {
                         continue;
                     }
 
-                    if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
-                        crate::log_warn!(
-                            "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
-                            seq_id,
-                            mask_len,
-                            vocab_size
-                        );
-                        // Snapshot is captured when constraint is first applied in GuidanceState::new()
-                        // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
-                    }
-
-                    let apply_len = std::cmp::min(vocab_size, mask_len);
-                    for tok in 0..apply_len {
-                        if !mask.is_allowed(tok as u32) {
-                            row[tok] = f32::NEG_INFINITY;
+                    let grammar = match sampling_params.grammar.as_ref() {
+                        Some(g) => g,
+                        None => {
+                            let _ = guidance_states.remove(id);
+                            let _ = guidance_failed.remove(id);
+                            let _ = guidance_mismatch.remove(id);
+                            continue;
                         }
-                    }
-                    if mask_len < vocab_size {
-                        for tok in mask_len..vocab_size {
-                            row[tok] = f32::NEG_INFINITY;
+                    };
+                    guided_seq_ids.insert(*id);
+
+                    let state = match guidance_states.entry(*id) {
+                        Entry::Occupied(entry) => entry.into_mut(),
+                        Entry::Vacant(entry) => {
+                            match GuidanceState::new_from_grammar(factory.clone(), grammar) {
+                                Ok(state) => entry.insert(state),
+                                Err(err) => {
+                                    guidance_failed.insert(*id);
+                                    crate::log_warn!(
+                                        "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                                        id,
+                                        err
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+
+                    match state.compute_mask_or_eos() {
+                        Ok(mask) => {
+                            masks.push((i, *id, mask));
+                            modified = true;
+                        }
+                        Err(err) => {
+                            if guidance_failed.insert(*id) {
+                                crate::log_warn!(
+                                    "[Seq {}] Failed to compute guidance mask: {}. Disabling constraints for this sequence.",
+                                    id,
+                                    err
+                                );
+                            }
+                            failed_seq_ids.push(*id);
                         }
                     }
                 }
-                let masked_logits = Tensor::from_vec(logits_vec, logits.shape(), &self.device)?;
-                /*
-                // Use optimized batch mask bias function
-                batch_mask_bias(
-                    &logits,
-                    &masks.iter().map(|(seq_idx, _, mask)| (*seq_idx, mask.clone())).collect::<Vec<_>>(),
-                    vocab_size,
-                )?
-                */
-                masked_logits
-            } else {
-                logits.clone()
-            };
 
-            (logits, Some(guided_seq_ids))
+                for seq_id in failed_seq_ids {
+                    let _ = guidance_states.remove(&seq_id);
+                }
+
+                let logits = if modified {
+                    // Now we must convert to Vec, modify, and update logits
+                    let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+
+                    for (seq_idx, seq_id, mask) in masks {
+                        let start = seq_idx * vocab_size;
+                        let end = start + vocab_size;
+                        let row = &mut logits_vec[start..end];
+                        let mask_len = mask.len();
+
+                        // Apply mask: set disallowed to -inf
+                        // This iterates entire vocab, but check is fast
+                        if mask_len == 0 {
+                            if guidance_failed.insert(seq_id) {
+                                crate::log_warn!(
+                                    "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                                    seq_id
+                                );
+                            }
+                            continue;
+                        }
+
+                        if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
+                            crate::log_warn!(
+                                "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                                seq_id,
+                                mask_len,
+                                vocab_size
+                            );
+                            // Snapshot is captured when constraint is first applied in GuidanceState::new()
+                            // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
+                        }
+
+                        let apply_len = std::cmp::min(vocab_size, mask_len);
+                        for tok in 0..apply_len {
+                            if !mask.is_allowed(tok as u32) {
+                                row[tok] = f32::NEG_INFINITY;
+                            }
+                        }
+                        if mask_len < vocab_size {
+                            for tok in mask_len..vocab_size {
+                                row[tok] = f32::NEG_INFINITY;
+                            }
+                        }
+                    }
+                    let masked_logits = Tensor::from_vec(logits_vec, logits.shape(), &self.device)?;
+                    /*
+                    // Use optimized batch mask bias function
+                    batch_mask_bias(
+                        &logits,
+                        &masks.iter().map(|(seq_idx, _, mask)| (*seq_idx, mask.clone())).collect::<Vec<_>>(),
+                        vocab_size,
+                    )?
+                    */
+                    masked_logits
+                } else {
+                    logits.clone()
+                };
+
+                (logits, Some(guided_seq_ids))
+            } else {
+                (logits.clone(), None)
+            }
         } else {
             (logits.clone(), None)
         };
