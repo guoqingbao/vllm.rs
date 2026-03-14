@@ -9,6 +9,7 @@ use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
+use regex::Regex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,16 +21,17 @@ pub struct Scheduler {
     transferred: VecDeque<Sequence>,
     pub block_manager: BlockManager,
     next_seq_id: usize,
-    /// Token IDs that represent the end of sequence
-    pub eos_token_id: Vec<u32>,
+    eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
     /// Token IDs that represent the start of a tool call (used to avoid false end matches)
     tool_call_start_token_ids: Vec<u32>,
     /// Token ID for } character (used for JSON tool call detection)
-    json_end_token_ids: Vec<u32>,
+    json_end_token_id: Option<u32>,
     /// Tokenizer for decoding output to check JSON tool call patterns
     tokenizer: Option<Arc<Tokenizer>>,
+    /// Regex for detecting JSON tool calls
+    tool_call_regex: Regex,
     cfg: EngineConfig,
     pd_config: Option<PdConfig>,
     is_last_prefill: bool,
@@ -46,16 +48,6 @@ pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
 const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.5;
 const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.75;
 const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.35;
-
-fn is_complete_tool_json(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(map) => {
-            map.get("name").is_some() && map.get("arguments").is_some()
-        }
-        serde_json::Value::Array(items) => items.iter().all(is_complete_tool_json),
-        _ => false,
-    }
-}
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -149,8 +141,11 @@ impl Scheduler {
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
             tool_call_start_token_ids: Vec::new(),
-            json_end_token_ids: Vec::new(),
+            json_end_token_id: None,
             tokenizer: None,
+            // Regex to match JSON tool call format: {"name": "...", "arguments": {...}}
+            // We use (?s) to allow dot matching newlines
+            tool_call_regex: Regex::new(r#"(?s)\{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$"#).unwrap(),
             cfg: econfig.clone(),
             pd_config: econfig.pd_config.clone(),
             is_last_prefill: false,
@@ -169,20 +164,12 @@ impl Scheduler {
 
     /// Set tokenizer for JSON tool call detection (called by engine after initialization)
     pub fn set_tokenizer(&mut self, tokenizer: Arc<Tokenizer>) {
-        self.json_end_token_ids.clear();
-
-        for ch in ["}", "]"] {
-            if let Ok(tokens) = tokenizer.encode(ch, false) {
-                if let Some(&token_id) = tokens.get_ids().last() {
-                    if !self.json_end_token_ids.contains(&token_id) {
-                        self.json_end_token_ids.push(token_id);
-                    }
-                }
+        // Get the token ID for "}" character
+        if let Ok(tokens) = tokenizer.encode("}", false) {
+            if let Some(&token_id) = tokens.get_ids().last() {
+                self.json_end_token_id = Some(token_id);
+                crate::log_info!("JSON end token ID (}}) set to: {}", token_id);
             }
-        }
-
-        if !self.json_end_token_ids.is_empty() {
-            crate::log_info!("JSON end token IDs set to: {:?}", self.json_end_token_ids);
         }
         self.tokenizer = Some(tokenizer);
     }
@@ -1147,7 +1134,7 @@ impl Scheduler {
     /// Check if the given token is a tool call end token
     /// This supports both:
     /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
-    /// 2. JSON end token "}" combined with complete tool JSON validation
+    /// 2. JSON end token "}" combined with Regex validation for {..."name":..., "arguments":...} pattern
     pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
         // 1. Check for explicit tool call end tokens (XML style)
         if self.tool_call_end_token_ids.contains(&token) {
@@ -1165,19 +1152,19 @@ impl Scheduler {
             return true;
         }
 
-        // 2. Check for JSON style tool call by attempting to parse complete JSON
-        if self.json_end_token_ids.contains(&token) {
+        // 2. Check for JSON style tool call using Regex
+        // This handles models like Qwen3 that output raw JSON without XML tags
+        if self.json_end_token_id == Some(token) {
             if let Some(tokenizer) = &self.tokenizer {
                 // Temporarily add the token to get complete output for decoding
                 let mut temp_output = self.running[idx].output_ids.to_vec();
                 temp_output.push(token);
 
                 if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
-                    let trimmed = decoded.trim();
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                        if is_complete_tool_json(&val) {
-                            return true;
-                        }
+                    // Check for JSON tool call pattern using Regex
+                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
+                    if self.tool_call_regex.is_match(&decoded) {
+                        return true;
                     }
                 }
             }
