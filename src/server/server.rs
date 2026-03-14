@@ -353,10 +353,6 @@ pub async fn chat_completion(
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
 
-    // Compose all grammars using compose_grammars from guidance.rs
-    // Clone forced_tool_name for later use in retain_tool_calls_forced_name
-    let forced_tool_name_clone = forced_tool_name.clone();
-
     if has_tools {
         crate::log_warn!("Tools enabled for request");
     }
@@ -430,6 +426,7 @@ pub async fn chat_completion(
             enforce_parser.clone(),
         );
         tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
+        let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
             l.log_start_response();
@@ -753,7 +750,7 @@ pub async fn chat_completion(
 
                         let dropped = retain_tool_calls_forced_name(
                             &mut pending_tool_calls,
-                            forced_tool_name_clone.as_deref(),
+                            forced_tool_name.as_deref(),
                         );
                         if dropped > 0 {
                             crate::log_warn!(
@@ -780,7 +777,7 @@ pub async fn chat_completion(
                         let invalid_feedback = build_invalid_tool_call_feedback(
                             &invalid_calls,
                             stream_tool_schemas.as_ref(),
-                            forced_tool_name_clone.as_deref(),
+                            forced_tool_name.as_deref(),
                         );
 
                         let (valid_calls, invalid_feedback) = if !invalid_calls.is_empty()
@@ -1046,10 +1043,8 @@ pub async fn chat_completion(
                 let mut parsed_calls = tool_parser
                     .parse_complete_with_fallback(&output.decode_output)
                     .await;
-                let dropped = retain_tool_calls_forced_name(
-                    &mut parsed_calls,
-                    forced_tool_name_clone.as_deref(),
-                );
+                let dropped =
+                    retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
                 if dropped > 0 {
                     crate::log_warn!(
                         "Dropped {} tool call(s) that did not match forced tool_choice",
@@ -1066,7 +1061,7 @@ pub async fn chat_completion(
                 let invalid_feedback = build_invalid_tool_call_feedback(
                     &invalid_calls,
                     tool_schemas.as_ref(),
-                    forced_tool_name_clone.as_deref(),
+                    forced_tool_name.as_deref(),
                 );
 
                 let valid_calls = validated_calls;

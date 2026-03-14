@@ -27,7 +27,7 @@ use crate::{
     models::qwen3_5_moe::Qwen3_5MoEForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
-    utils::config::{Config, EngineConfig, ModelType},
+    utils::config::{Config, EngineConfig, ModelType, SamplingParams},
     utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
@@ -52,6 +52,24 @@ pub struct CachedSamplingParams {
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
     DecodeVec(&'a Vec<DecodeSequence>),
+}
+
+fn sampling_params_for_batch_index<'a>(seqs: &'a Seqs<'a>, index: usize) -> &'a SamplingParams {
+    match seqs {
+        Seqs::SeqRefs(refs) => &refs[index].sampling_params,
+        Seqs::DecodeVec(vec) => &vec[index].sampling_params,
+    }
+}
+
+fn collect_guided_batch_entries(seqs: &Seqs<'_>, seq_ids: &[usize]) -> Vec<(usize, usize)> {
+    seq_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seq_id)| {
+            let sampling_params = sampling_params_for_batch_index(seqs, index);
+            sampling_params.grammar.as_ref().map(|_| (index, *seq_id))
+        })
+        .collect()
 }
 
 pub enum Model {
@@ -153,6 +171,250 @@ impl ModelRunner {
         }
         // Prefix snapshots are sized from auto-planned mamba slot capacity.
         mamba_cache_capacity
+    }
+
+    fn apply_requested_guidance(
+        &self,
+        logits: &Tensor,
+        seqs: &Seqs<'_>,
+        seq_ids: &[usize],
+    ) -> Result<(Tensor, Option<HashSet<usize>>)> {
+        let guided_entries = collect_guided_batch_entries(seqs, seq_ids);
+        if guided_entries.is_empty() {
+            return Ok((logits.clone(), None));
+        }
+
+        let Some(factory) = &self.llg_factory else {
+            return Ok((logits.clone(), None));
+        };
+
+        let mut guidance_states = self.guidance_states.write();
+        let mut guidance_failed = self.guidance_failed.write();
+        let mut guidance_mismatch = self.guidance_mismatch.write();
+        let mut modified = false;
+        let vocab_size = logits.dim(1)?;
+
+        let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new();
+        let mut failed_seq_ids = Vec::new();
+        let mut guided_seq_ids = HashSet::new();
+
+        for (i, id) in seq_ids.iter().enumerate() {
+            if guided_entries
+                .iter()
+                .any(|(guided_idx, _)| *guided_idx == i)
+            {
+                continue;
+            }
+            let _ = guidance_states.remove(id);
+            let _ = guidance_failed.remove(id);
+            let _ = guidance_mismatch.remove(id);
+        }
+
+        for (i, id) in guided_entries {
+            if guidance_failed.contains(&id) {
+                continue;
+            }
+
+            let grammar = sampling_params_for_batch_index(seqs, i)
+                .grammar
+                .as_ref()
+                .expect("guided batch entries must have a grammar");
+
+            let state = match guidance_states.entry(id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    match GuidanceState::new_from_grammar(factory.clone(), grammar) {
+                        Ok(state) => entry.insert(state),
+                        Err(err) => {
+                            guidance_failed.insert(id);
+                            crate::log_warn!(
+                            "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                            id,
+                            err
+                        );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            match state.compute_mask_or_eos() {
+                Ok(mask) => {
+                    masks.push((i, id, mask));
+                    guided_seq_ids.insert(id);
+                    modified = true;
+                }
+                Err(err) => {
+                    if guidance_failed.insert(id) {
+                        crate::log_warn!(
+                            "[Seq {}] Failed to compute guidance mask: {}. Disabling constraints for this sequence.",
+                            id,
+                            err
+                        );
+                    }
+                    failed_seq_ids.push(id);
+                }
+            }
+        }
+
+        for seq_id in failed_seq_ids {
+            let _ = guidance_states.remove(&seq_id);
+        }
+
+        if !modified {
+            return Ok((logits.clone(), Some(guided_seq_ids)));
+        }
+
+        let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+        for (seq_idx, seq_id, mask) in masks {
+            let start = seq_idx * vocab_size;
+            let end = start + vocab_size;
+            let row = &mut logits_vec[start..end];
+            let mask_len = mask.len();
+
+            if mask_len == 0 {
+                if guidance_failed.insert(seq_id) {
+                    crate::log_warn!(
+                        "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                        seq_id
+                    );
+                }
+                continue;
+            }
+
+            if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
+                crate::log_warn!(
+                    "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                    seq_id,
+                    mask_len,
+                    vocab_size
+                );
+                // Snapshot is captured when constraint is first applied in GuidanceState::new()
+                // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
+            }
+
+            let apply_len = std::cmp::min(vocab_size, mask_len);
+            for tok in 0..apply_len {
+                if !mask.is_allowed(tok as u32) {
+                    row[tok] = f32::NEG_INFINITY;
+                }
+            }
+            if mask_len < vocab_size {
+                for tok in mask_len..vocab_size {
+                    row[tok] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        Ok((
+            Tensor::from_vec(logits_vec, logits.shape(), &self.device)?,
+            Some(guided_seq_ids),
+        ))
+    }
+
+    fn sample_processed_logits(
+        &self,
+        logits: &Tensor,
+        seq_ids: &[usize],
+        guided_seq_ids: Option<&HashSet<usize>>,
+        sampling: &Sampling,
+    ) -> Result<Vec<u32>> {
+        let Some(guided_seq_ids) = guided_seq_ids else {
+            return self.logit_processor.sample_with_strategy(logits, sampling);
+        };
+
+        if guided_seq_ids.is_empty() || guided_seq_ids.len() == seq_ids.len() {
+            return self.logit_processor.sample_with_strategy(logits, sampling);
+        }
+
+        let guided_rows: Vec<usize> = seq_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seq_id)| guided_seq_ids.contains(seq_id).then_some(index))
+            .collect();
+        let unguided_rows: Vec<usize> = seq_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, seq_id)| (!guided_seq_ids.contains(seq_id)).then_some(index))
+            .collect();
+
+        let mut merged_tokens = vec![0u32; seq_ids.len()];
+
+        if !guided_rows.is_empty() {
+            let guided_indices = Tensor::from_vec(
+                guided_rows
+                    .iter()
+                    .map(|&idx| idx as u32)
+                    .collect::<Vec<_>>(),
+                (guided_rows.len(),),
+                &self.device,
+            )?;
+            let guided_logits = logits.index_select(&guided_indices, 0)?;
+            let guided_tokens = self
+                .logit_processor
+                .sample_with_strategy(&guided_logits, sampling)?;
+            for (row_idx, token) in guided_rows.into_iter().zip(guided_tokens.into_iter()) {
+                merged_tokens[row_idx] = token;
+            }
+        }
+
+        if !unguided_rows.is_empty() {
+            let unguided_indices = Tensor::from_vec(
+                unguided_rows
+                    .iter()
+                    .map(|&idx| idx as u32)
+                    .collect::<Vec<_>>(),
+                (unguided_rows.len(),),
+                &self.device,
+            )?;
+            let unguided_logits = logits.index_select(&unguided_indices, 0)?;
+            let unguided_tokens = self
+                .logit_processor
+                .sample_with_strategy(&unguided_logits, sampling)?;
+            for (row_idx, token) in unguided_rows.into_iter().zip(unguided_tokens.into_iter()) {
+                merged_tokens[row_idx] = token;
+            }
+        }
+
+        Ok(merged_tokens)
+    }
+
+    fn commit_guided_tokens(
+        &self,
+        seq_ids: &[usize],
+        tokens: &[u32],
+        guided_seq_ids: Option<HashSet<usize>>,
+    ) {
+        let Some(guided_seq_ids) = guided_seq_ids else {
+            return;
+        };
+
+        let mut guidance_states = self.guidance_states.write();
+        let mut guidance_failed = self.guidance_failed.write();
+        for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
+            if !guided_seq_ids.contains(seq_id) || guidance_failed.contains(seq_id) {
+                continue;
+            }
+
+            if let Some(state) = guidance_states.get_mut(seq_id) {
+                if state.is_finished() {
+                    continue;
+                }
+
+                let token = tokens[seq_idx];
+                if let Err(err) = state.commit_token(token) {
+                    if guidance_failed.insert(*seq_id) {
+                        crate::log_warn!(
+                            "[Seq {}] Failed to commit guided token {}: {}. Disabling constraints for this sequence.",
+                            seq_id,
+                            token,
+                            err
+                        );
+                    }
+                    let _ = guidance_states.remove(seq_id);
+                }
+            }
+        }
     }
 
     #[allow(unused)]
@@ -1193,156 +1455,8 @@ impl ModelRunner {
                 }),
         };
 
-        let has_guided_sequences = seq_ids.iter().enumerate().any(|(i, _)| {
-            let sampling_params = match &seqs {
-                Seqs::SeqRefs(refs) => &refs[i].sampling_params,
-                Seqs::DecodeVec(vec) => &vec[i].sampling_params,
-            };
-            sampling_params.grammar.is_some()
-        });
-
-        let (guided_logits, guided_seq_ids) = if has_guided_sequences {
-            if let Some(factory) = &self.llg_factory {
-                let mut guidance_states = self.guidance_states.write();
-                let mut guidance_failed = self.guidance_failed.write();
-                let mut guidance_mismatch = self.guidance_mismatch.write();
-                let mut modified = false;
-                let vocab_size = logits.dim(1)?;
-
-                // We only materialize logits on CPU if at least one constraint mask applies.
-
-                // We'll collect masks first to minimize holding locks or complex logic inside the loop.
-                let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new(); // (seq_index, seq_id, mask)
-                let mut failed_seq_ids = Vec::new();
-                let mut guided_seq_ids = HashSet::new();
-
-                for (i, id) in seq_ids.iter().enumerate() {
-                    let sampling_params = match &seqs {
-                        Seqs::SeqRefs(refs) => &refs[i].sampling_params,
-                        Seqs::DecodeVec(vec) => &vec[i].sampling_params,
-                    };
-
-                    if guidance_failed.contains(id) {
-                        continue;
-                    }
-
-                    let grammar = match sampling_params.grammar.as_ref() {
-                        Some(g) => g,
-                        None => {
-                            let _ = guidance_states.remove(id);
-                            let _ = guidance_failed.remove(id);
-                            let _ = guidance_mismatch.remove(id);
-                            continue;
-                        }
-                    };
-                    guided_seq_ids.insert(*id);
-
-                    let state = match guidance_states.entry(*id) {
-                        Entry::Occupied(entry) => entry.into_mut(),
-                        Entry::Vacant(entry) => {
-                            match GuidanceState::new_from_grammar(factory.clone(), grammar) {
-                                Ok(state) => entry.insert(state),
-                                Err(err) => {
-                                    guidance_failed.insert(*id);
-                                    crate::log_warn!(
-                                        "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
-                                        id,
-                                        err
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-
-                    match state.compute_mask_or_eos() {
-                        Ok(mask) => {
-                            masks.push((i, *id, mask));
-                            modified = true;
-                        }
-                        Err(err) => {
-                            if guidance_failed.insert(*id) {
-                                crate::log_warn!(
-                                    "[Seq {}] Failed to compute guidance mask: {}. Disabling constraints for this sequence.",
-                                    id,
-                                    err
-                                );
-                            }
-                            failed_seq_ids.push(*id);
-                        }
-                    }
-                }
-
-                for seq_id in failed_seq_ids {
-                    let _ = guidance_states.remove(&seq_id);
-                }
-
-                let logits = if modified {
-                    // Now we must convert to Vec, modify, and update logits
-                    let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
-
-                    for (seq_idx, seq_id, mask) in masks {
-                        let start = seq_idx * vocab_size;
-                        let end = start + vocab_size;
-                        let row = &mut logits_vec[start..end];
-                        let mask_len = mask.len();
-
-                        // Apply mask: set disallowed to -inf
-                        // This iterates entire vocab, but check is fast
-                        if mask_len == 0 {
-                            if guidance_failed.insert(seq_id) {
-                                crate::log_warn!(
-                                    "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
-                                    seq_id
-                                );
-                            }
-                            continue;
-                        }
-
-                        if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
-                            crate::log_warn!(
-                                "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
-                                seq_id,
-                                mask_len,
-                                vocab_size
-                            );
-                            // Snapshot is captured when constraint is first applied in GuidanceState::new()
-                            // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
-                        }
-
-                        let apply_len = std::cmp::min(vocab_size, mask_len);
-                        for tok in 0..apply_len {
-                            if !mask.is_allowed(tok as u32) {
-                                row[tok] = f32::NEG_INFINITY;
-                            }
-                        }
-                        if mask_len < vocab_size {
-                            for tok in mask_len..vocab_size {
-                                row[tok] = f32::NEG_INFINITY;
-                            }
-                        }
-                    }
-                    let masked_logits = Tensor::from_vec(logits_vec, logits.shape(), &self.device)?;
-                    /*
-                    // Use optimized batch mask bias function
-                    batch_mask_bias(
-                        &logits,
-                        &masks.iter().map(|(seq_idx, _, mask)| (*seq_idx, mask.clone())).collect::<Vec<_>>(),
-                        vocab_size,
-                    )?
-                    */
-                    masked_logits
-                } else {
-                    logits.clone()
-                };
-
-                (logits, Some(guided_seq_ids))
-            } else {
-                (logits.clone(), None)
-            }
-        } else {
-            (logits.clone(), None)
-        };
+        let (guided_logits, guided_seq_ids) =
+            self.apply_requested_guidance(logits, &seqs, &seq_ids)?;
 
         // Apply penalties using cached values (same for all sequences in batch)
         // This is done AFTER LLG masking so penalties only affect tokens allowed by grammar
@@ -1376,38 +1490,14 @@ impl ModelRunner {
             guided_logits.to_owned()
         };
 
-        let tokens = self
-            .logit_processor
-            .sample_with_strategy(&logits, &cached_params.sampling)?;
+        let tokens = self.sample_processed_logits(
+            &logits,
+            &seq_ids,
+            guided_seq_ids.as_ref(),
+            &cached_params.sampling,
+        )?;
 
-        if let Some(guided_seq_ids) = guided_seq_ids {
-            let mut guidance_states = self.guidance_states.write();
-            let mut guidance_failed = self.guidance_failed.write();
-            for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
-                if !guided_seq_ids.contains(seq_id) || guidance_failed.contains(seq_id) {
-                    continue;
-                }
-
-                if let Some(state) = guidance_states.get_mut(seq_id) {
-                    if state.is_finished() {
-                        continue;
-                    }
-
-                    let token = tokens[seq_idx];
-                    if let Err(err) = state.commit_token(token) {
-                        if guidance_failed.insert(*seq_id) {
-                            crate::log_warn!(
-                                "[Seq {}] Failed to commit guided token {}: {}. Disabling constraints for this sequence.",
-                                seq_id,
-                                token,
-                                err
-                            );
-                        }
-                        let _ = guidance_states.remove(seq_id);
-                    }
-                }
-            }
-        }
+        self.commit_guided_tokens(&seq_ids, &tokens, guided_seq_ids);
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {
@@ -1617,5 +1707,42 @@ impl ModelRunner {
         // }
 
         // cache_clear(&*self.get_kv_cache(), &block_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_guided_batch_entries, Seqs};
+    use crate::core::sequence::DecodeSequence;
+    use crate::utils::config::SamplingParams;
+    use llguidance::api::TopLevelGrammar;
+
+    fn decode_sequence(id: usize, grammar: Option<TopLevelGrammar>) -> DecodeSequence {
+        let mut sampling_params = SamplingParams::new_with_max_tokens(16);
+        sampling_params.grammar = grammar;
+        DecodeSequence {
+            id,
+            last_token: 0,
+            len: 1,
+            last_block_tokens: 1,
+            block_table_last: 0,
+            block_tables: vec![0],
+            sampling_params,
+        }
+    }
+
+    #[test]
+    fn test_collect_guided_batch_entries_only_returns_constrained_rows() {
+        let seqs = vec![
+            decode_sequence(10, None),
+            decode_sequence(11, Some(TopLevelGrammar::from_regex("a+"))),
+            decode_sequence(12, None),
+            decode_sequence(13, Some(TopLevelGrammar::from_regex("b+"))),
+        ];
+        let seq_ids = seqs.iter().map(|seq| seq.id).collect::<Vec<_>>();
+
+        let guided = collect_guided_batch_entries(&Seqs::DecodeVec(&seqs), &seq_ids);
+
+        assert_eq!(guided, vec![(1, 11), (3, 13)]);
     }
 }
