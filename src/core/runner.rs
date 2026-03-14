@@ -312,71 +312,8 @@ impl ModelRunner {
         ))
     }
 
-    fn sample_processed_logits(
-        &self,
-        logits: &Tensor,
-        seq_ids: &[usize],
-        guided_seq_ids: Option<&HashSet<usize>>,
-        sampling: &Sampling,
-    ) -> Result<Vec<u32>> {
-        let Some(guided_seq_ids) = guided_seq_ids else {
-            return self.logit_processor.sample_with_strategy(logits, sampling);
-        };
-
-        if guided_seq_ids.is_empty() || guided_seq_ids.len() == seq_ids.len() {
-            return self.logit_processor.sample_with_strategy(logits, sampling);
-        }
-
-        let guided_rows: Vec<usize> = seq_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(index, seq_id)| guided_seq_ids.contains(seq_id).then_some(index))
-            .collect();
-        let unguided_rows: Vec<usize> = seq_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(index, seq_id)| (!guided_seq_ids.contains(seq_id)).then_some(index))
-            .collect();
-
-        let mut merged_tokens = vec![0u32; seq_ids.len()];
-
-        if !guided_rows.is_empty() {
-            let guided_indices = Tensor::from_vec(
-                guided_rows
-                    .iter()
-                    .map(|&idx| idx as u32)
-                    .collect::<Vec<_>>(),
-                (guided_rows.len(),),
-                &self.device,
-            )?;
-            let guided_logits = logits.index_select(&guided_indices, 0)?;
-            let guided_tokens = self
-                .logit_processor
-                .sample_with_strategy(&guided_logits, sampling)?;
-            for (row_idx, token) in guided_rows.into_iter().zip(guided_tokens.into_iter()) {
-                merged_tokens[row_idx] = token;
-            }
-        }
-
-        if !unguided_rows.is_empty() {
-            let unguided_indices = Tensor::from_vec(
-                unguided_rows
-                    .iter()
-                    .map(|&idx| idx as u32)
-                    .collect::<Vec<_>>(),
-                (unguided_rows.len(),),
-                &self.device,
-            )?;
-            let unguided_logits = logits.index_select(&unguided_indices, 0)?;
-            let unguided_tokens = self
-                .logit_processor
-                .sample_with_strategy(&unguided_logits, sampling)?;
-            for (row_idx, token) in unguided_rows.into_iter().zip(unguided_tokens.into_iter()) {
-                merged_tokens[row_idx] = token;
-            }
-        }
-
-        Ok(merged_tokens)
+    fn sample_processed_logits(&self, logits: &Tensor, sampling: &Sampling) -> Result<Vec<u32>> {
+        self.logit_processor.sample_with_strategy(logits, sampling)
     }
 
     fn commit_guided_tokens(
@@ -1490,12 +1427,7 @@ impl ModelRunner {
             guided_logits.to_owned()
         };
 
-        let tokens = self.sample_processed_logits(
-            &logits,
-            &seq_ids,
-            guided_seq_ids.as_ref(),
-            &cached_params.sampling,
-        )?;
+        let tokens = self.sample_processed_logits(&logits, &cached_params.sampling)?;
 
         self.commit_guided_tokens(&seq_ids, &tokens, guided_seq_ids);
 
