@@ -257,8 +257,8 @@ impl ModelRunner {
             }
         }
 
-        for seq_id in failed_seq_ids {
-            let _ = guidance_states.remove(&seq_id);
+        for seq_id in &failed_seq_ids {
+            let _ = guidance_states.remove(seq_id);
         }
 
         if !modified {
@@ -279,18 +279,19 @@ impl ModelRunner {
                         seq_id
                     );
                 }
+                failed_seq_ids.push(seq_id);
                 continue;
             }
 
-            if mask_len != vocab_size && guidance_mismatch.insert(seq_id) {
-                crate::log_warn!(
-                    "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
-                    seq_id,
-                    mask_len,
-                    vocab_size
-                );
-                // Snapshot is captured when constraint is first applied in GuidanceState::new()
-                // Rollback is handled via Matcher::rollback() in GuidanceState::rollback_to()
+            if mask_len != vocab_size {
+                if guidance_mismatch.insert(seq_id) {
+                    crate::log_warn!(
+                        "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                        seq_id,
+                        mask_len,
+                        vocab_size
+                    );
+                }
             }
 
             let apply_len = std::cmp::min(vocab_size, mask_len);
@@ -304,6 +305,10 @@ impl ModelRunner {
                     row[tok] = f32::NEG_INFINITY;
                 }
             }
+        }
+
+        for seq_id in &failed_seq_ids {
+            let _ = guidance_states.remove(seq_id);
         }
 
         Ok((
@@ -1457,6 +1462,10 @@ impl ModelRunner {
         let _ = restored.remove(&id);
         let mut guidance_states = self.guidance_states.write();
         let _ = guidance_states.remove(&id);
+        let mut guidance_failed = self.guidance_failed.write();
+        let _ = guidance_failed.remove(&id);
+        let mut guidance_mismatch = self.guidance_mismatch.write();
+        let _ = guidance_mismatch.remove(&id);
         match &self.model {
             Model::Qwen3_5(model) => model.release_sequence_state(id),
             Model::Qwen3_5MoE(model) => model.release_sequence_state(id),
