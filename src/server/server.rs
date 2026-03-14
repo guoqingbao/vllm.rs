@@ -16,8 +16,7 @@ use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls, log_tool_calls,
-    resolve_tools, retain_tool_calls_forced_name, sanitize_tools_for_llguidance,
-    strict_tool_call_validation_enabled,
+    resolve_tools, retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
@@ -292,12 +291,13 @@ pub async fn chat_completion(
             e.guidance_tokens.clone(),
         )
     };
-    normalize_reasoning_controls(&mut params, &guidance_tokens);
-
     let constraint_grammar = match collect_openai_constraint_grammar(&request) {
         Ok(grammar) => grammar,
         Err(err) => return ChatResponder::ValidationError(err.to_string()),
     };
+    if constraint_grammar.is_some() {
+        normalize_reasoning_controls(&mut params, &guidance_tokens);
+    }
 
     let mcp_tools = data
         .mcp_manager
@@ -349,7 +349,6 @@ pub async fn chat_completion(
         }
     }
 
-    let sanitized_tools = sanitize_tools_for_llguidance(&resolved_tools);
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     let has_tools = !resolved_tools.is_empty();
     params.mcp_mode = if has_tools { Some(true) } else { None };
@@ -370,13 +369,6 @@ pub async fn chat_completion(
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();
 
-    // Build tool grammar based on parser type (XML for qwen_coder, JSON for others)
-    // Honor parser override flag (--enforce-parser) when available
-    let tool_parser_name = if let Some(ref enforced) = enforce_parser {
-        enforced.clone()
-    } else {
-        StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
-    };
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,
         Err(e) => {
@@ -394,12 +386,7 @@ pub async fn chat_completion(
         let engine = data.engine.read();
         params.grammar = build_guided_decoding_grammar(
             &engine.guidance_tokens,
-            &tool_config,
-            &sanitized_tools,
-            &tool_parser_name,
             constraint_grammar,
-            tool_choice_required,
-            forced_tool_name.clone(),
             max_tokens,
             params.reasoning_effort.clone(),
         );

@@ -50,9 +50,6 @@ pub enum GrammarError {
 
     #[error("invalid grammar: {0}")]
     InvalidGrammar(String),
-
-    #[error("tool grammar construction failed: {0}")]
-    ToolGrammarError(String),
 }
 
 pub type GrammarResult<T> = Result<T, GrammarError>;
@@ -227,19 +224,12 @@ impl GrammarBuilder {
 pub enum GrammarComposers {
     TextWithEos,
     Constraint(TopLevelGrammar),
-    Tool(TopLevelGrammar),
-    ConstraintOrTool(TopLevelGrammar, TopLevelGrammar),
-    ToolOrConstraint(TopLevelGrammar, TopLevelGrammar),
     WithReasoning(TopLevelGrammar, TopLevelGrammar),
 }
 
 /// Builder for constructing GrammarComposers
 pub struct GrammarComposerBuilder {
     constraint_grammars: Vec<TopLevelGrammar>,
-    tool_grammar: Option<TopLevelGrammar>,
-    has_tools: bool,
-    tool_choice_required: bool,
-    forced_tool_name: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -247,32 +237,12 @@ impl GrammarComposerBuilder {
     pub fn new() -> Self {
         Self {
             constraint_grammars: Vec::new(),
-            tool_grammar: None,
-            has_tools: false,
-            tool_choice_required: false,
-            forced_tool_name: None,
             reasoning_effort: None,
         }
     }
 
     pub fn constraints(mut self, grammars: Vec<TopLevelGrammar>) -> Self {
         self.constraint_grammars = grammars;
-        self
-    }
-
-    pub fn tool_grammar(mut self, grammar: Option<TopLevelGrammar>) -> Self {
-        self.tool_grammar = grammar;
-        self.has_tools = self.tool_grammar.is_some();
-        self
-    }
-
-    pub fn tool_required(mut self, required: bool) -> Self {
-        self.tool_choice_required = required;
-        self
-    }
-
-    pub fn forced_tool_name(mut self, name: Option<String>) -> Self {
-        self.forced_tool_name = name;
         self
     }
 
@@ -286,32 +256,10 @@ impl GrammarComposerBuilder {
         self.build_with_reasoning(base, guidance_tokens)
     }
 
-    fn build_base_composer(&self, guidance_tokens: &GuidanceTokens) -> GrammarComposers {
-        let tool_required = self.tool_choice_required || self.forced_tool_name.is_some();
-
-        match (
-            self.constraint_grammars.is_empty(),
-            self.tool_grammar.is_some(),
-        ) {
-            (true, false) => GrammarComposers::TextWithEos,
-            (true, true) => {
-                if tool_required {
-                    GrammarComposers::Tool(self.tool_grammar.clone().unwrap())
-                } else {
-                    let has_eos = !guidance_tokens.eos_token_ids.is_empty();
-                    let lark = chat_text_expression(has_eos);
-                    let text_gram = TopLevelGrammar::from_lark_utf8(&lark);
-                    GrammarComposers::ConstraintOrTool(
-                        text_gram,
-                        self.tool_grammar.clone().unwrap(),
-                    )
-                }
-            }
-            (false, false) => GrammarComposers::Constraint(self.constraint_grammars[0].clone()),
-            (false, true) => {
-                let constraint = self.constraint_grammars[0].clone();
-                GrammarComposers::ConstraintOrTool(constraint, self.tool_grammar.clone().unwrap())
-            }
+    fn build_base_composer(&self, _guidance_tokens: &GuidanceTokens) -> GrammarComposers {
+        match self.constraint_grammars.is_empty() {
+            true => GrammarComposers::TextWithEos,
+            false => GrammarComposers::Constraint(self.constraint_grammars[0].clone()),
         }
     }
 
@@ -368,19 +316,6 @@ impl GrammarComposers {
                 TopLevelGrammar::from_lark_utf8(&lark)
             }
             GrammarComposers::Constraint(c) => c.clone(),
-            GrammarComposers::Tool(t) => t.clone(),
-            GrammarComposers::ConstraintOrTool(c, t) => wrap_with_subgrammars(
-                "( @constraint | @tool )",
-                None,
-                &[("constraint", c), ("tool", t)],
-                None,
-            ),
-            GrammarComposers::ToolOrConstraint(t, c) => wrap_with_subgrammars(
-                "( @tool | @constraint )",
-                None,
-                &[("tool", t), ("constraint", c)],
-                None,
-            ),
             GrammarComposers::WithReasoning(reasoning, inner) => wrap_with_subgrammars(
                 "@reasoning @inner",
                 None,
@@ -864,23 +799,18 @@ pub fn build_tool_call_end_tag(
     build_special_token_tag(end_token_ids, end_token_str)
 }
 
-/// Compose grammars based on constraint and tool settings
+/// Compose grammars based on request constraints and optional reasoning
 /// Returns a single TopLevelGrammar with proper precedence
 /// This function takes the grammar that was built externally (with appropriate model-specific format)
 /// and handles the alternation/composition logic
 pub fn compose_grammars(
     constraint_grammars: Vec<TopLevelGrammar>,
-    has_tools: bool,
-    tool_choice_required: bool,
-    forced_tool_name: Option<String>,
     max_tokens: Option<usize>,
     guidance_tokens: &GuidanceTokens,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> TopLevelGrammar {
     let builder = GrammarComposerBuilder::new()
         .constraints(constraint_grammars)
-        .tool_required(has_tools && tool_choice_required)
-        .forced_tool_name(forced_tool_name)
         .reasoning_effort(reasoning_effort);
 
     let mut grammar = builder.build(guidance_tokens);

@@ -34,17 +34,6 @@ pub fn strict_tool_call_validation_enabled() -> bool {
     })
 }
 
-pub fn sanitize_tools_for_llguidance(tools: &[Tool]) -> Vec<Tool> {
-    tools.iter().map(sanitize_tool_schema).collect()
-}
-
-fn sanitize_tool_schema(tool: &Tool) -> Tool {
-    let mut tool = tool.clone();
-    tool.function.parameters =
-        crate::tools::schema::sanitize_schema_for_llguidance(&tool.function.parameters);
-    tool
-}
-
 /// Build a map of tool names to their parameter schemas
 pub fn build_tool_schema_map(tools: &[Tool]) -> HashMap<String, Value> {
     tools

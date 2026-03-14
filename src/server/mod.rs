@@ -8,10 +8,8 @@ pub mod parser;
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
-use crate::server::parser::ToolConfig;
 use crate::server::streaming::Streamer;
 use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
-use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
@@ -195,7 +193,7 @@ pub struct ExtraBody {
 }
 
 // TopLevelGrammar conversion functions
-// Client grammars are composed via merge_top_level_grammars alongside TEXT and tool grammars.
+// Client grammars are composed alongside TEXT and optional reasoning grammars.
 
 pub fn grammar_fragment_from_structured_outputs(
     structured: &StructuredOutputs,
@@ -406,31 +404,19 @@ pub fn collect_openai_constraint_grammar(
     Ok(selected)
 }
 
-#[allow(unused_variables)]
 pub fn build_guided_decoding_grammar(
     guidance_tokens: &GuidanceTokens,
-    tool_config: &ToolConfig,
-    tools: &[Tool],
-    tool_parser_name: &str,
     constraint_grammar: Option<TopLevelGrammar>,
-    tool_choice_required: bool,
-    forced_tool_name: Option<String>,
     max_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> Option<TopLevelGrammar> {
-    let constraint_enabled = constraint_grammar.is_some();
-    let reasoning_enabled = reasoning_effort
-        .as_ref()
-        .is_some_and(|effort| *effort != ReasoningEffort::None);
-
-    if !constraint_enabled && !reasoning_enabled {
+    if constraint_grammar.is_none() {
         return None;
     }
 
     crate::log_info!(
-        "[llg] Guided decoding enabled: constraint={} parser={} max_tokens={} reasoning={}",
-        constraint_enabled,
-        tool_parser_name,
+        "[llg] Guided decoding enabled: constraint={} max_tokens={} reasoning={}",
+        true,
         max_tokens,
         reasoning_effort
             .as_ref()
@@ -440,9 +426,6 @@ pub fn build_guided_decoding_grammar(
 
     Some(compose_grammars(
         constraint_grammar.into_iter().collect(),
-        !tools.is_empty(),
-        tool_choice_required,
-        forced_tool_name,
         Some(max_tokens),
         guidance_tokens,
         reasoning_effort,
@@ -1810,24 +1793,14 @@ mod tests {
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
         };
-        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
 
-        let grammar = build_guided_decoding_grammar(
-            &guidance_tokens,
-            &tool_config,
-            &[],
-            "qwen_coder",
-            None,
-            false,
-            None,
-            64,
-            Some(ReasoningEffort::Low),
+        let grammar =
+            build_guided_decoding_grammar(&guidance_tokens, None, 64, Some(ReasoningEffort::Low));
+
+        assert!(
+            grammar.is_none(),
+            "reasoning-only requests must not build guided decoding without a constraint"
         );
-
-        let grammar = grammar.expect("reasoning-only guided grammar should be built");
-        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
-        assert!(lark.contains("reasoning_block"), "should include reasoning");
-        assert!(lark.contains("text"), "should still include base text");
     }
 
     #[test]
@@ -1837,18 +1810,12 @@ mod tests {
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
         };
-        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
         let constraint =
             TopLevelGrammar::from_lark_utf8(r#"start: "positive" | "negative" | "neutral""#);
 
         let grammar = build_guided_decoding_grammar(
             &guidance_tokens,
-            &tool_config,
-            &[],
-            "qwen_coder",
             Some(constraint),
-            false,
-            None,
             64,
             Some(ReasoningEffort::Low),
         )
@@ -1880,7 +1847,6 @@ mod tests {
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
         };
-        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
         let constraint = TopLevelGrammar::from_json_schema(serde_json::json!({
             "type": "object",
             "properties": {
@@ -1892,12 +1858,7 @@ mod tests {
 
         let grammar = build_guided_decoding_grammar(
             &guidance_tokens,
-            &tool_config,
-            &[],
-            "qwen_coder",
             Some(constraint),
-            false,
-            None,
             64,
             Some(ReasoningEffort::Low),
         )

@@ -14,7 +14,7 @@ Guided decoding is request-scoped.
 
 The core engine does not invent grammars on its own. A request either:
 - supplies a constraint grammar
-- gets a composed grammar containing both
+- gets that constraint grammar composed with a reasoning prefix
 - or runs unconstrained when neither exists
 
 The final grammar is stored in `SamplingParams.grammar` and consumed by the runner.
@@ -44,7 +44,7 @@ The server composes:
 
 The result is a single `TopLevelGrammar` assigned to `SamplingParams.grammar`.
 
-If no constraint grammar and no tool grammar exist, `params.grammar` stays `None`.
+If no client-supplied constraint grammar exists, `params.grammar` stays `None`.
 
 ### 3. Sampling in runner
 
@@ -84,15 +84,14 @@ Legacy fields
 - `constraint`
 - `constraint_type = regex | lark | json_schema | json`
 
-If a request provides none of the above, guided decoding is not enabled unless tool grammar synthesis adds one.
+If a request provides none of the above, guided decoding is not enabled.
 
 ### Claude server
-
-Claude reuses the same tool-grammar builder path.
 
 Current state:
 - Claude does not expose the same client-supplied grammar request surface as the OpenAI endpoint
 - Claude reasoning is still driven by explicit thinking behavior, not by `reasoning_effort` grammar composition
+- Claude requests therefore do not currently enable guided decoding
 
 ## Reasoning Effort
 
@@ -100,7 +99,7 @@ Reasoning effort is separate from ordinary structured outputs.
 
 ### Current state
 
-The OpenAI path maps `reasoning_effort` into grammar composition.
+The OpenAI path maps `reasoning_effort` into grammar composition when a request constraint exists.
 
 Accepted values come from `ReasoningEffort::from_str`:
 - `none`
@@ -125,6 +124,7 @@ Relevant code:
 Reasoning effort:
 - does not enable chat-template thinking by itself
 - only affects grammar composition
+- is ignored when no request constraint grammar is present
 - only works when reasoning start/end tokens are available
 
 If the tokenizer does not expose reasoning markers, the system logs a warning and falls back to the base grammar.
@@ -154,7 +154,7 @@ Present guided decoding from the simplest use case to the most constrained one.
 | Enforce text pattern | `structured_outputs` or `constraint` | `regex` |
 | Enforce full object schema | `structured_outputs` or `response_format` | `json` / `json_schema` |
 | Enforce custom grammar | `structured_outputs` or `constraint` | `grammar` / `lark` |
-| Constrain tool call payload | `structured_outputs` or automatic tool grammar | `structural_tag` / tool grammar |
+| Constrain tagged structured output payload | `structured_outputs` | `structural_tag` |
 | Add a reasoning prefix | `reasoning_effort` | `low`, `medium`, `high`, etc. |
 
 ### 1. Constrain the answer to a fixed set
@@ -464,5 +464,5 @@ Check:
 
 - Guided decoding is only active when `SamplingParams.grammar` is present.
 - OpenAI currently has the richest client-facing grammar surface.
-- Claude currently reuses tool grammar, but not the same direct constraint request API.
+- Claude does not currently expose request-level guided decoding.
 - No request-level grammar means no guided decoding.
