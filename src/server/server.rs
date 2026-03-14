@@ -43,6 +43,8 @@ struct StreamingContext {
     response_tx: flume::Sender<ChatResponse>,
 }
 
+const EMPTY_TOOL_RESULT_ACK: &str = "Tool executed successfully with no textual output.";
+
 fn extract_text_from_content(content: Option<&super::MessageContentType>) -> String {
     match content {
         Some(super::MessageContentType::PureText(text)) => text.clone(),
@@ -59,6 +61,23 @@ fn extract_text_from_content(content: Option<&super::MessageContentType>) -> Str
             .collect::<Vec<_>>()
             .join(" "),
         None => String::new(),
+    }
+}
+
+fn normalize_empty_openai_tool_results(messages: &mut [ChatMessage]) {
+    for msg in messages {
+        if msg.role != "tool" {
+            continue;
+        }
+
+        let is_empty = extract_text_from_content(msg.content.as_ref())
+            .trim()
+            .is_empty();
+        if is_empty {
+            msg.content = Some(super::MessageContentType::PureText(
+                EMPTY_TOOL_RESULT_ACK.to_string(),
+            ));
+        }
     }
 }
 
@@ -357,7 +376,8 @@ pub async fn chat_completion(
         crate::log_warn!("Tools enabled for request");
     }
 
-    let chat_messages = request.messages.clone();
+    let mut chat_messages = request.messages.clone();
+    normalize_empty_openai_tool_results(&mut chat_messages);
     if let Err(err) = validate_openai_tool_messages(&chat_messages) {
         return ChatResponder::ValidationError(err);
     }
