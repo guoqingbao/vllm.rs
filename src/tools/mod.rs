@@ -23,7 +23,7 @@ pub struct ToolBuilder {
 }
 
 impl ToolBuilder {
-    fn new(name: String, description: String) -> Self {
+    pub fn new(name: String, description: String) -> Self {
         Self {
             name,
             description,
@@ -245,36 +245,5 @@ mod tests {
             }
             _ => panic!("expected function tool choice"),
         }
-    }
-}
-
-/// Format tool definitions for injection into the prompt
-#[derive(Debug, Clone)]
-pub struct ToolFormat {}
-
-impl ToolFormat {
-    /// Get tool prompt for a specific model type
-    pub fn get_tool_prompt(model_type: &crate::utils::config::ModelType) -> String {
-        use crate::server::parser::ToolConfig;
-        let config = ToolConfig::for_model_type(model_type);
-        let start_tag = &config.start_token_str;
-        let end_tag = &config.end_token_str;
-        let rule = format!(
-            "MOST IMPORTANT INSTRUCTION, **MUST** FOLLOW: For each function call, you MUST wrap function name and arguments in {start_tag}{end_tag} tags.\n\n\
-            Do NOT USE ANY code blocks. Required format:\n\
-            {start_tag}\n\
-            {{\"name\": \"<function-name>\", \"arguments\": <args-json-object>}}\n\
-            {end_tag}\n\n\
-            Rules:\n\
-            - Wrap function name and arguments with {start_tag} and {end_tag} tags\n\
-            - Always use the exact {start_tag}{end_tag} format shown above\n\
-            - Do NOT USE ANY code blocks\n\
-            - Tool-use must be placed **at the end** of your response (**AFTER REASONING**), **top-level**, and not nested within other tags.\n\
-            - Always adhere to this format for the tool use to ensure proper parsing and execution.\n\
-            - The \"name\" and \"arguments\" are necessary fields\n\
-            - DO NOT call ANY functions that DOES NOT defined between <tool> and </tool>\n\
-            - MUST FOLLOW the above instruction when using tool call!",
-        );
-        rule
     }
 }

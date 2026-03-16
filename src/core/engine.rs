@@ -20,7 +20,7 @@ use crate::transfer::PdRole;
 use crate::transfer::Transfer;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
-use crate::utils::guidance::load_toktrie_from_path;
+use crate::utils::guidance::{build_llg_factory, extract_guidance_tokens, GuidanceTokens};
 use crate::utils::heartbeat::heartbeat_worker;
 use crate::utils::image::{get_image_config, ImageData, ImageProcessConfig};
 use crate::utils::kvcache_allocator::KVCacheAllocator;
@@ -96,6 +96,7 @@ pub struct LLMEngine {
     pub model_type: ModelType,
     pub tool_config: ToolConfig,
     pub img_cfg: Option<ImageProcessConfig>,
+    pub guidance_tokens: GuidanceTokens,
 }
 
 impl LLMEngine {
@@ -103,10 +104,13 @@ impl LLMEngine {
     pub fn new(econfig: &EngineConfig, dtype: DType) -> Result<Arc<RwLock<Self>>> {
         let (model_pathes, is_gguf, mut config, config_tokenizer, tokenizer, mut generation_cfg) =
             init_config_tokenizer(econfig)?;
-        let toktrie = load_toktrie_from_path(&model_pathes.get_tokenizer_filename()).map(Arc::new);
-        if toktrie.is_none() {
-            crate::log_warn!("Guided decoding disabled: tokenizer trie unavailable.");
-        }
+        let llg_factory = match build_llg_factory(tokenizer.clone(), config.vocab_size) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                crate::log_warn!("Failed to build llguidance factory: {}", e);
+                None
+            }
+        };
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let model_loaded = Arc::new(AtomicBool::new(false));
@@ -114,7 +118,7 @@ impl LLMEngine {
             prepare_engine_config(econfig, &config, &config_tokenizer, &mut generation_cfg);
         config.fp8_kvcache = econfig.fp8_kvcache;
 
-        // In case config file missing bos and eos configuratioin
+        // In case config file missing bos and eos configuration
         config.apply_generation_cfg(generation_cfg.as_ref());
         if config.eos_token_id.is_none() {
             if let Some(eos) = &config_tokenizer.eos_token {
@@ -123,6 +127,14 @@ impl LLMEngine {
                 };
             }
         }
+        let guidance_tokens = extract_guidance_tokens(
+            &tokenizer,
+            config
+                .eos_token_id
+                .as_ref()
+                .map(EosTokenId::to_vec)
+                .unwrap_or_default(),
+        );
         assert!(
             config.architectures.is_some() && config.architectures.as_ref().unwrap().len() == 1,
             "Only one architecture is supported at the moment!"
@@ -207,7 +219,7 @@ impl LLMEngine {
                     device.clone(),
                     reporter,
                     transfer,
-                    toktrie.clone(),
+                    llg_factory.clone(),
                     None,
                 )?;
                 drop(vb);
@@ -377,9 +389,10 @@ impl LLMEngine {
             econfig.max_model_len = Some(32768);
         }
         let runners = Arc::new(RwLock::new(runners));
+
         let mut scheduler = Scheduler::new(runners.clone(), &econfig, &config);
 
-        // Initialize tool call end tokens for detection based on model type.
+        // Preserve model-specific tool token detection for non-guided paths.
         let mut tool_config = ToolConfig::for_model_type(&model_type);
         tool_config.validate_with_tokenizer(&tokenizer, &model_type);
         let tool_call_start_ids = tool_config.tool_call_start_ids(&tokenizer);
@@ -462,7 +475,9 @@ impl LLMEngine {
             tool_config,
             img_cfg,
             model_name,
+            guidance_tokens,
         }));
+
         Self::start_engine(engine.clone());
         Ok(engine)
     }
@@ -1039,10 +1054,7 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
-
-        // Apply user's thinking preference - default to false if not specified
-        let enable_thinking = params.thinking.unwrap_or(false);
-        prompt_template.set_enable_thinking(enable_thinking);
+        prompt_template.set_enable_thinking(params.thinking.unwrap_or(false));
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template

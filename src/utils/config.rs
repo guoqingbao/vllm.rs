@@ -1,9 +1,13 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
+#[cfg(not(feature = "python"))]
+use crate::utils::guidance::ReasoningEffort;
+use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
 use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
+use serde::ser::Error as _;
 use serde::{Deserialize, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
@@ -107,11 +111,53 @@ impl EosTokenId {
         EosTokenId::Multiple(out)
     }
 
+    pub fn to_vec(&self) -> Vec<u32> {
+        match self {
+            EosTokenId::Single(x) => vec![*x],
+            EosTokenId::Multiple(v) => v.clone(),
+        }
+    }
+
     fn into_vec(self) -> Vec<u32> {
         match self {
             EosTokenId::Single(x) => vec![x],
             EosTokenId::Multiple(v) => v,
         }
+    }
+}
+
+fn serialize_optional_grammar<S>(
+    grammar: &Option<TopLevelGrammar>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if serializer.is_human_readable() {
+        grammar.serialize(serializer)
+    } else {
+        let encoded = grammar
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(S::Error::custom)?;
+        encoded.serialize(serializer)
+    }
+}
+
+fn deserialize_optional_grammar<'de, D>(
+    deserializer: D,
+) -> Result<Option<TopLevelGrammar>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    if deserializer.is_human_readable() {
+        Option::<TopLevelGrammar>::deserialize(deserializer)
+    } else {
+        let encoded = Option::<String>::deserialize(deserializer)?;
+        encoded
+            .map(|json| serde_json::from_str(&json).map_err(serde::de::Error::custom))
+            .transpose()
     }
 }
 
@@ -459,6 +505,18 @@ pub struct SamplingParams {
     /// If Some(true), external tools are enabled and stream finishes at </tool_call>.
     #[serde(default)]
     pub mcp_mode: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    #[serde(
+        serialize_with = "serialize_optional_grammar",
+        deserialize_with = "deserialize_optional_grammar"
+    )]
+    pub grammar: Option<TopLevelGrammar>,
+    #[serde(default)]
+    pub grammar_json: Option<String>,
+    /// Reasoning effort level for OpenAI-compatible reasoning API
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[cfg(feature = "python")]
@@ -493,6 +551,19 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     #[serde(alias = "enable_thinking")]
     pub thinking: Option<bool>,
+    /// Grammar constraint as TopLevelGrammar for RPC serialization
+    #[serde(default)]
+    #[serde(
+        serialize_with = "serialize_optional_grammar",
+        deserialize_with = "deserialize_optional_grammar"
+    )]
+    pub grammar: Option<TopLevelGrammar>,
+    /// Grammar constraint as JSON string for Python API
+    #[pyo3(get, set)]
+    pub grammar_json: Option<String>,
+    /// Reasoning effort level for OpenAI-compatible reasoning API
+    #[pyo3(get, set)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -507,6 +578,7 @@ impl SamplingParams {
         frequency_penalty: Option<f32>,
         presence_penalty: Option<f32>,
         thinking: Option<bool>,
+        reasoning_effort: Option<ReasoningEffort>,
     ) -> Self {
         Self {
             temperature,
@@ -521,6 +593,9 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking,
+            grammar: None,
+            grammar_json: None,
+            reasoning_effort,
         }
     }
 
@@ -538,6 +613,9 @@ impl SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
+            grammar_json: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -557,6 +635,9 @@ impl Default for SamplingParams {
             stop_sequences: None,
             stop_token_ids: None,
             thinking: None,
+            grammar: None,
+            grammar_json: None,
+            reasoning_effort: None,
         }
     }
 }

@@ -1,6 +1,5 @@
 // src/core/transfer/comm.rs
 use super::{FinishedPrefillData, PdConfig, PdRole, TransferMessage};
-use bincode;
 use candle_core::Result;
 use interprocess::local_socket::traits::Listener;
 use interprocess::local_socket::traits::Stream;

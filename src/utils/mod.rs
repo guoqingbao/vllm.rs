@@ -14,6 +14,8 @@ pub mod image;
 pub mod kvcache_allocator;
 pub mod logits_processor;
 pub mod progress;
+pub mod reasoning;
+pub mod special_tokens;
 use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
 use crate::utils::config::MoEConfig;
@@ -25,6 +27,10 @@ use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
 use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
+pub use reasoning::{
+    build_reasoning_grammar, thinking_grammar_with_reasoning_block, ReasoningEffort,
+    ThinkingGrammarBuilder,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;

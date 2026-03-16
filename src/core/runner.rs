@@ -9,7 +9,7 @@ use crate::transfer::Transfer;
 use crate::utils::graph::{
     planned_graph_capture_batches, CudaGraphFn, CudaGraphWrapper, GraphCapturer, ModelFn,
 };
-use crate::utils::guidance::GuidanceState;
+use crate::utils::guidance::{GuidanceState, ParserFactory};
 use crate::utils::image::compute_image_slice;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use crate::utils::progress::ProgressLike;
@@ -27,7 +27,7 @@ use crate::{
     models::qwen3_5_moe::Qwen3_5MoEForCausalLM,
     models::qwen3_moe::Qwen3MoEForCausalLM,
     models::qwen3_vl::Qwen3VLForConditionalGeneration,
-    utils::config::{Config, EngineConfig, ModelType},
+    utils::config::{Config, EngineConfig, ModelType, SamplingParams},
     utils::kvcache_allocator::KVCacheAllocator,
 };
 use attention_rs::cache;
@@ -36,10 +36,10 @@ use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
-use toktrie::TokTrie;
+use toktrie::SimpleVob;
 
 /// Cached sampling parameters computed once during prefill, reused during decode
 #[derive(Clone, Debug)]
@@ -52,6 +52,24 @@ pub struct CachedSamplingParams {
 pub enum Seqs<'a> {
     SeqRefs(&'a [&'a Sequence]),
     DecodeVec(&'a Vec<DecodeSequence>),
+}
+
+fn sampling_params_for_batch_index<'a>(seqs: &'a Seqs<'a>, index: usize) -> &'a SamplingParams {
+    match seqs {
+        Seqs::SeqRefs(refs) => &refs[index].sampling_params,
+        Seqs::DecodeVec(vec) => &vec[index].sampling_params,
+    }
+}
+
+fn collect_guided_batch_entries(seqs: &Seqs<'_>, seq_ids: &[usize]) -> Vec<(usize, usize)> {
+    seq_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seq_id)| {
+            let sampling_params = sampling_params_for_batch_index(seqs, index);
+            sampling_params.grammar.as_ref().map(|_| (index, *seq_id))
+        })
+        .collect()
 }
 
 pub enum Model {
@@ -95,6 +113,9 @@ pub struct ModelRunner {
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     restored_prefix_sequences: RwLock<HashSet<usize>>,
     guidance_states: RwLock<HashMap<usize, GuidanceState>>,
+    guidance_failed: RwLock<HashSet<usize>>,
+    guidance_mismatch: RwLock<HashSet<usize>>,
+    llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
     /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
@@ -152,6 +173,192 @@ impl ModelRunner {
         mamba_cache_capacity
     }
 
+    fn apply_requested_guidance(
+        &self,
+        logits: &Tensor,
+        seqs: &Seqs<'_>,
+        seq_ids: &[usize],
+    ) -> Result<(Tensor, Option<HashSet<usize>>)> {
+        let guided_entries = collect_guided_batch_entries(seqs, seq_ids);
+        if guided_entries.is_empty() {
+            return Ok((logits.clone(), None));
+        }
+
+        let Some(factory) = &self.llg_factory else {
+            return Ok((logits.clone(), None));
+        };
+
+        let mut guidance_states = self.guidance_states.write();
+        let mut guidance_failed = self.guidance_failed.write();
+        let mut guidance_mismatch = self.guidance_mismatch.write();
+        let mut modified = false;
+        let vocab_size = logits.dim(1)?;
+
+        let mut masks: Vec<(usize, usize, SimpleVob)> = Vec::new();
+        let mut failed_seq_ids = Vec::new();
+        let mut guided_seq_ids = HashSet::new();
+
+        for (i, id) in seq_ids.iter().enumerate() {
+            if guided_entries
+                .iter()
+                .any(|(guided_idx, _)| *guided_idx == i)
+            {
+                continue;
+            }
+            let _ = guidance_states.remove(id);
+            let _ = guidance_failed.remove(id);
+            let _ = guidance_mismatch.remove(id);
+        }
+
+        for (i, id) in guided_entries {
+            if guidance_failed.contains(&id) {
+                continue;
+            }
+
+            let grammar = sampling_params_for_batch_index(seqs, i)
+                .grammar
+                .as_ref()
+                .expect("guided batch entries must have a grammar");
+
+            let state = match guidance_states.entry(id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    match GuidanceState::new_from_grammar(factory.clone(), grammar) {
+                        Ok(state) => entry.insert(state),
+                        Err(err) => {
+                            guidance_failed.insert(id);
+                            crate::log_warn!(
+                            "[Seq {}] Failed to create guidance state: {}. Disabling constraints for this sequence.",
+                            id,
+                            err
+                        );
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            match state.compute_mask_or_eos() {
+                Ok(mask) => {
+                    masks.push((i, id, mask));
+                    guided_seq_ids.insert(id);
+                    modified = true;
+                }
+                Err(err) => {
+                    if guidance_failed.insert(id) {
+                        crate::log_warn!(
+                            "[Seq {}] Failed to compute guidance mask: {}. Disabling constraints for this sequence.",
+                            id,
+                            err
+                        );
+                    }
+                    failed_seq_ids.push(id);
+                }
+            }
+        }
+
+        for seq_id in &failed_seq_ids {
+            let _ = guidance_states.remove(seq_id);
+        }
+
+        if !modified {
+            return Ok((logits.clone(), Some(guided_seq_ids)));
+        }
+
+        let mut logits_vec = logits.flatten_all()?.to_vec1::<f32>()?;
+        for (seq_idx, seq_id, mask) in masks {
+            let start = seq_idx * vocab_size;
+            let end = start + vocab_size;
+            let row = &mut logits_vec[start..end];
+            let mask_len = mask.len();
+
+            if mask_len == 0 {
+                if guidance_failed.insert(seq_id) {
+                    crate::log_warn!(
+                        "[Seq {}] Guidance mask length is 0. Disabling constraints for this sequence.",
+                        seq_id
+                    );
+                }
+                failed_seq_ids.push(seq_id);
+                continue;
+            }
+
+            if mask_len != vocab_size {
+                if guidance_mismatch.insert(seq_id) {
+                    crate::log_warn!(
+                        "[Seq {}] Guidance mask size {} does not match vocab size {}. Clamping mask application.",
+                        seq_id,
+                        mask_len,
+                        vocab_size
+                    );
+                }
+            }
+
+            let apply_len = std::cmp::min(vocab_size, mask_len);
+            for tok in 0..apply_len {
+                if !mask.is_allowed(tok as u32) {
+                    row[tok] = f32::NEG_INFINITY;
+                }
+            }
+            if mask_len < vocab_size {
+                for tok in mask_len..vocab_size {
+                    row[tok] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        for seq_id in &failed_seq_ids {
+            let _ = guidance_states.remove(seq_id);
+        }
+
+        Ok((
+            Tensor::from_vec(logits_vec, logits.shape(), &self.device)?,
+            Some(guided_seq_ids),
+        ))
+    }
+
+    fn sample_processed_logits(&self, logits: &Tensor, sampling: &Sampling) -> Result<Vec<u32>> {
+        self.logit_processor.sample_with_strategy(logits, sampling)
+    }
+
+    fn commit_guided_tokens(
+        &self,
+        seq_ids: &[usize],
+        tokens: &[u32],
+        guided_seq_ids: Option<HashSet<usize>>,
+    ) {
+        let Some(guided_seq_ids) = guided_seq_ids else {
+            return;
+        };
+
+        let mut guidance_states = self.guidance_states.write();
+        let mut guidance_failed = self.guidance_failed.write();
+        for (seq_idx, seq_id) in seq_ids.iter().enumerate() {
+            if !guided_seq_ids.contains(seq_id) || guidance_failed.contains(seq_id) {
+                continue;
+            }
+
+            if let Some(state) = guidance_states.get_mut(seq_id) {
+                if state.is_finished() {
+                    continue;
+                }
+
+                let token = tokens[seq_idx];
+                if let Err(err) = state.commit_token(token) {
+                    if guidance_failed.insert(*seq_id) {
+                        crate::log_warn!(
+                            "[Seq {}] Failed to commit guided token {}: {}. Disabling constraints for this sequence.",
+                            seq_id,
+                            token,
+                            err
+                        );
+                    }
+                    let _ = guidance_states.remove(seq_id);
+                }
+            }
+        }
+    }
+
     #[allow(unused)]
     pub fn new(
         model_type: ModelType,
@@ -164,7 +371,7 @@ impl ModelRunner {
         device: Device,
         reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
         transfer: Option<Arc<Transfer>>,
-        toktrie: Option<Arc<TokTrie>>,
+        llg_factory: Option<Arc<ParserFactory>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
         let model = crate::build_model!(
@@ -419,6 +626,9 @@ impl ModelRunner {
             seq_tokens: RwLock::new(HashMap::new()),
             restored_prefix_sequences: RwLock::new(HashSet::new()),
             guidance_states: RwLock::new(HashMap::new()),
+            guidance_failed: RwLock::new(HashSet::new()),
+            guidance_mismatch: RwLock::new(HashSet::new()),
+            llg_factory,
             transfer,
             is_first_rank: comm.rank() == 0,
             model_type,
@@ -1187,7 +1397,11 @@ impl ModelRunner {
                 }),
         };
 
+        let (guided_logits, guided_seq_ids) =
+            self.apply_requested_guidance(logits, &seqs, &seq_ids)?;
+
         // Apply penalties using cached values (same for all sequences in batch)
+        // This is done AFTER LLG masking so penalties only affect tokens allowed by grammar
         let has_any_penalty =
             cached_params.frequency_penalty.is_some() || cached_params.presence_penalty.is_some();
 
@@ -1209,18 +1423,18 @@ impl ModelRunner {
                 .collect();
 
             self.logit_processor.apply_batch_repeat_penalty(
-                logits,
+                &guided_logits,
                 vec![cached_params.frequency_penalty.unwrap_or(0.0); batch_size],
                 vec![cached_params.presence_penalty.unwrap_or(0.0); batch_size],
                 reference_tokens,
             )?
         } else {
-            logits.to_owned()
+            guided_logits.to_owned()
         };
 
-        let tokens = self
-            .logit_processor
-            .sample_with_strategy(&logits, &cached_params.sampling)?;
+        let tokens = self.sample_processed_logits(&logits, &cached_params.sampling)?;
+
+        self.commit_guided_tokens(&seq_ids, &tokens, guided_seq_ids);
 
         // Track tokens for sequences when penalties are enabled
         if has_any_penalty {
@@ -1236,6 +1450,8 @@ impl ModelRunner {
                 }
             }
         }
+
+        // Guided token commits are handled immediately after sampling.
         Ok(tokens)
     }
 
@@ -1246,6 +1462,10 @@ impl ModelRunner {
         let _ = restored.remove(&id);
         let mut guidance_states = self.guidance_states.write();
         let _ = guidance_states.remove(&id);
+        let mut guidance_failed = self.guidance_failed.write();
+        let _ = guidance_failed.remove(&id);
+        let mut guidance_mismatch = self.guidance_mismatch.write();
+        let _ = guidance_mismatch.remove(&id);
         match &self.model {
             Model::Qwen3_5(model) => model.release_sequence_state(id),
             Model::Qwen3_5MoE(model) => model.release_sequence_state(id),
@@ -1428,5 +1648,42 @@ impl ModelRunner {
         // }
 
         // cache_clear(&*self.get_kv_cache(), &block_ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_guided_batch_entries, Seqs};
+    use crate::core::sequence::DecodeSequence;
+    use crate::utils::config::SamplingParams;
+    use llguidance::api::TopLevelGrammar;
+
+    fn decode_sequence(id: usize, grammar: Option<TopLevelGrammar>) -> DecodeSequence {
+        let mut sampling_params = SamplingParams::new_with_max_tokens(16);
+        sampling_params.grammar = grammar;
+        DecodeSequence {
+            id,
+            last_token: 0,
+            len: 1,
+            last_block_tokens: 1,
+            block_table_last: 0,
+            block_tables: vec![0],
+            sampling_params,
+        }
+    }
+
+    #[test]
+    fn test_collect_guided_batch_entries_only_returns_constrained_rows() {
+        let seqs = vec![
+            decode_sequence(10, None),
+            decode_sequence(11, Some(TopLevelGrammar::from_regex("a+"))),
+            decode_sequence(12, None),
+            decode_sequence(13, Some(TopLevelGrammar::from_regex("b+"))),
+        ];
+        let seq_ids = seqs.iter().map(|seq| seq.id).collect::<Vec<_>>();
+
+        let guided = collect_guided_batch_entries(&Seqs::DecodeVec(&seqs), &seq_ids);
+
+        assert_eq!(guided, vec![(1, 11), (3, 13)]);
     }
 }

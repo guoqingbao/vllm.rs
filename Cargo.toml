@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
@@ -21,7 +21,8 @@ itertools = "0.13.0"
 akin = "0.4.0"
 indicatif = "0.17.11"
 serde_json = "1.0.108"
-llguidance = "0.6"
+llguidance = { version = "1.6", default-features = false, features = ["lark"] }
+toktrie_hf_tokenizers = "1.6"
 toktrie = "1.4"
 half = { version = "2.5.0", features = ["num-traits", "use-intrinsics", "rand_distr"] }
 tokio = { version = "1.38.0", features = ["sync"] }

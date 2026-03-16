@@ -83,6 +83,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Docker Build](docs/docker.md)
 - [Tool Parsing](docs/tool_parsing.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
+- [Structured Outputs](docs/llguidance-integration.md)
 - [Work with Claude Code](docs/claude_code.md)
 - [Work with OpenCode](docs/opencode.md)
 - [Embedding](docs/embeddings.md)
@@ -275,7 +276,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
   # Metal/MacOS
   vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```
-  
+
   <details open>
     <summary>Multi-GPU + Unquantized Model</summary>
 
@@ -320,6 +321,15 @@ vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
   ```
 
   </details>
+
+---
+
+## 🔌 Guided decoding (Structured Outputs & Constraints)
+vLLM.rs now supports structured output and constraint-based generation via llguidance:
+
+- **Custom Constraints**: allow clients to submit Lark/Regex/JSON Schema constraints via OpenAI-compatible structured_outputs/response_format
+
+See [**Structured Outputs Documentation →**](docs/llguidance-integration.md)
 
 ---
 
@@ -425,7 +435,7 @@ PD Disaggregation separates prefill (prompt processing) and decode (token genera
 
 ## 📽️ Demo Video
 
-Watch it in action 🎉 
+Watch it in action 🎉
 
 <video src="https://github.com/user-attachments/assets/7fc6aa0b-78ac-4323-923f-d761dd12857f" width="1000px"></video>
 

@@ -82,6 +82,7 @@
 - [Docker构建](docs/docker.md)
 - [工具调用解析](docs/tool_parsing.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
+- [结构化输出文档](docs/llguidance-integration.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)
 - [OpenCode使用vLLM.rs后端](docs/open_code.md)
 - [Goose AI Agent使用vLLM.rs后端](docs/goose.md)
@@ -307,8 +308,18 @@ cargo install --features metal
   </details>
 
 ---
-## 🔌 MCP集成 (工具调用)
 
+## 🔌 LLGuidance 支持（结构化输出与约束）
+
+vLLM.rs 现在支持通过 llguidance 库实现结构化输出和约束生成：
+
+- **自定义约束**：允许客户端通过 structured_outputs 或 response_format 提交 Lark/Regex/JSON Schema 约束
+
+查看 [**结构化输出文档 →**](docs/llguidance-integration.md)
+
+---
+
+## 🔌 MCP集成 (工具调用)
 通过Model Context Protocol让LLM调用外部工具。
 
 ```bash

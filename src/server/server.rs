@@ -1,7 +1,8 @@
 // src/server/server.rs
 use super::logger::ChatCompletionLogger;
 use super::{
-    build_messages_and_images,
+    build_guided_decoding_grammar, build_messages_and_images, collect_openai_constraint_grammar,
+    normalize_reasoning_controls,
     streaming::{ChatResponse, Streamer, StreamingStatus},
     ChatResponder, DetokenizeRequest, DetokenizeResponse, EmbeddingRequest, EmbeddingResponse,
     EncodingFormat, TokenizeInput, TokenizeRequest, TokenizeResponse,
@@ -19,6 +20,7 @@ use crate::tools::helpers::{
 };
 use crate::tools::{ToolChoice, ToolChoiceMode};
 use crate::utils::config::SamplingParams;
+use crate::utils::guidance::ReasoningEffort;
 use axum::{
     extract::{Json, Query, State},
     response::{sse::KeepAlive, Sse},
@@ -293,15 +295,28 @@ pub async fn chat_completion(
     params.presence_penalty = request.presence_penalty;
     params.session_id = request.session_id.clone();
     params.thinking = request.thinking.clone();
-    let (img_cfg, model_type, tool_config, engine_config) = {
+    params.stop_sequences = request.stop.clone();
+    params.reasoning_effort = request
+        .reasoning_effort
+        .clone()
+        .map(ReasoningEffort::from_str);
+    let (img_cfg, model_type, tool_config, engine_config, guidance_tokens) = {
         let e = data.engine.read();
         (
             e.img_cfg.clone(),
             e.model_type.clone(),
             e.tool_config.clone(),
             e.econfig.clone(),
+            e.guidance_tokens.clone(),
         )
     };
+    let constraint_grammar = match collect_openai_constraint_grammar(&request) {
+        Ok(grammar) => grammar,
+        Err(err) => return ChatResponder::ValidationError(err.to_string()),
+    };
+    if constraint_grammar.is_some() {
+        normalize_reasoning_controls(&mut params, &guidance_tokens);
+    }
 
     let mcp_tools = data
         .mcp_manager
@@ -382,6 +397,16 @@ pub async fn chat_completion(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+
+    {
+        let engine = data.engine.read();
+        params.grammar = build_guided_decoding_grammar(
+            &engine.guidance_tokens,
+            constraint_grammar,
+            max_tokens,
+            params.reasoning_effort.clone(),
+        );
+    }
 
     if use_stream {
         let session_id = params.session_id.clone();
