@@ -332,6 +332,10 @@ pub struct StreamToolParser {
     buffer_had_parse_activity: bool,
     // Candidate end marker seen while buffering; used to avoid false end hits inside content.
     pending_end_marker_candidate: bool,
+    // True when the current buffering window started from a dedicated special start token ID.
+    buffer_started_from_special_token: bool,
+    // True when non-marker content arrived after the start marker in the current buffering window.
+    buffer_saw_non_marker_content: bool,
 }
 
 /// Reasoning marker pairs: (start, end)
@@ -427,6 +431,8 @@ impl StreamToolParser {
             saw_buffer_parse_activity: false,
             buffer_had_parse_activity: false,
             pending_end_marker_candidate: false,
+            buffer_started_from_special_token: false,
+            buffer_saw_non_marker_content: false,
         }
     }
 
@@ -544,12 +550,16 @@ impl StreamToolParser {
                 }
                 // Check for start trigger
                 if self.is_start_token(token_id, token_text) {
+                    let started_from_special_token = self.config.has_start_tokens()
+                        && self.config.start_token_ids.contains(&token_id);
                     self.state = ParserState::Buffering;
                     self.buffer.clear();
                     self.buffer.push_str(token_text);
                     self.streaming_calls.clear();
                     self.buffer_had_parse_activity = false;
                     self.pending_end_marker_candidate = false;
+                    self.buffer_started_from_special_token = started_from_special_token;
+                    self.buffer_saw_non_marker_content = false;
                     match self.parser.parse_incremental(token_text, &self.tools).await {
                         Ok(result) => {
                             if !result.calls.is_empty() {
@@ -578,6 +588,9 @@ impl StreamToolParser {
             }
             ParserState::Buffering => {
                 self.buffer.push_str(token_text);
+                if self.token_contains_non_marker_content(token_text) {
+                    self.buffer_saw_non_marker_content = true;
+                }
                 let nested_start_marker = !self.config.start_token_str.is_empty()
                     && token_text.contains(&self.config.start_token_str);
                 if nested_start_marker {
@@ -650,6 +663,8 @@ impl StreamToolParser {
                     self.streaming_calls.clear();
                     self.buffer_had_parse_activity = false;
                     self.pending_end_marker_candidate = false;
+                    self.buffer_started_from_special_token = false;
+                    self.buffer_saw_non_marker_content = false;
                     return result;
                 }
 
@@ -681,8 +696,17 @@ impl StreamToolParser {
         self.streaming_calls.clear();
         self.buffer_had_parse_activity = false;
         self.pending_end_marker_candidate = false;
+        let drop_bare_start_marker = self.should_drop_bare_start_marker();
+        self.buffer_started_from_special_token = false;
+        self.buffer_saw_non_marker_content = false;
 
         if tool_calls.is_empty() || (!strict_complete && !recoverable_incomplete) {
+            if drop_bare_start_marker {
+                crate::log_warn!(
+                    "Dropping buffered bare tool-call marker at stream end without flushing text"
+                );
+                return Some(BufferedFinalizeResult::FlushBuffer(String::new()));
+            }
             crate::log_warn!("Buffered tool call could not be finalized; flushing buffered text");
             Some(BufferedFinalizeResult::FlushBuffer(buffered_text))
         } else {
@@ -704,6 +728,8 @@ impl StreamToolParser {
         self.state = ParserState::Normal;
         self.buffer_had_parse_activity = false;
         self.pending_end_marker_candidate = false;
+        self.buffer_started_from_special_token = false;
+        self.buffer_saw_non_marker_content = false;
         std::mem::take(&mut self.buffer)
     }
 
@@ -1088,6 +1114,24 @@ impl StreamToolParser {
             output = output.replace(&self.config.end_token_str, "");
         }
         output
+    }
+
+    fn should_drop_bare_start_marker(&self) -> bool {
+        self.buffer_started_from_special_token && !self.buffer_saw_non_marker_content
+    }
+
+    fn token_contains_non_marker_content(&self, token_text: &str) -> bool {
+        let trimmed = token_text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if !self.config.start_token_str.is_empty() && trimmed == self.config.start_token_str {
+            return false;
+        }
+        if !self.config.end_token_str.is_empty() && trimmed == self.config.end_token_str {
+            return false;
+        }
+        true
     }
 
     fn safe_partial_prefix_len(start_tag: &str) -> usize {
