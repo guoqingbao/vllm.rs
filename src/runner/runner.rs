@@ -129,14 +129,32 @@ fn main() -> anyhow::Result<()> {
 
             let stream_kv = Some(stream.try_clone()?);
             let mut econfig = init_req.econfig.clone();
-            let tokenizer = Tokenizer::from_file(init_req.model_pathes.get_tokenizer_filename())
-                .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-            let llg_factory = match build_llg_factory(tokenizer, init_req.config.vocab_size) {
-                Ok(f) => Some(f),
-                Err(e) => {
-                    vllm_rs::log_warn!("Failed to build llguidance factory: {}", e);
-                    None
+            let tokenizer_path = init_req.model_pathes.get_tokenizer_filename();
+            let llg_factory = if tokenizer_path.exists() {
+                match Tokenizer::from_file(&tokenizer_path) {
+                    Ok(tokenizer) => match build_llg_factory(tokenizer, init_req.config.vocab_size)
+                    {
+                        Ok(f) => Some(f),
+                        Err(e) => {
+                            vllm_rs::log_warn!("Failed to build llguidance factory: {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        vllm_rs::log_warn!(
+                            "Failed to load tokenizer from {:?}; disabling optional llguidance: {}",
+                            tokenizer_path,
+                            e
+                        );
+                        None
+                    }
                 }
+            } else {
+                vllm_rs::log_warn!(
+                    "Tokenizer file {:?} not found; disabling optional llguidance",
+                    tokenizer_path
+                );
+                None
             };
             #[allow(unused_mut)]
             let mut runner = {
