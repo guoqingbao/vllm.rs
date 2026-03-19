@@ -3,7 +3,7 @@
 
 use crate::models::layers::distributed::{
     load_restored_gguf_column_linear, load_restored_gguf_merged_qkv_linear,
-    load_restored_gguf_row_linear, shard, Comm, MergedParallelColumnLinear,
+    load_restored_gguf_row_linear, shard, tensor_parallel_chunk, Comm, MergedParallelColumnLinear,
     TensorParallelColumnLinear, TensorParallelRowLinear,
 };
 use crate::models::layers::{collect_key_map, VarBuilderX};
@@ -491,6 +491,10 @@ impl GatedDeltaNet {
             dt_bias =
                 undo_tiled_v_heads_first_dim(&dt_bias, num_k_heads_global, num_v_heads_global, 1)?;
         }
+        if vb.is_qvar_builder() {
+            a_log = tensor_parallel_chunk(&a_log, 0, rank, world_size, gdn_key_map["A_log"])?;
+            dt_bias = tensor_parallel_chunk(&dt_bias, 0, rank, world_size, gdn_key_map["dt_bias"])?;
+        }
 
         let projection = Self::load_projection(
             &vb,
@@ -523,23 +527,34 @@ impl GatedDeltaNet {
         };
         let q_start = rank * key_dim;
         let k_start = key_dim_global + rank * key_dim;
-        let v_start = key_dim_global * 2 + rank * value_dim;
         let q_w = conv_weight.narrow(0, q_start, key_dim)?;
         let k_w = conv_weight.narrow(0, k_start, key_dim)?;
-        let mut v_w = conv_weight.narrow(0, v_start, value_dim)?;
-        if vb.is_qvar_builder() && num_k_heads != num_v_heads {
-            v_w = undo_tiled_v_heads_first_dim(&v_w, num_k_heads, num_v_heads, head_v_dim)?;
+        let mut v_w = conv_weight.narrow(0, key_dim_global * 2, value_dim_global)?;
+        if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            v_w = undo_tiled_v_heads_first_dim(
+                &v_w,
+                num_k_heads_global,
+                num_v_heads_global,
+                head_v_dim,
+            )?;
         }
+        v_w = tensor_parallel_chunk(&v_w, 0, rank, world_size, "linear_attn.conv1d.weight[v]")?;
         let conv_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?.to_dtype(kernel_dtype)?;
 
         let conv_bias = vb.get((conv_dim_global,), gdn_key_map["conv1d.bias"]).ok();
         let conv_bias = if let Some(cb) = conv_bias {
             let q_b = cb.narrow(0, q_start, key_dim)?;
             let k_b = cb.narrow(0, k_start, key_dim)?;
-            let mut v_b = cb.narrow(0, v_start, value_dim)?;
-            if vb.is_qvar_builder() && num_k_heads != num_v_heads {
-                v_b = undo_tiled_v_heads_first_dim(&v_b, num_k_heads, num_v_heads, head_v_dim)?;
+            let mut v_b = cb.narrow(0, key_dim_global * 2, value_dim_global)?;
+            if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+                v_b = undo_tiled_v_heads_first_dim(
+                    &v_b,
+                    num_k_heads_global,
+                    num_v_heads_global,
+                    head_v_dim,
+                )?;
             }
+            v_b = tensor_parallel_chunk(&v_b, 0, rank, world_size, "linear_attn.conv1d.bias[v]")?;
             Some(Tensor::cat(&[&q_b, &k_b, &v_b], 0)?.to_dtype(kernel_dtype)?)
         } else {
             None

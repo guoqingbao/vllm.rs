@@ -64,6 +64,30 @@ impl TensorParallelColumnLinear {
     }
 }
 
+pub fn tensor_parallel_chunk(
+    x: &Tensor,
+    dim: usize,
+    rank: usize,
+    world_size: usize,
+    name: &str,
+) -> Result<Tensor> {
+    if world_size <= 1 {
+        return Ok(x.clone());
+    }
+    let dim_size = x.dim(dim)?;
+    if dim_size % world_size != 0 {
+        candle_core::bail!(
+            "tensor-parallel chunk for {} dim {} size {} is not divisible by world_size {}",
+            name,
+            dim,
+            dim_size,
+            world_size
+        );
+    }
+    let chunk_size = dim_size / world_size;
+    x.narrow(dim, rank * chunk_size, chunk_size)?.contiguous()
+}
+
 pub fn load_restored_gguf_column_linear(
     vb: &VarBuilderX,
     in_dim: usize,
@@ -80,17 +104,10 @@ pub fn load_restored_gguf_column_linear(
     let ws = qvb.get((out_dim, in_dim), "weight")?;
     let mut wdtype = ws.dtype();
     let weight = restore_weight(ws.dequantize_f16(qvb.device())?)?;
-    let local_weight = if comm.world_size() > 1 {
-        let chunk_size = weight.dim(0)? / comm.world_size();
-        if chunk_size % wdtype.block_size() != 0 {
-            wdtype = GgmlDType::Q8_0;
-        }
-        weight
-            .narrow(0, comm.rank() * chunk_size, chunk_size)?
-            .contiguous()?
-    } else {
-        weight
-    };
+    let local_weight = tensor_parallel_chunk(&weight, 0, comm.rank(), comm.world_size(), name)?;
+    if local_weight.dim(0)? % wdtype.block_size() != 0 {
+        wdtype = GgmlDType::Q8_0;
+    }
     let qtensor = QTensor::quantize(&local_weight, wdtype)?;
     let qlinear = QLinear::from_qparts_x(qtensor, None, dtype)?;
     Ok(TensorParallelColumnLinear::new(Linear::QLinear(qlinear)))
@@ -251,23 +268,20 @@ pub fn load_restored_gguf_merged_qkv_linear(
     let mut local_chunks = Vec::with_capacity(chunk_sizes.len());
     let mut output_splits = Vec::with_capacity(chunk_sizes.len());
     let mut offset = 0usize;
-    for &chunk_size in &chunk_sizes {
-        if chunk_size % comm.world_size() != 0 {
-            candle_core::bail!(
-                "GGUF in_proj_qkv chunk size {} is not divisible by world_size {}",
-                chunk_size,
-                comm.world_size()
-            );
-        }
-        let local_chunk_size = chunk_size / comm.world_size();
-        if local_chunk_size % wdtype.block_size() != 0 {
+    for (chunk_idx, &chunk_size) in chunk_sizes.iter().enumerate() {
+        let chunk = weight.narrow(0, offset, chunk_size)?;
+        let local_chunk = tensor_parallel_chunk(
+            &chunk,
+            0,
+            comm.rank(),
+            comm.world_size(),
+            &format!("{name}[{chunk_idx}]"),
+        )?;
+        if local_chunk.dim(0)? % wdtype.block_size() != 0 {
             wdtype = GgmlDType::Q8_0;
         }
-        let local_chunk = weight
-            .narrow(0, offset + comm.rank() * local_chunk_size, local_chunk_size)?
-            .contiguous()?;
         local_chunks.push(local_chunk);
-        output_splits.push(local_chunk_size);
+        output_splits.push(local_chunks.last().unwrap().dim(0)?);
         offset += chunk_size;
     }
 
@@ -456,17 +470,10 @@ pub fn load_restored_gguf_row_linear(
     let ws = qvb.get((out_dim, in_dim), "weight")?;
     let mut wdtype = ws.dtype();
     let weight = restore_weight(ws.dequantize_f16(qvb.device())?)?;
-    let local_weight = if comm.world_size() > 1 {
-        let chunk_size = weight.dim(1)? / comm.world_size();
-        if chunk_size % wdtype.block_size() != 0 {
-            wdtype = GgmlDType::Q8_0;
-        }
-        weight
-            .narrow(1, comm.rank() * chunk_size, chunk_size)?
-            .contiguous()?
-    } else {
-        weight
-    };
+    let local_weight = tensor_parallel_chunk(&weight, 1, comm.rank(), comm.world_size(), name)?;
+    if local_weight.dim(1)? % wdtype.block_size() != 0 {
+        wdtype = GgmlDType::Q8_0;
+    }
     let qtensor = QTensor::quantize(&local_weight, wdtype)?;
     let qlinear = QLinear::from_qparts_x(qtensor, None, dtype)?;
     Ok(TensorParallelRowLinear::new(
