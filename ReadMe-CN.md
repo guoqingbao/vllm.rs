@@ -53,6 +53,7 @@
    | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
    | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
    | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+   | Qwen3.5-4B (Q3_K_M)  | 1       | 1592       | 69.04s | 23.06    |
   </details>
 
 查看 [**完整性能测试 →**](docs/performance.md)
@@ -133,7 +134,7 @@ python3 -m pip install vllm_rs
   # CUDA
   python3 -m vllm_rs.server --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS (MacOS Tahoe之前的系统可能会存在生成过慢问题)
-  python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --prefix-cache
+  python3 -m vllm_rs.server --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache
    ```
   </details>
 
@@ -269,7 +270,7 @@ cargo install --features metal
    # CUDA （将 `--i`替换成 `--ui-server`则启用网页版本）
    vllm-rs --i --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --kv-fraction 0.8
    # Metal/MacOS (MacOS Tahoe之前的系统可能会存在生成过慢问题，使用更小的`--max-model-len` 或 `--kv-fraction`减少显存占用)
-   vllm-rs --i --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf
+   vllm-rs --i --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf
    ```
   </details>
 

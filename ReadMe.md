@@ -52,6 +52,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Qwen3-0.6B (BF16) | 1       | 456       | 9.23s    | 49.42       |
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
+| Qwen3.5-4B (Q3_K_M)  | 1       | 1592       | 69.04s | 23.06    |
 
   </details>
 
@@ -136,7 +137,7 @@ Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.
 # CUDA
 python3 -m vllm_rs.server --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
-python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache
 ```
 
   </details>
@@ -275,7 +276,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
   # CUDA
   vllm-rs --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS
-  vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache
   ```
 
   <details open>
