@@ -35,6 +35,8 @@ pub struct Attention {
     softcapping: Option<f64>,
     dtype: DType,
     no_per_head_norm: bool,
+    is_qwen35_or_next: bool,
+    is_qvar_builder: bool,
 }
 
 impl Attention {
@@ -405,7 +407,7 @@ impl Attention {
         let is_gemma = arch == "Gemma3ForConditionalGeneration".to_string()
             || arch == "Gemma3ForCausalLM".to_string();
         // Qwen3.5/Qwen3Next per-head q/k norms use Gemma-style +1 weight semantics.
-        let qk_norm_add_one = is_gemma || is_qwen35_or_next;
+        let qk_norm_add_one = is_gemma || (is_qwen35_or_next && !is_qvar_builder);
 
         let world_size = comm.world_size();
         let attention_heads = num_heads / world_size;
@@ -558,6 +560,8 @@ impl Attention {
             softcapping: config.attn_logit_softcapping,
             dtype,
             no_per_head_norm: no_per_head_norm_models.contains(&arch),
+            is_qwen35_or_next,
+            is_qvar_builder,
         })
     }
 
@@ -703,7 +707,12 @@ impl Attention {
             y
         };
 
-        self.o_proj.forward(&y.to_dtype(xs.dtype())?)
+        let y = if self.is_qvar_builder && self.is_qwen35_or_next {
+            y
+        } else {
+            y.to_dtype(xs.dtype())?
+        };
+        self.o_proj.forward(&y)
     }
 }
 

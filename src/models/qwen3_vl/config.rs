@@ -17,7 +17,7 @@ serde_default!(usize, default_temporal_patch_size, 2);
 serde_default!(usize, default_num_position_embeddings, 576);
 serde_default!(Vec<usize>, default_deepstack_visual_indexes, Vec::new());
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VisionConfig {
     #[serde(default = "default_depth")]
     pub depth: usize,
@@ -45,7 +45,7 @@ pub struct VisionConfig {
     pub deepstack_visual_indexes: Vec<usize>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Qwen3VLConfig {
     pub architectures: Option<Vec<String>>,
     pub text_config: Config,

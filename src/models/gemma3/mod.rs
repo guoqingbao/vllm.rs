@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 pub mod config;
 use attention_rs::ops::NonZeroOp;
-use config::Gemma3Config;
+use config::{Gemma3Config, TextConfig, VisionConfig};
 use std::iter::zip;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -508,6 +508,52 @@ pub struct Gemma3ForConditionalGeneration {
 }
 
 impl Gemma3ForConditionalGeneration {
+    fn synthesize_text_only_config(g_cfg: &Config) -> Gemma3Config {
+        Gemma3Config {
+            text_config: TextConfig {
+                attention_bias: g_cfg.attention_bias.unwrap_or(false),
+                head_dim: g_cfg.head_dim.unwrap_or(256),
+                hidden_activation: g_cfg.hidden_act,
+                hidden_size: g_cfg.hidden_size,
+                intermediate_size: g_cfg.intermediate_size,
+                num_attention_heads: g_cfg.num_attention_heads,
+                num_hidden_layers: g_cfg.num_hidden_layers,
+                num_key_value_heads: g_cfg.num_key_value_heads,
+                rms_norm_eps: g_cfg.rms_norm_eps,
+                rope_theta: g_cfg.rope_theta.unwrap_or(1_000_000.0),
+                vocab_size: g_cfg.vocab_size.unwrap_or(262_208),
+                sliding_window: g_cfg
+                    .sliding_window
+                    .unwrap_or(g_cfg.max_position_embeddings),
+                attn_logit_softcapping: g_cfg.attn_logit_softcapping,
+                final_logit_softcapping: g_cfg.final_logit_softcapping,
+                query_pre_attn_scalar: g_cfg.head_dim.unwrap_or(256),
+                max_position_embeddings: g_cfg.max_position_embeddings,
+                quantization_config: g_cfg.quantization_config.clone(),
+                tie_word_embeddings: g_cfg.tie_word_embeddings.unwrap_or(true),
+                rope_local_base_freq: 10_000.0,
+                sliding_window_pattern: 6,
+                rope_scaling: g_cfg.rope_scaling.clone(),
+                quant: g_cfg.quant.clone(),
+            },
+            vision_config: VisionConfig {
+                hidden_size: 768,
+                intermediate_size: 3072,
+                num_hidden_layers: 12,
+                num_attention_heads: 12,
+                num_channels: 3,
+                image_size: 224,
+                patch_size: 16,
+                hidden_act: candle_nn::Activation::GeluPytorchTanh,
+                layer_norm_eps: 1e-6,
+            },
+            image_token_index: 0,
+            mm_tokens_per_image: 0,
+            eos_token_id: g_cfg.eos_token_id.clone(),
+            has_vision: false,
+        }
+    }
+
     pub fn new(
         vb: &VarBuilderX,
         comm: Rc<Comm>,
@@ -517,12 +563,15 @@ impl Gemma3ForConditionalGeneration {
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
-        assert!(
-            g_cfg.extra_config_json.is_some(),
-            "Invalid multimodel config file!"
-        );
-        let config: Gemma3Config = serde_json::from_str(g_cfg.extra_config_json.as_ref().unwrap())
-            .map_err(candle_core::Error::wrap)?;
+        let config: Gemma3Config = if let Some(extra_config_json) = g_cfg.extra_config_json.as_ref()
+        {
+            serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?
+        } else {
+            crate::log_error!(
+                "Vision tower is disabled because no multimodal vision config was found."
+            );
+            Self::synthesize_text_only_config(g_cfg)
+        };
 
         let reporter = progress_reporter.clone();
         let is_qvar_builder = vb.is_qvar_builder();
@@ -698,76 +747,80 @@ impl Gemma3ForConditionalGeneration {
 
         // vision projection and embedding
         if let Some(images) = images {
-            let image_mask = input_ids.eq(self.config.image_token_index as u32)?;
-            let image_mask = image_mask
-                .unsqueeze(candle_core::D::Minus1)?
-                .broadcast_as(xs.shape().clone())?
-                .to_dtype(DType::U32)?;
-
-            let mut image_tensor = images.to_tensor_f32(&xs.device())?.to_dtype(self.dtype)?;
-            let mut image_sizes = images.patches.clone();
-            let num_images = image_tensor.dim(0)?;
-            assert!(
-                num_images == image_sizes.len(),
-                "Input image and patch dim mismatch!"
-            );
-            if images.image_idx > 0 && (images.image_idx as usize) < num_images {
-                image_tensor = image_tensor.narrow(
-                    0,
-                    images.image_idx as usize,
-                    num_images - images.image_idx as usize,
-                )?;
-                image_sizes = image_sizes[images.image_idx as usize..].to_vec();
-                crate::log_warn!(
-                    "Slicing images: start idx {} -> {:?}",
-                    images.image_idx,
-                    image_tensor.shape()
-                );
-            }
-
-            let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
-            if indices.shape().dim(0)? > 0 {
-                let image_features = self.vision_tower(&image_tensor, image_sizes)?;
-                let hidden = xs.dim(D::Minus1)?;
-                let indices_len = indices.shape().dim(0)?;
-                if indices_len % hidden != 0 {
-                    candle_core::bail!(
-                        "image indices length {} not divisible by hidden size {}",
-                        indices_len,
-                        hidden
-                    );
-                }
-                let tokens_in_chunk = indices_len / hidden;
-                let total_tokens = image_features.dim(0)?;
-                let start = images.image_token_offset.min(total_tokens);
-                let end = start + tokens_in_chunk;
-                if end > total_tokens {
-                    candle_core::bail!(
-                        "image token slice out of range: start {}, len {}, total {}",
-                        start,
-                        tokens_in_chunk,
-                        total_tokens
-                    );
-                }
-                let image_features = if start > 0 || end < total_tokens {
-                    image_features.narrow(0, start, tokens_in_chunk)?
-                } else {
-                    image_features
-                };
-
-                let mut x_flat = xs.flatten_all()?;
-                let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
-
-                x_flat = x_flat.scatter_add(
-                    &indices,
-                    &(image_flat - x_flat.gather(&indices, 0)?)?,
-                    0,
-                )?;
-                xs = x_flat.reshape(xs.shape())?;
+            if !self.config.has_vision {
+                crate::log_warn!("Ignoring image inputs because the vision tower is disabled.");
             } else {
-                crate::log_info!(
-                    "Skip image embedding because no image tokens found in this chunk!"
+                let image_mask = input_ids.eq(self.config.image_token_index as u32)?;
+                let image_mask = image_mask
+                    .unsqueeze(candle_core::D::Minus1)?
+                    .broadcast_as(xs.shape().clone())?
+                    .to_dtype(DType::U32)?;
+
+                let mut image_tensor = images.to_tensor_f32(&xs.device())?.to_dtype(self.dtype)?;
+                let mut image_sizes = images.patches.clone();
+                let num_images = image_tensor.dim(0)?;
+                assert!(
+                    num_images == image_sizes.len(),
+                    "Input image and patch dim mismatch!"
                 );
+                if images.image_idx > 0 && (images.image_idx as usize) < num_images {
+                    image_tensor = image_tensor.narrow(
+                        0,
+                        images.image_idx as usize,
+                        num_images - images.image_idx as usize,
+                    )?;
+                    image_sizes = image_sizes[images.image_idx as usize..].to_vec();
+                    crate::log_warn!(
+                        "Slicing images: start idx {} -> {:?}",
+                        images.image_idx,
+                        image_tensor.shape()
+                    );
+                }
+
+                let indices = image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
+                if indices.shape().dim(0)? > 0 {
+                    let image_features = self.vision_tower(&image_tensor, image_sizes)?;
+                    let hidden = xs.dim(D::Minus1)?;
+                    let indices_len = indices.shape().dim(0)?;
+                    if indices_len % hidden != 0 {
+                        candle_core::bail!(
+                            "image indices length {} not divisible by hidden size {}",
+                            indices_len,
+                            hidden
+                        );
+                    }
+                    let tokens_in_chunk = indices_len / hidden;
+                    let total_tokens = image_features.dim(0)?;
+                    let start = images.image_token_offset.min(total_tokens);
+                    let end = start + tokens_in_chunk;
+                    if end > total_tokens {
+                        candle_core::bail!(
+                            "image token slice out of range: start {}, len {}, total {}",
+                            start,
+                            tokens_in_chunk,
+                            total_tokens
+                        );
+                    }
+                    let image_features = if start > 0 || end < total_tokens {
+                        image_features.narrow(0, start, tokens_in_chunk)?
+                    } else {
+                        image_features
+                    };
+
+                    let mut x_flat = xs.flatten_all()?;
+                    let image_flat = image_features.flatten_all()?.to_dtype(xs.dtype())?;
+
+                    x_flat = x_flat.scatter_add(
+                        &indices,
+                        &(image_flat - x_flat.gather(&indices, 0)?)?,
+                        0,
+                    )?;
+                    xs = x_flat.reshape(xs.shape())?;
+                } else {
+                    crate::log_info!(
+                        "Skip image embedding because no image tokens found in this chunk!"
+                    );
+                }
             }
         }
 

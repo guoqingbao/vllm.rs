@@ -195,6 +195,17 @@ pub struct Conv3dNoBias {
 }
 
 impl Conv3dNoBias {
+    pub fn from_conv2d_weights(
+        w1: Tensor,
+        w2: Tensor,
+        cfg: candle_nn::Conv2dConfig,
+    ) -> Result<Self> {
+        Ok(Self {
+            conv2d_1: candle_nn::Conv2d::new(w1, None, cfg),
+            conv2d_2: candle_nn::Conv2d::new(w2, None, cfg),
+        })
+    }
+
     pub fn new(
         in_channels: usize,
         out_channels: usize,

@@ -30,11 +30,25 @@ pub enum Qwen3TextModel {
 #[allow(dead_code)]
 pub struct Qwen3VLForConditionalGeneration {
     text_model: Qwen3TextModel,
-    vision_model: Qwen3VLVisionModel,
+    vision_model: Option<Qwen3VLVisionModel>,
     spatial_merge_size: usize,
-    image_token_id: u32,
+    image_token_id: Option<u32>,
     vision_start_token_id: u32,
     vision_end_token_id: u32,
+}
+
+pub(crate) fn try_parse_multimodal_extra_config(config: &Config) -> Result<Option<Qwen3VLConfig>> {
+    let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+        return Ok(None);
+    };
+    let raw: serde_json::Value =
+        serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
+    if raw.get("vision_config").is_none() {
+        return Ok(None);
+    }
+    let mut cfg: Qwen3VLConfig = serde_json::from_value(raw).map_err(candle_core::Error::wrap)?;
+    cfg.text_config = config.clone();
+    Ok(Some(cfg))
 }
 
 impl Qwen3VLForConditionalGeneration {
@@ -47,40 +61,66 @@ impl Qwen3VLForConditionalGeneration {
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
-        assert!(
-            config.extra_config_json.is_some(),
-            "Invalid multimodel config file!"
-        );
-        let mut cfg: Qwen3VLConfig =
-            serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                .map_err(candle_core::Error::wrap)?;
-        cfg.text_config = config.clone();
+        let mut config_text = config.clone();
+        let mut vision_model = None;
+        let mut spatial_merge_size = 0;
+        let mut image_token_id = None;
+        let mut vision_start_token_id = 0;
+        let mut vision_end_token_id = 0;
 
-        crate::log_info!("Loading vision tower...");
+        if let Some(cfg) = try_parse_multimodal_extra_config(config)? {
+            if cfg.quantization_config.is_some() {
+                config_text.quantization_config = cfg.quantization_config.clone();
+            }
 
-        let vision_model =
-            Qwen3VLVisionModel::new(&cfg.vision_config, &vb.pp("model.visual"), dtype, device)?;
+            spatial_merge_size = cfg.vision_config.spatial_merge_size;
+            image_token_id = Some(cfg.image_token_id);
+            vision_start_token_id = cfg.vision_start_token_id;
+            vision_end_token_id = cfg.vision_end_token_id;
 
-        if cfg.quantization_config.is_some() {
-            cfg.text_config.quantization_config = cfg.quantization_config.clone();
+            let vision_vb = if vb.is_qvar_builder() {
+                vb.aux()
+            } else {
+                Some(vb.pp("model.visual"))
+            };
+            if let Some(vision_vb) = vision_vb {
+                crate::log_info!("Loading vision tower...");
+                vision_model = Some(Qwen3VLVisionModel::new(
+                    &cfg.vision_config,
+                    &vision_vb,
+                    dtype,
+                    device,
+                )?);
+            } else {
+                crate::log_error!(
+                    "Vision tower is disabled because no auxiliary GGUF mmproj file was found."
+                );
+            }
+        } else {
+            crate::log_error!(
+                "Vision tower is disabled because no multimodal vision config (or weight) was found."
+            );
         }
 
-        let arch = cfg
+        let arch = config
             .architectures
-            .unwrap_or(vec!["Qwen3VLForConditionalGeneration".to_string()]);
-        let arch = arch[0].as_str();
+            .as_ref()
+            .and_then(|archs| archs.first())
+            .map(|s| s.as_str())
+            .unwrap_or("Qwen3VLForConditionalGeneration");
         crate::log_info!("Loading language model...");
 
-        let mut config_text = config.clone();
-        if cfg.quantization_config.is_some() {
-            config_text.quantization_config = cfg.quantization_config.clone();
-        }
         let next_is_moe = config_text
             .moe_cfg
             .as_ref()
             .and_then(|m| m.num_experts)
             .unwrap_or(0)
             > 0;
+        let text_prefix = if vb.is_qvar_builder() {
+            None
+        } else {
+            Some("model.language_model.".to_string())
+        };
 
         let text_model = match arch {
             "Qwen3VLMoeForConditionalGeneration" => {
@@ -92,7 +132,7 @@ impl Qwen3VLForConditionalGeneration {
                     is_rope_i,
                     device,
                     progress_reporter,
-                    Some("model.language_model.".to_string()),
+                    text_prefix.clone(),
                 )?)
             }
             "Qwen3_5MoeForConditionalGeneration" => {
@@ -104,7 +144,7 @@ impl Qwen3VLForConditionalGeneration {
                     is_rope_i,
                     device,
                     progress_reporter,
-                    Some("model.language_model.".to_string()),
+                    text_prefix.clone(),
                 )?)
             }
             "Qwen3_5ForConditionalGeneration" => {
@@ -116,7 +156,7 @@ impl Qwen3VLForConditionalGeneration {
                     is_rope_i,
                     device,
                     progress_reporter,
-                    Some("model.language_model.".to_string()),
+                    text_prefix.clone(),
                 )?)
             }
             "Qwen3NextForConditionalGeneration" if next_is_moe => {
@@ -128,7 +168,7 @@ impl Qwen3VLForConditionalGeneration {
                     is_rope_i,
                     device,
                     progress_reporter,
-                    Some("model.language_model.".to_string()),
+                    text_prefix.clone(),
                 )?)
             }
             "Qwen3NextForConditionalGeneration" => {
@@ -140,7 +180,7 @@ impl Qwen3VLForConditionalGeneration {
                     is_rope_i,
                     device,
                     progress_reporter,
-                    Some("model.language_model.".to_string()),
+                    text_prefix.clone(),
                 )?)
             }
             _ => Qwen3TextModel::Dense(Qwen3ForCausalLM::new_with_prefix(
@@ -151,17 +191,17 @@ impl Qwen3VLForConditionalGeneration {
                 is_rope_i,
                 device,
                 progress_reporter,
-                Some("model.language_model.".to_string()),
+                text_prefix,
             )?),
         };
 
         Ok(Self {
             text_model,
             vision_model,
-            spatial_merge_size: cfg.vision_config.spatial_merge_size,
-            image_token_id: cfg.image_token_id,
-            vision_start_token_id: cfg.vision_start_token_id,
-            vision_end_token_id: cfg.vision_end_token_id,
+            spatial_merge_size,
+            image_token_id,
+            vision_start_token_id,
+            vision_end_token_id,
         })
     }
 
@@ -185,6 +225,47 @@ impl Qwen3VLForConditionalGeneration {
         let mut deepstack_visual_embeds: Option<Vec<Tensor>> = None;
 
         if let Some(images) = images {
+            let Some(vision_model) = self.vision_model.as_ref() else {
+                crate::log_warn!("Ignoring image inputs because the vision tower is disabled.");
+                return match &self.text_model {
+                    Qwen3TextModel::Dense(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::MoE(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::Dense35(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::MoE35(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                };
+            };
             let mut pixel_values = images.to_tensor_f32(&device)?.to_dtype(dtype)?;
             let mut patches = Vec::new();
             for (h, w) in &images.patches {
@@ -219,7 +300,7 @@ impl Qwen3VLForConditionalGeneration {
                 pixel_values = pixel_values.reshape((dims[0] * dims[1], dims[2]))?;
             }
             let (image_embeds, deepstack_image_embeds) =
-                self.vision_model.forward(&pixel_values, &image_grid_thw)?;
+                vision_model.forward(&pixel_values, &image_grid_thw)?;
 
             let image_embeds = image_embeds
                 .to_device(&device)?
@@ -229,7 +310,50 @@ impl Qwen3VLForConditionalGeneration {
                 .map(|t| t.to_device(&device)?.to_dtype(input_embeds.dtype()))
                 .collect::<Result<Vec<_>>>()?;
 
-            let image_mask = input_ids.eq(self.image_token_id as u32)?;
+            let Some(image_token_id) = self.image_token_id else {
+                crate::log_warn!(
+                    "Ignoring image inputs because image token metadata is unavailable."
+                );
+                return match &self.text_model {
+                    Qwen3TextModel::Dense(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::MoE(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::Dense35(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                    Qwen3TextModel::MoE35(m) => m.forward_with_deepstack(
+                        &input_embeds,
+                        &positions,
+                        kv_caches,
+                        input_metadata,
+                        true,
+                        &visual_pos_masks,
+                        &deepstack_visual_embeds,
+                    ),
+                };
+            };
+            let image_mask = input_ids.eq(image_token_id)?;
             visual_pos_masks = Some(image_mask.to_dtype(DType::U8)?);
 
             let image_mask = image_mask

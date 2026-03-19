@@ -1,5 +1,6 @@
 use super::config::VisionConfig;
 use crate::models::layers::{
+    collect_key_map,
     distributed::ReplicatedLinear,
     others::{embedding, layer_norm, Conv3dConfig, Conv3dNoBias, NormX},
     VarBuilderX,
@@ -7,6 +8,7 @@ use crate::models::layers::{
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{Activation, Embedding, Module};
 use either::Either;
+
 struct PatchEmbed {
     proj: Conv3dNoBias,
     bias: Tensor,
@@ -18,6 +20,55 @@ struct PatchEmbed {
 
 impl PatchEmbed {
     fn new(cfg: &VisionConfig, vb: VarBuilderX) -> Result<Self> {
+        if vb.is_qvar_builder() {
+            if cfg.temporal_patch_size != 2 {
+                candle_core::bail!(
+                    "Qwen GGUF vision patch embed only supports temporal_patch_size=2, got {}",
+                    cfg.temporal_patch_size
+                );
+            }
+            let patch_vb = vb.pp("v.patch_embd");
+            let (w1, w2, bias) = match &patch_vb.0 {
+                Either::Right(v) => (
+                    v.get(
+                        (
+                            cfg.hidden_size,
+                            cfg.in_chans,
+                            cfg.patch_size,
+                            cfg.patch_size,
+                        ),
+                        "weight",
+                    )?
+                    .dequantize(v.device())?,
+                    v.get(
+                        (
+                            cfg.hidden_size,
+                            cfg.in_chans,
+                            cfg.patch_size,
+                            cfg.patch_size,
+                        ),
+                        "weight.1",
+                    )?
+                    .dequantize(v.device())?,
+                    v.get(cfg.hidden_size, "bias")?.dequantize(v.device())?,
+                ),
+                Either::Left(_) => unreachable!(),
+            };
+            let conv_cfg = candle_nn::Conv2dConfig {
+                stride: cfg.patch_size,
+                ..Default::default()
+            };
+            let proj = Conv3dNoBias::from_conv2d_weights(w1, w2, conv_cfg)?;
+            return Ok(Self {
+                proj,
+                bias,
+                in_channels: cfg.in_chans,
+                patch_size: cfg.patch_size,
+                temporal_patch_size: cfg.temporal_patch_size,
+                hidden_size: cfg.hidden_size,
+            });
+        }
+
         let proj_vb = vb.pp("proj");
         let proj = Conv3dNoBias::new(
             cfg.in_chans,
@@ -72,12 +123,16 @@ impl VisionMlp {
         vb: VarBuilderX,
         dtype: DType,
     ) -> Result<Self> {
+        let key_map = collect_key_map(
+            vb.is_qvar_builder(),
+            [("linear_fc1", "ffn_up"), ("linear_fc2", "ffn_down")],
+        );
         Ok(Self {
             fc1: ReplicatedLinear::load_b(
                 dim,
                 hidden_dim,
                 true,
-                vb.pp("linear_fc1"),
+                vb.pp(key_map["linear_fc1"]),
                 &None,
                 &None,
                 dtype,
@@ -86,7 +141,7 @@ impl VisionMlp {
                 hidden_dim,
                 dim,
                 true,
-                vb.pp("linear_fc2"),
+                vb.pp(key_map["linear_fc2"]),
                 &None,
                 &None,
                 dtype,
@@ -132,9 +187,29 @@ struct VisionAttention {
 
 impl VisionAttention {
     fn new(dim: usize, num_heads: usize, vb: VarBuilderX, dtype: DType) -> Result<Self> {
+        let key_map = collect_key_map(
+            vb.is_qvar_builder(),
+            [("qkv", "attn_qkv"), ("proj", "attn_out")],
+        );
         Ok(Self {
-            qkv: ReplicatedLinear::load_b(dim, dim * 3, true, vb.pp("qkv"), &None, &None, dtype)?,
-            proj: ReplicatedLinear::load_b(dim, dim, true, vb.pp("proj"), &None, &None, dtype)?,
+            qkv: ReplicatedLinear::load_b(
+                dim,
+                dim * 3,
+                true,
+                vb.pp(key_map["qkv"]),
+                &None,
+                &None,
+                dtype,
+            )?,
+            proj: ReplicatedLinear::load_b(
+                dim,
+                dim,
+                true,
+                vb.pp(key_map["proj"]),
+                &None,
+                &None,
+                dtype,
+            )?,
             num_heads,
             head_dim: dim / num_heads,
         })
@@ -216,14 +291,23 @@ struct VisionBlock {
 
 impl VisionBlock {
     fn new(cfg: &VisionConfig, vb: VarBuilderX, dtype: DType) -> Result<Self> {
-        let norm1 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp("norm1"), dtype)?;
-        let norm2 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp("norm2"), dtype)?;
-        let attn = VisionAttention::new(cfg.hidden_size, cfg.num_heads, vb.pp("attn"), dtype)?;
+        let key_map = collect_key_map(vb.is_qvar_builder(), [("norm1", "ln1"), ("norm2", "ln2")]);
+        let norm1 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp(key_map["norm1"]), dtype)?;
+        let norm2 = layer_norm(cfg.hidden_size, 1e-6, true, vb.pp(key_map["norm2"]), dtype)?;
+        let attn = if vb.is_qvar_builder() {
+            VisionAttention::new(cfg.hidden_size, cfg.num_heads, vb.clone(), dtype)?
+        } else {
+            VisionAttention::new(cfg.hidden_size, cfg.num_heads, vb.pp("attn"), dtype)?
+        };
         let mlp = VisionMlp::new(
             cfg.hidden_size,
             cfg.intermediate_size,
             cfg.hidden_act,
-            vb.pp("mlp"),
+            if vb.is_qvar_builder() {
+                vb.clone()
+            } else {
+                vb.pp("mlp")
+            },
             dtype,
         )?;
         Ok(Self {
@@ -271,8 +355,17 @@ impl PatchMerger {
         } else {
             cfg.hidden_size
         };
+        let key_map = collect_key_map(
+            vb.is_qvar_builder(),
+            [
+                ("norm", "v.post_ln"),
+                ("linear_fc1", "mm.0"),
+                ("linear_fc2", "mm.2"),
+            ],
+        );
+
         Ok(Self {
-            norm: layer_norm(norm_dim, 1e-6, true, vb.pp("norm"), dtype)?,
+            norm: layer_norm(norm_dim, 1e-6, true, vb.pp(key_map["norm"]), dtype)?,
             use_postshuffle_norm,
             spatial_merge_unit: cfg.spatial_merge_size.pow(2),
             merged_hidden_size,
@@ -280,7 +373,7 @@ impl PatchMerger {
                 merged_hidden_size,
                 merged_hidden_size,
                 true,
-                vb.pp("linear_fc1"),
+                vb.pp(key_map["linear_fc1"]),
                 &None,
                 &None,
                 dtype,
@@ -289,7 +382,7 @@ impl PatchMerger {
                 merged_hidden_size,
                 cfg.out_hidden_size,
                 true,
-                vb.pp("linear_fc2"),
+                vb.pp(key_map["linear_fc2"]),
                 &None,
                 &None,
                 dtype,
@@ -369,37 +462,60 @@ impl Qwen3VLVisionModel {
         dtype: DType,
         device: &Device,
     ) -> Result<Self> {
-        let patch_embed = PatchEmbed::new(cfg, vb.pp("patch_embed"))?;
+        let is_qvar_builder = vb.is_qvar_builder();
+        let key_map = collect_key_map(
+            is_qvar_builder,
+            [
+                ("patch_embed", "v.patch_embd"),
+                ("pos_embed", "v.position_embd"),
+                ("blocks", "v.blk"),
+            ],
+        );
+
+        let patch_embed = if is_qvar_builder {
+            PatchEmbed::new(cfg, vb.clone())?
+        } else {
+            PatchEmbed::new(cfg, vb.pp(key_map["patch_embed"]))?
+        };
         let (pos_embed, _) = embedding(
             Some(cfg.num_position_embeddings),
             cfg.hidden_size,
-            vb.pp("pos_embed"),
+            vb.pp(key_map["pos_embed"]),
             dtype,
         )?;
 
-        // let embeddings = match &vb.0 {
-        //     Either::Left(v) => {
-        //         v.pp("pos_embed").get((cfg.num_position_embeddings, cfg.hidden_size), "weight")?
-        //     }
-        //     _=> panic!(""),
-        // };
-        // let pos_embed = Embedding::new(embeddings, cfg.hidden_size);
-
         let mut blocks = Vec::with_capacity(cfg.depth);
         for i in 0..cfg.depth {
-            blocks.push(VisionBlock::new(cfg, vb.pp(&format!("blocks.{i}")), dtype)?);
+            blocks.push(VisionBlock::new(
+                cfg,
+                vb.pp(&format!("{}.{}", key_map["blocks"], i)),
+                dtype,
+            )?);
         }
 
-        let merger = PatchMerger::new(cfg, false, vb.pp("merger"), dtype)?;
+        let merger = PatchMerger::new(
+            cfg,
+            false,
+            if is_qvar_builder {
+                vb.clone()
+            } else {
+                vb.pp("merger")
+            },
+            dtype,
+        )?;
         let deepstack_mergers = cfg
             .deepstack_visual_indexes
             .iter()
             .enumerate()
-            .map(|(i, _)| {
+            .map(|(i, layer_idx)| {
                 PatchMerger::new(
                     cfg,
                     true,
-                    vb.pp(&format!("deepstack_merger_list.{i}")),
+                    if is_qvar_builder {
+                        vb.pp(&format!("v.deepstack.{layer_idx}"))
+                    } else {
+                        vb.pp(&format!("deepstack_merger_list.{i}"))
+                    },
                     dtype,
                 )
             })

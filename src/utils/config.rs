@@ -1,7 +1,6 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
-#[cfg(not(feature = "python"))]
-use crate::utils::guidance::ReasoningEffort;
+use crate::utils::reasoning::ReasoningEffort;
 use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
@@ -562,8 +561,7 @@ pub struct SamplingParams {
     #[pyo3(get, set)]
     pub grammar_json: Option<String>,
     /// Reasoning effort level for OpenAI-compatible reasoning API
-    #[pyo3(get, set)]
-    pub reasoning_effort: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[cfg(not(feature = "python"))]
