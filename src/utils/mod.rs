@@ -1011,13 +1011,13 @@ pub fn init_config_tokenizer(
             let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
             let mut config = config_from_gguf(&content, &mut file)?;
+            let arch_name = config
+                .architectures
+                .as_ref()
+                .and_then(|archs| archs.first())
+                .map(|s| s.as_str())
+                .unwrap_or("");
             if let Some(aux_path) = auxiliary_weight_files.first() {
-                let arch_name = config
-                    .architectures
-                    .as_ref()
-                    .and_then(|archs| archs.first())
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
                 if matches!(
                     arch_name,
                     "Qwen3VLForConditionalGeneration"
@@ -1044,12 +1044,6 @@ pub fn init_config_tokenizer(
                     );
                 }
             } else {
-                let arch_name = config
-                    .architectures
-                    .as_ref()
-                    .and_then(|archs| archs.first())
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
                 if matches!(
                     arch_name,
                     "Qwen3_5ForConditionalGeneration"
@@ -1066,32 +1060,7 @@ pub fn init_config_tokenizer(
             }
             config
         };
-        let arch_name = config
-            .architectures
-            .as_ref()
-            .and_then(|archs| archs.first())
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let chat_template = if matches!(
-            arch_name,
-            "Qwen3_5ForCausalLM"
-                | "Qwen3_5ForConditionalGeneration"
-                | "Qwen3_5MoeForCausalLM"
-                | "Qwen3_5MoeForConditionalGeneration"
-        ) {
-            let override_path = Path::new("/data/Qwen3.5-27B/chat_template.jinja");
-            if override_path.exists() {
-                crate::log_warn!(
-                    "Override GGUF chat template from {}",
-                    override_path.display()
-                );
-                Some(std::fs::read_to_string(override_path).map_err(candle_core::Error::wrap)?)
-            } else {
-                chat_template.clone()
-            }
-        } else {
-            chat_template.clone()
-        };
+
         let config_tokenizer = TokenizerConfig {
             model_max_length: Some(context_length.unwrap_or(config.max_position_embeddings) as f64),
             add_bos_token: Some(bos.is_some()),
