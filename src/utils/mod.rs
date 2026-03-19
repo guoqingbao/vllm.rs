@@ -156,8 +156,16 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
     let embedding_length = md_get(format!("{arch}.embedding_length").as_str())?.to_u32()? as usize;
-    let feed_forward_length =
-        md_get(format!("{arch}.feed_forward_length").as_str())?.to_u32()? as usize;
+    let feed_forward_length = md_get(format!("{arch}.feed_forward_length").as_str())
+        .and_then(|v| v.to_u32())
+        .map(|v| v as usize)
+        .or_else(|_| {
+            if arch == "qwen35moe" {
+                Ok(0) //Qwen3.5 MoE has no MLP layer
+            } else {
+                candle_core::bail!("cannot find {arch}.feed_forward_length in metadata")
+            }
+        })?;
     let context_length = md_get(format!("{arch}.context_length").as_str())?.to_u32()? as usize;
     let block_count = md_get(format!("{arch}.block_count").as_str())?.to_u32()? as usize;
     let rms_norm_eps =
@@ -985,14 +993,18 @@ pub fn init_config_tokenizer(
             context_length,
             chat_template,
         } = {
-            let file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
+            let file = std::fs::File::open(&model_pathes.get_weight_filenames()[0])
+                .map_err(candle_core::Error::wrap)?;
             let mut readers = vec![file];
             let mut readers = readers.iter_mut().collect::<Vec<_>>();
-            if let Ok(content) = crate::utils::gguf_helper::Content::from_readers(&mut readers) {
-                get_gguf_info(&content).map_err(candle_core::Error::wrap)?
-            } else {
-                panic!("Error: Unable to read {:?} as a GGUF file! \n\t***Tips: use `--w` to specify safetensor model directory!", model_pathes.get_weight_filenames()[0]);
-            }
+            let content = crate::utils::gguf_helper::Content::from_readers(&mut readers)
+                .map_err(|e| {
+                    candle_core::Error::msg(format!(
+                        "Unable to read {:?} as a GGUF file: {e}\n\t***Tips: use `--w` to specify safetensor model directory!***",
+                        model_pathes.get_weight_filenames()[0]
+                    ))
+                })?;
+            get_gguf_info(&content).map_err(candle_core::Error::wrap)?
         };
 
         let config = {

@@ -40,6 +40,7 @@
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
+| **Qwen3.5-35B-A3B** | Q3_K_M | **35B (MoE)**| **106** tokens/s (**Hopper**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
