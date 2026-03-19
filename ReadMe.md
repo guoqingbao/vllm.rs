@@ -133,7 +133,7 @@ Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.
 
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --kv-fraction 0.6 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
 python3 -m vllm_rs.server --m unsloth/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --max-model-len 32768 --prefix-cache
 ```
@@ -154,7 +154,7 @@ python3 -m vllm_rs.server --m Qwen/Qwen3.5-122B-A10B --d 0,1 --ui-server --prefi
 
 ```bash
 # Load as Q4K format, other options (q2k, q3k, q5k, q6k, q8_0):
-python3 -m vllm_rs.server --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --d 0,1 --ui-server --prefix-cache
+python3 -m vllm_rs.server --w /path/Qwen3.5-35B-A3B --isq q4k --d 0 --ui-server --prefix-cache
 ```
 
   </details>
@@ -272,7 +272,7 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
 
   ```bash
   # CUDA
-  vllm-rs --m unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF --f Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --ui-server --prefix-cache
+  vllm-rs --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
   # Metal/MacOS
   vllm-rs --m Qwen/Qwen3-4B-GGUF --f Qwen3-4B-Q4_K_M.gguf --ui-server --prefix-cache
   ```

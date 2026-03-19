@@ -208,7 +208,7 @@ impl Qwen3_5MoEDecoderLayer {
             config.hidden_size,
             config.rms_norm_eps,
             if is_qvar_builder {
-                vb.pp("ffn_norm")
+                vb.pp("post_attention_norm")
             } else {
                 vb.pp("post_attention_layernorm")
             },
