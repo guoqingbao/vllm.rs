@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.9.11"
+version = "0.9.12"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
@@ -85,6 +85,9 @@ flashattn = ["attention-rs/flashattn", "attention-rs/no-fp8-kvcache"]
 flashinfer = ["attention-rs/flashinfer"]
 metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal", "dep:metal"]
 python = ["pyo3"]
+
+[patch."https://github.com/guoqingbao/attention.rs.git"]
+attention-rs = { path = "../attention.rs" }
 
 [[bin]]
 name = "runner"

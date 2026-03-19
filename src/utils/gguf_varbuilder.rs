@@ -87,7 +87,9 @@ impl VarBuilder {
 
     pub fn get_no_shape(&self, name: &str) -> Result<Arc<QTensor>> {
         let mut file = self.file.lock().unwrap();
-        let tensor = self.content.tensor(&mut *file, name, &self.device)?;
+        let tensor = self
+            .content
+            .tensor(&mut *file, &self.path(name), &self.device)?;
         Ok(Arc::new(tensor))
     }
 
@@ -96,6 +98,13 @@ impl VarBuilder {
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
-        self.content.tensor_infos.contains_key(key)
+        self.content.tensor_infos.contains_key(&self.path(key))
+    }
+
+    pub fn tensor_shape(&self, key: &str) -> Option<Vec<usize>> {
+        self.content
+            .tensor_infos
+            .get(&self.path(key))
+            .map(|info| info.shape.dims().to_vec())
     }
 }

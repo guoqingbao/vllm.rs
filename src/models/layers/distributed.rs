@@ -1,10 +1,12 @@
 use crate::models::layers::linear::{
-    linear_b_x as linear_b, linear_no_bias_x as linear, LinearX as Linear, LnFp8,
+    linear_b_x as linear_b, linear_no_bias_x as linear, LinearX as Linear, LnFp8, QLinear,
 };
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
+use crate::utils::gguf_helper::restore_qwen35_qkv_weight;
 #[cfg(feature = "nccl")]
 pub use candle_core::cuda_backend::cudarc::nccl::safe::{Comm, Id};
+use candle_core::quantized::{GgmlDType, QTensor};
 use candle_core::CustomOp1;
 use candle_core::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor};
 use candle_nn::var_builder::Shard;
@@ -62,6 +64,38 @@ impl TensorParallelColumnLinear {
     }
 }
 
+pub fn load_restored_gguf_column_linear(
+    vb: &VarBuilderX,
+    in_dim: usize,
+    out_dim: usize,
+    name: &str,
+    comm: Rc<Comm>,
+    dtype: DType,
+    restore_weight: impl FnOnce(Tensor) -> Result<Tensor>,
+) -> Result<TensorParallelColumnLinear> {
+    let qvb = match &vb.pp(name).0 {
+        Either::Right(vb) => vb.clone(),
+        _ => candle_core::bail!("expected GGUF varbuilder for {}", name),
+    };
+    let ws = qvb.get((out_dim, in_dim), "weight")?;
+    let mut wdtype = ws.dtype();
+    let weight = restore_weight(ws.dequantize_f16(qvb.device())?)?;
+    let local_weight = if comm.world_size() > 1 {
+        let chunk_size = weight.dim(0)? / comm.world_size();
+        if chunk_size % wdtype.block_size() != 0 {
+            wdtype = GgmlDType::Q8_0;
+        }
+        weight
+            .narrow(0, comm.rank() * chunk_size, chunk_size)?
+            .contiguous()?
+    } else {
+        weight
+    };
+    let qtensor = QTensor::quantize(&local_weight, wdtype)?;
+    let qlinear = QLinear::from_qparts_x(qtensor, None, dtype)?;
+    Ok(TensorParallelColumnLinear::new(Linear::QLinear(qlinear)))
+}
+
 pub struct MergedParallelColumnLinear {
     linears: Vec<TensorParallelColumnLinear>,
     biases: Vec<Option<Tensor>>,
@@ -85,6 +119,19 @@ impl MergedParallelColumnLinear {
     ) -> Result<Self> {
         let linear = Linear::new(weight, None, quant)?;
         let tp_linear = TensorParallelColumnLinear { linear };
+        Ok(Self {
+            linears: vec![tp_linear],
+            biases: vec![bias],
+            output_splits: Some(output_splits),
+        })
+    }
+
+    pub fn from_packed_local_qlinear(
+        qlinear: Linear,
+        bias: Option<Tensor>,
+        output_splits: Vec<usize>,
+    ) -> Result<Self> {
+        let tp_linear = TensorParallelColumnLinear { linear: qlinear };
         Ok(Self {
             linears: vec![tp_linear],
             biases: vec![bias],
@@ -171,6 +218,68 @@ impl MergedParallelColumnLinear {
         }
         Ok(xss)
     }
+}
+
+pub fn load_restored_gguf_merged_qkv_linear(
+    vb: &VarBuilderX,
+    hidden_size: usize,
+    key_dim_global: usize,
+    value_dim_global: usize,
+    num_k_heads_global: usize,
+    num_v_heads_global: usize,
+    head_v_dim: usize,
+    name: &str,
+    comm: Rc<Comm>,
+    dtype: DType,
+) -> Result<MergedParallelColumnLinear> {
+    let qvb = match &vb.pp(name).0 {
+        Either::Right(vb) => vb.clone(),
+        _ => candle_core::bail!("expected GGUF varbuilder for {}", name),
+    };
+    let out_dim = key_dim_global * 2 + value_dim_global;
+    let ws = qvb.get((out_dim, hidden_size), "weight")?;
+    let mut wdtype = ws.dtype();
+    let weight = restore_qwen35_qkv_weight(
+        &ws.dequantize_f16(qvb.device())?,
+        key_dim_global,
+        num_k_heads_global,
+        num_v_heads_global,
+        head_v_dim,
+    )?;
+
+    let chunk_sizes = [key_dim_global, key_dim_global, value_dim_global];
+    let mut local_chunks = Vec::with_capacity(chunk_sizes.len());
+    let mut output_splits = Vec::with_capacity(chunk_sizes.len());
+    let mut offset = 0usize;
+    for &chunk_size in &chunk_sizes {
+        if chunk_size % comm.world_size() != 0 {
+            candle_core::bail!(
+                "GGUF in_proj_qkv chunk size {} is not divisible by world_size {}",
+                chunk_size,
+                comm.world_size()
+            );
+        }
+        let local_chunk_size = chunk_size / comm.world_size();
+        if local_chunk_size % wdtype.block_size() != 0 {
+            wdtype = GgmlDType::Q8_0;
+        }
+        let local_chunk = weight
+            .narrow(0, offset + comm.rank() * local_chunk_size, local_chunk_size)?
+            .contiguous()?;
+        local_chunks.push(local_chunk);
+        output_splits.push(local_chunk_size);
+        offset += chunk_size;
+    }
+
+    let local_chunk_refs = local_chunks.iter().collect::<Vec<_>>();
+    let local_weight = Tensor::cat(&local_chunk_refs, 0)?;
+    let qtensor = QTensor::quantize(&local_weight, wdtype)?;
+    let qlinear = QLinear::from_qparts_x(qtensor, None, dtype)?;
+    MergedParallelColumnLinear::from_packed_local_qlinear(
+        Linear::QLinear(qlinear),
+        None,
+        output_splits,
+    )
 }
 
 #[allow(dead_code)]
@@ -329,6 +438,42 @@ impl TensorParallelRowLinear {
         }
         Ok(xs)
     }
+}
+
+pub fn load_restored_gguf_row_linear(
+    vb: &VarBuilderX,
+    in_dim: usize,
+    out_dim: usize,
+    name: &str,
+    comm: Rc<Comm>,
+    dtype: DType,
+    restore_weight: impl FnOnce(Tensor) -> Result<Tensor>,
+) -> Result<TensorParallelRowLinear> {
+    let qvb = match &vb.pp(name).0 {
+        Either::Right(vb) => vb.clone(),
+        _ => candle_core::bail!("expected GGUF varbuilder for {}", name),
+    };
+    let ws = qvb.get((out_dim, in_dim), "weight")?;
+    let mut wdtype = ws.dtype();
+    let weight = restore_weight(ws.dequantize_f16(qvb.device())?)?;
+    let local_weight = if comm.world_size() > 1 {
+        let chunk_size = weight.dim(1)? / comm.world_size();
+        if chunk_size % wdtype.block_size() != 0 {
+            wdtype = GgmlDType::Q8_0;
+        }
+        weight
+            .narrow(1, comm.rank() * chunk_size, chunk_size)?
+            .contiguous()?
+    } else {
+        weight
+    };
+    let qtensor = QTensor::quantize(&local_weight, wdtype)?;
+    let qlinear = QLinear::from_qparts_x(qtensor, None, dtype)?;
+    Ok(TensorParallelRowLinear::new(
+        Linear::QLinear(qlinear),
+        comm,
+        dtype,
+    ))
 }
 
 pub fn shard(dim: usize, rank: usize, world_size: usize) -> candle_nn::var_builder::Shard {

@@ -18,6 +18,9 @@ pub mod reasoning;
 pub mod special_tokens;
 use crate::core::GenerationOutput;
 use crate::models::gemma3::config::Gemma3Config;
+use crate::models::qwen3_vl::config::{
+    Qwen3VLConfig as Qwen3VLGgufConfig, VisionConfig as Qwen3VLGgufVisionConfig,
+};
 use crate::utils::config::MoEConfig;
 use crate::utils::config::ModelType;
 use crate::utils::config::QuantConfig;
@@ -133,6 +136,16 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     let arch = md_get("general.architecture")?.to_string()?;
 
     let head_count = md_get(format!("{arch}.attention.head_count").as_str())?.to_u32()? as usize;
+    let canonical_arch = match arch.as_str() {
+        "qwen35" => "Qwen3_5ForConditionalGeneration".to_string(),
+        "qwen35moe" => "Qwen3_5MoeForConditionalGeneration".to_string(),
+        "qwen3vl" => "Qwen3VLForConditionalGeneration".to_string(),
+        "qwen3vlmoe" => "Qwen3VLMoeForConditionalGeneration".to_string(),
+        "gemma3" => "Gemma3ForConditionalGeneration".to_string(),
+        "mistral3" => "Mistral3ForConditionalGeneration".to_string(),
+        _ => arch.clone(),
+    };
+
     let head_count_kv =
         md_get(format!("{arch}.attention.head_count_kv").as_str())?.to_u32()? as usize;
 
@@ -181,7 +194,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
     let eos_token_id = if eos_token_id.is_ok() {
-        EosTokenId::Single(eos_token_id.unwrap().to_u32()?)
+        EosTokenId::Multiple(vec![248044, 248046])
     } else {
         EosTokenId::Multiple(vec![])
     };
@@ -303,7 +316,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mod_cfg = if arch.to_string() == "qwen3moe" || arch.to_string() == "qwen2moe" {
+    let mod_cfg = if matches!(arch.as_str(), "qwen3moe" | "qwen2moe" | "qwen35moe") {
         let expert_feed_forward_length =
             md_get(format!("{arch}.expert_feed_forward_length").as_str())?.to_u32()? as usize;
         let expert_weights_norm = md_get(format!("{arch}.expert_weights_norm").as_str());
@@ -348,7 +361,19 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             moe_intermediate_size: expert_feed_forward_length,
             shared_expert_intermediate_size: expert_shared_feed_forward_length,
             num_experts: Some(md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize),
-            mlp_only_layers: Some(vec![]),
+            mlp_only_layers: Some(match md_get(format!("{arch}.moe_layer_pattern").as_str()) {
+                Ok(pattern) => pattern
+                    .to_vec()?
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(idx, v)| match v.to_bool() {
+                        Ok(true) => None,
+                        Ok(false) => Some(idx),
+                        Err(_) => None,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            }),
             decoder_sparse_step: Some(1),
             norm_topk_prob: expert_weights_norm.unwrap_or(true),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
@@ -361,8 +386,38 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
+    let extra_config_json = if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
+        let conv_kernel_size =
+            md_get(format!("{arch}.ssm.conv_kernel").as_str())?.to_u32()? as usize;
+        let num_k_heads = md_get(format!("{arch}.ssm.group_count").as_str())?.to_u32()? as usize;
+        let num_v_heads = md_get(format!("{arch}.ssm.time_step_rank").as_str())?.to_u32()? as usize;
+        let key_head_dim = md_get(format!("{arch}.ssm.state_size").as_str())?.to_u32()? as usize;
+        let inner_size = md_get(format!("{arch}.ssm.inner_size").as_str())?.to_u32()? as usize;
+        let value_head_dim = if num_v_heads > 0 && inner_size % num_v_heads == 0 {
+            inner_size / num_v_heads
+        } else {
+            key_head_dim
+        };
+        let full_attention_interval =
+            md_get(format!("{arch}.full_attention_interval").as_str())?.to_u32()? as usize;
+        Some(
+            serde_json::json!({
+                "architectures": [canonical_arch.clone()],
+                "linear_conv_kernel_dim": conv_kernel_size,
+                "linear_num_key_heads": num_k_heads,
+                "linear_num_value_heads": num_v_heads,
+                "linear_key_head_dim": key_head_dim,
+                "linear_value_head_dim": value_head_dim,
+                "full_attention_interval": full_attention_interval,
+            })
+            .to_string(),
+        )
+    } else {
+        None
+    };
+
     let cfg = Config {
-        architectures: Some(vec![arch.clone()]),
+        architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
         num_key_value_heads: head_count_kv,
@@ -393,10 +448,102 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         fp8_kvcache: None,
         quantization_config: None,
         is_multi_model: None,
-        extra_config_json: None,
+        extra_config_json,
     };
 
     Ok(cfg)
+}
+
+fn tokenizer_token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
+    tokenizer
+        .get_vocab(true)
+        .get(token)
+        .copied()
+        .ok_or_else(|| {
+            candle_core::Error::Msg(format!("missing multimodal token `{token}`").into())
+        })
+}
+
+fn qwen3_vl_deepstack_indexes(
+    ct: &candle_core::quantized::gguf_file::Content,
+) -> Result<Vec<usize>> {
+    let md_get = |s: &str| match ct.metadata.get(s) {
+        None => candle_core::bail!("cannot find {s} in metadata"),
+        Some(v) => Ok(v),
+    };
+    let values = md_get("clip.vision.is_deepstack_layers")
+        .and_then(|v| v.to_vec().cloned())
+        .ok();
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, v)| match v.to_bool() {
+            Ok(true) => Some(idx),
+            _ => None,
+        })
+        .collect())
+}
+
+fn build_qwen3_vl_gguf_extra_config(
+    text_config: &Config,
+    mmproj_ct: &candle_core::quantized::gguf_file::Content,
+    tokenizer: &Tokenizer,
+) -> Result<String> {
+    let md_get = |s: &str| match mmproj_ct.metadata.get(s) {
+        None => candle_core::bail!("cannot find {s} in metadata"),
+        Some(v) => Ok(v),
+    };
+    let vision_cfg = Qwen3VLGgufVisionConfig {
+        depth: md_get("clip.vision.block_count")?.to_u32()? as usize,
+        hidden_size: md_get("clip.vision.embedding_length")?.to_u32()? as usize,
+        out_hidden_size: md_get("clip.vision.projection_dim")?.to_u32()? as usize,
+        hidden_act: if md_get("clip.use_gelu")
+            .and_then(|v| v.to_bool())
+            .unwrap_or(true)
+        {
+            candle_nn::Activation::Gelu
+        } else {
+            candle_nn::Activation::Silu
+        },
+        intermediate_size: md_get("clip.vision.feed_forward_length")?.to_u32()? as usize,
+        num_heads: md_get("clip.vision.attention.head_count")?.to_u32()? as usize,
+        in_chans: 3,
+        patch_size: md_get("clip.vision.patch_size")?.to_u32()? as usize,
+        spatial_merge_size: md_get("clip.vision.spatial_merge_size")?.to_u32()? as usize,
+        temporal_patch_size: 2,
+        num_position_embeddings: {
+            let image_size = md_get("clip.vision.image_size")?.to_u32()? as usize;
+            let patch_size = md_get("clip.vision.patch_size")?.to_u32()? as usize;
+            (image_size / patch_size).pow(2)
+        },
+        deepstack_visual_indexes: qwen3_vl_deepstack_indexes(mmproj_ct)?,
+    };
+    let cfg = Qwen3VLGgufConfig {
+        architectures: text_config.architectures.clone(),
+        text_config: text_config.clone(),
+        vision_config: vision_cfg,
+        image_token_id: tokenizer_token_id(tokenizer, "<|image_pad|>")?,
+        video_token_id: tokenizer_token_id(tokenizer, "<|video_pad|>")?,
+        vision_start_token_id: tokenizer_token_id(tokenizer, "<|vision_start|>")?,
+        vision_end_token_id: tokenizer_token_id(tokenizer, "<|vision_end|>")?,
+        tie_word_embeddings: text_config.tie_word_embeddings.unwrap_or(false),
+        quantization_config: None,
+    };
+    let mut root = serde_json::to_value(&cfg).map_err(candle_core::Error::wrap)?;
+    if let Some(raw_text_extra) = &text_config.extra_config_json {
+        if let Ok(extra_root) = serde_json::from_str::<serde_json::Value>(raw_text_extra) {
+            if let (Some(text_cfg), Some(extra_obj)) = (
+                root.get_mut("text_config").and_then(|v| v.as_object_mut()),
+                extra_root.as_object(),
+            ) {
+                for (key, value) in extra_obj {
+                    text_cfg.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    serde_json::to_string(&root).map_err(candle_core::Error::wrap)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -829,6 +976,7 @@ pub fn init_config_tokenizer(
         && model_pathes.get_weight_filenames()[0].exists()
     {
         assert!(econfig.isq.is_none(), "GGUF model does not support ISQ! \n\t***Tips: use `--w` to specify safetensors model path!***");
+        let auxiliary_weight_files = model_pathes.get_auxiliary_filenames();
         let GGUFInfo {
             tokenizer,
             bos,
@@ -850,13 +998,93 @@ pub fn init_config_tokenizer(
         let config = {
             let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
-            config_from_gguf(&content, &mut file)?
+            let mut config = config_from_gguf(&content, &mut file)?;
+            if let Some(aux_path) = auxiliary_weight_files.first() {
+                let arch_name = config
+                    .architectures
+                    .as_ref()
+                    .and_then(|archs| archs.first())
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                if matches!(
+                    arch_name,
+                    "Qwen3VLForConditionalGeneration"
+                        | "Qwen3VLMoeForConditionalGeneration"
+                        | "Qwen3_5ForConditionalGeneration"
+                        | "Qwen3_5MoeForConditionalGeneration"
+                ) {
+                    crate::log_info!("Loading GGUF multimodal config from {}", aux_path.display());
+                    let mut aux_file =
+                        std::fs::File::open(aux_path).map_err(candle_core::Error::wrap)?;
+                    let aux_content =
+                        candle_core::quantized::gguf_file::Content::read(&mut aux_file)
+                            .map_err(candle_core::Error::wrap)?;
+                    config.is_multi_model = Some(true);
+                    config.extra_config_json = Some(build_qwen3_vl_gguf_extra_config(
+                        &config,
+                        &aux_content,
+                        &tokenizer,
+                    )?);
+                } else {
+                    crate::log_warn!(
+                        "Auxiliary GGUF file(s) detected, but multimodal GGUF loading is not implemented for architecture {}. Loading text-only model.",
+                        arch_name
+                    );
+                }
+            } else {
+                let arch_name = config
+                    .architectures
+                    .as_ref()
+                    .and_then(|archs| archs.first())
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                if matches!(
+                    arch_name,
+                    "Qwen3_5ForConditionalGeneration"
+                        | "Qwen3_5MoeForConditionalGeneration"
+                        | "Qwen3VLForConditionalGeneration"
+                        | "Qwen3VLMoeForConditionalGeneration"
+                        | "Gemma3ForConditionalGeneration"
+                        | "Mistral3ForConditionalGeneration"
+                ) {
+                    crate::log_error!(
+                        "No auxiliary GGUF mmproj file found for multimodal GGUF model. Vision is disabled and the model will run in text-only mode."
+                    );
+                }
+            }
+            config
+        };
+        let arch_name = config
+            .architectures
+            .as_ref()
+            .and_then(|archs| archs.first())
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let chat_template = if matches!(
+            arch_name,
+            "Qwen3_5ForCausalLM"
+                | "Qwen3_5ForConditionalGeneration"
+                | "Qwen3_5MoeForCausalLM"
+                | "Qwen3_5MoeForConditionalGeneration"
+        ) {
+            let override_path = Path::new("/data/Qwen3.5-27B/chat_template.jinja");
+            if override_path.exists() {
+                crate::log_warn!(
+                    "Override GGUF chat template from {}",
+                    override_path.display()
+                );
+                Some(std::fs::read_to_string(override_path).map_err(candle_core::Error::wrap)?)
+            } else {
+                chat_template.clone()
+            }
+        } else {
+            chat_template.clone()
         };
         let config_tokenizer = TokenizerConfig {
             model_max_length: Some(context_length.unwrap_or(config.max_position_embeddings) as f64),
             add_bos_token: Some(bos.is_some()),
             add_eos_token: Some(eos.is_some()),
-            chat_template: chat_template.clone(),
+            chat_template,
             bos_token: bos,
             eos_token: eos,
         };
@@ -1119,6 +1347,11 @@ pub fn get_arch_rope(
         ("Qwen3_5MoeForConditionalGeneration", false),
         ("Qwen3NextForCausalLM", false),
         ("Qwen3NextForConditionalGeneration", false),
+        ("qwen35", false),
+        ("qwen35moe", false),
+        ("qwen3vl", false),
+        ("qwen3vlmoe", false),
+        ("gemma3", false),
     ]
     .iter()
     .cloned()
@@ -1135,7 +1368,7 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3_5ForCausalLM" => (
+        "Qwen3_5ForCausalLM" | "qwen35" => (
             ModelType::Qwen3_5,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
@@ -1143,7 +1376,7 @@ pub fn get_arch_rope(
             ModelType::Qwen3_5MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3_5MoeForCausalLM" => (
+        "Qwen3_5MoeForCausalLM" | "qwen35moe" => (
             ModelType::Qwen3_5MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
@@ -1155,7 +1388,9 @@ pub fn get_arch_rope(
         | "Qwen3VLMoeForConditionalGeneration"
         | "Qwen3_5ForConditionalGeneration"
         | "Qwen3_5MoeForConditionalGeneration"
-        | "Qwen3NextForConditionalGeneration" => (
+        | "Qwen3NextForConditionalGeneration"
+        | "qwen3vl"
+        | "qwen3vlmoe" => (
             ModelType::Qwen3VL,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
@@ -1200,7 +1435,7 @@ pub fn get_arch_rope(
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
             (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
         }
-        "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => (
+        "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" | "gemma3" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
         ),
@@ -1496,4 +1731,39 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
         ))
         .yellow()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{get_arch_rope, ModelType};
+    use tokenizers::{models::bpe::BPE, Tokenizer};
+
+    fn empty_tokenizer() -> Tokenizer {
+        Tokenizer::new(BPE::default())
+    }
+
+    #[test]
+    fn gguf_qwen35_arch_maps_to_qwen35_model_type() {
+        let tokenizer = empty_tokenizer();
+        let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen35".to_string()).unwrap();
+        assert!(matches!(model_type, ModelType::Qwen3_5));
+        assert!(!is_rope_i);
+    }
+
+    #[test]
+    fn gguf_qwen35moe_arch_maps_to_qwen35_moe_model_type() {
+        let tokenizer = empty_tokenizer();
+        let (model_type, _, is_rope_i) =
+            get_arch_rope(&tokenizer, "qwen35moe".to_string()).unwrap();
+        assert!(matches!(model_type, ModelType::Qwen3_5MoE));
+        assert!(!is_rope_i);
+    }
+
+    #[test]
+    fn gguf_qwen3vl_arch_maps_to_multimodal_model_type() {
+        let tokenizer = empty_tokenizer();
+        let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
+        assert!(matches!(model_type, ModelType::Qwen3VL));
+        assert!(!is_rope_i);
+    }
 }

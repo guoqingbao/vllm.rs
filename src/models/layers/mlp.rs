@@ -2,12 +2,11 @@ use crate::models::layers::distributed::{
     shard, Comm, MergedParallelColumnLinear, ReplicatedLinear, TensorParallelColumnLinear,
     TensorParallelRowLinear,
 };
-use crate::models::layers::VarBuilderX;
+use crate::models::layers::{collect_key_map, VarBuilderX};
 use crate::utils::config::QuantConfig;
 use candle_core::{DType, Result, Tensor};
 use candle_nn::var_builder::Shard;
 use candle_nn::{Activation, Module};
-use std::collections::HashMap;
 use std::rc::Rc;
 
 enum GateUpProjection {
@@ -342,16 +341,16 @@ impl MLP {
         dtype: DType,
         suffix: &str,
     ) -> Result<Self> {
-        let key_map: HashMap<&str, &str> = [
-            ("gate_proj", "ffn_gate"),
-            ("up_proj", "ffn_up"),
-            ("gate_up_proj", "ffn_up"),
-            ("down_proj", "ffn_down"),
-        ]
-        .iter()
-        .cloned()
-        .collect();
         let is_qvar_builder = vb.is_qvar_builder();
+        let key_map = collect_key_map(
+            is_qvar_builder,
+            [
+                ("gate_proj", "ffn_gate"),
+                ("up_proj", "ffn_up"),
+                ("gate_up_proj", "ffn_up"),
+                ("down_proj", "ffn_down"),
+            ],
+        );
 
         let gate_up_proj = if let Some(packed) = Self::try_load_packed_gate_up(
             &vb,

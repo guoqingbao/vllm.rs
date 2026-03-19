@@ -2,10 +2,16 @@
 // Shared Qwen3.5/Qwen3Next GatedDeltaNet linear-attention layer.
 
 use crate::models::layers::distributed::{
-    shard, Comm, MergedParallelColumnLinear, TensorParallelColumnLinear, TensorParallelRowLinear,
+    load_restored_gguf_column_linear, load_restored_gguf_merged_qkv_linear,
+    load_restored_gguf_row_linear, shard, Comm, MergedParallelColumnLinear,
+    TensorParallelColumnLinear, TensorParallelRowLinear,
 };
-use crate::models::layers::VarBuilderX;
+use crate::models::layers::{collect_key_map, VarBuilderX};
 use crate::utils::config::Config;
+use crate::utils::gguf_helper::{
+    restore_qwen35_a_log_from_gguf, restore_qwen35_qkv_weight, undo_tiled_v_heads_first_dim,
+    undo_tiled_v_heads_last_dim,
+};
 use crate::utils::resolve_qwen3_hybrid_config;
 use attention_rs::gdn;
 use attention_rs::mamba_cache::MambaCache;
@@ -61,9 +67,11 @@ impl GatedDeltaNet {
     fn load_projection(
         vb: &VarBuilderX,
         hidden_size: usize,
+        num_k_heads_global: usize,
         key_dim_global: usize,
         value_dim_global: usize,
         num_v_heads_global: usize,
+        head_v_dim: usize,
         comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
@@ -74,6 +82,14 @@ impl GatedDeltaNet {
         } else {
             (None, None)
         };
+        let projection_pairs = [
+            ("in_proj_qkv", "attn_qkv"),
+            ("in_proj_z", "attn_gate"),
+            ("in_proj_b", "ssm_beta"),
+            ("in_proj_a", "ssm_alpha"),
+        ];
+        let projection_key_map = collect_key_map(vb.is_qvar_builder(), projection_pairs);
+
         // Qwen3Next format: fused qkvz + fused ba
         let projection_size_qkvz = key_dim_global * 2 + value_dim_global * 2;
         let projection_size_ba = num_v_heads_global * 2;
@@ -108,54 +124,113 @@ impl GatedDeltaNet {
         };
 
         // Qwen3.5 format: split qkv, z, b, a
-        let split_z = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            value_dim_global,
-            false,
-            vb.pp("in_proj_z"),
-            comm.clone(),
-            &quantization_config,
-            &quant,
-            dtype,
-        );
+        let split_z = if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            load_restored_gguf_column_linear(
+                vb,
+                hidden_size,
+                value_dim_global,
+                projection_key_map["in_proj_z"],
+                comm.clone(),
+                dtype,
+                |w| {
+                    undo_tiled_v_heads_first_dim(
+                        &w,
+                        num_k_heads_global,
+                        num_v_heads_global,
+                        head_v_dim,
+                    )
+                },
+            )
+        } else {
+            TensorParallelColumnLinear::load_with_hints(
+                hidden_size,
+                value_dim_global,
+                false,
+                vb.pp(projection_key_map["in_proj_z"]),
+                comm.clone(),
+                &quantization_config,
+                &quant,
+                dtype,
+            )
+        };
 
-        let split_b = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            num_v_heads_global,
-            false,
-            vb.pp("in_proj_b"),
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        );
-        let split_a = TensorParallelColumnLinear::load_with_hints(
-            hidden_size,
-            num_v_heads_global,
-            false,
-            vb.pp("in_proj_a"),
-            comm.clone(),
-            &None,
-            &None,
-            dtype,
-        );
+        let split_b = if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            load_restored_gguf_column_linear(
+                vb,
+                hidden_size,
+                num_v_heads_global,
+                projection_key_map["in_proj_b"],
+                comm.clone(),
+                dtype,
+                |w| undo_tiled_v_heads_first_dim(&w, num_k_heads_global, num_v_heads_global, 1),
+            )
+        } else {
+            TensorParallelColumnLinear::load_with_hints(
+                hidden_size,
+                num_v_heads_global,
+                false,
+                vb.pp(projection_key_map["in_proj_b"]),
+                comm.clone(),
+                &None,
+                &None,
+                dtype,
+            )
+        };
+        let split_a = if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            load_restored_gguf_column_linear(
+                vb,
+                hidden_size,
+                num_v_heads_global,
+                projection_key_map["in_proj_a"],
+                comm.clone(),
+                dtype,
+                |w| undo_tiled_v_heads_first_dim(&w, num_k_heads_global, num_v_heads_global, 1),
+            )
+        } else {
+            TensorParallelColumnLinear::load_with_hints(
+                hidden_size,
+                num_v_heads_global,
+                false,
+                vb.pp(projection_key_map["in_proj_a"]),
+                comm.clone(),
+                &None,
+                &None,
+                dtype,
+            )
+        };
 
         if let (Ok(in_proj_z), Ok(in_proj_b), Ok(in_proj_a)) = (split_z, split_b, split_a) {
             if comm.world_size() > 1 {
                 // TP-safe path for packed in_proj_qkv [q|k|v]:
                 // shard each semantic chunk independently (q, k, v), not as one contiguous block.
-                let split_qkv_merged = MergedParallelColumnLinear::load_merged_chunks(
-                    hidden_size,
-                    key_dim_global * 2 + value_dim_global,
-                    0,
-                    vec![key_dim_global, key_dim_global, value_dim_global],
-                    None,
-                    vb.pp("in_proj_qkv"),
-                    comm.clone(),
-                    &quantization_config,
-                    &quant,
-                    dtype,
-                );
+                let split_qkv_merged =
+                    if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+                        load_restored_gguf_merged_qkv_linear(
+                            vb,
+                            hidden_size,
+                            key_dim_global,
+                            value_dim_global,
+                            num_k_heads_global,
+                            num_v_heads_global,
+                            head_v_dim,
+                            projection_key_map["in_proj_qkv"],
+                            comm.clone(),
+                            dtype,
+                        )
+                    } else {
+                        MergedParallelColumnLinear::load_merged_chunks(
+                            hidden_size,
+                            key_dim_global * 2 + value_dim_global,
+                            0,
+                            vec![key_dim_global, key_dim_global, value_dim_global],
+                            None,
+                            vb.pp(projection_key_map["in_proj_qkv"]),
+                            comm.clone(),
+                            &quantization_config,
+                            &quant,
+                            dtype,
+                        )
+                    };
 
                 match split_qkv_merged {
                     Ok(in_proj_qkv) => {
@@ -178,16 +253,37 @@ impl GatedDeltaNet {
             }
 
             // Single GPU (or non-FP8 fallback): use legacy split loader.
-            let split_qkv_legacy = TensorParallelColumnLinear::load_with_hints(
-                hidden_size,
-                key_dim_global * 2 + value_dim_global,
-                false,
-                vb.pp("in_proj_qkv"),
-                comm.clone(),
-                &quantization_config,
-                &quant,
-                dtype,
-            );
+            let split_qkv_legacy =
+                if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+                    load_restored_gguf_column_linear(
+                        vb,
+                        hidden_size,
+                        key_dim_global * 2 + value_dim_global,
+                        projection_key_map["in_proj_qkv"],
+                        comm.clone(),
+                        dtype,
+                        |w| {
+                            restore_qwen35_qkv_weight(
+                                &w,
+                                key_dim_global,
+                                num_k_heads_global,
+                                num_v_heads_global,
+                                head_v_dim,
+                            )
+                        },
+                    )
+                } else {
+                    TensorParallelColumnLinear::load_with_hints(
+                        hidden_size,
+                        key_dim_global * 2 + value_dim_global,
+                        false,
+                        vb.pp(projection_key_map["in_proj_qkv"]),
+                        comm.clone(),
+                        &quantization_config,
+                        &quant,
+                        dtype,
+                    )
+                };
 
             if let Ok(in_proj_qkv) = split_qkv_legacy {
                 return Ok(GdnProjection::SplitQkvZaLegacy {
@@ -344,6 +440,11 @@ impl GatedDeltaNet {
         } else {
             false
         };
+        let kernel_dtype = if vb.is_qvar_builder() {
+            DType::F32
+        } else {
+            dtype
+        };
 
         let num_v_heads = num_v_heads_global / world_size;
         let num_k_heads = num_k_heads_global / world_size;
@@ -359,16 +460,46 @@ impl GatedDeltaNet {
 
         // Learned GDN parameters
         let sd = shard(0, comm.rank(), comm.world_size());
-        let a_log = vb.get_with_hints_dtype((num_v_heads_global,), "A_log", sd, DType::F32)?;
-
-        let dt_bias = vb.get_with_hints_dtype((num_v_heads_global,), "dt_bias", sd, dtype)?;
+        let gdn_pairs = [
+            ("A_log", "ssm_a"),
+            ("dt_bias", "ssm_dt.bias"),
+            ("conv1d.weight", "ssm_conv1d.weight"),
+            ("conv1d.bias", "ssm_conv1d.bias"),
+            ("out_proj", "ssm_out"),
+            ("norm.weight", "ssm_norm.weight"),
+            ("norm.bias", "ssm_norm.bias"),
+        ];
+        let gdn_key_map = collect_key_map(vb.is_qvar_builder(), gdn_pairs);
+        let a_log_loaded =
+            vb.get_with_hints_dtype((num_v_heads_global,), gdn_key_map["A_log"], sd, DType::F32)?;
+        let mut a_log = if vb.is_qvar_builder() {
+            restore_qwen35_a_log_from_gguf(&a_log_loaded)?
+        } else {
+            a_log_loaded
+        };
+        let mut dt_bias = vb
+            .get_with_hints_dtype(
+                (num_v_heads_global,),
+                gdn_key_map["dt_bias"],
+                sd,
+                DType::F32,
+            )?
+            .to_dtype(kernel_dtype)?;
+        if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            a_log =
+                undo_tiled_v_heads_first_dim(&a_log, num_k_heads_global, num_v_heads_global, 1)?;
+            dt_bias =
+                undo_tiled_v_heads_first_dim(&dt_bias, num_k_heads_global, num_v_heads_global, 1)?;
+        }
 
         let projection = Self::load_projection(
             &vb,
             hidden_size,
+            num_k_heads_global,
             key_dim_global,
             value_dim_global,
             num_v_heads_global,
+            head_v_dim,
             comm.clone(),
             config,
             dtype,
@@ -376,50 +507,98 @@ impl GatedDeltaNet {
         )?;
 
         // Conv1D weights are stored global; slice rank-local q/k/v channel blocks.
-        let conv_weight = vb.get((conv_dim_global, 1, conv_kernel_size), "conv1d.weight")?;
+        let conv_weight = if vb.is_qvar_builder() {
+            vb.get_with_hints_dtype(
+                (conv_dim_global, conv_kernel_size),
+                gdn_key_map["conv1d.weight"],
+                Default::default(),
+                DType::F32,
+            )?
+            .unsqueeze(1)?
+        } else {
+            vb.get(
+                (conv_dim_global, 1, conv_kernel_size),
+                gdn_key_map["conv1d.weight"],
+            )?
+        };
         let q_start = rank * key_dim;
         let k_start = key_dim_global + rank * key_dim;
         let v_start = key_dim_global * 2 + rank * value_dim;
         let q_w = conv_weight.narrow(0, q_start, key_dim)?;
         let k_w = conv_weight.narrow(0, k_start, key_dim)?;
-        let v_w = conv_weight.narrow(0, v_start, value_dim)?;
-        let conv_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+        let mut v_w = conv_weight.narrow(0, v_start, value_dim)?;
+        if vb.is_qvar_builder() && num_k_heads != num_v_heads {
+            v_w = undo_tiled_v_heads_first_dim(&v_w, num_k_heads, num_v_heads, head_v_dim)?;
+        }
+        let conv_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?.to_dtype(kernel_dtype)?;
 
-        let conv_bias = vb.get((conv_dim_global,), "conv1d.bias").ok();
+        let conv_bias = vb.get((conv_dim_global,), gdn_key_map["conv1d.bias"]).ok();
         let conv_bias = if let Some(cb) = conv_bias {
             let q_b = cb.narrow(0, q_start, key_dim)?;
             let k_b = cb.narrow(0, k_start, key_dim)?;
-            let v_b = cb.narrow(0, v_start, value_dim)?;
-            Some(Tensor::cat(&[&q_b, &k_b, &v_b], 0)?)
+            let mut v_b = cb.narrow(0, v_start, value_dim)?;
+            if vb.is_qvar_builder() && num_k_heads != num_v_heads {
+                v_b = undo_tiled_v_heads_first_dim(&v_b, num_k_heads, num_v_heads, head_v_dim)?;
+            }
+            Some(Tensor::cat(&[&q_b, &k_b, &v_b], 0)?.to_dtype(kernel_dtype)?)
         } else {
             None
         };
 
         // Output projection
-        let out_proj = TensorParallelRowLinear::load_with_hints(
-            value_dim_global,
-            hidden_size,
-            vb.pp("out_proj"),
-            comm.clone(),
-            if is_fp8_quant {
-                &config.quantization_config
-            } else {
-                &None
-            },
-            if is_fp8_quant { &config.quant } else { &None },
-            dtype,
-        )?;
+        let out_proj = if vb.is_qvar_builder() && num_k_heads_global != num_v_heads_global {
+            load_restored_gguf_row_linear(
+                &vb,
+                value_dim_global,
+                hidden_size,
+                gdn_key_map["out_proj"],
+                comm.clone(),
+                dtype,
+                |w| {
+                    undo_tiled_v_heads_last_dim(
+                        &w,
+                        num_k_heads_global,
+                        num_v_heads_global,
+                        head_v_dim,
+                    )
+                },
+            )?
+        } else {
+            TensorParallelRowLinear::load_with_hints(
+                value_dim_global,
+                hidden_size,
+                vb.pp(gdn_key_map["out_proj"]),
+                comm.clone(),
+                if is_fp8_quant {
+                    &config.quantization_config
+                } else {
+                    &None
+                },
+                if is_fp8_quant { &config.quant } else { &None },
+                dtype,
+            )?
+        };
 
         // GDN output norm (gated RMSNorm): both Qwen3.5 and Qwen3Next use per-head params.
         let gdn_norm_weight = vb
-            .get_with_hints_dtype((head_v_dim,), "norm.weight", Shard::default(), DType::F32)
+            .get_with_hints_dtype(
+                (head_v_dim,),
+                gdn_key_map["norm.weight"],
+                Shard::default(),
+                DType::F32,
+            )
             .map_err(|err| {
                 candle_core::Error::Msg(format!(
                     "Unable to load linear_attn.norm.weight as per-head [{head_v_dim}]: {err}"
                 ))
             })?;
         let gdn_norm_bias = vb
-            .get_with_hints_dtype((head_v_dim,), "norm.bias", Shard::default(), DType::F32)
+            .get_with_hints_dtype(
+                (head_v_dim,),
+                gdn_key_map["norm.bias"],
+                Shard::default(),
+                DType::F32,
+            )
             .ok();
         let scale = 1.0f64 / (head_k_dim as f64).sqrt();
         Ok(Self {
@@ -457,7 +636,6 @@ impl GatedDeltaNet {
         }
         let (token_count, _hidden) = xs.dims2()?;
         let is_prefill = input_metadata.is_prefill;
-
         let (q, k, v, z, b, a) = self.project_inputs(xs)?;
         let mixed_qkv = Tensor::cat(&[&q, &k, &v], 1)?;
 

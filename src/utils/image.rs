@@ -508,13 +508,11 @@ pub fn get_image_config(
     let img_cfg = match model_type {
         ModelType::Mistral3VL => {
             use crate::models::mistral3_vl::Mistral3Config;
-            assert!(
-                config.extra_config_json.is_some(),
-                "Multimodel missing vision config!"
-            );
+            let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+                return Ok(None);
+            };
             let cfg: Mistral3Config =
-                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                    .map_err(candle_core::Error::wrap)?;
+                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
 
             let mut img_cfg = ImageProcessConfig::default(
                 None,
@@ -533,13 +531,11 @@ pub fn get_image_config(
         }
         ModelType::Gemma3 => {
             use crate::models::gemma3::config::Gemma3Config;
-            assert!(
-                config.extra_config_json.is_some(),
-                "Multimodel missing vision config!"
-            );
+            let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+                return Ok(None);
+            };
             let cfg: Gemma3Config =
-                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                    .map_err(candle_core::Error::wrap)?;
+                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
 
             let mut img_cfg = ImageProcessConfig::default(
                 Some("<start_of_image>".to_string()),
@@ -562,13 +558,11 @@ pub fn get_image_config(
         }
         ModelType::Qwen3VL => {
             use crate::models::qwen3_vl::config::Qwen3VLConfig;
-            assert!(
-                config.extra_config_json.is_some(),
-                "Multimodel missing vision config!"
-            );
+            let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+                return Ok(None);
+            };
             let cfg: Qwen3VLConfig =
-                serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                    .map_err(candle_core::Error::wrap)?;
+                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
 
             let mut img_cfg = ImageProcessConfig::default(
                 Some("<|vision_start|>".to_string()),

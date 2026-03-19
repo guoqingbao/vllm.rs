@@ -150,9 +150,9 @@ impl MultiModalProjector {
 
 pub struct Mistral3ForConditionalGeneration {
     text_model: LLaMaForCausalLM,
-    vision_model: VisionModel,
-    mmproj: MultiModalProjector,
-    cfg: Mistral3Config,
+    vision_model: Option<VisionModel>,
+    mmproj: Option<MultiModalProjector>,
+    image_token_index: Option<usize>,
 }
 
 impl Mistral3ForConditionalGeneration {
@@ -165,39 +165,55 @@ impl Mistral3ForConditionalGeneration {
         device: &Device,
         progress_reporter: Arc<RwLock<Box<dyn ProgressLike>>>,
     ) -> Result<Self> {
-        assert!(
-            config.extra_config_json.is_some(),
-            "Invalid multimodel config file!"
-        );
-        let mut cfg: Mistral3Config =
-            serde_json::from_str(config.extra_config_json.as_ref().unwrap())
-                .map_err(candle_core::Error::wrap)?;
-        cfg.text_config = config.clone();
-        crate::log_info!("Loading vision tower...");
-        let vision_model = VisionModel::new(
-            &cfg.vision_config,
-            vb.pp("vision_tower"),
-            comm.clone(),
-            dtype,
-        )?;
-        let mmproj = MultiModalProjector::new(&cfg, vb.pp("multi_modal_projector"), dtype)?;
         crate::log_info!("Loading language model...");
+        let text_vb = if vb.is_qvar_builder() {
+            vb.clone()
+        } else {
+            vb.pp("language_model")
+        };
 
         let text_model = LLaMaForCausalLM::new(
-            &vb.pp("language_model"),
+            &text_vb,
             comm.clone(),
-            &cfg.text_config,
+            config,
             dtype,
             is_rope_i,
             device,
             progress_reporter,
         )?;
 
+        let (vision_model, mmproj, image_token_index) =
+            if let Some(extra_config_json) = config.extra_config_json.as_ref() {
+                let mut cfg: Mistral3Config =
+                    serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
+                cfg.text_config = config.clone();
+                crate::log_info!("Loading vision tower...");
+                (
+                    Some(VisionModel::new(
+                        &cfg.vision_config,
+                        vb.pp("vision_tower"),
+                        comm.clone(),
+                        dtype,
+                    )?),
+                    Some(MultiModalProjector::new(
+                        &cfg,
+                        vb.pp("multi_modal_projector"),
+                        dtype,
+                    )?),
+                    Some(cfg.image_token_index),
+                )
+            } else {
+                crate::log_warn!(
+                    "Vision tower is disabled because no multimodal vision config was found."
+                );
+                (None, None, None)
+            };
+
         Ok(Self {
             vision_model,
             text_model,
             mmproj,
-            cfg: cfg.clone(),
+            image_token_index,
         })
     }
 
@@ -208,9 +224,13 @@ impl Mistral3ForConditionalGeneration {
     ) -> Result<Tensor> {
         let image_outputs = self
             .vision_model
+            .as_ref()
+            .unwrap()
             .forward(image_features, image_sizes.clone())?;
         let selected_image_feature = image_outputs;
         self.mmproj
+            .as_ref()
+            .unwrap()
             .forward(&selected_image_feature.squeeze(0)?, image_sizes)
     }
 
@@ -229,8 +249,18 @@ impl Mistral3ForConditionalGeneration {
         );
 
         if let Some(images) = images {
+            let Some(image_token_index) = self.image_token_index else {
+                crate::log_warn!("Ignoring image inputs because the vision tower is disabled.");
+                return self.text_model.forward(
+                    &input_embeds,
+                    positions,
+                    kv_caches,
+                    input_metadata,
+                    true,
+                );
+            };
             let mut image_tensor = images.to_tensor_f32(&input_ids.device())?.to_dtype(dtype)?;
-            let image_mask = input_ids.eq(self.cfg.image_token_index as u32)?;
+            let image_mask = input_ids.eq(image_token_index as u32)?;
             let image_mask = image_mask
                 .unsqueeze(D::Minus1)?
                 .broadcast_as(input_embeds.shape().clone())?

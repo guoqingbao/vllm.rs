@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+
 pub struct Downloader {
     model_id: Option<String>,
     weight_path: Option<String>,
@@ -17,6 +18,7 @@ pub struct ModelPaths {
     pub config_filename: PathBuf,
     pub generation_config_filename: PathBuf,
     pub filenames: Vec<PathBuf>,
+    pub auxiliary_filenames: Vec<PathBuf>,
     pub chat_template_filename: Option<PathBuf>,
 }
 
@@ -33,6 +35,9 @@ impl ModelPaths {
     pub fn get_weight_filenames(&self) -> Vec<PathBuf> {
         self.filenames.clone()
     }
+    pub fn get_auxiliary_filenames(&self) -> Vec<PathBuf> {
+        self.auxiliary_filenames.clone()
+    }
     pub fn get_generation_config_filename(&self) -> PathBuf {
         self.generation_config_filename.clone()
     }
@@ -42,6 +47,78 @@ impl ModelPaths {
 }
 
 impl Downloader {
+    fn is_mmproj_filename(name: &str) -> bool {
+        let lower = name.to_ascii_lowercase();
+        lower.ends_with(".gguf") && lower.starts_with("mmproj")
+    }
+
+    fn mmproj_rank(name: &str, main_filename: Option<&str>) -> i32 {
+        let lower = name.to_ascii_lowercase();
+        let mut score = 0;
+        if let Some(main) = main_filename {
+            let exact = format!("mmproj-{}", main.to_ascii_lowercase());
+            if lower == exact {
+                score += 100;
+            }
+        }
+        if lower.contains("bf16") {
+            score += 30;
+        }
+        if lower.contains("f16") {
+            score += 20;
+        }
+        if lower.contains("f32") {
+            score += 5;
+        }
+        score
+    }
+
+    fn pick_mmproj_filename<'a, I>(candidates: I, main_filename: Option<&str>) -> Option<String>
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        candidates
+            .into_iter()
+            .filter(|name| Self::is_mmproj_filename(name))
+            .max_by(|left, right| {
+                let lrank = Self::mmproj_rank(left, main_filename);
+                let rrank = Self::mmproj_rank(right, main_filename);
+                lrank.cmp(&rrank).then_with(|| left.cmp(right))
+            })
+            .map(ToString::to_string)
+    }
+
+    fn find_local_mmproj_file(main_file: &Path) -> Option<PathBuf> {
+        let dir = main_file.parent()?;
+        let main_name = main_file.file_name()?.to_str()?;
+        let mut candidates = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()? {
+            let path = entry.ok()?.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if Self::is_mmproj_filename(name) {
+                candidates.push(path);
+            }
+        }
+        candidates.into_iter().max_by(|left, right| {
+            let lname = left
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let rname = right
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            let lrank = Self::mmproj_rank(lname, Some(main_name));
+            let rrank = Self::mmproj_rank(rname, Some(main_name));
+            lrank.cmp(&rrank).then_with(|| lname.cmp(rname))
+        })
+    }
+
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -52,6 +129,33 @@ impl Downloader {
             weight_path,
             weight_file,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Downloader;
+
+    #[test]
+    fn pick_mmproj_prefers_exact_match() {
+        let selected = Downloader::pick_mmproj_filename(
+            [
+                "mmproj-BF16.gguf",
+                "mmproj-Qwen3.5-27B-Q4_K_M.gguf",
+                "mmproj-F16.gguf",
+            ],
+            Some("Qwen3.5-27B-Q4_K_M.gguf"),
+        );
+        assert_eq!(selected.as_deref(), Some("mmproj-Qwen3.5-27B-Q4_K_M.gguf"));
+    }
+
+    #[test]
+    fn pick_mmproj_prefers_bf16_over_f16() {
+        let selected = Downloader::pick_mmproj_filename(
+            ["mmproj-F16.gguf", "mmproj-BF16.gguf", "mmproj-Q8_0.gguf"],
+            Some("model.gguf"),
+        );
+        assert_eq!(selected.as_deref(), Some("mmproj-BF16.gguf"));
     }
 }
 
@@ -124,6 +228,7 @@ impl Downloader {
                             } else {
                                 "".into()
                             },
+                            auxiliary_filenames: Vec::new(),
                             chat_template_filename: if Path::new(path)
                                 .join("chat_template.json")
                                 .exists()
@@ -139,20 +244,30 @@ impl Downloader {
             }
             //model in a quantized file (gguf/ggml format)
             (None, path, Some(file)) => (
-                ModelPaths {
-                    tokenizer_filename: PathBuf::new(),
-                    tokenizer_config_filename: PathBuf::new(),
-                    config_filename: PathBuf::new(),
-                    filenames: {
-                        let path = path.clone().unwrap_or("".to_string());
-                        if Path::new(&path).join(file).exists() {
-                            vec![Path::new(&path).join(file)]
-                        } else {
-                            panic!("Model file not found {file}");
-                        }
-                    },
-                    generation_config_filename: "".into(),
-                    chat_template_filename: None,
+                {
+                    let path = path.clone().unwrap_or_default();
+                    let main_file = Path::new(&path).join(file);
+                    if !main_file.exists() {
+                        panic!("Model file not found {file}");
+                    }
+                    let auxiliary_filenames = Self::find_local_mmproj_file(&main_file)
+                        .map(|path| {
+                            crate::log_info!(
+                                "Found auxiliary GGUF file for multimodal model: {}",
+                                path.display()
+                            );
+                            vec![path]
+                        })
+                        .unwrap_or_default();
+                    ModelPaths {
+                        tokenizer_filename: PathBuf::new(),
+                        tokenizer_config_filename: PathBuf::new(),
+                        config_filename: PathBuf::new(),
+                        filenames: vec![main_file],
+                        auxiliary_filenames,
+                        generation_config_filename: "".into(),
+                        chat_template_filename: None,
+                    }
                 },
                 true,
             ),
@@ -330,6 +445,7 @@ impl Downloader {
                 tokenizer_config_filename,
                 config_filename,
                 filenames,
+                auxiliary_filenames: Vec::new(),
                 generation_config_filename,
                 chat_template_filename,
             });
@@ -381,6 +497,7 @@ impl Downloader {
             tokenizer_config_filename,
             config_filename,
             filenames,
+            auxiliary_filenames: Vec::new(),
             generation_config_filename,
             chat_template_filename: None,
         })
@@ -395,38 +512,75 @@ impl Downloader {
         );
         let filename = self.weight_file.clone().unwrap();
         let mut filenames = vec![];
+        let api = hf_hub::api::sync::Api::new().unwrap();
+        let revision = revision.unwrap_or("main".to_string());
+        let repo = api.repo(hf_hub::Repo::with_revision(
+            self.model_id.clone().unwrap(),
+            hf_hub::RepoType::Model,
+            revision.to_string(),
+        ));
+        let repo_info = repo.info().map_err(candle_core::Error::wrap)?;
+        let mmproj_name = Self::pick_mmproj_filename(
+            repo_info.siblings.iter().map(|s| s.rfilename.as_str()),
+            Some(&filename),
+        );
+
+        let mut auxiliary_filenames = Vec::new();
         if let Some(cache_path) = self.check_cache() {
             let cached_gguf_file = cache_path.join(&filename);
             if cached_gguf_file.exists() {
                 crate::log_warn!("Found cache: {}", cached_gguf_file.display());
                 filenames.push(cached_gguf_file.clone());
+            }
+
+            if let Some(mmproj_name) = &mmproj_name {
+                let cached_mmproj_file = cache_path.join(mmproj_name);
+                if cached_mmproj_file.exists() {
+                    crate::log_warn!("Found auxiliary cache: {}", cached_mmproj_file.display());
+                    auxiliary_filenames.push(cached_mmproj_file);
+                }
+            }
+
+            if !filenames.is_empty() && (mmproj_name.is_none() || !auxiliary_filenames.is_empty()) {
                 return Ok(ModelPaths {
                     tokenizer_filename: "".into(),
                     tokenizer_config_filename: "".into(),
                     config_filename: "".into(),
                     filenames,
+                    auxiliary_filenames,
                     generation_config_filename: "".into(),
                     chat_template_filename: None,
                 });
             }
         }
-        let api = hf_hub::api::sync::Api::new().unwrap();
-        let revision = revision.unwrap_or("main".to_string());
-        let filename = api
-            .repo(hf_hub::Repo::with_revision(
-                self.model_id.clone().unwrap(),
-                hf_hub::RepoType::Model,
-                revision.to_string(),
-            ))
-            .get(filename.as_str())
-            .map_err(candle_core::Error::wrap)?;
-        filenames.push(filename);
+
+        if filenames.is_empty() {
+            let filename = repo
+                .get(filename.as_str())
+                .map_err(candle_core::Error::wrap)?;
+            filenames.push(filename);
+        }
+
+        if auxiliary_filenames.is_empty() {
+            if let Some(mmproj_name) = mmproj_name {
+                crate::log_info!(
+                    "Downloading auxiliary GGUF file {} from repo {}",
+                    mmproj_name,
+                    self.model_id.as_ref().unwrap(),
+                );
+                let mmproj_path = repo
+                    .get(mmproj_name.as_str())
+                    .map_err(candle_core::Error::wrap)?;
+                auxiliary_filenames.push(mmproj_path);
+            }
+        }
 
         Ok(ModelPaths {
             tokenizer_filename: "".into(),
             tokenizer_config_filename: "".into(),
             config_filename: "".into(),
             filenames,
+            auxiliary_filenames,
             generation_config_filename: "".into(),
             chat_template_filename: None,
         })

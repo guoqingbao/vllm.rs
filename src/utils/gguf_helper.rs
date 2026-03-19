@@ -262,6 +262,7 @@ pub struct GGUFInfo {
 
 struct PropsGGUF {
     model: String,
+    pre: Option<String>,
     tokens: Vec<String>,
     added_tokens: Option<Vec<String>>,
     scores: Option<Vec<f32>>,
@@ -280,6 +281,7 @@ impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
 
         let props = Self {
             model: c.get_value("model")?,
+            pre: c.get_value("pre").ok(),
             tokens: c.get_value("tokens")?,
             added_tokens: c.get_value("added_tokens").ok(),
             scores: c.get_value("scores").ok(),
@@ -432,10 +434,11 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     )?;
 
     let split = Split::new(
-        SplitPattern::Regex("(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+".to_string()),
+        SplitPattern::Regex(bpe_pre_tokenizer_regex(p.pre.as_deref()).to_string()),
         SplitDelimiterBehavior::Isolated,
         false,
-    ).unwrap();
+    )
+    .unwrap();
 
     // example:
     // "type": "ByteLevel",
@@ -464,6 +467,20 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     }
 
     Ok((tokenizer, TokenizerKind::Bpe))
+}
+
+fn bpe_pre_tokenizer_regex(pre: Option<&str>) -> &'static str {
+    match pre {
+        Some("qwen35") => {
+            "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| ?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+        }
+        Some("qwen2") | Some("deepseek-r1-qwen") | Some("kormo") => {
+            "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+        }
+        _ => {
+            "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"
+        }
+    }
 }
 
 fn unigram_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
@@ -614,5 +631,103 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
         };
 
         Ok(value)
+    }
+}
+
+pub fn undo_tiled_v_heads_first_dim(
+    x: &candle_core::Tensor,
+    num_k_heads: usize,
+    num_v_heads: usize,
+    head_dim: usize,
+) -> candle_core::Result<candle_core::Tensor> {
+    if num_k_heads == num_v_heads {
+        return Ok(x.clone());
+    }
+    let num_v_per_k = num_v_heads / num_k_heads;
+    let dims = x.dims().to_vec();
+    if dims.is_empty() || dims[0] != num_v_heads * head_dim {
+        candle_core::bail!(
+            "undo_tiled_v_heads_first_dim expects leading dim {}, got {:?}",
+            num_v_heads * head_dim,
+            x.shape()
+        );
+    }
+    let mut reshaped = vec![num_v_per_k, num_k_heads, head_dim];
+    reshaped.extend_from_slice(&dims[1..]);
+    x.reshape(reshaped)?
+        .transpose(0, 1)?
+        .contiguous()?
+        .reshape(dims)
+}
+
+pub fn undo_tiled_v_heads_last_dim(
+    x: &candle_core::Tensor,
+    num_k_heads: usize,
+    num_v_heads: usize,
+    head_dim: usize,
+) -> candle_core::Result<candle_core::Tensor> {
+    if num_k_heads == num_v_heads {
+        return Ok(x.clone());
+    }
+    let num_v_per_k = num_v_heads / num_k_heads;
+    let dims = x.dims().to_vec();
+    let last = *dims.last().ok_or_else(|| {
+        candle_core::Error::Msg("undo_tiled_v_heads_last_dim expects non-empty tensor".into())
+    })?;
+    if last != num_v_heads * head_dim {
+        candle_core::bail!(
+            "undo_tiled_v_heads_last_dim expects trailing dim {}, got {:?}",
+            num_v_heads * head_dim,
+            x.shape()
+        );
+    }
+    let split_dim = dims.len() - 1;
+    let mut reshaped = dims[..split_dim].to_vec();
+    reshaped.extend_from_slice(&[num_v_per_k, num_k_heads, head_dim]);
+    x.reshape(reshaped)?
+        .transpose(split_dim, split_dim + 1)?
+        .contiguous()?
+        .reshape(dims)
+}
+
+pub fn restore_qwen35_qkv_weight(
+    weight: &candle_core::Tensor,
+    key_dim: usize,
+    num_k_heads: usize,
+    num_v_heads: usize,
+    head_v_dim: usize,
+) -> candle_core::Result<candle_core::Tensor> {
+    let q = weight.narrow(0, 0, key_dim)?;
+    let k = weight.narrow(0, key_dim, key_dim)?;
+    let v = undo_tiled_v_heads_first_dim(
+        &weight.narrow(0, key_dim * 2, num_v_heads * head_v_dim)?,
+        num_k_heads,
+        num_v_heads,
+        head_v_dim,
+    )?;
+    candle_core::Tensor::cat(&[&q, &k, &v], 0)
+}
+
+pub fn restore_qwen35_a_log_from_gguf(
+    a: &candle_core::Tensor,
+) -> candle_core::Result<candle_core::Tensor> {
+    a.neg()?.log()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bpe_pre_tokenizer_regex;
+
+    #[test]
+    fn qwen35_gguf_bpe_uses_qwen35_regex() {
+        let regex = bpe_pre_tokenizer_regex(Some("qwen35"));
+        assert!(regex.contains("\\p{M}"));
+        assert!(regex.contains("(?:'[sS]"));
+    }
+
+    #[test]
+    fn default_gguf_bpe_regex_stays_generic() {
+        let regex = bpe_pre_tokenizer_regex(None);
+        assert!(regex.contains("(?i:'s|'t|'re|'ve|'m|'ll|'d)"));
     }
 }

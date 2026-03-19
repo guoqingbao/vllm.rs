@@ -67,6 +67,7 @@ pub struct Qwen3_5MoEDecoderLayer {
     post_attention_layernorm: NormX,
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
     dtype: DType,
+    is_qvar_builder: bool,
 }
 
 impl Qwen3_5MoEDecoderLayer {
@@ -200,7 +201,7 @@ impl Qwen3_5MoEDecoderLayer {
                 vb.pp("input_layernorm")
             },
             DType::F32,
-            true,
+            !is_qvar_builder,
         )?;
 
         let post_attention_layernorm = rms_norm(
@@ -212,7 +213,7 @@ impl Qwen3_5MoEDecoderLayer {
                 vb.pp("post_attention_layernorm")
             },
             DType::F32,
-            true,
+            !is_qvar_builder,
         )?;
 
         let rotary = if layer_type == "full_attention" {
@@ -230,6 +231,7 @@ impl Qwen3_5MoEDecoderLayer {
             post_attention_layernorm,
             rotary_emb: rotary,
             dtype,
+            is_qvar_builder,
         })
     }
 
@@ -259,7 +261,9 @@ impl Qwen3_5MoEDecoderLayer {
                 )?
             }
             Qwen3_5MoEAttnType::LinearAttention(gdn) => {
-                if xs.dtype() != self.dtype {
+                if self.is_qvar_builder {
+                    gdn.forward(&xs, mamba_cache, input_metadata, seq_slots)?
+                } else if xs.dtype() != self.dtype {
                     gdn.forward(
                         &xs.to_dtype(self.dtype)?,
                         mamba_cache,
@@ -505,7 +509,7 @@ impl Qwen3_5MoEForCausalLM {
                 vb.pp(&format!("{}norm", prefix))
             },
             DType::F32,
-            true,
+            !is_qvar_builder,
         )?;
 
         let lm_head = ReplicatedLinear::load_no_bias(
@@ -550,6 +554,7 @@ impl Qwen3_5MoEForCausalLM {
         // Start small and let runner preallocate to the final engine capacity.
         let max_batch_size = 1;
 
+        let conv_cache_dtype = if is_qvar_builder { DType::F32 } else { dtype };
         let mamba_cache = if num_gdn_layers > 0 {
             MambaCache::new(
                 num_gdn_layers,
@@ -559,12 +564,12 @@ impl Qwen3_5MoEForCausalLM {
                 num_v_heads,
                 key_head_dim,
                 value_head_dim,
-                dtype,
+                conv_cache_dtype,
                 DType::F32,
                 device,
             )?
         } else {
-            MambaCache::new(0, 1, 1, 2, 1, 1, 1, dtype, DType::F32, device)?
+            MambaCache::new(0, 1, 1, 2, 1, 1, 1, conv_cache_dtype, DType::F32, device)?
         };
 
         Ok(Self {
