@@ -203,7 +203,7 @@ impl Mistral3ForConditionalGeneration {
                     Some(cfg.image_token_index),
                 )
             } else {
-                crate::log_warn!(
+                crate::log_error!(
                     "Vision tower is disabled because no multimodal vision config was found."
                 );
                 (None, None, None)

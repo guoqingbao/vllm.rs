@@ -557,12 +557,10 @@ pub fn get_image_config(
             Some(img_cfg)
         }
         ModelType::Qwen3VL => {
-            use crate::models::qwen3_vl::config::Qwen3VLConfig;
-            let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+            let Some(cfg) = crate::models::qwen3_vl::try_parse_multimodal_extra_config(config)?
+            else {
                 return Ok(None);
             };
-            let cfg: Qwen3VLConfig =
-                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
 
             let mut img_cfg = ImageProcessConfig::default(
                 Some("<|vision_start|>".to_string()),
@@ -601,5 +599,66 @@ impl ToFilter for Option<usize> {
             Some(4) => Ok(FilterType::Nearest),
             Some(x) => candle_core::bail!("Filter number {x} not supported"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_image_config;
+    use crate::utils::config::{Config, EosTokenId, ModelType};
+
+    fn base_config(extra_config_json: Option<String>) -> Config {
+        Config {
+            architectures: Some(vec!["Qwen3_5ForConditionalGeneration".to_string()]),
+            head_dim: Some(128),
+            num_attention_heads: 4,
+            num_key_value_heads: 4,
+            max_position_embeddings: 1024,
+            hidden_size: 512,
+            num_hidden_layers: 2,
+            max_model_len: Some(1024),
+            intermediate_size: 1024,
+            rms_norm_eps: 1e-6,
+            vocab_size: Some(32000),
+            rope_theta: Some(10000.0),
+            attention_bias: None,
+            qkv_bias: None,
+            attn_output_gate: None,
+            attn_logit_softcapping: None,
+            final_logit_softcapping: None,
+            tie_word_embeddings: Some(false),
+            bos_token_id: Some(1),
+            eos_token_id: Some(EosTokenId::Single(2)),
+            use_sliding_window: None,
+            sliding_window: None,
+            max_window_layers: None,
+            partial_rotary_factor: None,
+            hidden_act: candle_nn::Activation::Silu,
+            rope_scaling: None,
+            quant: None,
+            moe_cfg: None,
+            fp8_kvcache: None,
+            quantization_config: None,
+            is_multi_model: None,
+            extra_config_json,
+        }
+    }
+
+    #[test]
+    fn qwen35_text_only_extra_config_disables_image_config() {
+        let config = base_config(Some(
+            serde_json::json!({
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "linear_conv_kernel_dim": 4,
+                "linear_num_key_heads": 2,
+                "linear_num_value_heads": 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "full_attention_interval": 4,
+            })
+            .to_string(),
+        ));
+        let cfg = get_image_config(ModelType::Qwen3VL, &config).unwrap();
+        assert!(cfg.is_none());
     }
 }

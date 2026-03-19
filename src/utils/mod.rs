@@ -202,7 +202,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     let eos_token_id = md_get("tokenizer.ggml.eos_token_id");
 
     let eos_token_id = if eos_token_id.is_ok() {
-        EosTokenId::Multiple(vec![248044, 248046])
+        EosTokenId::Single(eos_token_id.unwrap().to_u32()?)
     } else {
         EosTokenId::Multiple(vec![])
     };

@@ -37,6 +37,20 @@ pub struct Qwen3VLForConditionalGeneration {
     vision_end_token_id: u32,
 }
 
+pub(crate) fn try_parse_multimodal_extra_config(config: &Config) -> Result<Option<Qwen3VLConfig>> {
+    let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+        return Ok(None);
+    };
+    let raw: serde_json::Value =
+        serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
+    if raw.get("vision_config").is_none() {
+        return Ok(None);
+    }
+    let mut cfg: Qwen3VLConfig = serde_json::from_value(raw).map_err(candle_core::Error::wrap)?;
+    cfg.text_config = config.clone();
+    Ok(Some(cfg))
+}
+
 impl Qwen3VLForConditionalGeneration {
     pub fn new(
         vb: &VarBuilderX,
@@ -54,11 +68,7 @@ impl Qwen3VLForConditionalGeneration {
         let mut vision_start_token_id = 0;
         let mut vision_end_token_id = 0;
 
-        if let Some(extra_config_json) = config.extra_config_json.as_ref() {
-            let mut cfg: Qwen3VLConfig =
-                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
-            cfg.text_config = config.clone();
-
+        if let Some(cfg) = try_parse_multimodal_extra_config(config)? {
             if cfg.quantization_config.is_some() {
                 config_text.quantization_config = cfg.quantization_config.clone();
             }
@@ -82,13 +92,13 @@ impl Qwen3VLForConditionalGeneration {
                     device,
                 )?);
             } else {
-                crate::log_warn!(
+                crate::log_error!(
                     "Vision tower is disabled because no auxiliary GGUF mmproj file was found."
                 );
             }
         } else {
-            crate::log_warn!(
-                "Vision tower is disabled because no multimodal vision config was found."
+            crate::log_error!(
+                "Vision tower is disabled because no multimodal vision config (or weight) was found."
             );
         }
 
@@ -549,5 +559,101 @@ impl Qwen3VLForConditionalGeneration {
             Qwen3TextModel::MoE35(m) => m.reset_mamba_cache(),
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_parse_multimodal_extra_config;
+    use crate::models::qwen3_vl::config::VisionConfig;
+    use crate::utils::config::{Config, EosTokenId};
+
+    fn base_config(extra_config_json: Option<String>) -> Config {
+        Config {
+            architectures: Some(vec!["Qwen3_5ForConditionalGeneration".to_string()]),
+            head_dim: Some(128),
+            num_attention_heads: 4,
+            num_key_value_heads: 4,
+            max_position_embeddings: 1024,
+            hidden_size: 512,
+            num_hidden_layers: 2,
+            max_model_len: Some(1024),
+            intermediate_size: 1024,
+            rms_norm_eps: 1e-6,
+            vocab_size: Some(32000),
+            rope_theta: Some(10000.0),
+            attention_bias: None,
+            qkv_bias: None,
+            attn_output_gate: None,
+            attn_logit_softcapping: None,
+            final_logit_softcapping: None,
+            tie_word_embeddings: Some(false),
+            bos_token_id: Some(1),
+            eos_token_id: Some(EosTokenId::Single(2)),
+            use_sliding_window: None,
+            sliding_window: None,
+            max_window_layers: None,
+            partial_rotary_factor: None,
+            hidden_act: candle_nn::Activation::Silu,
+            rope_scaling: None,
+            quant: None,
+            moe_cfg: None,
+            fp8_kvcache: None,
+            quantization_config: None,
+            is_multi_model: None,
+            extra_config_json,
+        }
+    }
+
+    #[test]
+    fn qwen35_hybrid_only_extra_config_stays_text_only() {
+        let config = base_config(Some(
+            serde_json::json!({
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "linear_conv_kernel_dim": 4,
+                "linear_num_key_heads": 2,
+                "linear_num_value_heads": 4,
+                "linear_key_head_dim": 128,
+                "linear_value_head_dim": 128,
+                "full_attention_interval": 4,
+            })
+            .to_string(),
+        ));
+        let parsed = try_parse_multimodal_extra_config(&config).unwrap();
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn multimodal_extra_config_is_parsed_when_vision_config_exists() {
+        let text_config = base_config(None);
+        let config = base_config(Some(
+            serde_json::json!({
+                "architectures": ["Qwen3_5ForConditionalGeneration"],
+                "text_config": text_config,
+                "vision_config": VisionConfig {
+                    depth: 2,
+                    hidden_size: 128,
+                    out_hidden_size: 128,
+                    hidden_act: candle_nn::Activation::Gelu,
+                    intermediate_size: 256,
+                    num_heads: 4,
+                    in_chans: 3,
+                    patch_size: 14,
+                    spatial_merge_size: 2,
+                    temporal_patch_size: 2,
+                    num_position_embeddings: 64,
+                    deepstack_visual_indexes: Vec::new(),
+                },
+                "image_token_id": 151655u32,
+                "video_token_id": 151656u32,
+                "vision_start_token_id": 151652u32,
+                "vision_end_token_id": 151653u32,
+                "tie_word_embeddings": false,
+                "quantization_config": null,
+            })
+            .to_string(),
+        ));
+        let parsed = try_parse_multimodal_extra_config(&config).unwrap();
+        assert!(parsed.is_some());
     }
 }
