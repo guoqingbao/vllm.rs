@@ -7,6 +7,7 @@ use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
 use crate::utils::get_dtype;
+use crate::utils::reasoning::ReasoningEffort;
 use llguidance::api::TopLevelGrammar;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
@@ -427,6 +428,22 @@ impl SamplingParams {
         } else {
             self.grammar = None;
         }
+    }
+
+    #[getter]
+    fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort.as_ref().map(|effort| match effort {
+            ReasoningEffort::None => "none".to_string(),
+            ReasoningEffort::Low => "low".to_string(),
+            ReasoningEffort::Medium => "medium".to_string(),
+            ReasoningEffort::High => "high".to_string(),
+            ReasoningEffort::ChainOfThought => "chain_of_thought".to_string(),
+        })
+    }
+
+    #[setter]
+    fn set_reasoning_effort(&mut self, value: Option<String>) {
+        self.reasoning_effort = value.map(ReasoningEffort::from_str);
     }
 }
 
