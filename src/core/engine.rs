@@ -176,6 +176,14 @@ impl LLMEngine {
             log_info!("Using default device ID: [0]");
             vec![0]
         };
+        #[cfg(feature = "nvtx")]
+        assert!(
+            device_ids.len() == 1,
+            "nvtx profiler only workable on single rank!"
+        );
+
+        #[cfg(feature = "nvtx")]
+        let use_runner = false;
 
         let runners = if !use_runner {
             let device = crate::utils::new_device(device_ids[0])?;

@@ -7,3 +7,5 @@ AGENTS.md
 *.log
 *.code-workspace
 CLAUDE.md
+*.nsys-rep
+*.sqlite
