@@ -714,6 +714,8 @@ impl ModelRunner {
 
     #[allow(unused)]
     pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
+        #[cfg(feature = "nvtx")]
+        nvtx::range_push!("{}", if is_prefill { "prefill" } else { "decoding" });
         let (input_ids, positions, mut input_metadata) = if is_prefill {
             match &seqs {
                 Seqs::SeqRefs(seqs) => self.prepare_prefill(seqs)?,
@@ -842,6 +844,8 @@ impl ModelRunner {
             }
         )?;
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
+        #[cfg(feature = "nvtx")]
+        nvtx::range_pop!();
         Ok(output_ids)
     }
 
