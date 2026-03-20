@@ -314,25 +314,6 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         if let Some(routed_scaling_factor) = self.routed_scaling_factor {
             topk_weights = (topk_weights * routed_scaling_factor)?;
         }
-        let xs = if cfg!(feature = "flashinfer") {
-            xs.to_dtype(DType::BF16)?
-        } else {
-            xs.to_owned()
-        };
-
-        #[cfg(all(feature = "cuda", feature = "flashinfer"))]
-        if let Ok(mut ys) =
-            moe::flashinfer_fused_moe(&xs, &topk_ids, &topk_weights, &self.gate_up_w, &self.down_w)
-        {
-            if self.world_size > 1 {
-                ys = self.all_reduce.apply(&ys)?;
-            }
-            return Ok(if ys.dtype() != self.dtype {
-                ys.to_dtype(self.dtype)?
-            } else {
-                ys
-            });
-        }
 
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
@@ -1222,30 +1203,10 @@ impl FusedMoeFp8 {
         }
 
         let xs = if xs.dtype() == DType::F32 {
-            if cfg!(feature = "flashinfer") {
-                xs.to_dtype(DType::BF16)?
-            } else {
-                xs.to_dtype(self.dtype)?
-            }
+            xs.to_dtype(self.dtype)?
         } else {
             xs.clone()
         };
-
-        #[cfg(all(feature = "cuda", feature = "flashinfer"))]
-        if let Ok(mut ys) = moe::flashinfer_fused_moe_fp8(
-            &xs,
-            &topk_ids,
-            &topk_weights,
-            &self.gate_up_experts,
-            &self.gate_up_experts_scale,
-            &self.down_experts,
-            &self.down_experts_scale,
-        ) {
-            if self.world_size > 1 {
-                ys = self.all_reduce.apply(&ys)?;
-            }
-            return Ok(ys.to_dtype(self.dtype)?);
-        }
 
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
