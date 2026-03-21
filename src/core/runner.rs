@@ -169,8 +169,9 @@ impl ModelRunner {
         if !prefix_cache_enabled || mamba_cache_capacity == 0 {
             return 0;
         }
-        // Prefix snapshots are sized from auto-planned mamba slot capacity.
-        mamba_cache_capacity
+        // Keep a larger snapshot pool than active slots so prompt/chunk-prefill
+        // boundaries survive decode-time snapshot churn when prefix cache is hot.
+        mamba_cache_capacity.saturating_mul(2)
     }
 
     fn apply_requested_guidance(
@@ -694,11 +695,16 @@ impl ModelRunner {
         }
     }
 
-    pub fn capture_mamba_prefix_state(&self, seq_id: usize, hash: u64) -> Result<bool> {
+    pub fn capture_mamba_prefix_state(
+        &self,
+        seq_id: usize,
+        hash: u64,
+        preserve: bool,
+    ) -> Result<bool> {
         match &self.model {
-            Model::Qwen3_5(model) => model.capture_mamba_prefix_state(seq_id, hash),
-            Model::Qwen3_5MoE(model) => model.capture_mamba_prefix_state(seq_id, hash),
-            Model::Qwen3VL(model) => model.capture_mamba_prefix_state(seq_id, hash),
+            Model::Qwen3_5(model) => model.capture_mamba_prefix_state(seq_id, hash, preserve),
+            Model::Qwen3_5MoE(model) => model.capture_mamba_prefix_state(seq_id, hash, preserve),
+            Model::Qwen3VL(model) => model.capture_mamba_prefix_state(seq_id, hash, preserve),
             _ => return Ok(true),
         }
     }
@@ -936,7 +942,7 @@ impl ModelRunner {
         let mut max_seqlen_q = 0;
         let mut max_seqlen_k = 0;
         let mut slot_mapping = Vec::new();
-        let CHUNK_SIZE: usize = 8192;
+        let CHUNK_SIZE: usize = if cfg!(feature = "cuda") { 8192 } else { 4096 };
         let mut max_context_len = 0;
         for (seq_idx, seq) in seqs.iter().enumerate() {
             let seqlen = seq.len();
