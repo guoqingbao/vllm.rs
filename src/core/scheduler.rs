@@ -655,7 +655,7 @@ impl Scheduler {
     ) -> (Vec<usize>, Vec<usize>) {
         let mut finished_seqs = Vec::new();
         let mut remove_ids = Vec::new();
-        let CHUNK_SIZE: usize = 8192;
+        let CHUNK_SIZE: usize = if cfg!(feature = "cuda") { 8192 } else { 4096 };
         for (i, id) in scheduled_ids.iter().enumerate() {
             if *id < self.running.len() {
                 let seq = &self.running[*id];

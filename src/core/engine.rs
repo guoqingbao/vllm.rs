@@ -1393,7 +1393,7 @@ impl LLMEngine {
             let mut chunked_mean: Option<Vec<f32>> = None;
             let mut last_vec: Option<Vec<f32>> = None;
             let mut processed_tokens = 0usize;
-            let chunk_size = 8192;
+            let chunk_size = if cfg!(feature = "cuda") { 8192 } else { 4096 };
 
             while seq.num_cached_tokens < seq.len() {
                 let remaining = seq.len() - seq.num_cached_tokens;

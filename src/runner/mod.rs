@@ -194,7 +194,7 @@ pub enum MessageType {
     FinishDecode(usize),
 
     // Hybrid mamba-prefix state management.
-    CaptureMambaPrefixState((usize, u64)),
+    CaptureMambaPrefixState((usize, u64, bool)),
     CaptureMambaPrefixStateResponse(bool),
     HasMambaPrefixState(u64),
     HasMambaPrefixStateResponse(bool),

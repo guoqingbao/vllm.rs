@@ -294,13 +294,14 @@ fn main() -> anyhow::Result<()> {
             Ok(MessageType::FinishDecode(id)) => {
                 runner.finished(id);
             }
-            Ok(MessageType::CaptureMambaPrefixState((seq_id, hash))) => {
-                let ret = runner.capture_mamba_prefix_state(seq_id, hash);
+            Ok(MessageType::CaptureMambaPrefixState((seq_id, hash, preserve))) => {
+                let ret = runner.capture_mamba_prefix_state(seq_id, hash, preserve);
                 if ret.is_err() {
                     vllm_rs::log_error!(
-                        "CaptureMambaPrefixState failed for seq {} hash {}: {:?}",
+                        "CaptureMambaPrefixState failed for seq {} hash {} preserve={} : {:?}",
                         seq_id,
                         hash,
+                        preserve,
                         ret
                     );
                 }

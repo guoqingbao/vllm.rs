@@ -436,7 +436,8 @@ impl BlockManager {
         else {
             return;
         };
-        match self.try_capture_mamba_prefix_state(seq.id, hash) {
+        let preserve_snapshot = seq.output_ids.is_empty();
+        match self.try_capture_mamba_prefix_state(seq.id, hash, preserve_snapshot) {
             Ok(true) => {
                 if let Some(&block_id_u32) = seq.block_table.get(full_blocks.saturating_sub(1)) {
                     let block_id = block_id_u32 as usize;
@@ -797,9 +798,9 @@ impl BlockManager {
         pub,
         try_capture_mamba_prefix_state,
         capture_mamba_prefix_state,
-        (seq_id: usize, hash: u64),
+        (seq_id: usize, hash: u64, preserve: bool),
         MessageType::CaptureMambaPrefixState,
-        ((seq_id, hash)),
+        ((seq_id, hash, preserve)),
         MessageType::CaptureMambaPrefixStateResponse,
         bool
     );
