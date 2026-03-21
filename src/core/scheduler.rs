@@ -671,8 +671,6 @@ impl Scheduler {
                     }
                     finished_seqs.push((i, seq.id));
                 } else {
-                    self.block_manager
-                        .capture_mamba_prefix_state(seq, seq.num_cached_tokens + CHUNK_SIZE);
                     remove_ids.push(seq.id);
                     //unfinished due to chunked_prefill, push back to waiting list
                     let mut seq = seq.clone();

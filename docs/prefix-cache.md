@@ -37,8 +37,9 @@ Example with default `block_size=64` and stride `8`:
 - Decode snapshot boundary is every `512` tokens.
 - Effective hybrid prefix reuse is aligned to the nearest captured boundary.
 
-This setting only sparsifies decode-time snapshot capture. Prompt/prefill
-snapshot capture remains dense.
+This setting only sparsifies decode-time snapshot capture. Prompt snapshots are
+still captured at prefix-cache-visible boundaries, including the final chunk of
+chunked prefill.
 
 ## Notes
 - Prefix cache uses the same KV memory pool as active sequences. A larger cache
