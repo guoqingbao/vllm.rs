@@ -467,16 +467,58 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     Ok(cfg)
 }
 
+/// Derives optimal YARN RoPE scaling parameters based on the scaling factor.
+/// 
+/// For factors > 4.0, parameters are scaled proportionally to maintain
+/// appropriate frequency band transitions. The attn_factor is kept at 1.0
+/// as it's a multiplier applied to the YARN mscale calculation.
+/// Reference: https://github.com/jquesnelle/yarn
+/// 
+/// Returns: (beta_fast, beta_slow, extrapolation_factor, attn_factor)
+pub fn derive_yarn_parameters(factor: f64) -> (f64, f64, f64, f64) {
+    // Validate factor
+    let factor = factor.max(1.0);
+
+    // beta_fast: Controls transition band width between fast and slow frequencies
+    // For factor > 4, scale proportionally to sqrt(factor/4)
+    let beta_fast = if factor <= 4.0 {
+        32.0
+    } else {
+        32.0 * (factor / 4.0).sqrt()
+    };
+
+    // beta_slow: Controls low-frequency attenuation
+    // Keep at 1.0 for all scaling factors (standard YARN behavior)
+    let beta_slow = 1.0;
+
+    // extrapolation_factor: Adjusts extrapolation behavior beyond original context
+    // Slightly increase for factors > 8.0
+    let extrapolation_factor = if factor > 8.0 {
+        1.0 + 0.05 * (factor - 8.0).sqrt()
+    } else {
+        1.0
+    };
+
+    // attn_factor: Attention scaling multiplier
+    // In YARN, this is applied to mscale = (0.1 * ln(factor) + 1) * attn_factor
+    // The reference implementation keeps attn_factor = 1.0
+    let attn_factor = 1.0;
+
+    (beta_fast, beta_slow, extrapolation_factor, attn_factor)
+}
+
 pub fn apply_static_rope_scaling(yarn_scaling_factor: Option<f64>, max_position_embeddings: usize) -> Option<HashMap<String, RopeScalingValue>> {
     if let Some(factor) = yarn_scaling_factor {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(factor);
+
         let mut scaling_map = HashMap::new();
         scaling_map.insert("rope_type".into(), RopeScalingValue::String("yarn".into()));
         scaling_map.insert("factor".into(), RopeScalingValue::Number(factor));
         scaling_map.insert("original_max_position_embeddings".into(), RopeScalingValue::Number(max_position_embeddings as f64));
-        scaling_map.insert("extrapolation_factor".into(), RopeScalingValue::Number(1.0));
-        scaling_map.insert("attn_factor".into(), RopeScalingValue::Number(1.0));
-        scaling_map.insert("beta_fast".into(), RopeScalingValue::Number(32.0));
-        scaling_map.insert("beta_slow".into(), RopeScalingValue::Number(1.0));
+        scaling_map.insert("beta_fast".into(), RopeScalingValue::Number(beta_fast));
+        scaling_map.insert("beta_slow".into(), RopeScalingValue::Number(beta_slow));
+        scaling_map.insert("extrapolation_factor".into(), RopeScalingValue::Number(extrapolation_factor));
+        scaling_map.insert("attn_factor".into(), RopeScalingValue::Number(attn_factor));
         return Some(scaling_map);
     }
     None
@@ -1742,7 +1784,7 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_arch_rope, ModelType};
+    use super::{get_arch_rope, ModelType, derive_yarn_parameters};
     use tokenizers::{models::bpe::BPE, Tokenizer};
 
     fn empty_tokenizer() -> Tokenizer {
@@ -1772,5 +1814,50 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
+    }
+
+    #[test]
+    fn test_derive_yarn_parameters_1x() {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(1.0);
+        assert_eq!(beta_fast, 32.0);
+        assert_eq!(beta_slow, 1.0);
+        assert_eq!(extrapolation_factor, 1.0);
+        assert_eq!(attn_factor, 1.0);  // ln(1) = 0, so 0.1*0 + 1 = 1
+    }
+
+    #[test]
+    fn test_derive_yarn_parameters_4x() {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(4.0);
+        assert_eq!(beta_fast, 32.0);  // No scaling for factor <= 4
+        assert_eq!(beta_slow, 1.0);
+        assert_eq!(extrapolation_factor, 1.0);  // No scaling for factor <= 8
+        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
+    }
+
+    #[test]
+    fn test_derive_yarn_parameters_8x() {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(8.0);
+        assert!((beta_fast - 45.25).abs() < 0.1);  // 32 * sqrt(8/4) = 32 * sqrt(2) ≈ 45.25
+        assert_eq!(beta_slow, 1.0);
+        assert_eq!(extrapolation_factor, 1.0);  // factor=8 is not > 8, so no scaling
+        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
+    }
+
+    #[test]
+    fn test_derive_yarn_parameters_12x() {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(12.0);
+        assert!((beta_fast - 55.43).abs() < 0.1);  // 32 * sqrt(12/4) = 32 * sqrt(3) ≈ 55.43
+        assert_eq!(beta_slow, 1.0);
+        assert!((extrapolation_factor - 1.1).abs() < 0.01);  // 1.0 + 0.05*sqrt(12-8) = 1.0 + 0.05*2 = 1.1
+        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
+    }
+
+    #[test]
+    fn test_derive_yarn_parameters_large_factor() {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(32.0);
+        assert!((beta_fast - 90.51).abs() < 0.1);  // 32 * sqrt(32/4) = 32 * sqrt(8) ≈ 90.51
+        assert_eq!(beta_slow, 1.0);
+        assert!((extrapolation_factor - 1.245).abs() < 0.01);  // 1.0 + 0.05*sqrt(32-8) = 1.0 + 0.05*4.899 ≈ 1.245
+        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
     }
 }
