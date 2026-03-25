@@ -275,6 +275,11 @@ pub async fn chat_completion(
     }
 
     let use_stream = request.stream.unwrap_or(false);
+    let include_usage = request
+        .stream_options
+        .as_ref()
+        .map(|options| options.include_usage)
+        .unwrap_or(true);
     let tool_buffer_timeout = Duration::from_secs(
         env::var("VLLM_RS_TOOL_BUFFER_TIMEOUT_SECS")
             .ok()
@@ -892,7 +897,7 @@ pub async fn chat_completion(
                                 },
                                 error: None,
                             }],
-                            usage: Some(Usage {
+                            usage: include_usage.then_some(Usage {
                                 prompt_tokens: prompt_length,
                                 completion_tokens: total_decoded_tokens,
                                 total_tokens: prompt_length + total_decoded_tokens,

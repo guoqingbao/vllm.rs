@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.9.14"
+version = "0.9.15"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."

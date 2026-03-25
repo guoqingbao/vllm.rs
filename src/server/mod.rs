@@ -42,6 +42,12 @@ enum StopSequences {
     Many(Vec<String>),
 }
 
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct StreamOptions {
+    #[serde(default)]
+    pub include_usage: bool,
+}
+
 fn deserialize_stop_sequences<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Option<Vec<String>>, D::Error>
@@ -74,6 +80,8 @@ pub struct ChatCompletionRequest {
     )]
     pub stop: Option<Vec<String>>,
     pub stream: Option<bool>,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
     pub session_id: Option<String>,
     /// Tools available for the model to call
     #[serde(default)]
@@ -1625,6 +1633,21 @@ mod tests {
         let json = r#"{"messages":[{"role":"user","content":"hi"}],"stop":"END"}"#;
         let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.stop, Some(vec!["END".to_string()]));
+    }
+
+    #[test]
+    fn test_chat_completion_stream_options_parsing() {
+        let json = r#"{
+            "messages":[{"role":"user","content":"hi"}],
+            "stream":true,
+            "stream_options":{"include_usage":true}
+        }"#;
+        let request: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.stream, Some(true));
+        assert_eq!(
+            request.stream_options.map(|options| options.include_usage),
+            Some(true)
+        );
     }
 
     #[test]
