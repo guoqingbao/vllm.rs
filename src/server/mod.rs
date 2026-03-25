@@ -964,6 +964,10 @@ pub struct Args {
     /// MCP server arguments (comma-separated)
     #[arg(long, value_delimiter = ',', default_value = None)]
     pub mcp_args: Option<Vec<String>>,
+
+    /// YARN RoPE scaling factor (explicit override, no auto-calculation)
+    #[arg(long, default_value = None)]
+    pub yarn_scaling_factor: Option<f64>,
 }
 
 /// Result of executing tool calls via MCP

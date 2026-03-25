@@ -128,6 +128,7 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
 pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     ct: &candle_core::quantized::gguf_file::Content,
     reader: &mut R,
+    yarn_scaling_factor: Option<f64>,
 ) -> Result<Config> {
     let md_get = |s: &str| match ct.metadata.get(s) {
         None => candle_core::bail!("cannot find {s} in metadata"),
@@ -424,7 +425,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let cfg = Config {
+    let mut cfg = Config {
         architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
@@ -459,7 +460,26 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         extra_config_json,
     };
 
+    if let Some(scaling) = apply_static_rope_scaling(yarn_scaling_factor, cfg.max_position_embeddings) {
+        cfg.rope_scaling = Some(scaling);
+    }
+
     Ok(cfg)
+}
+
+pub fn apply_static_rope_scaling(yarn_scaling_factor: Option<f64>, max_position_embeddings: usize) -> Option<HashMap<String, RopeScalingValue>> {
+    if let Some(factor) = yarn_scaling_factor {
+        let mut scaling_map = HashMap::new();
+        scaling_map.insert("rope_type".into(), RopeScalingValue::String("yarn".into()));
+        scaling_map.insert("factor".into(), RopeScalingValue::Number(factor));
+        scaling_map.insert("original_max_position_embeddings".into(), RopeScalingValue::Number(max_position_embeddings as f64));
+        scaling_map.insert("extrapolation_factor".into(), RopeScalingValue::Number(1.0));
+        scaling_map.insert("attn_factor".into(), RopeScalingValue::Number(1.0));
+        scaling_map.insert("beta_fast".into(), RopeScalingValue::Number(32.0));
+        scaling_map.insert("beta_slow".into(), RopeScalingValue::Number(1.0));
+        return Some(scaling_map);
+    }
+    None
 }
 
 fn tokenizer_token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
@@ -860,6 +880,11 @@ pub fn init_config_tokenizer(
                 .map_err(candle_core::Error::wrap)?
         };
 
+        let yarn_scaling_factor = econfig.yarn_scaling_factor;
+        if let Some(scaling) = apply_static_rope_scaling(yarn_scaling_factor, config.max_position_embeddings) {
+            config.rope_scaling = Some(scaling);
+        }
+
         if config.extra_config_json.is_none() {
             if let Ok(raw) = std::fs::read_to_string(&config_path) {
                 config.extra_config_json = Some(raw);
@@ -1010,7 +1035,8 @@ pub fn init_config_tokenizer(
         let config = {
             let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
-            let mut config = config_from_gguf(&content, &mut file)?;
+            let yarn_scaling_factor = econfig.yarn_scaling_factor;
+            let mut config = config_from_gguf(&content, &mut file, yarn_scaling_factor)?;
             let arch_name = config
                 .architectures
                 .as_ref()

@@ -308,6 +308,7 @@ pub struct EngineConfig {
     pub tool_prompt_template: Option<String>,
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    pub yarn_scaling_factor: Option<f64>,
 }
 
 #[cfg(feature = "python")]
@@ -385,6 +386,8 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub pd_client_prefix_cache_ratio: Option<f32>,
+    #[pyo3(get, set)]
+    pub yarn_scaling_factor: Option<f64>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -419,6 +422,7 @@ impl EngineConfig {
         tool_prompt_template: Option<String>,
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
+        yarn_scaling_factor: Option<f64>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -469,6 +473,7 @@ impl EngineConfig {
             tool_prompt_template,
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
+            yarn_scaling_factor,
         }
     }
 }

@@ -34,6 +34,7 @@ pub struct EngineBuilder {
     prefix_cache_max_tokens: Option<usize>,
     pd_server_prefix_cache_ratio: Option<f32>,
     pd_client_prefix_cache_ratio: Option<f32>,
+    yarn_scaling_factor: Option<f64>,
     device_ids: Option<Vec<usize>>,
 }
 
@@ -50,6 +51,7 @@ impl EngineBuilder {
             prefix_cache_max_tokens: None,
             pd_server_prefix_cache_ratio: None,
             pd_client_prefix_cache_ratio: None,
+            yarn_scaling_factor: None,
             device_ids: None,
         }
     }
@@ -96,6 +98,11 @@ impl EngineBuilder {
 
     pub fn with_pd_client_prefix_cache_ratio(mut self, ratio: f32) -> Self {
         self.pd_client_prefix_cache_ratio = Some(ratio);
+        self
+    }
+
+    pub fn with_yarn_scaling_factor(mut self, factor: f64) -> Self {
+        self.yarn_scaling_factor = Some(factor);
         self
     }
 
@@ -151,6 +158,7 @@ impl EngineBuilder {
             None,
             self.pd_server_prefix_cache_ratio,
             self.pd_client_prefix_cache_ratio,
+            self.yarn_scaling_factor,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

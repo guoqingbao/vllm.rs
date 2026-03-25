@@ -518,6 +518,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  control kvcache usage (percentage of remaining gpu memory after model loading) |
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
 | `--prefix-cache-max-tokens`   | Cap prefix cache size in tokens (rounded down to block size) |
+| `--yarn-scaling-factor`       | YARN RoPE scaling factor for context extension (e.g., `4.0` extends 4x context) |
 
 ### MCP Configuration
 
