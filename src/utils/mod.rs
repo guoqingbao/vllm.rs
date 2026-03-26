@@ -1831,7 +1831,7 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{derive_yarn_parameters, get_arch_rope, ModelType};
+    use super::{get_arch_rope, ModelType};
     use tokenizers::{models::bpe::BPE, Tokenizer};
 
     fn empty_tokenizer() -> Tokenizer {
