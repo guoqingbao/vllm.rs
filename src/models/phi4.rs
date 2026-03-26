@@ -28,6 +28,27 @@ struct Phi4RotaryEmbedding {
 }
 
 impl Phi4RotaryEmbedding {
+    fn effective_max_seq_len(cfg: &Config) -> usize {
+        let Some(rope_scaling) = &cfg.rope_scaling else {
+            return cfg.max_position_embeddings;
+        };
+
+        let factor = rope_scaling.get("factor").and_then(|v| v.as_f64());
+        let original_max_position_embeddings = rope_scaling
+            .get("original_max_position_embeddings")
+            .and_then(|v| v.as_f64());
+
+        match (factor, original_max_position_embeddings) {
+            (Some(factor), Some(original_max_position_embeddings)) if factor > 1.0 => {
+                std::cmp::max(
+                    cfg.max_position_embeddings,
+                    (original_max_position_embeddings * factor).round() as usize,
+                )
+            }
+            _ => cfg.max_position_embeddings,
+        }
+    }
+
     fn rope_scaling_array(
         value: &RopeScalingValue,
         expected_len: usize,
@@ -57,7 +78,7 @@ impl Phi4RotaryEmbedding {
             .partial_rotary_factor
             .map(|factor| (factor * dim as f32) as usize)
             .unwrap_or(dim);
-        let max_seq_len = cfg.max_position_embeddings;
+        let max_seq_len = Self::effective_max_seq_len(cfg);
         let rope_theta = cfg.rope_theta.unwrap_or(10000.0);
         let inv_freq: Vec<_> = (0..rotary_dim)
             .step_by(2)

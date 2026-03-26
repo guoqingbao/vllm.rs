@@ -453,6 +453,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--kv-fraction`       |  用于控制KVCache使用量 (模型加载后剩余可用GPU显存的百分比) |
 | `--prefix-cache`   | 启用前缀缓存，用于多轮对话 |
 | `--prefix-cache-max-tokens`   | 限制前缀缓存大小（按 block size 向下取整） |
+| `--yarn-scaling-factor`       | YARN RoPE缩放因子，用于扩展上下文窗口（例如：`4.0` 扩展4倍上下文） |
 
 ### MCP配置参数
 

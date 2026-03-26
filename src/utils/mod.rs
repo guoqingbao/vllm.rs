@@ -462,6 +462,130 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     Ok(cfg)
 }
 
+/// Derives optimal YARN RoPE scaling parameters based on the scaling factor.
+///
+/// For factors > 4.0, parameters are scaled proportionally to maintain
+/// appropriate frequency band transitions. The attn_factor is kept at 1.0
+/// as it's a multiplier applied to the YARN mscale calculation.
+/// Reference: https://github.com/jquesnelle/yarn
+///
+/// Returns: (beta_fast, beta_slow, extrapolation_factor, attn_factor)
+pub fn derive_yarn_parameters(factor: f64) -> (f64, f64, f64, f64) {
+    // Validate factor
+    let factor = factor.max(1.0);
+
+    // beta_fast: Controls transition band width between fast and slow frequencies
+    // For factor > 4, scale proportionally to sqrt(factor/4)
+    let beta_fast = if factor <= 4.0 {
+        32.0
+    } else {
+        32.0 * (factor / 4.0).sqrt()
+    };
+
+    // beta_slow: Controls low-frequency attenuation
+    // Keep at 1.0 for all scaling factors (standard YARN behavior)
+    let beta_slow = 1.0;
+
+    // extrapolation_factor: Adjusts extrapolation behavior beyond original context
+    // Slightly increase for factors > 8.0
+    let extrapolation_factor = if factor > 8.0 {
+        1.0 + 0.05 * (factor - 8.0).sqrt()
+    } else {
+        1.0
+    };
+
+    // attn_factor: Attention scaling multiplier
+    // In YARN, this is applied to mscale = (0.1 * ln(factor) + 1) * attn_factor
+    // The reference implementation keeps attn_factor = 1.0
+    let attn_factor = 1.0;
+
+    (beta_fast, beta_slow, extrapolation_factor, attn_factor)
+}
+
+pub fn apply_static_rope_scaling(
+    yarn_scaling_factor: Option<f64>,
+    max_position_embeddings: usize,
+) -> Option<HashMap<String, RopeScalingValue>> {
+    if let Some(factor) = yarn_scaling_factor {
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) =
+            derive_yarn_parameters(factor);
+
+        let mut scaling_map = HashMap::new();
+        scaling_map.insert("rope_type".into(), RopeScalingValue::String("yarn".into()));
+        scaling_map.insert("factor".into(), RopeScalingValue::Number(factor));
+        scaling_map.insert(
+            "original_max_position_embeddings".into(),
+            RopeScalingValue::Number(max_position_embeddings as f64),
+        );
+        scaling_map.insert("beta_fast".into(), RopeScalingValue::Number(beta_fast));
+        scaling_map.insert("beta_slow".into(), RopeScalingValue::Number(beta_slow));
+        scaling_map.insert(
+            "extrapolation_factor".into(),
+            RopeScalingValue::Number(extrapolation_factor),
+        );
+        scaling_map.insert("attn_factor".into(), RopeScalingValue::Number(attn_factor));
+        return Some(scaling_map);
+    }
+    None
+}
+
+fn apply_runtime_rope_overrides(config: &mut Config, yarn_scaling_factor: Option<f64>) {
+    if let Some(scaling) =
+        apply_static_rope_scaling(yarn_scaling_factor, config.max_position_embeddings)
+    {
+        config.rope_scaling = Some(scaling);
+    }
+}
+
+fn effective_max_position_embeddings(config: &Config) -> usize {
+    let Some(rope_scaling) = &config.rope_scaling else {
+        return config.max_position_embeddings;
+    };
+
+    let rope_type = rope_scaling
+        .get("rope_type")
+        .or_else(|| rope_scaling.get("type"))
+        .and_then(|value| value.as_str());
+    let factor = rope_scaling.get("factor").and_then(|value| value.as_f64());
+    let original_max_position_embeddings = rope_scaling
+        .get("original_max_position_embeddings")
+        .and_then(|value| value.as_f64());
+
+    match (rope_type, factor, original_max_position_embeddings) {
+        (Some("yarn"), Some(factor), Some(original_max_position_embeddings)) if factor > 1.0 => {
+            let scaled_max_position_embeddings =
+                (original_max_position_embeddings * factor).round() as usize;
+            std::cmp::max(
+                config.max_position_embeddings,
+                scaled_max_position_embeddings,
+            )
+        }
+        _ => config.max_position_embeddings,
+    }
+}
+
+fn resolve_config_model_len(config: &Config, config_tokenizer: &TokenizerConfig) -> usize {
+    let effective_max_position_embeddings = effective_max_position_embeddings(config);
+    let (tokenizer_model_len, tokenizer_limit_is_fallback) = match config_tokenizer.model_max_length
+    {
+        Some(model_max_length) if model_max_length < 10_000_000.0 => {
+            (model_max_length as usize, false)
+        }
+        Some(_) => (262_144, true),
+        None => (262_144, true),
+    };
+
+    let tokenizer_model_len = if effective_max_position_embeddings > config.max_position_embeddings
+        && (tokenizer_limit_is_fallback || tokenizer_model_len <= config.max_position_embeddings)
+    {
+        effective_max_position_embeddings
+    } else {
+        tokenizer_model_len
+    };
+
+    std::cmp::min(effective_max_position_embeddings, tokenizer_model_len)
+}
+
 fn tokenizer_token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
     tokenizer
         .get_vocab(true)
@@ -860,6 +984,8 @@ pub fn init_config_tokenizer(
                 .map_err(candle_core::Error::wrap)?
         };
 
+        apply_runtime_rope_overrides(&mut config, econfig.yarn_scaling_factor);
+
         if config.extra_config_json.is_none() {
             if let Ok(raw) = std::fs::read_to_string(&config_path) {
                 config.extra_config_json = Some(raw);
@@ -1058,6 +1184,7 @@ pub fn init_config_tokenizer(
                     );
                 }
             }
+            apply_runtime_rope_overrides(&mut config, econfig.yarn_scaling_factor);
             config
         };
 
@@ -1489,19 +1616,7 @@ pub fn prepare_engine_config(
 ) -> (EngineConfig, bool) {
     let mut econfig = econfig.clone();
 
-    let config_model_len = std::cmp::min(
-        config.max_position_embeddings,
-        if let Some(l) = config_tokenizer.model_max_length {
-            if l < 10000000.0 {
-                // Sometime this value is invalid
-                l as usize
-            } else {
-                262144
-            }
-        } else {
-            262144
-        },
-    );
+    let config_model_len = resolve_config_model_len(config, config_tokenizer);
 
     econfig.config_model_len = Some(config_model_len);
 
