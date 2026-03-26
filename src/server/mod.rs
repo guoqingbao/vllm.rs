@@ -1321,11 +1321,13 @@ pub async fn run_server(
     with_ui_server: bool,
 ) -> Result<()> {
     use axum::extract::DefaultBodyLimit;
-    let (has_vision, model_name) = {
+    let (has_vision, model_name, resolved_max_model_len) = {
         let e = engine.read();
         e.get_model_info()
     };
     let has_vision = Arc::new(has_vision);
+    let exposed_model_id = resolve_engine_model_id(&econfig).unwrap_or_else(|| model_name.clone());
+    let exposed_max_model_len = resolved_max_model_len;
 
     let is_pd_server = if let Some(cfg) = &econfig.pd_config {
         matches!(cfg.role, PdRole::Server)
@@ -1378,7 +1380,7 @@ pub async fn run_server(
     let app = Router::new()
         .route(
             "/v1/models",
-            get(|| async move {
+            get(move || async move {
                 let m = if *has_vision {
                     vec!["text", "image"]
                 } else {
@@ -1388,7 +1390,7 @@ pub async fn run_server(
                     "object": "list",
                     "data": [
                         {
-                            "id": model_name,
+                            "id": exposed_model_id,
                             "object": "model",
                             "created": std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -1397,6 +1399,7 @@ pub async fn run_server(
                             "owned_by": "vllm.rs",
                             "permission": [],
                             "modalities": m,
+                            "max_model_len": exposed_max_model_len,
                         }
                     ]
                 }))
