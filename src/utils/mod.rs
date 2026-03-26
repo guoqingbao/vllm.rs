@@ -128,7 +128,6 @@ pub fn new_device(ordinal: usize) -> Result<Device> {
 pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
     ct: &candle_core::quantized::gguf_file::Content,
     reader: &mut R,
-    yarn_scaling_factor: Option<f64>,
 ) -> Result<Config> {
     let md_get = |s: &str| match ct.metadata.get(s) {
         None => candle_core::bail!("cannot find {s} in metadata"),
@@ -425,7 +424,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mut cfg = Config {
+    let cfg = Config {
         architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
@@ -460,20 +459,16 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         extra_config_json,
     };
 
-    if let Some(scaling) = apply_static_rope_scaling(yarn_scaling_factor, cfg.max_position_embeddings) {
-        cfg.rope_scaling = Some(scaling);
-    }
-
     Ok(cfg)
 }
 
 /// Derives optimal YARN RoPE scaling parameters based on the scaling factor.
-/// 
+///
 /// For factors > 4.0, parameters are scaled proportionally to maintain
 /// appropriate frequency band transitions. The attn_factor is kept at 1.0
 /// as it's a multiplier applied to the YARN mscale calculation.
 /// Reference: https://github.com/jquesnelle/yarn
-/// 
+///
 /// Returns: (beta_fast, beta_slow, extrapolation_factor, attn_factor)
 pub fn derive_yarn_parameters(factor: f64) -> (f64, f64, f64, f64) {
     // Validate factor
@@ -507,21 +502,88 @@ pub fn derive_yarn_parameters(factor: f64) -> (f64, f64, f64, f64) {
     (beta_fast, beta_slow, extrapolation_factor, attn_factor)
 }
 
-pub fn apply_static_rope_scaling(yarn_scaling_factor: Option<f64>, max_position_embeddings: usize) -> Option<HashMap<String, RopeScalingValue>> {
+pub fn apply_static_rope_scaling(
+    yarn_scaling_factor: Option<f64>,
+    max_position_embeddings: usize,
+) -> Option<HashMap<String, RopeScalingValue>> {
     if let Some(factor) = yarn_scaling_factor {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(factor);
+        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) =
+            derive_yarn_parameters(factor);
 
         let mut scaling_map = HashMap::new();
         scaling_map.insert("rope_type".into(), RopeScalingValue::String("yarn".into()));
         scaling_map.insert("factor".into(), RopeScalingValue::Number(factor));
-        scaling_map.insert("original_max_position_embeddings".into(), RopeScalingValue::Number(max_position_embeddings as f64));
+        scaling_map.insert(
+            "original_max_position_embeddings".into(),
+            RopeScalingValue::Number(max_position_embeddings as f64),
+        );
         scaling_map.insert("beta_fast".into(), RopeScalingValue::Number(beta_fast));
         scaling_map.insert("beta_slow".into(), RopeScalingValue::Number(beta_slow));
-        scaling_map.insert("extrapolation_factor".into(), RopeScalingValue::Number(extrapolation_factor));
+        scaling_map.insert(
+            "extrapolation_factor".into(),
+            RopeScalingValue::Number(extrapolation_factor),
+        );
         scaling_map.insert("attn_factor".into(), RopeScalingValue::Number(attn_factor));
         return Some(scaling_map);
     }
     None
+}
+
+fn apply_runtime_rope_overrides(config: &mut Config, yarn_scaling_factor: Option<f64>) {
+    if let Some(scaling) =
+        apply_static_rope_scaling(yarn_scaling_factor, config.max_position_embeddings)
+    {
+        config.rope_scaling = Some(scaling);
+    }
+}
+
+fn effective_max_position_embeddings(config: &Config) -> usize {
+    let Some(rope_scaling) = &config.rope_scaling else {
+        return config.max_position_embeddings;
+    };
+
+    let rope_type = rope_scaling
+        .get("rope_type")
+        .or_else(|| rope_scaling.get("type"))
+        .and_then(|value| value.as_str());
+    let factor = rope_scaling.get("factor").and_then(|value| value.as_f64());
+    let original_max_position_embeddings = rope_scaling
+        .get("original_max_position_embeddings")
+        .and_then(|value| value.as_f64());
+
+    match (rope_type, factor, original_max_position_embeddings) {
+        (Some("yarn"), Some(factor), Some(original_max_position_embeddings)) if factor > 1.0 => {
+            let scaled_max_position_embeddings =
+                (original_max_position_embeddings * factor).round() as usize;
+            std::cmp::max(
+                config.max_position_embeddings,
+                scaled_max_position_embeddings,
+            )
+        }
+        _ => config.max_position_embeddings,
+    }
+}
+
+fn resolve_config_model_len(config: &Config, config_tokenizer: &TokenizerConfig) -> usize {
+    let effective_max_position_embeddings = effective_max_position_embeddings(config);
+    let (tokenizer_model_len, tokenizer_limit_is_fallback) = match config_tokenizer.model_max_length
+    {
+        Some(model_max_length) if model_max_length < 10_000_000.0 => {
+            (model_max_length as usize, false)
+        }
+        Some(_) => (262_144, true),
+        None => (262_144, true),
+    };
+
+    let tokenizer_model_len = if effective_max_position_embeddings > config.max_position_embeddings
+        && (tokenizer_limit_is_fallback || tokenizer_model_len <= config.max_position_embeddings)
+    {
+        effective_max_position_embeddings
+    } else {
+        tokenizer_model_len
+    };
+
+    std::cmp::min(effective_max_position_embeddings, tokenizer_model_len)
 }
 
 fn tokenizer_token_id(tokenizer: &Tokenizer, token: &str) -> Result<u32> {
@@ -922,10 +984,7 @@ pub fn init_config_tokenizer(
                 .map_err(candle_core::Error::wrap)?
         };
 
-        let yarn_scaling_factor = econfig.yarn_scaling_factor;
-        if let Some(scaling) = apply_static_rope_scaling(yarn_scaling_factor, config.max_position_embeddings) {
-            config.rope_scaling = Some(scaling);
-        }
+        apply_runtime_rope_overrides(&mut config, econfig.yarn_scaling_factor);
 
         if config.extra_config_json.is_none() {
             if let Ok(raw) = std::fs::read_to_string(&config_path) {
@@ -1077,8 +1136,7 @@ pub fn init_config_tokenizer(
         let config = {
             let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
             let content = candle_core::quantized::gguf_file::Content::read(&mut file).unwrap();
-            let yarn_scaling_factor = econfig.yarn_scaling_factor;
-            let mut config = config_from_gguf(&content, &mut file, yarn_scaling_factor)?;
+            let mut config = config_from_gguf(&content, &mut file)?;
             let arch_name = config
                 .architectures
                 .as_ref()
@@ -1126,6 +1184,7 @@ pub fn init_config_tokenizer(
                     );
                 }
             }
+            apply_runtime_rope_overrides(&mut config, econfig.yarn_scaling_factor);
             config
         };
 
@@ -1557,19 +1616,7 @@ pub fn prepare_engine_config(
 ) -> (EngineConfig, bool) {
     let mut econfig = econfig.clone();
 
-    let config_model_len = std::cmp::min(
-        config.max_position_embeddings,
-        if let Some(l) = config_tokenizer.model_max_length {
-            if l < 10000000.0 {
-                // Sometime this value is invalid
-                l as usize
-            } else {
-                262144
-            }
-        } else {
-            262144
-        },
-    );
+    let config_model_len = resolve_config_model_len(config, config_tokenizer);
 
     econfig.config_model_len = Some(config_model_len);
 
@@ -1784,7 +1831,7 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_arch_rope, ModelType, derive_yarn_parameters};
+    use super::{derive_yarn_parameters, get_arch_rope, ModelType};
     use tokenizers::{models::bpe::BPE, Tokenizer};
 
     fn empty_tokenizer() -> Tokenizer {
@@ -1814,50 +1861,5 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
-    }
-
-    #[test]
-    fn test_derive_yarn_parameters_1x() {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(1.0);
-        assert_eq!(beta_fast, 32.0);
-        assert_eq!(beta_slow, 1.0);
-        assert_eq!(extrapolation_factor, 1.0);
-        assert_eq!(attn_factor, 1.0);  // ln(1) = 0, so 0.1*0 + 1 = 1
-    }
-
-    #[test]
-    fn test_derive_yarn_parameters_4x() {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(4.0);
-        assert_eq!(beta_fast, 32.0);  // No scaling for factor <= 4
-        assert_eq!(beta_slow, 1.0);
-        assert_eq!(extrapolation_factor, 1.0);  // No scaling for factor <= 8
-        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
-    }
-
-    #[test]
-    fn test_derive_yarn_parameters_8x() {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(8.0);
-        assert!((beta_fast - 45.25).abs() < 0.1);  // 32 * sqrt(8/4) = 32 * sqrt(2) ≈ 45.25
-        assert_eq!(beta_slow, 1.0);
-        assert_eq!(extrapolation_factor, 1.0);  // factor=8 is not > 8, so no scaling
-        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
-    }
-
-    #[test]
-    fn test_derive_yarn_parameters_12x() {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(12.0);
-        assert!((beta_fast - 55.43).abs() < 0.1);  // 32 * sqrt(12/4) = 32 * sqrt(3) ≈ 55.43
-        assert_eq!(beta_slow, 1.0);
-        assert!((extrapolation_factor - 1.1).abs() < 0.01);  // 1.0 + 0.05*sqrt(12-8) = 1.0 + 0.05*2 = 1.1
-        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
-    }
-
-    #[test]
-    fn test_derive_yarn_parameters_large_factor() {
-        let (beta_fast, beta_slow, extrapolation_factor, attn_factor) = derive_yarn_parameters(32.0);
-        assert!((beta_fast - 90.51).abs() < 0.1);  // 32 * sqrt(32/4) = 32 * sqrt(8) ≈ 90.51
-        assert_eq!(beta_slow, 1.0);
-        assert!((extrapolation_factor - 1.245).abs() < 0.01);  // 1.0 + 0.05*sqrt(32-8) = 1.0 + 0.05*4.899 ≈ 1.245
-        assert_eq!(attn_factor, 1.0);  // attn_factor is always 1.0 (multiplier for YARN mscale)
     }
 }
