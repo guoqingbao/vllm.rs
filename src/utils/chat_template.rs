@@ -208,6 +208,10 @@ impl ChatTemplate {
         self.enable_thinking = enable;
     }
 
+    pub fn template_source(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
+
     pub fn set_escape_tokens(&mut self, mut tokens: Vec<String>) {
         tokens.retain(|token| !token.is_empty());
         tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
