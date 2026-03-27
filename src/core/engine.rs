@@ -18,7 +18,7 @@ use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
-use crate::utils::chat_template::Message;
+use crate::utils::chat_template::{Message, RenderedPromptRepairer};
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::{build_llg_factory, extract_guidance_tokens, GuidanceTokens};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -41,7 +41,6 @@ use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
-use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::rc::Rc;
@@ -58,182 +57,6 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .expect("Failed to build global Tokio runtime")
 });
-
-static ADD_GENERATION_PROMPT_COMBINED_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r#"(?s)\{%-?\s*if\s+add_generation_prompt\s*-?%\}.*?\{\{\-?\s*['"](?P<literal>.*?)['"]\s*\}\}.*?\{%-?\s*endif\s*-?%\}"#,
-    )
-    .expect("valid combined add_generation_prompt regex")
-});
-
-static ADD_GENERATION_PROMPT_SPLIT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r#"(?s)\{%-?\s*if\s+add_generation_prompt\s*-?%\}.*?\{\{\-?\s*['"](?P<header>.*?)['"]\s*\}\}.*?if\s+enable_thinking\s+is\s+defined\s+and\s+enable_thinking\s+is\s+false.*?\{\{\-?\s*['"](?P<disabled>.*?)['"]\s*\}\}.*?\{%-?\s*else\s*-?%\}.*?\{\{\-?\s*['"](?P<enabled>.*?)['"]\s*\}\}.*?\{%-?\s*endif\s*-?%\}.*?\{%-?\s*endif\s*-?%\}"#,
-    )
-    .expect("valid split add_generation_prompt regex")
-});
-
-fn escaped_special_token_for_text(token: &str) -> String {
-    if let Some(rest) = token.strip_prefix('<') {
-        format!("<\u{200C}{}", rest)
-    } else {
-        format!("{}\u{200C}", token)
-    }
-}
-
-fn decode_template_string_literal(literal: &str) -> String {
-    let mut decoded = String::with_capacity(literal.len());
-    let mut chars = literal.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => decoded.push('\n'),
-                Some('r') => decoded.push('\r'),
-                Some('t') => decoded.push('\t'),
-                Some('\\') => decoded.push('\\'),
-                Some('\'') => decoded.push('\''),
-                Some('"') => decoded.push('"'),
-                Some(other) => {
-                    decoded.push('\\');
-                    decoded.push(other);
-                }
-                None => decoded.push('\\'),
-            }
-        } else {
-            decoded.push(ch);
-        }
-    }
-    decoded
-}
-
-fn extract_generation_prompt_literal_from_chat_template(
-    chat_template: &str,
-    enable_thinking: bool,
-) -> Option<String> {
-    if let Some(captures) = ADD_GENERATION_PROMPT_SPLIT_RE.captures(chat_template) {
-        let header = decode_template_string_literal(captures.name("header")?.as_str());
-        let branch = if enable_thinking {
-            captures.name("enabled")?.as_str()
-        } else {
-            captures.name("disabled")?.as_str()
-        };
-        let suffix = decode_template_string_literal(branch);
-        return Some(format!("{header}{suffix}"));
-    }
-
-    ADD_GENERATION_PROMPT_COMBINED_RE
-        .captures(chat_template)
-        .and_then(|captures| captures.name("literal"))
-        .map(|literal| decode_template_string_literal(literal.as_str()))
-}
-
-fn extract_assistant_header_from_chat_template(
-    chat_template: &str,
-    start_marker: &str,
-    enable_thinking: bool,
-) -> Option<String> {
-    let literal =
-        extract_generation_prompt_literal_from_chat_template(chat_template, enable_thinking)?;
-    if let Some(idx) = literal.find(start_marker) {
-        Some(literal[..idx].to_string())
-    } else if literal.contains("assistant") {
-        Some(literal)
-    } else {
-        None
-    }
-}
-
-fn extract_reasoning_scaffold_from_chat_template(
-    chat_template: &str,
-    start_marker: &str,
-    enable_thinking: bool,
-) -> Option<String> {
-    let literal =
-        extract_generation_prompt_literal_from_chat_template(chat_template, enable_thinking)?;
-    let assistant_header =
-        extract_assistant_header_from_chat_template(chat_template, start_marker, enable_thinking)?;
-    literal
-        .strip_prefix(&assistant_header)
-        .map(|suffix| suffix.to_string())
-}
-
-fn opening_reasoning_scaffold<'a>(scaffold: &'a str, end_marker: &str) -> &'a str {
-    if let Some(idx) = scaffold.find(end_marker) {
-        &scaffold[..idx]
-    } else {
-        scaffold
-    }
-}
-
-fn apply_reasoning_repair_to_rendered_prompt(
-    base_prompt: &str,
-    assistant_header: &str,
-    start_marker: &str,
-    end_marker: &str,
-    scaffold: &str,
-) -> Option<String> {
-    let mut cursor = 0usize;
-    let mut repaired = String::with_capacity(base_prompt.len() + 128);
-    let mut changed = false;
-    let escaped_start_marker = escaped_special_token_for_text(start_marker);
-    let escaped_end_marker = escaped_special_token_for_text(end_marker);
-    let opening_scaffold = opening_reasoning_scaffold(scaffold, end_marker);
-
-    while let Some(rel_idx) = base_prompt[cursor..].find(assistant_header) {
-        let header_idx = cursor + rel_idx;
-        let after_header_idx = header_idx + assistant_header.len();
-        repaired.push_str(&base_prompt[cursor..after_header_idx]);
-
-        let rest = &base_prompt[after_header_idx..];
-        let next_end = rest.find("<|im_end|>").unwrap_or(rest.len());
-        let block_content = &rest[..next_end];
-        let trimmed_block = block_content.trim_start();
-        let has_start_marker = trimmed_block.starts_with(start_marker);
-        let has_escaped_start_marker = trimmed_block.starts_with(&escaped_start_marker);
-        let raw_end_idx = block_content.find(end_marker);
-        let escaped_end_idx = block_content.find(&escaped_end_marker);
-        let has_end_marker = raw_end_idx.is_some() || escaped_end_idx.is_some();
-        let needs_prefix_repair = !has_start_marker;
-        let needs_end_marker_restore = escaped_end_idx.is_some();
-        let should_repair = needs_prefix_repair || needs_end_marker_restore;
-
-        if should_repair {
-            let prefix = if !needs_prefix_repair || has_escaped_start_marker {
-                ""
-            } else if has_end_marker {
-                opening_scaffold
-            } else {
-                scaffold
-            };
-            repaired.push_str(prefix);
-
-            let mut content = block_content.to_string();
-            if needs_prefix_repair && has_escaped_start_marker {
-                let leading_ws_len = content.len() - content.trim_start().len();
-                content.replace_range(
-                    leading_ws_len..leading_ws_len + escaped_start_marker.len(),
-                    start_marker,
-                );
-            }
-            if let Some(end_idx) = content.find(&escaped_end_marker) {
-                content.replace_range(end_idx..end_idx + escaped_end_marker.len(), end_marker);
-            }
-            repaired.push_str(&content);
-            changed = true;
-        } else {
-            repaired.push_str(block_content);
-        }
-
-        cursor = after_header_idx + next_end;
-    }
-
-    if !changed {
-        return None;
-    }
-
-    repaired.push_str(&base_prompt[cursor..]);
-    Some(repaired)
-}
 
 #[derive(Debug, Clone)]
 pub enum StreamItem {
@@ -1274,34 +1097,7 @@ impl LLMEngine {
         (prompt, image_idx)
     }
 
-    fn build_rendered_prompt_repair(
-        &self,
-        base_prompt: &str,
-        enable_thinking: bool,
-    ) -> Option<String> {
-        let Some(template_source) = self.template.template_source() else {
-            return None;
-        };
-        let assistant_header = extract_assistant_header_from_chat_template(
-            template_source,
-            "<think>",
-            enable_thinking,
-        )
-        .or_else(|| {
-            base_prompt
-                .contains("<|im_start|>assistant\n")
-                .then(|| "<|im_start|>assistant\n".to_string())
-        })?;
-        apply_reasoning_repair_to_rendered_prompt(
-            base_prompt,
-            &assistant_header,
-            "<think>",
-            "</think>",
-            "<think>\n",
-        )
-    }
-
-    fn select_prompt_with_reasoning_repair(
+    fn select_prompt_with_prefix_cache_repair(
         &mut self,
         params: &SamplingParams,
         messages: &Vec<Message>,
@@ -1314,9 +1110,10 @@ impl LLMEngine {
             return (base_prompt, image_idx);
         }
 
-        let repaired_prompt =
-            self.build_rendered_prompt_repair(&base_prompt, params.thinking.unwrap_or(false));
-        (repaired_prompt.unwrap_or(base_prompt), image_idx)
+        let enable_thinking = params.thinking.unwrap_or(false);
+        let repaired = RenderedPromptRepairer::from_chat_template(&self.template, enable_thinking)
+            .and_then(|r| r.repair(&base_prompt));
+        (repaired.unwrap_or(base_prompt), image_idx)
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1349,7 +1146,7 @@ impl LLMEngine {
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
             let (prompt, image_idx) =
-                self.select_prompt_with_reasoning_repair(param, messages, &images, tools, false);
+                self.select_prompt_with_prefix_cache_repair(param, messages, &images, tools, false);
             if let Some(ref l) = logger {
                 l.log_prompt(&prompt);
             }
@@ -1510,7 +1307,7 @@ impl LLMEngine {
         logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<(usize, usize, Option<String>, mpsc::Receiver<StreamItem>)> {
         let (prompt, image_idx) =
-            self.select_prompt_with_reasoning_repair(params, messages, &images, tools, false);
+            self.select_prompt_with_prefix_cache_repair(params, messages, &images, tools, false);
         if let Some(ref l) = logger {
             l.log_prompt(&prompt);
         }
@@ -1786,126 +1583,5 @@ impl LLMEngine {
     /// Get a clone of the chat template for external use (e.g., tokenization without generation)
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_assistant_header_from_qwen_generation_prompt_branch() {
-        let template = r#"
-{%- if add_generation_prompt %}
-    {{- '<|im_start|>assistant\n' }}
-    {%- if enable_thinking is defined and enable_thinking is false %}
-        {{- '<think>\n\n</think>\n\n' }}
-    {%- else %}
-        {{- '<think>\n' }}
-    {%- endif %}
-{%- endif %}
-"#;
-        assert_eq!(
-            extract_assistant_header_from_chat_template(template, "<think>", true).as_deref(),
-            Some("<|im_start|>assistant\n")
-        );
-    }
-
-    #[test]
-    fn extracts_assistant_header_from_combined_generation_prompt_literal() {
-        let template = r#"
-{%- if add_generation_prompt %}
-    {{- '<|im_start|>assistant\n<think>\n' }}
-{%- endif %}
-"#;
-        assert_eq!(
-            extract_assistant_header_from_chat_template(template, "<think>", true).as_deref(),
-            Some("<|im_start|>assistant\n")
-        );
-    }
-
-    #[test]
-    fn reasoning_repair_prefixes_cover_common_hidden_scaffolds() {
-        let template = r#"
-{%- if add_generation_prompt %}
-    {{- '<|im_start|>assistant\n' }}
-    {%- if enable_thinking is defined and enable_thinking is false %}
-        {{- '<think>\n\n</think>\n\n' }}
-    {%- else %}
-        {{- '<think>\n' }}
-    {%- endif %}
-{%- endif %}
-"#;
-        assert_eq!(
-            extract_reasoning_scaffold_from_chat_template(template, "<think>", true).as_deref(),
-            Some("<think>\n")
-        );
-        assert_eq!(
-            extract_reasoning_scaffold_from_chat_template(template, "<think>", false).as_deref(),
-            Some("<think>\n\n</think>\n\n")
-        );
-    }
-
-    #[test]
-    fn reasoning_repair_prefix_is_applied_only_to_assistant_messages() {
-        let prompt = "<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\nThinking Process:\n...\n</think>\nhello<|im_end|>\n";
-        let repaired = apply_reasoning_repair_to_rendered_prompt(
-            prompt,
-            "<|im_start|>assistant\n",
-            "<think>",
-            "</think>",
-            "<think>\n",
-        )
-        .unwrap();
-        assert!(repaired.contains("<|im_start|>assistant\n<think>\nThinking Process:"));
-    }
-
-    #[test]
-    fn reasoning_repair_applies_when_visible_text_has_no_end_marker() {
-        let prompt =
-            "<|im_start|>assistant\nFinal answer only<|im_end|>\n<|im_start|>assistant\n<think>\n";
-        let repaired = apply_reasoning_repair_to_rendered_prompt(
-            prompt,
-            "<|im_start|>assistant\n",
-            "<think>",
-            "</think>",
-            "<think>\n",
-        )
-        .unwrap();
-        assert!(repaired.starts_with("<|im_start|>assistant\n<think>\nFinal answer only"));
-    }
-
-    #[test]
-    fn reasoning_repair_uses_full_disabled_scaffold_when_end_marker_is_missing() {
-        let prompt = "<|im_start|>assistant\nVisible answer<|im_end|>\n";
-        let repaired = apply_reasoning_repair_to_rendered_prompt(
-            prompt,
-            "<|im_start|>assistant\n",
-            "<think>",
-            "</think>",
-            "<think>\n\n</think>\n\n",
-        )
-        .unwrap();
-        assert!(
-            repaired.starts_with("<|im_start|>assistant\n<think>\n\n</think>\n\nVisible answer")
-        );
-    }
-
-    #[test]
-    fn reasoning_repair_restores_escaped_end_marker_without_readding_prefix() {
-        let prompt =
-            "<|im_start|>assistant\n<think>\nreasoning\n<\u{200C}/think>\nanswer<|im_end|>\n";
-        let repaired = apply_reasoning_repair_to_rendered_prompt(
-            prompt,
-            "<|im_start|>assistant\n",
-            "<think>",
-            "</think>",
-            "<think>\n",
-        )
-        .unwrap();
-        assert_eq!(
-            repaired,
-            "<|im_start|>assistant\n<think>\nreasoning\n</think>\nanswer<|im_end|>\n"
-        );
     }
 }
