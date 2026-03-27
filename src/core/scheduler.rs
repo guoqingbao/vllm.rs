@@ -10,7 +10,7 @@ use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
 use regex::Regex;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
@@ -21,7 +21,7 @@ pub struct Scheduler {
     transferred: VecDeque<Sequence>,
     pub block_manager: BlockManager,
     next_seq_id: usize,
-    eos_token_id: Vec<u32>,
+    eos_token_id: HashSet<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
     /// Token IDs that represent the start of a tool call (used to avoid false end matches)
@@ -134,9 +134,9 @@ impl Scheduler {
             ),
             next_seq_id: 0,
             eos_token_id: match &config.eos_token_id {
-                Some(EosTokenId::Single(eos)) => vec![*eos],
+                Some(EosTokenId::Single(eos)) => vec![*eos].into_iter().collect(),
                 Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
-                _ => vec![],
+                _ => HashSet::<u32>::new(),
             },
             // Tool call end tokens will be set by engine after tokenizer is initialized
             tool_call_end_token_ids: Vec::new(),
