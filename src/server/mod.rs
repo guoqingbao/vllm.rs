@@ -1111,7 +1111,7 @@ pub fn convert_chat_message(
         if let Some(tool_calls) = &msg.tool_calls {
             let mut content = String::new();
             if let Some(existing) = &msg.content {
-                content = extract_text_content(existing).trim().to_owned();
+                content = extract_text_content(existing);
             }
             let template_calls = tool_calls
                 .iter()

@@ -127,6 +127,56 @@ pub struct ChatTemplate {
     enable_thinking: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PromptReplay {
+    pub suffix_text: String,
+}
+
+impl PromptReplay {
+    pub fn is_empty(&self) -> bool {
+        self.suffix_text.is_empty()
+    }
+}
+
+const ASSISTANT_REASONING_SENTINELS: [(&str, &str); 8] = [
+    ("<think>", "__VLLM_RS_ASSIST_REASONING_START__"),
+    ("</think>", "__VLLM_RS_ASSIST_REASONING_END__"),
+    ("<|think|>", "__VLLM_RS_ASSIST_REASONING_START_QWEN__"),
+    ("<|/think|>", "__VLLM_RS_ASSIST_REASONING_END_QWEN__"),
+    ("[THINK]", "__VLLM_RS_ASSIST_REASONING_START_BRACKET__"),
+    ("[/THINK]", "__VLLM_RS_ASSIST_REASONING_END_BRACKET__"),
+    ("<thought>", "__VLLM_RS_ASSIST_REASONING_START_THOUGHT__"),
+    ("</thought>", "__VLLM_RS_ASSIST_REASONING_END_THOUGHT__"),
+];
+
+fn protect_assistant_reasoning_markers(content: &str) -> String {
+    let mut protected = content.to_string();
+    for (raw, sentinel) in ASSISTANT_REASONING_SENTINELS {
+        protected = protected.replace(raw, sentinel);
+    }
+    protected
+}
+
+fn restore_assistant_reasoning_markers(content: &str) -> String {
+    let mut restored = content.to_string();
+    for (raw, sentinel) in ASSISTANT_REASONING_SENTINELS {
+        restored = restored.replace(sentinel, raw);
+    }
+    restored
+}
+
+fn strip_generation_assistant_header(suffix_text: &str) -> &str {
+    let Some((first_line, remainder)) = suffix_text.split_once('\n') else {
+        return suffix_text;
+    };
+
+    if first_line.ends_with("assistant") {
+        return remainder;
+    }
+
+    suffix_text
+}
+
 impl ChatTemplate {
     pub fn collect_escape_tokens(tokenizer: &Tokenizer, tool_markers: &[&str]) -> Vec<String> {
         let mut tokens = tokenizer
@@ -241,18 +291,28 @@ impl ChatTemplate {
                 let mut escaped = message.clone();
                 // System/developer prompts can include engine-defined structural
                 // tool-call instructions that must remain exact (e.g. <tool_call>).
-                // Escape only user/assistant/tool payloads.
-                if !matches!(escaped.role.as_str(), "system" | "developer") {
-                    escaped.content = self.escape_text(&escaped.content);
+                // Assistant reasoning markers are protected first so prior
+                // tool-call turns can round-trip placeholder restoration
+                // without being escaped away by special-token handling.
+                match escaped.role.as_str() {
+                    "system" | "developer" => {}
+                    "assistant" => {
+                        let protected = protect_assistant_reasoning_markers(&escaped.content);
+                        escaped.content = self.escape_text(&protected);
+                    }
+                    _ => {
+                        escaped.content = self.escape_text(&escaped.content);
+                    }
                 }
                 escaped
             })
             .collect()
     }
 
-    pub fn apply_chat_template(
+    fn render_chat_template(
         &self,
         tools: &Vec<Tool>,
+        add_generation_prompt: bool,
         log: bool,
     ) -> Result<String, ApplyChatTemplateError> {
         if self.chat_template.is_none() {
@@ -283,12 +343,149 @@ impl ChatTemplate {
         template
             .render(context! {
               messages => render_messages,
-              add_generation_prompt => self.add_generation_prompt,
+              add_generation_prompt => add_generation_prompt,
               bos_token => self.bos_token,
               eos_token => self.eos_token,
               enable_thinking => self.enable_thinking,
               tools => tools,
             })
+            .map(|rendered| restore_assistant_reasoning_markers(&rendered))
             .map_err(ApplyChatTemplateError::RenderTemplateError)
+    }
+
+    pub fn apply_chat_template(
+        &self,
+        tools: &Vec<Tool>,
+        log: bool,
+    ) -> Result<String, ApplyChatTemplateError> {
+        self.render_chat_template(tools, self.add_generation_prompt, log)
+    }
+
+    pub fn generation_prompt_replay(
+        &self,
+        tools: &Vec<Tool>,
+        rendered_prompt: &str,
+    ) -> Option<PromptReplay> {
+        if !self.add_generation_prompt {
+            return None;
+        }
+
+        let prompt_without_generation = self.render_chat_template(tools, false, false).ok()?;
+        let suffix_text = rendered_prompt
+            .strip_prefix(&prompt_without_generation)?
+            .to_string();
+        let suffix_text = strip_generation_assistant_header(&suffix_text).to_string();
+        if suffix_text.is_empty() {
+            return None;
+        }
+        Some(PromptReplay { suffix_text })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THINKING_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- else %}
+        {{- '<think>\n' }}
+    {%- endif %}
+{%- endif %}
+"#;
+
+    const HEADER_ONLY_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}
+"#;
+
+    const ALT_ASSISTANT_HEADER_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<turn>' + message.role + '\n' + message.content + '</turn>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<assistant_start>assistant\n<think>\n' }}
+{%- endif %}
+"#;
+
+    fn build_template(source: &str, enable_thinking: bool) -> ChatTemplate {
+        ChatTemplate::new(
+            None,
+            Some(source.to_string()),
+            None,
+            None,
+            None,
+            true,
+            enable_thinking,
+        )
+    }
+
+    #[test]
+    fn generation_prompt_replay_extracts_thinking_suffix() {
+        let template = build_template(THINKING_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay.suffix_text, "<think>\n");
+    }
+
+    #[test]
+    fn generation_prompt_replay_extracts_disabled_thinking_suffix() {
+        let template = build_template(THINKING_TEMPLATE, false);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay.suffix_text, "<think>\n\n</think>\n\n");
+    }
+
+    #[test]
+    fn generation_prompt_replay_extracts_header_only_suffix() {
+        let template = build_template(HEADER_ONLY_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        assert!(template
+            .generation_prompt_replay(&Vec::new(), &rendered)
+            .is_none());
+    }
+
+    #[test]
+    fn generation_prompt_replay_strips_non_qwen_assistant_header() {
+        let template = build_template(ALT_ASSISTANT_HEADER_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay.suffix_text, "<think>\n");
+    }
+
+    #[test]
+    fn strip_generation_assistant_header_only_strips_leading_header_line() {
+        let suffix = "<|im_start|>assistant\n<think>\nassistant\n";
+        assert_eq!(
+            strip_generation_assistant_header(suffix),
+            "<think>\nassistant\n"
+        );
+    }
+
+    #[test]
+    fn protect_and_restore_reasoning_markers_round_trip() {
+        let original =
+            "<think>\na\n</think>\n<|think|>b<|/think|>\n[THINK]c[/THINK]\n<thought>d</thought>";
+        let protected = protect_assistant_reasoning_markers(original);
+        assert!(!protected.contains("<think>"));
+        assert!(!protected.contains("</think>"));
+        let restored = restore_assistant_reasoning_markers(&protected);
+        assert_eq!(restored, original);
     }
 }

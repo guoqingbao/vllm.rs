@@ -346,6 +346,48 @@ const REASONING_MARKERS: &[(&str, &str)] = &[
     ("<thought>", "</thought>"),
 ];
 
+/// All reasoning marker strings, used for tool-response placeholder rewriting.
+pub const ALL_REASONING_MARKER_STRINGS: &[&str] = &[
+    "<think>",
+    "</think>",
+    "<|think|>",
+    "<|/think|>",
+    "[THINK]",
+    "[/THINK]",
+    "<thought>",
+    "</thought>",
+];
+
+/// Replace reasoning markers with a single-space placeholder for tool-call
+/// responses sent back to the client.
+pub fn strip_reasoning_markers_for_tool_response(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let mut out = text.to_string();
+    for marker in ALL_REASONING_MARKER_STRINGS {
+        if out.contains(marker) {
+            out = out.replace(marker, " ");
+        }
+    }
+    out
+}
+
+pub fn text_contains_reasoning_marker(text: &str) -> bool {
+    ALL_REASONING_MARKER_STRINGS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+pub fn token_text_is_reasoning_boundary(text: &str) -> bool {
+    let trimmed = text.trim_matches(|ch: char| ch.is_whitespace());
+    !trimmed.is_empty()
+        && ALL_REASONING_MARKER_STRINGS
+            .iter()
+            .any(|marker| trimmed == *marker)
+}
+
 /// Detect whether a rendered prompt already ends inside a reasoning block.
 ///
 /// This happens for templates that prefill `<think>` in `add_generation_prompt`.
@@ -1945,6 +1987,12 @@ abc
         let safe = parser.sanitize_tool_markup_for_display(raw);
         assert!(safe.contains("<\u{200C}tool_ca"));
         assert!(!parser.contains_tool_markup(&safe));
+    }
+
+    #[test]
+    fn test_strip_reasoning_markers_for_tool_response_uses_space_placeholders() {
+        let text = "<think>\nabc\n</think>";
+        assert_eq!(strip_reasoning_markers_for_tool_response(text), " \nabc\n ");
     }
 
     #[test]

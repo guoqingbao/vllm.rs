@@ -10,7 +10,7 @@ use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
 use regex::Regex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
@@ -35,6 +35,11 @@ pub struct Scheduler {
     cfg: EngineConfig,
     pd_config: Option<PdConfig>,
     is_last_prefill: bool,
+    reasoning_marker_revision_seqs: HashSet<usize>,
+    reasoning_prompt_replay_suffixes: HashMap<usize, Vec<u32>>,
+    reasoning_start_token_ids: Vec<u32>,
+    reasoning_end_token_ids: Vec<u32>,
+    space_token_id: Option<u32>,
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
@@ -149,6 +154,95 @@ impl Scheduler {
             cfg: econfig.clone(),
             pd_config: econfig.pd_config.clone(),
             is_last_prefill: false,
+            reasoning_marker_revision_seqs: HashSet::new(),
+            reasoning_prompt_replay_suffixes: HashMap::new(),
+            reasoning_start_token_ids: Vec::new(),
+            reasoning_end_token_ids: Vec::new(),
+            space_token_id: None,
+        }
+    }
+
+    pub fn mark_reasoning_marker_revision(&mut self, seq_id: usize) {
+        self.reasoning_marker_revision_seqs.insert(seq_id);
+    }
+
+    pub fn set_reasoning_prompt_replay_suffix(&mut self, seq_id: usize, suffix_ids: Vec<u32>) {
+        if suffix_ids.is_empty() {
+            self.reasoning_prompt_replay_suffixes.remove(&seq_id);
+        } else {
+            self.reasoning_prompt_replay_suffixes
+                .insert(seq_id, suffix_ids);
+        }
+    }
+
+    pub fn set_reasoning_marker_tokens(
+        &mut self,
+        start_ids: Vec<u32>,
+        end_ids: Vec<u32>,
+        space_id: Option<u32>,
+    ) {
+        self.reasoning_start_token_ids = start_ids;
+        self.reasoning_end_token_ids = end_ids;
+        self.space_token_id = space_id;
+    }
+
+    fn token_is_whitespace_only(tokenizer: Option<&Arc<Tokenizer>>, token_id: u32) -> bool {
+        tokenizer
+            .and_then(|tokenizer| tokenizer.decode(&[token_id], false).ok())
+            .is_some_and(|text| !text.is_empty() && text.chars().all(|ch| ch.is_whitespace()))
+    }
+
+    fn try_revise_reasoning_markers(
+        revision_set: &mut HashSet<usize>,
+        replay_suffixes: &mut HashMap<usize, Vec<u32>>,
+        start_ids: &[u32],
+        end_ids: &[u32],
+        space_id: Option<u32>,
+        tokenizer: Option<&Arc<Tokenizer>>,
+        seq: &mut Sequence,
+    ) {
+        if !revision_set.remove(&seq.id) {
+            return;
+        }
+        let space = match space_id {
+            Some(id) => id,
+            None => return,
+        };
+        let prompt_len = seq.token_ids.len() - seq.output_ids.len();
+        if let Some(replay_suffix) = replay_suffixes.remove(&seq.id) {
+            if !replay_suffix.is_empty()
+                && prompt_len >= replay_suffix.len()
+                && seq.token_ids[prompt_len - replay_suffix.len()..prompt_len] == replay_suffix
+            {
+                for token_id in &mut seq.token_ids[prompt_len - replay_suffix.len()..prompt_len] {
+                    *token_id = space;
+                }
+            }
+        }
+
+        if !start_ids.is_empty() || !end_ids.is_empty() {
+            let mut pending_whitespace_placeholder = false;
+            for idx in 0..seq.output_ids.len() {
+                let token_id = seq.output_ids[idx];
+                if start_ids.contains(&token_id) || end_ids.contains(&token_id) {
+                    seq.output_ids[idx] = space;
+                    seq.token_ids[prompt_len + idx] = space;
+                    pending_whitespace_placeholder = true;
+                    continue;
+                }
+                if pending_whitespace_placeholder
+                    && Self::token_is_whitespace_only(tokenizer, token_id)
+                {
+                    seq.output_ids[idx] = space;
+                    seq.token_ids[prompt_len + idx] = space;
+                    continue;
+                }
+                pending_whitespace_placeholder = false;
+            }
+        }
+
+        if let Some(&last) = seq.token_ids.last() {
+            seq.last_token = last;
         }
     }
 
@@ -468,12 +562,18 @@ impl Scheduler {
                         );
                         let seq = &mut self.running[idx];
                         if success {
-                            // Insert into prefix cache so future requests can benefit
-                            // LRU eviction will handle memory pressure automatically
+                            Self::try_revise_reasoning_markers(
+                                &mut self.reasoning_marker_revision_seqs,
+                                &mut self.reasoning_prompt_replay_suffixes,
+                                &self.reasoning_start_token_ids,
+                                &self.reasoning_end_token_ids,
+                                self.space_token_id,
+                                self.tokenizer.as_ref(),
+                                seq,
+                            );
                             self.block_manager
                                 .capture_mamba_prefix_state(seq, seq.len());
                             self.block_manager.cache_sequence(seq);
-                            // Maintain resources until client asks to release or cache eviction
                             seq.status = SequenceStatus::Cached;
                             let cur_time = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -527,6 +627,15 @@ impl Scheduler {
                     seq.is_tool_call_end = true;
                     // External tool mode: finish stream so client can handle tool calls
                     seq.status = SequenceStatus::Finished;
+                    Self::try_revise_reasoning_markers(
+                        &mut self.reasoning_marker_revision_seqs,
+                        &mut self.reasoning_prompt_replay_suffixes,
+                        &self.reasoning_start_token_ids,
+                        &self.reasoning_end_token_ids,
+                        self.space_token_id,
+                        self.tokenizer.as_ref(),
+                        seq,
+                    );
                     self.block_manager
                         .capture_mamba_prefix_state(seq, seq.len());
                     self.block_manager.cache_sequence(seq);
@@ -561,6 +670,15 @@ impl Scheduler {
                     });
                 }
                 seq.status = SequenceStatus::Finished;
+                Self::try_revise_reasoning_markers(
+                    &mut self.reasoning_marker_revision_seqs,
+                    &mut self.reasoning_prompt_replay_suffixes,
+                    &self.reasoning_start_token_ids,
+                    &self.reasoning_end_token_ids,
+                    self.space_token_id,
+                    self.tokenizer.as_ref(),
+                    seq,
+                );
                 self.block_manager
                     .capture_mamba_prefix_state(seq, seq.len());
                 self.block_manager.cache_sequence(seq);
@@ -621,6 +739,8 @@ impl Scheduler {
     }
 
     pub fn cancel(&mut self, seq_id: usize) {
+        self.reasoning_marker_revision_seqs.remove(&seq_id);
+        self.reasoning_prompt_replay_suffixes.remove(&seq_id);
         for i in 0..self.running.len() {
             let seq = &mut self.running[i];
             if seq.id == seq_id {
@@ -1204,5 +1324,38 @@ impl Scheduler {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::config::SamplingParams;
+
+    #[test]
+    fn revises_prompt_replay_suffix_as_whole_span() {
+        let mut revision_set = HashSet::from([7usize]);
+        let mut replay_suffixes = HashMap::from([(7usize, vec![151, 152, 153])]);
+        let mut seq = Sequence::new(
+            vec![11, 12, 151, 152, 153],
+            16,
+            SamplingParams::new_with_max_tokens(8),
+            &None,
+            0,
+        );
+        seq.id = 7;
+
+        Scheduler::try_revise_reasoning_markers(
+            &mut revision_set,
+            &mut replay_suffixes,
+            &[],
+            &[],
+            Some(32),
+            None,
+            &mut seq,
+        );
+
+        assert_eq!(seq.token_ids, vec![11, 12, 32, 32, 32]);
+        assert_eq!(seq.last_token, 32);
     }
 }

@@ -18,7 +18,7 @@ use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
-use crate::utils::chat_template::Message;
+use crate::utils::chat_template::{Message, PromptReplay};
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::{build_llg_factory, extract_guidance_tokens, GuidanceTokens};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -58,6 +58,9 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to build global Tokio runtime")
 });
 
+const REASONING_START_MARKERS: &[&str] = &["<think>", "<|think|>", "[THINK]", "<thought>"];
+const REASONING_END_MARKERS: &[&str] = &["</think>", "<|/think|>", "[/THINK]", "</thought>"];
+
 #[derive(Debug, Clone)]
 pub enum StreamItem {
     Token(String, u32), //streaming: (text, token_id)
@@ -87,6 +90,8 @@ pub struct LLMEngine {
     decode_start_times: HashMap<usize, usize>,
     decode_length: HashMap<usize, usize>,
     seq_prefilled_reasoning_end: HashMap<usize, String>,
+    seq_prompt_replays: HashMap<usize, Vec<u32>>,
+    reasoning_space_token_id: Option<u32>,
     last_check_throughput_time: usize,
     active_requests: HashSet<usize>,
     cancelled_sequences: Vec<usize>,
@@ -426,6 +431,31 @@ impl LLMEngine {
         // Set tokenizer for JSON tool call detection (for models like Qwen3 that output raw JSON)
         scheduler.set_tokenizer(Arc::new(tokenizer.clone()));
 
+        let reasoning_space_token_id = {
+            let resolve_single_token = |s: &str| -> Option<u32> {
+                tokenizer.encode(s, false).ok().and_then(|enc| {
+                    let ids = enc.get_ids();
+                    if ids.len() == 1 {
+                        Some(ids[0])
+                    } else {
+                        None
+                    }
+                })
+            };
+
+            let start_ids: Vec<u32> = REASONING_START_MARKERS
+                .iter()
+                .filter_map(|m| resolve_single_token(m))
+                .collect();
+            let end_ids: Vec<u32> = REASONING_END_MARKERS
+                .iter()
+                .filter_map(|m| resolve_single_token(m))
+                .collect();
+            let space_id = resolve_single_token(" ");
+            scheduler.set_reasoning_marker_tokens(start_ids, end_ids, space_id);
+            space_id
+        };
+
         log_warn!(
             "Maximum batched tokens {} ({} blocks x Block_Size {} for KV cache). Additional CPU KV Cache blocks {}.",
             econfig.max_num_batched_tokens,
@@ -474,6 +504,8 @@ impl LLMEngine {
             decode_start_times: HashMap::new(),
             decode_length: HashMap::new(),
             seq_prefilled_reasoning_end: HashMap::new(),
+            seq_prompt_replays: HashMap::new(),
+            reasoning_space_token_id,
             last_check_throughput_time: 0,
             active_requests: HashSet::new(),
             cancelled_sequences: Vec::new(),
@@ -494,6 +526,7 @@ impl LLMEngine {
         &mut self,
         params: &SamplingParams,
         prompt: &str,
+        prompt_replay: Option<&PromptReplay>,
         request_type: &RequestType,
         images: &Option<ImageData>,
         image_idx: i32,
@@ -504,6 +537,19 @@ impl LLMEngine {
             .expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
+        let raw_replay_token_ids = self.encode_prompt_replay_token_ids(prompt_replay);
+        let placeholder_replay = self.should_enable_reasoning_cache_revision_for_params(params);
+        let replay_token_ids = raw_replay_token_ids.as_ref().map(|replay_ids| {
+            if placeholder_replay {
+                if let Some(space_id) = self.reasoning_space_token_id {
+                    vec![space_id; replay_ids.len()]
+                } else {
+                    replay_ids.clone()
+                }
+            } else {
+                replay_ids.clone()
+            }
+        });
         if let Some(max_model_len) = self.econfig.max_model_len {
             if length > max_model_len - 1 {
                 candle_core::bail!(
@@ -603,6 +649,15 @@ impl LLMEngine {
         if let Some(end_marker) = detect_prefilled_reasoning_end_marker(prompt) {
             self.seq_prefilled_reasoning_end.insert(seq_id, end_marker);
         }
+        if let Some(replay_ids) = replay_token_ids {
+            self.seq_prompt_replays.insert(seq_id, replay_ids);
+        }
+        if placeholder_replay {
+            if let Some(raw_replay_ids) = raw_replay_token_ids {
+                self.scheduler
+                    .set_reasoning_prompt_replay_suffix(seq_id, raw_replay_ids);
+            }
+        }
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -623,12 +678,19 @@ impl LLMEngine {
         &mut self,
         params: &SamplingParams,
         prompt: &str,
+        prompt_replay: Option<&PromptReplay>,
         request_type: RequestType,
         images: &Option<ImageData>,
         image_idx: i32,
     ) -> Result<(usize, usize, Receiver<StreamItem>)> {
-        let (seq_id, prompt_length) =
-            self.add_request_(params, prompt, &request_type, images, image_idx)?;
+        let (seq_id, prompt_length) = self.add_request_(
+            params,
+            prompt,
+            prompt_replay,
+            &request_type,
+            images,
+            image_idx,
+        )?;
         let (tx, rx) = channel(1024);
         self.stream_senders.insert(seq_id, tx);
         self.request_types.insert(seq_id, request_type.clone());
@@ -648,8 +710,35 @@ impl LLMEngine {
         self.scheduler.get_num_cached_tokens()
     }
 
+    fn should_enable_reasoning_cache_revision(&self, tools: &[Tool]) -> bool {
+        !tools.is_empty() && self.scheduler.block_manager.prefix_cache_enabled()
+    }
+
+    fn should_enable_reasoning_cache_revision_for_params(&self, params: &SamplingParams) -> bool {
+        params.mcp_mode.is_some() && self.scheduler.block_manager.prefix_cache_enabled()
+    }
+
+    fn encode_prompt_replay_token_ids(
+        &self,
+        prompt_replay: Option<&PromptReplay>,
+    ) -> Option<Vec<u32>> {
+        let replay = prompt_replay?;
+        if replay.is_empty() {
+            return None;
+        }
+        self.tokenizer
+            .encode(replay.suffix_text.as_str(), false)
+            .ok()
+            .map(|encoding| encoding.get_ids().to_vec())
+            .filter(|ids| !ids.is_empty())
+    }
+
     pub fn get_available_kv_tokens(&self) -> usize {
         self.scheduler.get_available_kv_tokens()
+    }
+
+    fn take_prompt_replay_token_ids(&mut self, seq_id: usize) -> Option<Vec<u32>> {
+        self.seq_prompt_replays.remove(&seq_id)
     }
 
     pub fn notify_runner_finished(&mut self, id: usize) -> Result<()> {
@@ -842,6 +931,7 @@ impl LLMEngine {
                     self.decode_start_times.remove(&seq_id);
                     self.decode_length.remove(&seq_id);
                     self.seq_prefilled_reasoning_end.remove(&seq_id);
+                    self.seq_prompt_replays.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
                     if self.econfig.server_mode.unwrap_or(true) {
                         self.scheduler.print_free_blocks();
@@ -876,13 +966,17 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
-                    let token_ids =
+                    let mut token_ids =
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
                             // Special case, the real first token is generated on PD server
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
                         } else {
                             vec![s.last_token]
                         };
+                    if let Some(mut replay_ids) = self.take_prompt_replay_token_ids(seq_id) {
+                        replay_ids.extend(token_ids);
+                        token_ids = replay_ids;
+                    }
 
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -980,6 +1074,7 @@ impl LLMEngine {
             self.stream_decoders.remove(&seq_id);
             self.decode_start_times.remove(&seq_id);
             self.seq_prefilled_reasoning_end.remove(&seq_id);
+            self.seq_prompt_replays.remove(&seq_id);
             if let Some(r) = &reason {
                 if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                     if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -1059,7 +1154,7 @@ impl LLMEngine {
         messages: &Vec<Message>,
         tools: &Vec<Tool>,
         log: bool,
-    ) -> (String, i32) {
+    ) -> (String, i32, Option<PromptReplay>) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
         prompt_template.set_enable_thinking(params.thinking.unwrap_or(false));
@@ -1088,6 +1183,7 @@ impl LLMEngine {
             }
             prompt
         };
+        let replay = prompt_template.generation_prompt_replay(tools, &prompt);
 
         if log {
             log_info!(
@@ -1095,7 +1191,7 @@ impl LLMEngine {
                 prompt.replace("\n", "")
             );
         }
-        (prompt, image_idx)
+        (prompt, image_idx, replay)
     }
 
     pub fn is_idle(&self) -> bool {
@@ -1127,13 +1223,22 @@ impl LLMEngine {
         }
         let mut receivers = Vec::new();
         for (param, messages) in params.iter().zip(message_list.iter()) {
-            let (prompt, image_idx) = self.apply_chat_template(param, messages, tools, false);
+            let (prompt, image_idx, prompt_replay) =
+                self.apply_chat_template(param, messages, tools, false);
             if let Some(ref l) = logger {
                 l.log_prompt(&prompt);
             }
-            if let Ok((seq_id, prompt_length, rx)) =
-                self.add_request(param, &prompt, RequestType::Completion, &images, image_idx)
-            {
+            if let Ok((seq_id, prompt_length, rx)) = self.add_request(
+                param,
+                &prompt,
+                prompt_replay.as_ref(),
+                RequestType::Completion,
+                &images,
+                image_idx,
+            ) {
+                if self.should_enable_reasoning_cache_revision(tools) {
+                    self.scheduler.mark_reasoning_marker_revision(seq_id);
+                }
                 receivers.push((seq_id, prompt_length, rx));
             }
         }
@@ -1271,6 +1376,7 @@ impl LLMEngine {
         self.scheduler.clear_finished();
         self.scheduler.release_waitings();
         self.seq_prefilled_reasoning_end.clear();
+        self.seq_prompt_replays.clear();
     }
 
     /// Returns the reasoning end marker when the prompt for this sequence
@@ -1287,12 +1393,23 @@ impl LLMEngine {
         tools: &Vec<Tool>,
         logger: &Option<Arc<ChatCompletionLogger>>,
     ) -> Result<(usize, usize, Option<String>, mpsc::Receiver<StreamItem>)> {
-        let (prompt, image_idx) = self.apply_chat_template(params, messages, tools, false);
+        let (prompt, image_idx, prompt_replay) =
+            self.apply_chat_template(params, messages, tools, false);
         if let Some(ref l) = logger {
             l.log_prompt(&prompt);
         }
-        match self.add_request(params, &prompt, RequestType::Stream, &images, image_idx) {
+        match self.add_request(
+            params,
+            &prompt,
+            prompt_replay.as_ref(),
+            RequestType::Stream,
+            &images,
+            image_idx,
+        ) {
             Ok((seq_id, prompt_length, rx)) => {
+                if self.should_enable_reasoning_cache_revision(tools) {
+                    self.scheduler.mark_reasoning_marker_revision(seq_id);
+                }
                 let prefilled_reasoning_end = self.get_prefilled_reasoning_end_marker(seq_id);
                 Ok((seq_id, prompt_length, prefilled_reasoning_end, rx))
             }

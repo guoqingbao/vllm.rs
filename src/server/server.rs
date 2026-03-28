@@ -464,6 +464,7 @@ pub async fn chat_completion(
             let mut total_decoded_tokens = 0usize;
             let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
             let mut suppressed_tool_markup: String = String::new();
+            let mut pending_reasoning_whitespace_placeholder = false;
             let mut buffering_since: Option<Instant> = None;
             let mut buffering_cancel_requested = false;
             let mut buffering_warned = false;
@@ -549,11 +550,25 @@ pub async fn chat_completion(
                                         );
                                         continue;
                                     }
+                                    let display_text =
+                                        if crate::server::parser::token_text_is_reasoning_boundary(
+                                            &token,
+                                        ) {
+                                            pending_reasoning_whitespace_placeholder = true;
+                                            " ".to_string()
+                                        } else if pending_reasoning_whitespace_placeholder
+                                            && token.chars().all(|ch| ch.is_whitespace())
+                                        {
+                                            " ".to_string()
+                                        } else {
+                                            pending_reasoning_whitespace_placeholder = false;
+                                            crate::server::parser::strip_reasoning_markers_for_tool_response(&text)
+                                        };
                                     // Send content to client
                                     if let Some(ref l) = stream_logger {
-                                        l.log_stream_token(&text);
+                                        l.log_stream_token(&display_text);
                                     }
-                                    if !stream_ctx.send_token(&text) {
+                                    if !stream_ctx.send_token(&display_text) {
                                         crate::log_error!(
                                             "[Seq {}] Stream send error (disconnected)",
                                             current_seq_id
@@ -564,6 +579,7 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::Buffering => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     // Parser is buffering, don't send anything to client yet.
                                     if buffering_since.is_none() {
                                         buffering_since = Some(Instant::now());
@@ -605,6 +621,7 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::FlushBuffer(text) => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -633,6 +650,8 @@ pub async fn chat_completion(
                                     }
                                     let safe_text =
                                         tool_parser.sanitize_tool_markup_for_display(&text);
+                                    let safe_text =
+                                        crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_text);
                                     if safe_text != text {
                                         crate::log_warn!(
                                             "[Seq {}] Sanitized leaked tool markup in flushed text",
@@ -655,6 +674,7 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::ToolCalls(tools) => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -716,6 +736,8 @@ pub async fn chat_completion(
                                             } else {
                                                 let safe_buffer = tool_parser
                                                     .sanitize_tool_markup_for_display(&buffer);
+                                                let safe_buffer =
+                                                    crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_buffer);
                                                 if safe_buffer != buffer {
                                                     crate::log_warn!(
                                                         "[Seq {}] Sanitized leaked tool markup in partial buffer",
@@ -749,6 +771,8 @@ pub async fn chat_completion(
                             if pending_tool_calls.is_empty() && !suppressed_tool_markup.is_empty() {
                                 let safe_suppressed = tool_parser
                                     .sanitize_tool_markup_for_display(&suppressed_tool_markup);
+                                let safe_suppressed =
+                                    crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_suppressed);
                                 crate::log_warn!(
                                     "[Seq {}] Releasing {} suppressed tool-markup chars as sanitized text (no tool calls recovered)",
                                     current_seq_id,
@@ -1103,7 +1127,14 @@ pub async fn chat_completion(
                             output.decode_output.clone()
                         }
                     };
-                    (Some(fallback_text), None)
+                    (
+                        Some(
+                            crate::server::parser::strip_reasoning_markers_for_tool_response(
+                                &fallback_text,
+                            ),
+                        ),
+                        None,
+                    )
                 } else {
                     log_tool_calls("Valid", &valid_calls);
                     let public_calls = valid_calls
