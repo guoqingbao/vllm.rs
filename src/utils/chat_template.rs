@@ -4,6 +4,11 @@ use minijinja::{context, Environment};
 use pyo3::pyclass;
 use tokenizers::Tokenizer;
 
+pub(crate) const REASONING_START_MARKERS: &[&str] =
+    &["<think>", "<|think|>", "[THINK]", "<thought>"];
+pub(crate) const REASONING_END_MARKERS: &[&str] =
+    &["</think>", "<|/think|>", "[/THINK]", "</thought>"];
+
 #[cfg(feature = "python")]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[pyclass]

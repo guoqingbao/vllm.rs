@@ -18,7 +18,9 @@ use crate::server::{EmbeddingStrategy, UsageResponse};
 use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::transfer::Transfer;
-use crate::utils::chat_template::{Message, PromptReplay};
+use crate::utils::chat_template::{
+    Message, PromptReplay, REASONING_END_MARKERS, REASONING_START_MARKERS,
+};
 use crate::utils::config::{EngineConfig, EosTokenId, ModelType, SamplingParams};
 use crate::utils::guidance::{build_llg_factory, extract_guidance_tokens, GuidanceTokens};
 use crate::utils::heartbeat::heartbeat_worker;
@@ -57,9 +59,6 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .build()
         .expect("Failed to build global Tokio runtime")
 });
-
-const REASONING_START_MARKERS: &[&str] = &["<think>", "<|think|>", "[THINK]", "<thought>"];
-const REASONING_END_MARKERS: &[&str] = &["</think>", "<|/think|>", "[/THINK]", "</thought>"];
 
 #[derive(Debug, Clone)]
 pub enum StreamItem {
