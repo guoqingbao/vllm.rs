@@ -19,6 +19,7 @@ use axum::{
         IntoResponse, Sse,
     },
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use flume::{Receiver, TrySendError};
 use futures::Stream;
 use once_cell::sync::Lazy;
@@ -53,6 +54,14 @@ static ANTHROPIC_BILLING_CCH_RE: Lazy<Regex> = Lazy::new(|| {
         .expect("valid anthropic billing cch regex")
 });
 
+const CLAUDE_REASONING_MARKERS: &[(&str, &str)] = &[
+    ("<think>", "</think>"),
+    ("<|think|>", "<|/think|>"),
+    ("[THINK]", "[/THINK]"),
+    ("<thought>", "</thought>"),
+];
+const SYNTHETIC_THINKING_SIGNATURE_PREFIX: &str = "vllm-rs-thinking-v1:";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeContent {
@@ -67,6 +76,14 @@ pub enum ClaudeContentBlock {
     Text { text: String },
     #[serde(rename = "image")]
     Image { source: ClaudeImageSource },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -213,6 +230,14 @@ pub struct ClaudeMessageResponse {
 pub enum ClaudeContentBlockOut {
     #[serde(rename = "text")]
     Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -255,11 +280,33 @@ pub struct ClaudeContentBlockDeltaEvent {
 pub enum ClaudeContentDelta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta { thinking: String },
+    #[serde(rename = "signature_delta")]
+    SignatureDelta { signature: String },
     #[serde(rename = "input_json_delta")]
     InputJsonDelta {
         #[serde(rename = "partial_json")]
         partial_json: String,
     },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SyntheticThinkingSignature {
+    version: u8,
+    suffix_placeholder: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaudeThinkingBlock {
+    thinking: String,
+    signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedClaudeAssistantOutput {
+    thinking_blocks: Vec<ClaudeThinkingBlock>,
+    text: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -439,6 +486,149 @@ fn tool_choice_to_openai(choice: &Option<ClaudeToolChoice>) -> Option<ToolChoice
     }
 }
 
+fn encode_synthetic_thinking_signature(suffix_placeholder: &str) -> String {
+    let payload = SyntheticThinkingSignature {
+        version: 1,
+        suffix_placeholder: suffix_newlines_to_spaces(suffix_placeholder),
+    };
+    let json = serde_json::to_vec(&payload).unwrap_or_default();
+    format!(
+        "{}{}",
+        SYNTHETIC_THINKING_SIGNATURE_PREFIX,
+        URL_SAFE_NO_PAD.encode(json)
+    )
+}
+
+fn decode_synthetic_thinking_signature(signature: &str) -> Option<SyntheticThinkingSignature> {
+    let encoded = signature.strip_prefix(SYNTHETIC_THINKING_SIGNATURE_PREFIX)?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn replay_text_for_thinking_block(thinking: &str, signature: Option<&str>) -> String {
+    let thinking = normalize_suffix_thinking_text(thinking);
+    let suffix_placeholder = signature
+        .and_then(decode_synthetic_thinking_signature)
+        .map(|payload| payload.suffix_placeholder)
+        .unwrap_or_else(|| " ".to_string());
+    format!(" {}{}", thinking, suffix_placeholder)
+}
+
+fn suffix_newlines_to_spaces(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch == '\n' || ch == '\r' { ' ' } else { ch })
+        .collect()
+}
+
+fn normalize_suffix_thinking_text(thinking: &str) -> String {
+    if thinking.trim().is_empty() {
+        suffix_newlines_to_spaces(thinking)
+    } else {
+        thinking.to_string()
+    }
+}
+
+fn find_reasoning_start(text: &str) -> Option<(usize, &'static str, &'static str)> {
+    CLAUDE_REASONING_MARKERS
+        .iter()
+        .filter_map(|(start, end)| text.find(start).map(|idx| (idx, *start, *end)))
+        .min_by_key(|(idx, _, _)| *idx)
+}
+
+fn find_reasoning_end(text: &str) -> Option<(usize, &'static str)> {
+    CLAUDE_REASONING_MARKERS
+        .iter()
+        .filter_map(|(_, end)| text.find(end).map(|idx| (idx, *end)))
+        .min_by_key(|(idx, _)| *idx)
+}
+
+fn append_reasoning_segment(
+    rendered: &mut String,
+    thinking_blocks: &mut Vec<ClaudeThinkingBlock>,
+    thinking: &str,
+    trailing_ws: &str,
+) {
+    let suffix_placeholder = format!(" {}", trailing_ws);
+    let normalized_thinking = normalize_suffix_thinking_text(thinking);
+    let signature = encode_synthetic_thinking_signature(&suffix_placeholder);
+    if normalized_thinking.trim().is_empty() {
+        rendered.push_str(&replay_text_for_thinking_block(
+            &normalized_thinking,
+            Some(signature.as_str()),
+        ));
+    } else {
+        thinking_blocks.push(ClaudeThinkingBlock {
+            thinking: normalized_thinking,
+            signature,
+        });
+    }
+}
+
+fn parse_claude_assistant_output(text: &str) -> ParsedClaudeAssistantOutput {
+    let mut remaining = text;
+    let mut rendered = String::new();
+    let mut thinking_blocks = Vec::new();
+
+    while !remaining.is_empty() {
+        let next_start = find_reasoning_start(remaining);
+        let next_end = find_reasoning_end(remaining);
+        if let Some((end_idx, end_marker)) = next_end {
+            let start_before_end = next_start
+                .as_ref()
+                .is_some_and(|(start_idx, _, _)| *start_idx < end_idx);
+            if !start_before_end {
+                let after_end = &remaining[end_idx + end_marker.len()..];
+                let trailing_ws_len = after_end
+                    .char_indices()
+                    .take_while(|(_, ch)| ch.is_whitespace())
+                    .map(|(idx, ch)| idx + ch.len_utf8())
+                    .last()
+                    .unwrap_or(0);
+                append_reasoning_segment(
+                    &mut rendered,
+                    &mut thinking_blocks,
+                    &remaining[..end_idx],
+                    &after_end[..trailing_ws_len],
+                );
+                remaining = &after_end[trailing_ws_len..];
+                continue;
+            }
+        }
+
+        let Some((start_idx, start_marker, end_marker)) = next_start else {
+            rendered.push_str(remaining);
+            break;
+        };
+
+        rendered.push_str(&remaining[..start_idx]);
+        let after_start = &remaining[start_idx + start_marker.len()..];
+        let Some(end_idx) = after_start.find(end_marker) else {
+            rendered.push_str(&remaining[start_idx..]);
+            break;
+        };
+
+        let after_end = &after_start[end_idx + end_marker.len()..];
+        let trailing_ws_len = after_end
+            .char_indices()
+            .take_while(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .last()
+            .unwrap_or(0);
+        append_reasoning_segment(
+            &mut rendered,
+            &mut thinking_blocks,
+            &after_start[..end_idx],
+            &after_end[..trailing_ws_len],
+        );
+        remaining = &after_end[trailing_ws_len..];
+    }
+
+    ParsedClaudeAssistantOutput {
+        thinking_blocks,
+        text: rendered,
+    }
+}
+
 fn normalize_claude_volatile_text(text: &mut String) -> usize {
     let mut occurrences = CLAUDE_SETTINGS_UUID_RE.find_iter(text.as_str()).count();
     if occurrences > 0 {
@@ -480,6 +670,10 @@ fn normalize_content_blocks(blocks: &mut [ClaudeContentBlock]) -> usize {
     for block in blocks {
         normalized += match block {
             ClaudeContentBlock::Text { text } => normalize_claude_volatile_text(text),
+            ClaudeContentBlock::Thinking { thinking, .. } => {
+                normalize_claude_volatile_text(thinking)
+            }
+            ClaudeContentBlock::RedactedThinking { data } => normalize_claude_volatile_text(data),
             ClaudeContentBlock::ToolUse { input, .. } => normalize_json_strings(input),
             ClaudeContentBlock::ToolResult { content, .. } => {
                 normalize_tool_result_content(content)
@@ -571,6 +765,12 @@ fn blocks_to_message_content(
                     items.push(MessageContent::Text { text: text.clone() });
                 }
             }
+            ClaudeContentBlock::Thinking { .. } => {
+                return Err("thinking blocks are not valid in plain content".to_string())
+            }
+            ClaudeContentBlock::RedactedThinking { .. } => {
+                return Err("redacted_thinking blocks are not valid in plain content".to_string())
+            }
             ClaudeContentBlock::Image { source } => {
                 if !allow_images {
                     return Err("image blocks are not supported here".to_string());
@@ -611,6 +811,16 @@ fn build_message_content_type(items: Vec<MessageContent>) -> Option<MessageConte
     }
 }
 
+fn push_text_content(items: &mut Vec<MessageContent>, text: String) {
+    if text.is_empty() {
+        return;
+    }
+    match items.last_mut() {
+        Some(MessageContent::Text { text: existing }) => existing.push_str(&text),
+        _ => items.push(MessageContent::Text { text }),
+    }
+}
+
 fn tool_result_content_to_text(content: &ClaudeToolResultContent) -> Result<String, String> {
     match content {
         ClaudeToolResultContent::Text(text) => Ok(text.clone()),
@@ -623,6 +833,12 @@ fn tool_result_content_to_text(content: &ClaudeToolResultContent) -> Result<Stri
                             combined.push(' ');
                         }
                         combined.push_str(text);
+                    }
+                    ClaudeContentBlock::Thinking { thinking, .. } => {
+                        if !combined.is_empty() {
+                            combined.push(' ');
+                        }
+                        combined.push_str(thinking);
                     }
                     _ => {
                         return Err(
@@ -821,7 +1037,7 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
 
     match &message.content {
         ClaudeContent::Text(text) => {
-            if text.trim().is_empty() {
+            if text.is_empty() {
                 return Ok(Vec::new());
             }
             return Ok(vec![ChatMessage::text(role, text.clone())]);
@@ -837,8 +1053,32 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         if !tool_calls.is_empty() {
                             flush_tool_call_message(&mut out, &mut tool_calls);
                         }
-                        if !text.trim().is_empty() {
-                            content_items.push(MessageContent::Text { text: text.clone() });
+                        if !text.is_empty() {
+                            push_text_content(&mut content_items, text.clone());
+                        }
+                    }
+                    ClaudeContentBlock::Thinking {
+                        thinking,
+                        signature,
+                    } => {
+                        if role != "assistant" {
+                            return Err("thinking blocks must be in assistant messages".to_string());
+                        }
+                        if !tool_calls.is_empty() {
+                            flush_tool_call_message(&mut out, &mut tool_calls);
+                        }
+                        push_text_content(
+                            &mut content_items,
+                            replay_text_for_thinking_block(thinking, signature.as_deref()),
+                        );
+                    }
+                    ClaudeContentBlock::RedactedThinking { .. } => {
+                        if role != "assistant" {
+                            return Err("redacted_thinking blocks must be in assistant messages"
+                                .to_string());
+                        }
+                        if !tool_calls.is_empty() {
+                            flush_tool_call_message(&mut out, &mut tool_calls);
                         }
                     }
                     ClaudeContentBlock::Image { source } => {
@@ -1036,6 +1276,412 @@ fn send_tool_use_block(
     };
     stream_ctx.send_json_event("content_block_stop", &stop)?;
     Ok(())
+}
+
+fn longest_partial_marker_suffix(text: &str, markers: &[&str]) -> usize {
+    let mut longest = 0usize;
+    for marker in markers {
+        let max_len = marker.len().saturating_sub(1).min(text.len());
+        for len in 1..=max_len {
+            if text.ends_with(&marker[..len]) {
+                longest = longest.max(len);
+            }
+        }
+    }
+    longest
+}
+
+#[derive(Debug)]
+enum ClaudeThinkingStreamMode {
+    Text,
+    ThinkingCandidate {
+        end_marker: &'static str,
+        buffered: String,
+    },
+    Thinking {
+        index: usize,
+        end_marker: &'static str,
+    },
+    PendingThinkingClose {
+        index: usize,
+        trailing_ws: String,
+    },
+    PendingEmptyThinking {
+        placeholder: String,
+    },
+}
+
+#[derive(Debug)]
+struct ClaudeThinkingStreamEmitter {
+    next_block_index: usize,
+    open_text_block: Option<usize>,
+    parse_buffer: String,
+    mode: ClaudeThinkingStreamMode,
+}
+
+impl ClaudeThinkingStreamEmitter {
+    fn new() -> Self {
+        Self {
+            next_block_index: 0,
+            open_text_block: None,
+            parse_buffer: String::new(),
+            mode: ClaudeThinkingStreamMode::Text,
+        }
+    }
+
+    fn open_text_block_index(&self) -> Option<usize> {
+        self.open_text_block
+    }
+
+    fn ensure_text_block(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+    ) -> Result<usize, StreamSendError> {
+        if let Some(index) = self.open_text_block {
+            return Ok(index);
+        }
+        let index = self.next_block_index;
+        let start_block = ClaudeContentBlockStartEvent {
+            event_type: "content_block_start",
+            index,
+            content_block: ClaudeContentBlockOut::Text {
+                text: String::new(),
+            },
+        };
+        stream_ctx.send_json_event("content_block_start", &start_block)?;
+        self.open_text_block = Some(index);
+        self.next_block_index += 1;
+        Ok(index)
+    }
+
+    fn emit_text(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+        logger: Option<&ChatCompletionLogger>,
+        text: &str,
+    ) -> Result<(), StreamSendError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        if let Some(logger) = logger {
+            logger.log_stream_token(text);
+        }
+        let index = self.ensure_text_block(stream_ctx)?;
+        send_text_delta(stream_ctx, index, text)
+    }
+
+    fn close_text_block(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+    ) -> Result<(), StreamSendError> {
+        let Some(index) = self.open_text_block.take() else {
+            return Ok(());
+        };
+        let stop_event = ClaudeContentBlockStopEvent {
+            event_type: "content_block_stop",
+            index,
+        };
+        stream_ctx.send_json_event("content_block_stop", &stop_event)
+    }
+
+    fn start_thinking_candidate(&mut self, end_marker: &'static str) {
+        self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
+            end_marker,
+            buffered: String::new(),
+        };
+    }
+
+    fn start_thinking_block(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+    ) -> Result<usize, StreamSendError> {
+        self.close_text_block(stream_ctx)?;
+        let index = self.next_block_index;
+        let start_block = ClaudeContentBlockStartEvent {
+            event_type: "content_block_start",
+            index,
+            content_block: ClaudeContentBlockOut::Thinking {
+                thinking: String::new(),
+                signature: None,
+            },
+        };
+        stream_ctx.send_json_event("content_block_start", &start_block)?;
+        self.next_block_index += 1;
+        Ok(index)
+    }
+
+    fn emit_thinking_delta(
+        stream_ctx: &ClaudeStreamingContext,
+        index: usize,
+        text: &str,
+    ) -> Result<(), StreamSendError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        let delta = ClaudeContentBlockDeltaEvent {
+            event_type: "content_block_delta",
+            index,
+            delta: ClaudeContentDelta::ThinkingDelta {
+                thinking: text.to_string(),
+            },
+        };
+        stream_ctx.send_json_event("content_block_delta", &delta)
+    }
+
+    fn close_thinking_block(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+        index: usize,
+        suffix_placeholder: &str,
+    ) -> Result<(), StreamSendError> {
+        let signature = encode_synthetic_thinking_signature(suffix_placeholder);
+        let delta = ClaudeContentBlockDeltaEvent {
+            event_type: "content_block_delta",
+            index,
+            delta: ClaudeContentDelta::SignatureDelta { signature },
+        };
+        stream_ctx.send_json_event("content_block_delta", &delta)?;
+        let stop = ClaudeContentBlockStopEvent {
+            event_type: "content_block_stop",
+            index,
+        };
+        stream_ctx.send_json_event("content_block_stop", &stop)?;
+        self.mode = ClaudeThinkingStreamMode::Text;
+        Ok(())
+    }
+
+    fn push_chunk(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+        logger: Option<&ChatCompletionLogger>,
+        text: &str,
+    ) -> Result<(), StreamSendError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.parse_buffer.push_str(text);
+        self.drain(stream_ctx, logger, false)
+    }
+
+    fn finish(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+        logger: Option<&ChatCompletionLogger>,
+    ) -> Result<usize, StreamSendError> {
+        self.drain(stream_ctx, logger, true)?;
+        self.close_text_block(stream_ctx)?;
+        Ok(self.next_block_index)
+    }
+
+    fn drain(
+        &mut self,
+        stream_ctx: &ClaudeStreamingContext,
+        logger: Option<&ChatCompletionLogger>,
+        finalize: bool,
+    ) -> Result<(), StreamSendError> {
+        loop {
+            let mode = std::mem::replace(&mut self.mode, ClaudeThinkingStreamMode::Text);
+            match mode {
+                ClaudeThinkingStreamMode::Text => {
+                    let next_start = find_reasoning_start(&self.parse_buffer);
+                    let next_end = find_reasoning_end(&self.parse_buffer);
+                    let Some((start_idx, start_marker, end_marker)) = next_start else {
+                        if let Some((end_idx, end_marker)) = next_end {
+                            let buffered = self.parse_buffer[..end_idx].to_string();
+                            self.parse_buffer.drain(..end_idx);
+                            self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
+                                end_marker,
+                                buffered,
+                            };
+                            continue;
+                        }
+                        let reserve = if finalize {
+                            0
+                        } else {
+                            let markers: Vec<&str> = CLAUDE_REASONING_MARKERS
+                                .iter()
+                                .map(|(start, _)| *start)
+                                .collect();
+                            longest_partial_marker_suffix(&self.parse_buffer, &markers)
+                        };
+                        let emit_len = self.parse_buffer.len().saturating_sub(reserve);
+                        if emit_len == 0 {
+                            self.mode = ClaudeThinkingStreamMode::Text;
+                            return Ok(());
+                        }
+                        let emit_text = self.parse_buffer[..emit_len].to_string();
+                        self.parse_buffer.drain(..emit_len);
+                        self.emit_text(stream_ctx, logger, &emit_text)?;
+                        self.mode = ClaudeThinkingStreamMode::Text;
+                        continue;
+                    };
+
+                    if let Some((end_idx, end_marker_only)) = next_end {
+                        if end_idx < start_idx {
+                            let buffered = self.parse_buffer[..end_idx].to_string();
+                            self.parse_buffer.drain(..end_idx);
+                            self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
+                                end_marker: end_marker_only,
+                                buffered,
+                            };
+                            continue;
+                        }
+                    }
+
+                    if start_idx > 0 {
+                        let emit_text = self.parse_buffer[..start_idx].to_string();
+                        self.parse_buffer.drain(..start_idx);
+                        self.emit_text(stream_ctx, logger, &emit_text)?;
+                        self.mode = ClaudeThinkingStreamMode::Text;
+                        continue;
+                    }
+
+                    if self.parse_buffer.len() < start_marker.len() {
+                        self.mode = ClaudeThinkingStreamMode::Text;
+                        return Ok(());
+                    }
+
+                    self.parse_buffer.drain(..start_marker.len());
+                    self.start_thinking_candidate(end_marker);
+                }
+                ClaudeThinkingStreamMode::ThinkingCandidate {
+                    end_marker,
+                    mut buffered,
+                } => {
+                    if let Some(end_idx) = self.parse_buffer.find(end_marker) {
+                        let delta_text = self.parse_buffer[..end_idx].to_string();
+                        self.parse_buffer.drain(..end_idx + end_marker.len());
+                        buffered.push_str(&delta_text);
+                        self.mode = ClaudeThinkingStreamMode::PendingEmptyThinking {
+                            placeholder: format!(" {}", normalize_suffix_thinking_text(&buffered)),
+                        };
+                        continue;
+                    }
+
+                    let reserve = if finalize {
+                        0
+                    } else {
+                        longest_partial_marker_suffix(&self.parse_buffer, &[end_marker])
+                    };
+                    let emit_len = self.parse_buffer.len().saturating_sub(reserve);
+                    if emit_len == 0 {
+                        if finalize {
+                            let remaining = std::mem::take(&mut self.parse_buffer);
+                            buffered.push_str(&remaining);
+                            if buffered.trim().is_empty() {
+                                let placeholder =
+                                    format!(" {}", normalize_suffix_thinking_text(&buffered));
+                                self.emit_text(stream_ctx, logger, &placeholder)?;
+                                self.mode = ClaudeThinkingStreamMode::Text;
+                            } else {
+                                let index = self.start_thinking_block(stream_ctx)?;
+                                Self::emit_thinking_delta(stream_ctx, index, &buffered)?;
+                                self.close_thinking_block(stream_ctx, index, " ")?;
+                            }
+                            continue;
+                        }
+                        self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
+                            end_marker,
+                            buffered,
+                        };
+                        return Ok(());
+                    }
+                    let delta_text = self.parse_buffer[..emit_len].to_string();
+                    self.parse_buffer.drain(..emit_len);
+                    buffered.push_str(&delta_text);
+                    if !buffered.trim().is_empty() {
+                        let index = self.start_thinking_block(stream_ctx)?;
+                        Self::emit_thinking_delta(stream_ctx, index, &buffered)?;
+                        self.mode = ClaudeThinkingStreamMode::Thinking { index, end_marker };
+                    } else {
+                        self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
+                            end_marker,
+                            buffered,
+                        };
+                    }
+                }
+                ClaudeThinkingStreamMode::Thinking { index, end_marker } => {
+                    if let Some(end_idx) = self.parse_buffer.find(end_marker) {
+                        let delta_text = self.parse_buffer[..end_idx].to_string();
+                        self.parse_buffer.drain(..end_idx + end_marker.len());
+                        Self::emit_thinking_delta(stream_ctx, index, &delta_text)?;
+                        self.mode = ClaudeThinkingStreamMode::PendingThinkingClose {
+                            index,
+                            trailing_ws: String::new(),
+                        };
+                        continue;
+                    }
+
+                    let reserve = if finalize {
+                        0
+                    } else {
+                        longest_partial_marker_suffix(&self.parse_buffer, &[end_marker])
+                    };
+                    let emit_len = self.parse_buffer.len().saturating_sub(reserve);
+                    if emit_len == 0 {
+                        if finalize {
+                            let remaining = std::mem::take(&mut self.parse_buffer);
+                            Self::emit_thinking_delta(stream_ctx, index, &remaining)?;
+                            self.close_thinking_block(stream_ctx, index, " ")?;
+                            continue;
+                        }
+                        self.mode = ClaudeThinkingStreamMode::Thinking { index, end_marker };
+                        return Ok(());
+                    }
+                    let delta_text = self.parse_buffer[..emit_len].to_string();
+                    self.parse_buffer.drain(..emit_len);
+                    Self::emit_thinking_delta(stream_ctx, index, &delta_text)?;
+                    self.mode = ClaudeThinkingStreamMode::Thinking { index, end_marker };
+                }
+                ClaudeThinkingStreamMode::PendingThinkingClose {
+                    index,
+                    mut trailing_ws,
+                } => {
+                    let ws_len = self
+                        .parse_buffer
+                        .char_indices()
+                        .take_while(|(_, ch)| ch.is_whitespace())
+                        .map(|(idx, ch)| idx + ch.len_utf8())
+                        .last()
+                        .unwrap_or(0);
+                    if ws_len > 0 {
+                        trailing_ws.push_str(&self.parse_buffer[..ws_len]);
+                        self.parse_buffer.drain(..ws_len);
+                    }
+                    if !self.parse_buffer.is_empty() || finalize {
+                        let suffix_placeholder = format!(" {}", trailing_ws);
+                        self.close_thinking_block(stream_ctx, index, &suffix_placeholder)?;
+                        continue;
+                    }
+                    self.mode =
+                        ClaudeThinkingStreamMode::PendingThinkingClose { index, trailing_ws };
+                    return Ok(());
+                }
+                ClaudeThinkingStreamMode::PendingEmptyThinking { mut placeholder } => {
+                    let ws_len = self
+                        .parse_buffer
+                        .char_indices()
+                        .take_while(|(_, ch)| ch.is_whitespace())
+                        .map(|(idx, ch)| idx + ch.len_utf8())
+                        .last()
+                        .unwrap_or(0);
+                    if ws_len > 0 {
+                        placeholder
+                            .push_str(&suffix_newlines_to_spaces(&self.parse_buffer[..ws_len]));
+                        self.parse_buffer.drain(..ws_len);
+                    }
+                    if !self.parse_buffer.is_empty() || finalize {
+                        let text = std::mem::take(&mut placeholder);
+                        self.emit_text(stream_ctx, logger, &text)?;
+                        self.mode = ClaudeThinkingStreamMode::Text;
+                        continue;
+                    }
+                    self.mode = ClaudeThinkingStreamMode::PendingEmptyThinking { placeholder };
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 async fn send_json_event_with_timeout<T: Serialize>(
@@ -1274,7 +1920,7 @@ fn thinking_to_bool(thinking: &Option<ClaudeThinking>) -> Option<bool> {
                 crate::log_warn!("Anthropic thinking budget_tokens provided but ignored");
             }
             match config.mode.as_str() {
-                "enabled" => Some(true),
+                "enabled" | "adaptive" => Some(true),
                 "disabled" => Some(false),
                 other => {
                     crate::log_warn!("Anthropic thinking mode '{}' not recognized", other);
@@ -1336,11 +1982,13 @@ pub async fn messages(
             .unwrap_or(600),
     );
 
+    let anthropic_thinking = thinking_to_bool(&request.thinking);
+    let anthropic_thinking_enabled = anthropic_thinking == Some(true);
     let mut params = SamplingParams::new_with_max_tokens(max_tokens);
     params.temperature = request.temperature;
     params.top_k = request.top_k.map(|v| v as isize);
     params.top_p = request.top_p;
-    params.thinking = thinking_to_bool(&request.thinking);
+    params.thinking = anthropic_thinking;
     if let Some(stop_sequences) = &request.stop_sequences {
         if !stop_sequences.is_empty() {
             params.stop_sequences = Some(stop_sequences.clone());
@@ -1416,6 +2064,7 @@ pub async fn messages(
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     }
+    let use_claude_thinking_blocks = anthropic_thinking_enabled && resolved_tools.is_empty();
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     params.mcp_mode = if !resolved_tools.is_empty() {
@@ -1599,6 +2248,7 @@ pub async fn messages(
             let text_block_index = 0usize;
             let mut pending_tool_calls: Vec<ToolCall> = Vec::new();
             let mut suppressed_tool_markup: String = String::new();
+            let mut pending_reasoning_whitespace_placeholder = false;
             let mut buffering_since: Option<Instant> = None;
             let mut buffering_cancel_requested = false;
             let mut buffering_warned = false;
@@ -1611,6 +2261,9 @@ pub async fn messages(
             );
             tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end.clone());
             let should_parse_tools = !stream_tools.is_empty();
+            let use_claude_thinking_stream = anthropic_thinking_enabled && !should_parse_tools;
+            let mut thinking_stream =
+                use_claude_thinking_stream.then(ClaudeThinkingStreamEmitter::new);
 
             let mut current_stream = stream;
             'stream: loop {
@@ -1674,21 +2327,42 @@ pub async fn messages(
                                         );
                                         continue;
                                     }
-                                    if let Some(ref l) = stream_logger {
-                                        l.log_stream_token(&text);
-                                    }
-                                    if let Err(err) = send_text_with_start(
-                                        &stream_ctx,
-                                        &mut text_block_started,
-                                        text_block_index,
-                                        &text,
-                                    ) {
+                                    let send_result = if use_claude_thinking_stream {
+                                        thinking_stream
+                                            .as_mut()
+                                            .expect("thinking stream emitter")
+                                            .push_chunk(
+                                                &stream_ctx,
+                                                stream_logger.as_ref().map(|logger| &**logger),
+                                                &text,
+                                            )
+                                    } else {
+                                        let display_text =
+                                            crate::server::parser::apply_reasoning_placeholder_stream_logic(
+                                                &token,
+                                                &text,
+                                                &mut pending_reasoning_whitespace_placeholder,
+                                            );
+                                        if let Some(ref l) = stream_logger {
+                                            l.log_stream_token(&display_text);
+                                        }
+                                        send_text_with_start(
+                                            &stream_ctx,
+                                            &mut text_block_started,
+                                            text_block_index,
+                                            &display_text,
+                                        )
+                                    };
+                                    if let Err(err) = send_result {
+                                        let text_status = thinking_stream
+                                            .as_ref()
+                                            .and_then(|emitter| emitter.open_text_block_index());
                                         handle_stream_send_error(
                                             err,
                                             seq_id,
                                             &response_tx,
-                                            text_block_started,
-                                            text_block_index,
+                                            text_status.is_some() || text_block_started,
+                                            text_status.unwrap_or(text_block_index),
                                             total_decoded_tokens,
                                             true,
                                         )
@@ -1700,6 +2374,7 @@ pub async fn messages(
                                     }
                                 }
                                 StreamResult::Buffering => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     if buffering_since.is_none() {
                                         buffering_since = Some(Instant::now());
                                         buffering_warned = false;
@@ -1740,6 +2415,7 @@ pub async fn messages(
                                     }
                                 }
                                 StreamResult::FlushBuffer(text) => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -1768,27 +2444,44 @@ pub async fn messages(
                                     }
                                     let safe_text =
                                         tool_parser.sanitize_tool_markup_for_display(&text);
-                                    if safe_text != text {
+                                    if !use_claude_thinking_stream && safe_text != text {
                                         crate::log_warn!(
                                             "[Seq {}] Sanitized leaked tool markup in flushed text",
                                             seq_id
                                         );
                                     }
-                                    if let Some(ref l) = stream_logger {
-                                        l.log_stream_token(&safe_text);
-                                    }
-                                    if let Err(err) = send_text_with_start(
-                                        &stream_ctx,
-                                        &mut text_block_started,
-                                        text_block_index,
-                                        &safe_text,
-                                    ) {
+                                    let send_result = if use_claude_thinking_stream {
+                                        thinking_stream
+                                            .as_mut()
+                                            .expect("thinking stream emitter")
+                                            .push_chunk(
+                                                &stream_ctx,
+                                                stream_logger.as_ref().map(|logger| &**logger),
+                                                &safe_text,
+                                            )
+                                    } else {
+                                        let safe_text =
+                                            crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_text);
+                                        if let Some(ref l) = stream_logger {
+                                            l.log_stream_token(&safe_text);
+                                        }
+                                        send_text_with_start(
+                                            &stream_ctx,
+                                            &mut text_block_started,
+                                            text_block_index,
+                                            &safe_text,
+                                        )
+                                    };
+                                    if let Err(err) = send_result {
+                                        let text_status = thinking_stream
+                                            .as_ref()
+                                            .and_then(|emitter| emitter.open_text_block_index());
                                         handle_stream_send_error(
                                             err,
                                             seq_id,
                                             &response_tx,
-                                            text_block_started,
-                                            text_block_index,
+                                            text_status.is_some() || text_block_started,
+                                            text_status.unwrap_or(text_block_index),
                                             total_decoded_tokens,
                                             true,
                                         )
@@ -1800,6 +2493,7 @@ pub async fn messages(
                                     }
                                 }
                                 StreamResult::ToolCalls(calls) => {
+                                    pending_reasoning_whitespace_placeholder = false;
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -1807,21 +2501,36 @@ pub async fn messages(
                                 }
                             }
                         } else if !token.is_empty() {
-                            if let Some(ref l) = stream_logger {
-                                l.log_stream_token(&token);
-                            }
-                            if let Err(err) = send_text_with_start(
-                                &stream_ctx,
-                                &mut text_block_started,
-                                text_block_index,
-                                &token,
-                            ) {
+                            let send_result = if use_claude_thinking_stream {
+                                thinking_stream
+                                    .as_mut()
+                                    .expect("thinking stream emitter")
+                                    .push_chunk(
+                                        &stream_ctx,
+                                        stream_logger.as_ref().map(|logger| &**logger),
+                                        &token,
+                                    )
+                            } else {
+                                if let Some(ref l) = stream_logger {
+                                    l.log_stream_token(&token);
+                                }
+                                send_text_with_start(
+                                    &stream_ctx,
+                                    &mut text_block_started,
+                                    text_block_index,
+                                    &token,
+                                )
+                            };
+                            if let Err(err) = send_result {
+                                let text_status = thinking_stream
+                                    .as_ref()
+                                    .and_then(|emitter| emitter.open_text_block_index());
                                 handle_stream_send_error(
                                     err,
                                     seq_id,
                                     &response_tx,
-                                    text_block_started,
-                                    text_block_index,
+                                    text_status.is_some() || text_block_started,
+                                    text_status.unwrap_or(text_block_index),
                                     total_decoded_tokens,
                                     true,
                                 )
@@ -1868,18 +2577,34 @@ pub async fn messages(
                                             } else {
                                                 let safe_buffer = tool_parser
                                                     .sanitize_tool_markup_for_display(&buffer);
-                                                if safe_buffer != buffer {
+                                                if !use_claude_thinking_stream
+                                                    && safe_buffer != buffer
+                                                {
                                                     crate::log_warn!(
                                                         "[Seq {}] Sanitized leaked tool markup in partial buffer",
                                                         seq_id
                                                     );
                                                 }
-                                                let _ = send_text_with_start(
-                                                    &stream_ctx,
-                                                    &mut text_block_started,
-                                                    text_block_index,
-                                                    &safe_buffer,
-                                                );
+                                                if use_claude_thinking_stream {
+                                                    let _ = thinking_stream
+                                                        .as_mut()
+                                                        .expect("thinking stream emitter")
+                                                        .push_chunk(
+                                                            &stream_ctx,
+                                                            stream_logger
+                                                                .as_ref()
+                                                                .map(|logger| &**logger),
+                                                            &safe_buffer,
+                                                        );
+                                                } else {
+                                                    let safe_buffer = crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_buffer);
+                                                    let _ = send_text_with_start(
+                                                        &stream_ctx,
+                                                        &mut text_block_started,
+                                                        text_block_index,
+                                                        &safe_buffer,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1906,15 +2631,27 @@ pub async fn messages(
                                     seq_id,
                                     safe_suppressed.len()
                                 );
-                                if let Some(ref l) = stream_logger {
-                                    l.log_stream_token(&safe_suppressed);
+                                if use_claude_thinking_stream {
+                                    let _ = thinking_stream
+                                        .as_mut()
+                                        .expect("thinking stream emitter")
+                                        .push_chunk(
+                                            &stream_ctx,
+                                            stream_logger.as_ref().map(|logger| &**logger),
+                                            &safe_suppressed,
+                                        );
+                                } else {
+                                    let safe_suppressed = crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_suppressed);
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(&safe_suppressed);
+                                    }
+                                    let _ = send_text_with_start(
+                                        &stream_ctx,
+                                        &mut text_block_started,
+                                        text_block_index,
+                                        &safe_suppressed,
+                                    );
                                 }
-                                let _ = send_text_with_start(
-                                    &stream_ctx,
-                                    &mut text_block_started,
-                                    text_block_index,
-                                    &safe_suppressed,
-                                );
                             } else if !pending_tool_calls.is_empty()
                                 && !suppressed_tool_markup.is_empty()
                             {
@@ -2014,15 +2751,85 @@ pub async fn messages(
 
                         if !has_tool_calls {
                             if let Some(feedback) = invalid_feedback.as_deref() {
-                                if let Some(ref l) = stream_logger {
-                                    l.log_stream_token(feedback);
+                                let send_result = if use_claude_thinking_stream {
+                                    thinking_stream
+                                        .as_mut()
+                                        .expect("thinking stream emitter")
+                                        .push_chunk(
+                                            &stream_ctx,
+                                            stream_logger.as_ref().map(|logger| &**logger),
+                                            feedback,
+                                        )
+                                } else {
+                                    if let Some(ref l) = stream_logger {
+                                        l.log_stream_token(feedback);
+                                    }
+                                    send_text_with_start(
+                                        &stream_ctx,
+                                        &mut text_block_started,
+                                        text_block_index,
+                                        feedback,
+                                    )
+                                };
+                                if let Err(err) = send_result {
+                                    let text_status = thinking_stream
+                                        .as_ref()
+                                        .and_then(|emitter| emitter.open_text_block_index());
+                                    handle_stream_send_error(
+                                        err,
+                                        seq_id,
+                                        &response_tx,
+                                        text_status.is_some() || text_block_started,
+                                        text_status.unwrap_or(text_block_index),
+                                        total_decoded_tokens,
+                                        true,
+                                    )
+                                    .await;
+                                    let mut e = engine_clone.write();
+                                    e.cancel(seq_id);
+                                    stream_finished = true;
+                                    break 'stream;
                                 }
-                                if let Err(err) = send_text_with_start(
-                                    &stream_ctx,
-                                    &mut text_block_started,
-                                    text_block_index,
-                                    feedback,
-                                ) {
+                            }
+                        }
+
+                        let next_block_index = if use_claude_thinking_stream {
+                            match thinking_stream
+                                .as_mut()
+                                .expect("thinking stream emitter")
+                                .finish(&stream_ctx, stream_logger.as_ref().map(|logger| &**logger))
+                            {
+                                Ok(index) => index,
+                                Err(err) => {
+                                    let text_status = thinking_stream
+                                        .as_ref()
+                                        .and_then(|emitter| emitter.open_text_block_index());
+                                    handle_stream_send_error(
+                                        err,
+                                        seq_id,
+                                        &response_tx,
+                                        text_status.is_some(),
+                                        text_status.unwrap_or(text_block_index),
+                                        total_decoded_tokens,
+                                        true,
+                                    )
+                                    .await;
+                                    let mut e = engine_clone.write();
+                                    e.cancel(seq_id);
+                                    stream_finished = true;
+                                    break 'stream;
+                                }
+                            }
+                        } else {
+                            let mut next_block_index = 0usize;
+                            if text_block_started {
+                                let stop_event = ClaudeContentBlockStopEvent {
+                                    event_type: "content_block_stop",
+                                    index: text_block_index,
+                                };
+                                if let Err(err) =
+                                    stream_ctx.send_json_event("content_block_stop", &stop_event)
+                                {
                                     handle_stream_send_error(
                                         err,
                                         seq_id,
@@ -2038,36 +2845,11 @@ pub async fn messages(
                                     stream_finished = true;
                                     break 'stream;
                                 }
+                                text_block_started = false;
+                                next_block_index = text_block_index + 1;
                             }
-                        }
-
-                        let mut next_block_index = 0usize;
-                        if text_block_started {
-                            let stop_event = ClaudeContentBlockStopEvent {
-                                event_type: "content_block_stop",
-                                index: text_block_index,
-                            };
-                            if let Err(err) =
-                                stream_ctx.send_json_event("content_block_stop", &stop_event)
-                            {
-                                handle_stream_send_error(
-                                    err,
-                                    seq_id,
-                                    &response_tx,
-                                    text_block_started,
-                                    text_block_index,
-                                    total_decoded_tokens,
-                                    true,
-                                )
-                                .await;
-                                let mut e = engine_clone.write();
-                                e.cancel(seq_id);
-                                stream_finished = true;
-                                break 'stream;
-                            }
-                            text_block_started = false;
-                            next_block_index = text_block_index + 1;
-                        }
+                            next_block_index
+                        };
 
                         if has_tool_calls {
                             let tool_blocks = tool_calls_to_blocks(&tool_calls);
@@ -2344,18 +3126,65 @@ pub async fn messages(
             }
         }
         let content = if has_tool_calls {
-            tool_calls_to_blocks(&valid_calls)
+            if use_claude_thinking_blocks {
+                let parsed = parse_claude_assistant_output(&output.decode_output);
+                let mut blocks = parsed
+                    .thinking_blocks
+                    .into_iter()
+                    .map(|block| ClaudeContentBlockOut::Thinking {
+                        thinking: block.thinking,
+                        signature: Some(block.signature),
+                    })
+                    .collect::<Vec<_>>();
+                if !parsed.text.is_empty() {
+                    blocks.push(ClaudeContentBlockOut::Text { text: parsed.text });
+                }
+                blocks.extend(tool_calls_to_blocks(&valid_calls));
+                blocks
+            } else {
+                let safe_text = tool_parser.sanitize_tool_markup_for_display(&output.decode_output);
+                let safe_text =
+                    crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_text);
+                let mut blocks = Vec::new();
+                if !safe_text.is_empty() {
+                    blocks.push(ClaudeContentBlockOut::Text { text: safe_text });
+                }
+                blocks.extend(tool_calls_to_blocks(&valid_calls));
+                blocks
+            }
         } else {
             let safe_text = if let Some(feedback) = invalid_feedback {
                 feedback
+            } else if tool_parser.contains_tool_markup(&output.decode_output) {
+                tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
             } else {
-                if tool_parser.contains_tool_markup(&output.decode_output) {
-                    tool_parser.sanitize_tool_markup_for_display(&output.decode_output)
-                } else {
-                    output.decode_output.clone()
-                }
+                output.decode_output.clone()
             };
-            vec![ClaudeContentBlockOut::Text { text: safe_text }]
+            if use_claude_thinking_blocks {
+                let parsed = parse_claude_assistant_output(&safe_text);
+                let mut blocks = parsed
+                    .thinking_blocks
+                    .into_iter()
+                    .map(|block| ClaudeContentBlockOut::Thinking {
+                        thinking: block.thinking,
+                        signature: Some(block.signature),
+                    })
+                    .collect::<Vec<_>>();
+                if !parsed.text.is_empty() {
+                    blocks.push(ClaudeContentBlockOut::Text { text: parsed.text });
+                }
+                if blocks.is_empty() {
+                    vec![ClaudeContentBlockOut::Text {
+                        text: String::new(),
+                    }]
+                } else {
+                    blocks
+                }
+            } else {
+                let safe_text =
+                    crate::server::parser::strip_reasoning_markers_for_tool_response(&safe_text);
+                vec![ClaudeContentBlockOut::Text { text: safe_text }]
+            }
         };
 
         let response = ClaudeMessageResponse {
@@ -2721,6 +3550,75 @@ mod tests {
 
         let enabled = thinking_to_bool(&request.thinking);
         assert_eq!(enabled, Some(true));
+    }
+
+    #[test]
+    fn accepts_adaptive_thinking_config() {
+        let thinking = Some(ClaudeThinking::Config(ClaudeThinkingConfig {
+            mode: "adaptive".to_string(),
+            budget_tokens: None,
+        }));
+        assert_eq!(thinking_to_bool(&thinking), Some(true));
+    }
+
+    #[test]
+    fn converts_assistant_thinking_blocks_back_to_placeholder_text() {
+        let signature = encode_synthetic_thinking_signature(" \n\n");
+        let message = ClaudeMessage {
+            role: "assistant".to_string(),
+            content: ClaudeContent::Blocks(vec![
+                ClaudeContentBlock::Thinking {
+                    thinking: "\nplan\n".to_string(),
+                    signature: Some(signature),
+                },
+                ClaudeContentBlock::Text {
+                    text: "done".to_string(),
+                },
+            ]),
+        };
+
+        let converted = convert_claude_message(&message).unwrap();
+        let text = match converted[0].content.as_ref() {
+            Some(MessageContentType::Single(MessageContent::Text { text })) => text.clone(),
+            Some(MessageContentType::Multi(items)) => match &items[0] {
+                MessageContent::Text { text } => text.clone(),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        };
+        assert_eq!(text, " \nplan\n   done");
+    }
+
+    #[test]
+    fn parses_assistant_output_into_thinking_blocks_and_text() {
+        let parsed = parse_claude_assistant_output("<think>\nabc\n</think>\n\nResult text");
+        assert_eq!(
+            parsed.thinking_blocks,
+            vec![ClaudeThinkingBlock {
+                thinking: "\nabc\n".to_string(),
+                signature: encode_synthetic_thinking_signature(" \n\n"),
+            }]
+        );
+        assert_eq!(parsed.text, "Result text");
+        let replay = replay_text_for_thinking_block(
+            &parsed.thinking_blocks[0].thinking,
+            Some(parsed.thinking_blocks[0].signature.as_str()),
+        );
+        assert_eq!(replay, " \nabc\n   ");
+    }
+
+    #[test]
+    fn normalizes_newlines_in_empty_suffix_thinking_block() {
+        let parsed = parse_claude_assistant_output("<think>\n\n</think>\n\n");
+        assert!(parsed.thinking_blocks.is_empty());
+        assert_eq!(parsed.text, "      ");
+    }
+
+    #[test]
+    fn normalizes_prefilled_reasoning_close_suffix_to_placeholders() {
+        let parsed = parse_claude_assistant_output("  </think>\n\n");
+        assert!(parsed.thinking_blocks.is_empty());
+        assert_eq!(parsed.text, "      ");
     }
 
     #[test]

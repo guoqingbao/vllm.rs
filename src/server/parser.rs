@@ -388,6 +388,24 @@ pub fn token_text_is_reasoning_boundary(text: &str) -> bool {
             .any(|marker| trimmed == *marker)
 }
 
+pub fn apply_reasoning_placeholder_stream_logic(
+    token: &str,
+    text: &str,
+    pending_reasoning_whitespace_placeholder: &mut bool,
+) -> String {
+    if token_text_is_reasoning_boundary(token) {
+        *pending_reasoning_whitespace_placeholder = true;
+        " ".to_string()
+    } else if *pending_reasoning_whitespace_placeholder
+        && token.chars().all(|ch| ch.is_whitespace())
+    {
+        " ".to_string()
+    } else {
+        *pending_reasoning_whitespace_placeholder = false;
+        strip_reasoning_markers_for_tool_response(text)
+    }
+}
+
 /// Detect whether a rendered prompt already ends inside a reasoning block.
 ///
 /// This happens for templates that prefill `<think>` in `add_generation_prompt`.
@@ -1993,6 +2011,26 @@ abc
     fn test_strip_reasoning_markers_for_tool_response_uses_space_placeholders() {
         let text = "<think>\nabc\n</think>";
         assert_eq!(strip_reasoning_markers_for_tool_response(text), " \nabc\n ");
+    }
+
+    #[test]
+    fn test_apply_reasoning_placeholder_stream_logic_replaces_boundary_and_following_whitespace() {
+        let mut pending = false;
+        assert_eq!(
+            apply_reasoning_placeholder_stream_logic("<think>", "<think>", &mut pending),
+            " "
+        );
+        assert!(pending);
+        assert_eq!(
+            apply_reasoning_placeholder_stream_logic("\n\n", "\n\n", &mut pending),
+            " "
+        );
+        assert!(pending);
+        assert_eq!(
+            apply_reasoning_placeholder_stream_logic("hello", "hello", &mut pending),
+            "hello"
+        );
+        assert!(!pending);
     }
 
     #[test]
