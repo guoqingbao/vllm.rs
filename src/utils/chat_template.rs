@@ -146,7 +146,7 @@ const REASONING_BLOCK_PAIRS: [(&str, &str); 4] = [
 /// Empty blocks (from replay suffix patterns) are skipped.
 ///
 /// Returns `(reasoning_content, remaining_content)` if any matched pair is found.
-fn extract_reasoning_content(content: &str) -> Option<(String, String)> {
+pub fn extract_reasoning_content(content: &str) -> Option<(String, String)> {
     for &(open, close) in &REASONING_BLOCK_PAIRS {
         if !content.contains(open) || !content.contains(close) {
             continue;
@@ -175,7 +175,9 @@ fn extract_reasoning_content(content: &str) -> Option<(String, String)> {
         }
 
         let reasoning = reasoning_parts.join("\n");
-        let remaining = content[last_close_end..].trim_start_matches('\n').to_string();
+        let remaining = content[last_close_end..]
+            .trim_start_matches('\n')
+            .to_string();
         return Some((reasoning, remaining));
     }
     None
@@ -686,7 +688,9 @@ mod tests {
             close_count + 1,
             "Expected exactly one more <think> (generation prompt) than </think>. \
              Got {} opens and {} closes in:\n{}",
-            open_count, close_count, rendered
+            open_count,
+            close_count,
+            rendered
         );
 
         let double_pattern = "<think>\n\n</think>\n\n<think>";
@@ -806,8 +810,7 @@ mod tests {
 
     #[test]
     fn extract_reasoning_content_empty_think() {
-        let (reasoning, remaining) =
-            extract_reasoning_content("<think>\n</think>\nworld").unwrap();
+        let (reasoning, remaining) = extract_reasoning_content("<think>\n</think>\nworld").unwrap();
         assert_eq!(reasoning, "");
         assert_eq!(remaining, "world");
     }

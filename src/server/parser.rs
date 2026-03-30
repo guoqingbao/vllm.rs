@@ -336,6 +336,9 @@ pub struct StreamToolParser {
     buffer_started_from_special_token: bool,
     // True when non-marker content arrived after the start marker in the current buffering window.
     buffer_saw_non_marker_content: bool,
+    // When true, tool call detection is active even inside reasoning blocks.
+    // Used when reasoning content is streamed separately (STREAM_AS_REASONING_CONTENT).
+    detect_tools_in_reasoning: bool,
 }
 
 /// Reasoning marker pairs: (start, end)
@@ -345,6 +348,10 @@ const REASONING_MARKERS: &[(&str, &str)] = &[
     ("[THINK]", "[/THINK]"),
     ("<thought>", "</thought>"),
 ];
+
+pub fn reasoning_markers() -> &'static [(&'static str, &'static str)] {
+    REASONING_MARKERS
+}
 
 /// Strip all reasoning blocks (matched start/end pairs) from text.
 /// Unmatched opening markers are also removed up to the end of the string.
@@ -457,7 +464,16 @@ impl StreamToolParser {
             pending_end_marker_candidate: false,
             buffer_started_from_special_token: false,
             buffer_saw_non_marker_content: false,
+            detect_tools_in_reasoning: false,
         }
+    }
+
+    /// Enable tool call detection inside reasoning blocks.
+    /// Should be set when reasoning content is streamed separately
+    /// (STREAM_AS_REASONING_CONTENT), so that tool calls inside
+    /// `<think>...</think>` are still detected and buffered.
+    pub fn set_detect_tools_in_reasoning(&mut self, enabled: bool) {
+        self.detect_tools_in_reasoning = enabled;
     }
 
     /// Check if currently inside a reasoning block
@@ -557,10 +573,13 @@ impl StreamToolParser {
 
         match self.state.clone() {
             ParserState::Normal => {
-                // Don't detect tool-call starts inside reasoning or code blocks.
-                // Once buffering starts we must continue buffering even if arguments
-                // contain code fences/backticks.
-                if self.in_reasoning() || self.in_code_block {
+                // Don't detect tool-call starts inside code blocks.
+                // Skip reasoning blocks unless detect_tools_in_reasoning is set
+                // (which is the case when reasoning is streamed separately).
+                if self.in_code_block {
+                    return StreamResult::Content(token_text.to_string());
+                }
+                if self.in_reasoning() && !self.detect_tools_in_reasoning {
                     return StreamResult::Content(token_text.to_string());
                 }
                 // Check for start trigger
@@ -817,13 +836,14 @@ impl StreamToolParser {
         let mut masked = text.to_string();
         let mut search_from = 0usize;
         loop {
-            let Some(start_pos) = masked[search_from..].find(start_tag).map(|p| search_from + p)
+            let Some(start_pos) = masked[search_from..]
+                .find(start_tag)
+                .map(|p| search_from + p)
             else {
                 break;
             };
             let inner_start = start_pos + start_tag.len();
-            let Some(end_pos) = masked[inner_start..].find(end_tag).map(|p| inner_start + p)
-            else {
+            let Some(end_pos) = masked[inner_start..].find(end_tag).map(|p| inner_start + p) else {
                 break;
             };
             // Replace the inner content (between tags) with spaces.
@@ -1473,6 +1493,7 @@ impl StreamToolParser {
                 delta: Delta {
                     role: None,
                     content: Some(content.to_string()),
+                    reasoning_content: None,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -1497,6 +1518,7 @@ impl StreamToolParser {
                 delta: Delta {
                     role: None,
                     content: None,
+                    reasoning_content: None,
                     tool_calls: Some(
                         tools
                             .into_iter()
@@ -2367,7 +2389,9 @@ abc
         ));
         assert!(parser.in_reasoning());
         assert!(matches!(
-            parser.process_token(0, "planning next step</think>\n").await,
+            parser
+                .process_token(0, "planning next step</think>\n")
+                .await,
             StreamResult::Content(_)
         ));
         assert!(!parser.in_reasoning());
@@ -2512,8 +2536,7 @@ abc
             "Two balanced reasoning blocks should not leave reasoning open"
         );
 
-        parser.accumulated_output =
-            "<think>first</think>\ntext\n<think>still open".to_string();
+        parser.accumulated_output = "<think>first</think>\ntext\n<think>still open".to_string();
         parser.resync_reasoning_and_code_block_state();
         assert!(
             parser.in_reasoning(),
@@ -2658,7 +2681,9 @@ abc
 
         // Model generates text after tool call
         assert!(matches!(
-            parser.process_token(0, "\nBased on the search results").await,
+            parser
+                .process_token(0, "\nBased on the search results")
+                .await,
             StreamResult::Content(_)
         ));
         assert!(!parser.in_reasoning());

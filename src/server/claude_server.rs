@@ -2603,9 +2603,8 @@ pub async fn messages(
                             }
                             if pending_tool_calls.is_empty() {
                                 let accumulated = tool_parser.accumulated_output().to_string();
-                                let reparsed = tool_parser
-                                    .parse_complete_with_fallback(&accumulated)
-                                    .await;
+                                let reparsed =
+                                    tool_parser.parse_complete_with_fallback(&accumulated).await;
                                 if !reparsed.is_empty() {
                                     crate::log_warn!(
                                         "[Seq {}] Recovered {} tool call(s) from full-output fallback parse",
@@ -2614,7 +2613,8 @@ pub async fn messages(
                                     );
                                     pending_tool_calls.extend(reparsed);
                                 } else {
-                                    let stripped = tool_parser.accumulated_output_without_reasoning();
+                                    let stripped =
+                                        tool_parser.accumulated_output_without_reasoning();
                                     if stripped != accumulated && !stripped.trim().is_empty() {
                                         let reparsed_stripped = tool_parser
                                             .parse_complete_with_fallback(&stripped)
