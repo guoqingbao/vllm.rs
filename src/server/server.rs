@@ -734,8 +734,9 @@ pub async fn chat_completion(
                                 }
                             }
                             if pending_tool_calls.is_empty() {
+                                let accumulated = tool_parser.accumulated_output().to_string();
                                 let reparsed = tool_parser
-                                    .parse_complete_with_fallback(tool_parser.accumulated_output())
+                                    .parse_complete_with_fallback(&accumulated)
                                     .await;
                                 if !reparsed.is_empty() {
                                     crate::log_warn!(
@@ -744,6 +745,21 @@ pub async fn chat_completion(
                                         reparsed.len()
                                     );
                                     pending_tool_calls.extend(reparsed);
+                                } else {
+                                    let stripped = tool_parser.accumulated_output_without_reasoning();
+                                    if stripped != accumulated && !stripped.trim().is_empty() {
+                                        let reparsed_stripped = tool_parser
+                                            .parse_complete_with_fallback(&stripped)
+                                            .await;
+                                        if !reparsed_stripped.is_empty() {
+                                            crate::log_warn!(
+                                                "[Seq {}] Recovered {} tool call(s) from reasoning-stripped fallback parse",
+                                                current_seq_id,
+                                                reparsed_stripped.len()
+                                            );
+                                            pending_tool_calls.extend(reparsed_stripped);
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() && !suppressed_tool_markup.is_empty() {
@@ -1068,6 +1084,21 @@ pub async fn chat_completion(
                 let mut parsed_calls = tool_parser
                     .parse_complete_with_fallback(&output.decode_output)
                     .await;
+                if parsed_calls.is_empty() {
+                    let stripped =
+                        crate::server::parser::strip_reasoning_blocks(&output.decode_output);
+                    if stripped != output.decode_output && !stripped.trim().is_empty() {
+                        parsed_calls = tool_parser
+                            .parse_complete_with_fallback(&stripped)
+                            .await;
+                        if !parsed_calls.is_empty() {
+                            crate::log_warn!(
+                                "Recovered {} tool call(s) from reasoning-stripped fallback parse",
+                                parsed_calls.len()
+                            );
+                        }
+                    }
+                }
                 let dropped =
                     retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
                 if dropped > 0 {
@@ -1400,6 +1431,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
         ];
@@ -1415,6 +1447,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_unknown", "{\"ok\":true}"),
         ];
@@ -1431,6 +1464,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
             ChatMessage::tool_result("call_1", "{\"ok\":false}"),
@@ -1448,6 +1482,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::text("user", "let us skip the tool result"),
         ];
@@ -1467,6 +1502,7 @@ mod tests {
                     crate::tools::new_tool_call("call_2", "lookup", "{}"),
                 ]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
             ChatMessage::tool_result("call_2", "{\"ok\":true}"),

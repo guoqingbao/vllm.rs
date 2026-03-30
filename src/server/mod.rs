@@ -530,6 +530,9 @@ pub struct ChatMessage {
     /// Tool call ID when role is "tool"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Reasoning/thinking content for the assistant turn (used by some clients)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -540,6 +543,7 @@ impl ChatMessage {
             content: Some(MessageContentType::PureText(content.into())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -550,6 +554,7 @@ impl ChatMessage {
             content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 
@@ -560,6 +565,7 @@ impl ChatMessage {
             content: Some(MessageContentType::PureText(content.into())),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            reasoning_content: None,
         }
     }
 }
@@ -1111,7 +1117,7 @@ pub fn convert_chat_message(
         if let Some(tool_calls) = &msg.tool_calls {
             let mut content = String::new();
             if let Some(existing) = &msg.content {
-                content = extract_text_content(existing).trim().to_owned();
+                content = extract_text_content(existing);
             }
             let template_calls = tool_calls
                 .iter()
@@ -1123,6 +1129,7 @@ pub fn convert_chat_message(
                 num_images: 0,
                 tool_calls: Some(template_calls),
                 tool_call_id: None,
+                reasoning_content: msg.reasoning_content.clone(),
             });
         }
     }
@@ -1142,6 +1149,7 @@ pub fn convert_chat_message(
             num_images: 0,
             tool_calls: None,
             tool_call_id: msg.tool_call_id.clone(),
+            reasoning_content: None,
         });
     }
 
@@ -1171,7 +1179,11 @@ pub fn convert_chat_message(
         }
     }
 
-    Ok(Message::new(role, prompt.trim().to_owned(), images.len()))
+    let mut message = Message::new(role.clone(), prompt.trim().to_owned(), images.len());
+    if role == "assistant" {
+        message.reasoning_content = msg.reasoning_content.clone();
+    }
+    Ok(message)
 }
 
 fn extract_text_content(content: &MessageContentType) -> String {
@@ -1493,6 +1505,7 @@ mod tests {
             content: Some(MessageContentType::PureText("hello world".to_string())),
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }];
 
         let (converted, images) = build_messages_and_images(&messages, None).unwrap();
@@ -1524,6 +1537,7 @@ mod tests {
             content: None,
             tool_calls: Some(vec![tool_call]),
             tool_call_id: None,
+            reasoning_content: None,
         };
         let mut processor = None;
         let mut images = Vec::new();

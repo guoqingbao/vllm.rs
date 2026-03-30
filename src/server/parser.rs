@@ -346,6 +346,30 @@ const REASONING_MARKERS: &[(&str, &str)] = &[
     ("<thought>", "</thought>"),
 ];
 
+/// Strip all reasoning blocks (matched start/end pairs) from text.
+/// Unmatched opening markers are also removed up to the end of the string.
+pub fn strip_reasoning_blocks(text: &str) -> String {
+    let mut result = text.to_string();
+    for &(start, end) in REASONING_MARKERS {
+        loop {
+            let Some(start_idx) = result.find(start) else {
+                break;
+            };
+            let inner_start = start_idx + start.len();
+            if let Some(end_rel) = result[inner_start..].find(end) {
+                let end_idx = inner_start + end_rel + end.len();
+                result.replace_range(start_idx..end_idx, "");
+            } else {
+                // Unmatched opening marker: remove from start marker to end of string
+                // to avoid leaving dangling reasoning content.
+                result.truncate(start_idx);
+                break;
+            }
+        }
+    }
+    result
+}
+
 /// Detect whether a rendered prompt already ends inside a reasoning block.
 ///
 /// This happens for templates that prefill `<think>` in `add_generation_prompt`.
@@ -461,6 +485,13 @@ impl StreamToolParser {
         &self.accumulated_output
     }
 
+    /// Return accumulated output with reasoning blocks stripped.
+    /// Useful for fallback tool-call parsing when reasoning markers may have
+    /// prevented the streaming parser from detecting tool calls.
+    pub fn accumulated_output_without_reasoning(&self) -> String {
+        strip_reasoning_blocks(&self.accumulated_output)
+    }
+
     /// Get the buffered content
     pub fn buffer(&self) -> &str {
         &self.buffer
@@ -515,29 +546,13 @@ impl StreamToolParser {
         // Always accumulate
         self.accumulated_output.push_str(token_text);
 
-        // Measure code block start/end markers in the buffer
-        let mut code_block_count = 0;
-        for line in self.accumulated_output.clone().lines() {
-            // account for labled code block starts
-            if line.trim().starts_with("```") {
-                code_block_count += 1;
-            }
-        }
-        // Even number indicates blocks are closed, odd
-        self.in_code_block = code_block_count % 2 == 1;
-
-        // Track reasoning blocks
-        if self.active_reasoning_end.is_none() {
-            for &(start, end) in REASONING_MARKERS {
-                if token_text.contains(start) || self.accumulated_output.ends_with(start) {
-                    self.active_reasoning_end = Some(end.to_string());
-                    break;
-                }
-            }
-        } else if let Some(end_marker) = self.active_reasoning_end.as_deref() {
-            if token_text.contains(end_marker) || self.accumulated_output.ends_with(end_marker) {
-                self.active_reasoning_end = None;
-            }
+        // Only track reasoning and code-block state while in Normal mode.
+        // During Buffering the token content is tool-call payload (JSON, XML)
+        // which may contain strings like "</think>" or "```" that must not
+        // corrupt the reasoning/code-block tracking used for Normal-mode gating.
+        if !matches!(self.state, ParserState::Buffering) {
+            self.update_code_block_state(token_text);
+            self.update_reasoning_state(token_text);
         }
 
         match self.state.clone() {
@@ -665,6 +680,7 @@ impl StreamToolParser {
                     self.pending_end_marker_candidate = false;
                     self.buffer_started_from_special_token = false;
                     self.buffer_saw_non_marker_content = false;
+                    self.resync_reasoning_and_code_block_state();
                     return result;
                 }
 
@@ -699,6 +715,7 @@ impl StreamToolParser {
         let drop_bare_start_marker = self.should_drop_bare_start_marker();
         self.buffer_started_from_special_token = false;
         self.buffer_saw_non_marker_content = false;
+        self.resync_reasoning_and_code_block_state();
 
         if tool_calls.is_empty() || (!strict_complete && !recoverable_incomplete) {
             if drop_bare_start_marker {
@@ -730,7 +747,118 @@ impl StreamToolParser {
         self.pending_end_marker_candidate = false;
         self.buffer_started_from_special_token = false;
         self.buffer_saw_non_marker_content = false;
-        std::mem::take(&mut self.buffer)
+        let buf = std::mem::take(&mut self.buffer);
+        self.resync_reasoning_and_code_block_state();
+        buf
+    }
+
+    /// Re-derive reasoning and code-block state from the full accumulated
+    /// output after exiting Buffering mode.  While buffering, these trackers
+    /// are frozen so that tool-call payload (which may contain `</think>` or
+    /// triple-backtick strings) does not corrupt them.  On transition back to
+    /// Normal we must reconcile the true state.
+    ///
+    /// Tool-call envelopes (e.g. `<tool_call>...</tool_call>`) are masked out
+    /// before scanning so that markers embedded in JSON arguments are ignored.
+    fn resync_reasoning_and_code_block_state(&mut self) {
+        let text = Self::mask_tool_envelopes(
+            &self.accumulated_output,
+            &self.config.start_token_str,
+            &self.config.end_token_str,
+        );
+
+        // Re-derive code-block state: count fences in full output.
+        let mut code_block_count = 0usize;
+        for line in text.lines() {
+            if line.trim().starts_with("```") {
+                code_block_count += 1;
+            }
+        }
+        self.in_code_block = code_block_count % 2 == 1;
+
+        // Re-derive reasoning state: find the last unmatched reasoning start.
+        self.active_reasoning_end = None;
+        for &(start, end) in REASONING_MARKERS {
+            let mut search_from = 0usize;
+            let mut open = false;
+            loop {
+                if open {
+                    match text[search_from..].find(end) {
+                        Some(pos) => {
+                            open = false;
+                            search_from += pos + end.len();
+                        }
+                        None => break,
+                    }
+                } else {
+                    match text[search_from..].find(start) {
+                        Some(pos) => {
+                            open = true;
+                            search_from += pos + start.len();
+                        }
+                        None => break,
+                    }
+                }
+            }
+            if open {
+                self.active_reasoning_end = Some(end.to_string());
+                break;
+            }
+        }
+    }
+
+    /// Replace the content between each tool-call start/end envelope with
+    /// spaces so that markers inside tool arguments are invisible to the
+    /// reasoning/code-block resync scan.
+    fn mask_tool_envelopes(text: &str, start_tag: &str, end_tag: &str) -> String {
+        if start_tag.is_empty() || end_tag.is_empty() {
+            return text.to_string();
+        }
+        let mut masked = text.to_string();
+        let mut search_from = 0usize;
+        loop {
+            let Some(start_pos) = masked[search_from..].find(start_tag).map(|p| search_from + p)
+            else {
+                break;
+            };
+            let inner_start = start_pos + start_tag.len();
+            let Some(end_pos) = masked[inner_start..].find(end_tag).map(|p| inner_start + p)
+            else {
+                break;
+            };
+            // Replace the inner content (between tags) with spaces.
+            let replacement = " ".repeat(end_pos - inner_start);
+            masked.replace_range(inner_start..end_pos, &replacement);
+            search_from = end_pos + end_tag.len();
+        }
+        masked
+    }
+
+    /// Update code-block fence tracking from the current token.
+    /// Only counts fences in the token text itself (incremental) to avoid
+    /// re-scanning the entire accumulated output on every token.
+    fn update_code_block_state(&mut self, token_text: &str) {
+        for line in token_text.lines() {
+            if line.trim().starts_with("```") {
+                self.in_code_block = !self.in_code_block;
+            }
+        }
+    }
+
+    /// Update reasoning block tracking from the current token.
+    fn update_reasoning_state(&mut self, token_text: &str) {
+        if self.active_reasoning_end.is_none() {
+            for &(start, end) in REASONING_MARKERS {
+                if token_text.contains(start) || self.accumulated_output.ends_with(start) {
+                    self.active_reasoning_end = Some(end.to_string());
+                    break;
+                }
+            }
+        } else if let Some(end_marker) = self.active_reasoning_end.as_deref() {
+            if token_text.contains(end_marker) || self.accumulated_output.ends_with(end_marker) {
+                self.active_reasoning_end = None;
+            }
+        }
     }
 
     /// Check if token/text matches start trigger
@@ -1960,6 +2088,770 @@ abc
         assert_eq!(
             StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5MoE, "qwen3.5-moe"),
             "qwen_coder"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Reasoning marker isolation during tool-call buffering
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_reasoning_markers_inside_tool_args_do_not_corrupt_state() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Model outputs <think> before tool call
+        assert!(matches!(
+            parser.process_token(0, "<think>").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_reasoning());
+
+        // Reasoning ends
+        assert!(matches!(
+            parser.process_token(0, "some thought</think>").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+
+        // Now tool call starts
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+
+        // Tool arguments contain "</think>" as a string value - must NOT flip reasoning state
+        assert!(matches!(
+            parser
+                .process_token(
+                    0,
+                    r#"{"name": "test", "arguments": {"text": "<think>inside</think>"}}"#
+                )
+                .await,
+            StreamResult::Buffering
+        ));
+        assert!(
+            !parser.in_reasoning(),
+            "Reasoning state must not be corrupted by markers inside tool-call buffer"
+        );
+
+        // End tool call
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "test");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        // After exiting buffering, reasoning state must be correct
+        assert!(
+            !parser.in_reasoning(),
+            "Reasoning state must be clean after tool call completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reasoning_state_resyncs_after_buffering_exit() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Open reasoning block
+        assert!(matches!(
+            parser.process_token(0, "<think>").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_reasoning());
+
+        // Close reasoning
+        assert!(matches!(
+            parser.process_token(0, "thought</think>\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+
+        // Tool call with <think> in arguments
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+        assert!(matches!(
+            parser
+                .process_token(0, r#"{"name": "test", "arguments": {"q": "<think>"}}"#)
+                .await,
+            StreamResult::Buffering
+        ));
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(_) => {}
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        // After tool call, reasoning state must reflect the full accumulated
+        // output: <think>thought</think>\n<tool_call>...<think>...</tool_call>
+        // The <think> inside the tool call is part of JSON, not a real marker.
+        // The resync should see the original <think>...</think> pair as balanced.
+        assert!(
+            !parser.in_reasoning(),
+            "Resync must recognize balanced reasoning markers in accumulated output"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_suppressed_during_active_reasoning() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Open reasoning
+        assert!(matches!(
+            parser.process_token(0, "<think>").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_reasoning());
+
+        // Tool call start token during reasoning should be treated as content
+        match parser.process_token(151657, "<tool_call>").await {
+            StreamResult::Content(text) => {
+                assert_eq!(text, "<tool_call>");
+            }
+            other => panic!(
+                "Expected Content (tool suppressed during reasoning), got {:?}",
+                other
+            ),
+        }
+        assert_eq!(
+            parser.state(),
+            &ParserState::Normal,
+            "Parser must stay in Normal when tool start is suppressed during reasoning"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_code_block_state_not_corrupted_by_tool_buffer() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Not in a code block initially
+        assert!(!parser.in_code_block());
+
+        // Start tool call
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+
+        // Tool arguments contain triple backticks
+        assert!(matches!(
+            parser
+                .process_token(
+                    0,
+                    r#"{"name": "test", "arguments": {"code": "```rust\nfn main() {}\n```"}}"#
+                )
+                .await,
+            StreamResult::Buffering
+        ));
+
+        // Code block state must not be affected by content inside the tool buffer
+        assert!(
+            !parser.in_code_block(),
+            "Code block state must not be corrupted by backticks inside tool-call buffer"
+        );
+
+        // End tool call
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(_) => {}
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        // After resync, code block state should still be false
+        assert!(
+            !parser.in_code_block(),
+            "Code block state must be clean after tool call with backticks in args"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prefilled_reasoning_end_marker_suppresses_tool_detection() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Simulate prompt that ends with <think> (prefilled reasoning)
+        parser.set_initial_reasoning_end_marker(Some("</think>".to_string()));
+        assert!(parser.in_reasoning());
+
+        // Tool call start during active reasoning should be suppressed
+        match parser.process_token(151657, "<tool_call>").await {
+            StreamResult::Content(text) => {
+                assert_eq!(text, "<tool_call>");
+            }
+            other => panic!(
+                "Expected Content (tool suppressed during prefilled reasoning), got {:?}",
+                other
+            ),
+        }
+
+        // Close reasoning
+        assert!(matches!(
+            parser.process_token(0, "</think>\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+
+        // Now tool call should work
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_tool_calls_with_reasoning_between() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // First tool call
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+        assert!(matches!(
+            parser
+                .process_token(0, r#"{"name": "test", "arguments": {}}"#)
+                .await,
+            StreamResult::Buffering
+        ));
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => assert_eq!(calls.len(), 1),
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        // Reasoning block between tool calls
+        assert!(matches!(
+            parser.process_token(0, "\n<think>").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_reasoning());
+        assert!(matches!(
+            parser.process_token(0, "planning next step</think>\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+
+        // Second tool call should work
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+        assert!(matches!(
+            parser
+                .process_token(0, r#"{"name": "test", "arguments": {}}"#)
+                .await,
+            StreamResult::Buffering
+        ));
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => assert_eq!(calls.len(), 1),
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_finalize_with_reasoning_markers_in_buffer() {
+        let tools = vec![crate::tools::function_tool("Write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer =
+            r#"<tool_call>{"name": "Write", "arguments": {"text": "<think>test</think>"}}"#
+                .to_string();
+        parser.accumulated_output = parser.buffer.clone();
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("Write".to_string()),
+            arguments: r#"{"text": "<think>test</think>"}"#.to_string(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::ToolCalls(calls)) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "Write");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        assert!(
+            !parser.in_reasoning(),
+            "After finalize, reasoning state must be resynced and clean"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Resync correctness tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_resync_reasoning_balanced_markers() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.accumulated_output = "<think>some thought</think>\nHello".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            !parser.in_reasoning(),
+            "Balanced <think>...</think> should not leave reasoning open"
+        );
+    }
+
+    #[test]
+    fn test_resync_reasoning_unbalanced_open() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.accumulated_output = "<think>still thinking...".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            parser.in_reasoning(),
+            "Unbalanced <think> without </think> should leave reasoning open"
+        );
+    }
+
+    #[test]
+    fn test_resync_code_block_state() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.accumulated_output = "text\n```rust\nfn main() {}\n```\nmore text".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            !parser.in_code_block(),
+            "Balanced code fences should not leave code block open"
+        );
+
+        parser.accumulated_output = "text\n```rust\nfn main() {}".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            parser.in_code_block(),
+            "Unbalanced code fence should leave code block open"
+        );
+    }
+
+    #[test]
+    fn test_resync_multiple_reasoning_blocks() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.accumulated_output =
+            "<think>first</think>\ntext\n<think>second</think>\nmore".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            !parser.in_reasoning(),
+            "Two balanced reasoning blocks should not leave reasoning open"
+        );
+
+        parser.accumulated_output =
+            "<think>first</think>\ntext\n<think>still open".to_string();
+        parser.resync_reasoning_and_code_block_state();
+        assert!(
+            parser.in_reasoning(),
+            "Second unbalanced reasoning block should leave reasoning open"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Detect prefilled reasoning end marker
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_detect_prefilled_reasoning_end_marker_think() {
+        let prompt = "...<|im_start|>assistant\n<think>";
+        assert_eq!(
+            detect_prefilled_reasoning_end_marker(prompt),
+            Some("</think>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_prefilled_reasoning_end_marker_qwen() {
+        let prompt = "...<|im_start|>assistant\n<|think|>";
+        assert_eq!(
+            detect_prefilled_reasoning_end_marker(prompt),
+            Some("<|/think|>".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_prefilled_reasoning_end_marker_none() {
+        let prompt = "...<|im_start|>assistant\n";
+        assert_eq!(detect_prefilled_reasoning_end_marker(prompt), None);
+    }
+
+    #[test]
+    fn test_detect_prefilled_reasoning_end_marker_trailing_whitespace() {
+        let prompt = "...<|im_start|>assistant\n<think>  \n";
+        assert_eq!(
+            detect_prefilled_reasoning_end_marker(prompt),
+            Some("</think>".to_string())
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // mask_tool_envelopes
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_mask_tool_envelopes_basic() {
+        let text = "before<tool_call>{\"think\": \"</think>\"}</tool_call>after";
+        let masked = StreamToolParser::mask_tool_envelopes(text, "<tool_call>", "</tool_call>");
+        assert!(!masked.contains("</think>"));
+        assert!(masked.contains("before"));
+        assert!(masked.contains("after"));
+        assert!(masked.contains("<tool_call>"));
+        assert!(masked.contains("</tool_call>"));
+    }
+
+    #[test]
+    fn test_mask_tool_envelopes_multiple() {
+        let text = "<tool_call>first</tool_call>middle<tool_call>second</tool_call>";
+        let masked = StreamToolParser::mask_tool_envelopes(text, "<tool_call>", "</tool_call>");
+        assert!(!masked.contains("first"));
+        assert!(!masked.contains("second"));
+        assert!(masked.contains("middle"));
+    }
+
+    #[test]
+    fn test_mask_tool_envelopes_no_tags() {
+        let text = "no tool calls here <think>reasoning</think>";
+        let masked = StreamToolParser::mask_tool_envelopes(text, "<tool_call>", "</tool_call>");
+        assert_eq!(masked, text);
+    }
+
+    #[test]
+    fn test_mask_tool_envelopes_unclosed() {
+        let text = "<tool_call>unclosed content with </think>";
+        let masked = StreamToolParser::mask_tool_envelopes(text, "<tool_call>", "</tool_call>");
+        assert_eq!(masked, text, "Unclosed envelope should not be masked");
+    }
+
+    #[test]
+    fn test_mask_tool_envelopes_empty_tags() {
+        let text = "content with </think> markers";
+        let masked = StreamToolParser::mask_tool_envelopes(text, "", "</tool_call>");
+        assert_eq!(masked, text, "Empty start tag should return text unchanged");
+    }
+
+    // ---------------------------------------------------------------
+    // End-to-end: reasoning → tool → reasoning → tool
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_full_agentic_loop_reasoning_tool_interleave() {
+        let tools = vec![crate::tools::function_tool("search", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Prefilled reasoning from prompt
+        parser.set_initial_reasoning_end_marker(Some("</think>".to_string()));
+        assert!(parser.in_reasoning());
+
+        // Model generates reasoning content
+        assert!(matches!(
+            parser.process_token(0, "Let me think about this...").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_reasoning());
+
+        // Model closes reasoning
+        assert!(matches!(
+            parser.process_token(0, "</think>\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+
+        // Model generates first tool call
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+        assert!(matches!(
+            parser
+                .process_token(0, r#"{"name": "search", "arguments": {"q": "test"}}"#)
+                .await,
+            StreamResult::Buffering
+        ));
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "search");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+        assert!(!parser.in_reasoning());
+
+        // Model generates text after tool call
+        assert!(matches!(
+            parser.process_token(0, "\nBased on the search results").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_reasoning());
+    }
+
+    #[tokio::test]
+    async fn test_tool_call_with_think_marker_in_json_string_value() {
+        let tools = vec![crate::tools::function_tool("write", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Tool call whose argument value contains a think marker
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+
+        // JSON with </think> embedded in a string value
+        let json_with_think = r#"{"name": "write", "arguments": {"content": "The model uses <think> tags for reasoning and </think> to close them."}}"#;
+        assert!(matches!(
+            parser.process_token(0, json_with_think).await,
+            StreamResult::Buffering
+        ));
+
+        match parser.process_token(151658, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "write");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        // After the tool call, reasoning state must be clean
+        assert!(
+            !parser.in_reasoning(),
+            "Think markers in tool call JSON must not corrupt reasoning state"
+        );
+
+        // Subsequent content should flow normally
+        match parser.process_token(0, "\nDone!").await {
+            StreamResult::Content(text) => assert_eq!(text, "\nDone!"),
+            other => panic!("Expected Content, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_incremental_code_block_tracking_in_normal_mode() {
+        let tools = vec![crate::tools::function_tool("test", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        // Open code block
+        assert!(matches!(
+            parser.process_token(0, "```python\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(parser.in_code_block());
+
+        // Tool start inside code block should be suppressed
+        match parser.process_token(151657, "<tool_call>").await {
+            StreamResult::Content(text) => {
+                assert_eq!(text, "<tool_call>");
+            }
+            other => panic!(
+                "Expected Content (tool suppressed in code block), got {:?}",
+                other
+            ),
+        }
+
+        // Close code block
+        assert!(matches!(
+            parser.process_token(0, "\n```\n").await,
+            StreamResult::Content(_)
+        ));
+        assert!(!parser.in_code_block());
+
+        // Now tool call should work
+        assert!(matches!(
+            parser.process_token(151657, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_text_mode_tool_call_with_reasoning_markers_in_args() {
+        let tools = vec![crate::tools::function_tool("edit", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Phi,
+            "phi".to_string(),
+            ToolConfig::for_model_type(&ModelType::Phi),
+            tools,
+            None,
+        );
+
+        // Text-mode tool call (no special token IDs)
+        assert!(matches!(
+            parser.process_token(0, "<tool_call>").await,
+            StreamResult::Buffering
+        ));
+
+        // Arguments contain multiple reasoning marker types
+        let args = r#"{"name": "edit", "arguments": {"old": "<think>old</think>", "new": "<|think|>new<|/think|>"}}"#;
+        assert!(matches!(
+            parser.process_token(0, args).await,
+            StreamResult::Buffering
+        ));
+
+        match parser.process_token(0, "</tool_call>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "edit");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+
+        assert!(
+            !parser.in_reasoning(),
+            "Multiple reasoning marker types in tool args must not corrupt state"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // strip_reasoning_blocks
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_strip_reasoning_blocks_basic() {
+        let text = "<think>some reasoning</think>\nHello world";
+        assert_eq!(strip_reasoning_blocks(text), "\nHello world");
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_multiple() {
+        let text = "<think>first</think>\nmiddle\n<think>second</think>\nend";
+        assert_eq!(strip_reasoning_blocks(text), "\nmiddle\n\nend");
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_unmatched_open() {
+        let text = "before\n<think>unclosed reasoning and tool call";
+        assert_eq!(
+            strip_reasoning_blocks(text),
+            "before\n",
+            "Unmatched opening marker should truncate from that point"
+        );
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_with_tool_call() {
+        let text = "<think>reasoning</think>\n<tool_call>{\"name\": \"test\"}</tool_call>";
+        let stripped = strip_reasoning_blocks(text);
+        assert!(stripped.contains("<tool_call>"));
+        assert!(!stripped.contains("<think>"));
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_empty_think() {
+        let text = "<think>\n</think>\n<tool_call>{\"name\": \"test\"}</tool_call>";
+        let stripped = strip_reasoning_blocks(text);
+        assert!(stripped.contains("<tool_call>"));
+        assert!(!stripped.contains("<think>"));
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_no_markers() {
+        let text = "Hello world, no reasoning here";
+        assert_eq!(strip_reasoning_blocks(text), text);
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_qwen_markers() {
+        let text = "<|think|>reasoning<|/think|>\nHello";
+        assert_eq!(strip_reasoning_blocks(text), "\nHello");
+    }
+
+    #[test]
+    fn test_strip_reasoning_blocks_double_think_with_tool() {
+        let text = "<think>\n\n</think>\n\n<think>\n</think>\n\n<tool_call>{\"name\": \"test\"}</tool_call>";
+        let stripped = strip_reasoning_blocks(text);
+        assert!(
+            stripped.contains("<tool_call>"),
+            "Tool call should survive after stripping double-think pattern. Got: {}",
+            stripped
         );
     }
 }

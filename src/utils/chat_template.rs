@@ -17,6 +17,8 @@ pub struct Message {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -29,6 +31,8 @@ pub struct Message {
     pub tool_calls: Option<Vec<serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -40,6 +44,7 @@ impl Message {
             num_images,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }
     }
 }
@@ -127,13 +132,80 @@ pub struct ChatTemplate {
     enable_thinking: bool,
 }
 
+const REASONING_BLOCK_PAIRS: [(&str, &str); 4] = [
+    ("<think>", "</think>"),
+    ("<|think|>", "<|/think|>"),
+    ("[THINK]", "[/THINK]"),
+    ("<thought>", "</thought>"),
+];
+
+/// Extract reasoning content from assistant message content.
+///
+/// Collects text from ALL `<think>...</think>` blocks and returns the
+/// combined reasoning plus the remaining content after the last close tag.
+/// Empty blocks (from replay suffix patterns) are skipped.
+///
+/// Returns `(reasoning_content, remaining_content)` if any matched pair is found.
+fn extract_reasoning_content(content: &str) -> Option<(String, String)> {
+    for &(open, close) in &REASONING_BLOCK_PAIRS {
+        if !content.contains(open) || !content.contains(close) {
+            continue;
+        }
+        let mut reasoning_parts: Vec<&str> = Vec::new();
+        let mut search_from = 0;
+        let mut last_close_end = 0;
+
+        while let Some(open_idx) = content[search_from..].find(open) {
+            let abs_open = search_from + open_idx;
+            let inner_start = abs_open + open.len();
+            let Some(close_rel) = content[inner_start..].find(close) else {
+                break;
+            };
+            let abs_close = inner_start + close_rel;
+            let block = content[inner_start..abs_close].trim_matches('\n');
+            if !block.is_empty() {
+                reasoning_parts.push(block);
+            }
+            last_close_end = abs_close + close.len();
+            search_from = last_close_end;
+        }
+
+        if last_close_end == 0 {
+            continue;
+        }
+
+        let reasoning = reasoning_parts.join("\n");
+        let remaining = content[last_close_end..].trim_start_matches('\n').to_string();
+        return Some((reasoning, remaining));
+    }
+    None
+}
+
+fn strip_generation_assistant_header(suffix_text: &str) -> &str {
+    let Some((first_line, remainder)) = suffix_text.split_once('\n') else {
+        return suffix_text;
+    };
+
+    if first_line.ends_with("assistant") {
+        return remainder;
+    }
+
+    suffix_text
+}
+
 impl ChatTemplate {
     pub fn collect_escape_tokens(tokenizer: &Tokenizer, tool_markers: &[&str]) -> Vec<String> {
         let mut tokens = tokenizer
             .get_added_tokens_decoder()
             .into_values()
-            .filter(|added| added.special)
-            .map(|added| added.content)
+            .filter_map(|added| {
+                let content = added.content;
+                if added.special || should_escape_marker(&content) {
+                    Some(content)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
 
         for marker in tool_markers {
@@ -196,6 +268,7 @@ impl ChatTemplate {
             num_images,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
     }
 
@@ -232,27 +305,50 @@ impl ChatTemplate {
     }
 
     fn escaped_messages_for_render(&self) -> Vec<Message> {
-        if self.escape_tokens.is_empty() {
-            return self.messages.clone();
-        }
+        // For assistant messages: extract reasoning from <think>...</think>
+        // into `reasoning_content` and strip it from `content`.  This lets
+        // templates that support `message.reasoning_content` (e.g. Qwen3)
+        // use it directly, while templates that parse <think> from content
+        // can still find it if needed.
+        //
+        // We always strip reasoning markers from content to avoid the
+        // "double-think" bug and to prevent escape_text from mangling
+        // them (ZWNJ insertion would make them invisible to the template).
+        let need_escape = !self.escape_tokens.is_empty();
         self.messages
             .iter()
             .map(|message| {
                 let mut escaped = message.clone();
-                // System/developer prompts can include engine-defined structural
-                // tool-call instructions that must remain exact (e.g. <tool_call>).
-                // Escape only user/assistant/tool payloads.
-                if !matches!(escaped.role.as_str(), "system" | "developer") {
-                    escaped.content = self.escape_text(&escaped.content);
+                match escaped.role.as_str() {
+                    "system" | "developer" => {}
+                    "assistant" => {
+                        if let Some((reasoning, remaining)) =
+                            extract_reasoning_content(&escaped.content)
+                        {
+                            if escaped.reasoning_content.is_none() {
+                                escaped.reasoning_content = Some(reasoning);
+                            }
+                            escaped.content = remaining;
+                        }
+                        if need_escape {
+                            escaped.content = self.escape_text(&escaped.content);
+                        }
+                    }
+                    _ => {
+                        if need_escape {
+                            escaped.content = self.escape_text(&escaped.content);
+                        }
+                    }
                 }
                 escaped
             })
             .collect()
     }
 
-    pub fn apply_chat_template(
+    fn render_chat_template(
         &self,
         tools: &Vec<Tool>,
+        add_generation_prompt: bool,
         log: bool,
     ) -> Result<String, ApplyChatTemplateError> {
         if self.chat_template.is_none() {
@@ -283,12 +379,449 @@ impl ChatTemplate {
         template
             .render(context! {
               messages => render_messages,
-              add_generation_prompt => self.add_generation_prompt,
+              add_generation_prompt => add_generation_prompt,
               bos_token => self.bos_token,
               eos_token => self.eos_token,
               enable_thinking => self.enable_thinking,
               tools => tools,
             })
             .map_err(ApplyChatTemplateError::RenderTemplateError)
+    }
+
+    pub fn apply_chat_template(
+        &self,
+        tools: &Vec<Tool>,
+        log: bool,
+    ) -> Result<String, ApplyChatTemplateError> {
+        self.render_chat_template(tools, self.add_generation_prompt, log)
+    }
+
+    pub fn generation_prompt_replay_suffix(
+        &self,
+        tools: &Vec<Tool>,
+        rendered_prompt: &str,
+    ) -> Option<String> {
+        if !self.add_generation_prompt {
+            return None;
+        }
+
+        let prompt_without_generation = self.render_chat_template(tools, false, false).ok()?;
+        let suffix_text = rendered_prompt
+            .strip_prefix(&prompt_without_generation)?
+            .to_string();
+        let suffix_text = strip_generation_assistant_header(&suffix_text).to_string();
+        if suffix_text.is_empty() {
+            return None;
+        }
+        Some(suffix_text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THINKING_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- else %}
+        {{- '<think>\n' }}
+    {%- endif %}
+{%- endif %}
+"#;
+
+    const HEADER_ONLY_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n' }}
+{%- endif %}
+"#;
+
+    const ALT_ASSISTANT_HEADER_TEMPLATE: &str = r#"
+{%- for message in messages %}
+    {{- '<turn>' + message.role + '\n' + message.content + '</turn>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- '<assistant_start>assistant\n<think>\n' }}
+{%- endif %}
+"#;
+
+    fn build_template(source: &str, enable_thinking: bool) -> ChatTemplate {
+        ChatTemplate::new(
+            None,
+            Some(source.to_string()),
+            None,
+            None,
+            None,
+            true,
+            enable_thinking,
+        )
+    }
+
+    #[test]
+    fn generation_prompt_replay_suffix_extracts_thinking_suffix() {
+        let template = build_template(THINKING_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay_suffix(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay, "<think>\n");
+    }
+
+    #[test]
+    fn generation_prompt_replay_suffix_extracts_disabled_thinking_suffix() {
+        let template = build_template(THINKING_TEMPLATE, false);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay_suffix(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay, "<think>\n\n</think>\n\n");
+    }
+
+    #[test]
+    fn generation_prompt_replay_suffix_extracts_header_only_suffix() {
+        let template = build_template(HEADER_ONLY_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        assert!(template
+            .generation_prompt_replay_suffix(&Vec::new(), &rendered)
+            .is_none());
+    }
+
+    #[test]
+    fn generation_prompt_replay_suffix_strips_non_qwen_assistant_header() {
+        let template = build_template(ALT_ASSISTANT_HEADER_TEMPLATE, true);
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+        let replay = template
+            .generation_prompt_replay_suffix(&Vec::new(), &rendered)
+            .unwrap();
+        assert_eq!(replay, "<think>\n");
+    }
+
+    #[test]
+    fn strip_generation_assistant_header_only_strips_leading_header_line() {
+        let suffix = "<|im_start|>assistant\n<think>\nassistant\n";
+        assert_eq!(
+            strip_generation_assistant_header(suffix),
+            "<think>\nassistant\n"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_extracted_from_assistant_content() {
+        let mut template = build_template(THINKING_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![Message {
+            role: "assistant".to_string(),
+            content: "<think>cached reasoning</think>\nHello".to_string(),
+            num_images: 0,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        template.set_messages(&messages);
+
+        let render_msgs = template.escaped_messages_for_render();
+        assert_eq!(
+            render_msgs[0].reasoning_content.as_deref(),
+            Some("cached reasoning"),
+        );
+        assert_eq!(render_msgs[0].content, "Hello");
+    }
+
+    #[test]
+    fn reasoning_content_extracted_with_tool_calls() {
+        let mut template = build_template(THINKING_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "Search for X".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "<think>I need to search</think>\n".to_string(),
+                num_images: 0,
+                tool_calls: Some(vec![serde_json::json!({
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": {"q": "X"}}
+                })]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "tool".to_string(),
+                content: "result: found X".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
+            },
+        ];
+        template.set_messages(&messages);
+
+        let render_msgs = template.escaped_messages_for_render();
+        let assistant_msg = &render_msgs[1];
+        assert_eq!(
+            assistant_msg.reasoning_content.as_deref(),
+            Some("I need to search"),
+        );
+        assert!(
+            !assistant_msg.content.contains("<think>"),
+            "Reasoning markers should be removed from content after extraction",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Qwen3-style template tests (reasoning_content extraction)
+    // ---------------------------------------------------------------
+
+    const QWEN3_TEMPLATE: &str = r#"
+{%- for message in messages %}
+{%- if message.content is string %}
+{%- set content = message.content %}
+{%- else %}
+{%- set content = '' %}
+{%- endif %}
+{%- if message.role == "user" or message.role == "system" %}
+{{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+{%- elif message.role == "assistant" %}
+{%- set reasoning_content = '' %}
+{%- if message.reasoning_content is string %}
+{%- set reasoning_content = message.reasoning_content %}
+{%- else %}
+{%- if '<think>' in content %}
+{%- set reasoning_content = content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+{%- set content = content.split('</think>')[-1].lstrip('\n') %}
+{%- endif %}
+{%- endif %}
+{%- if reasoning_content %}
+{{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
+{%- else %}
+{{- '<|im_start|>' + message.role + '\n' + content }}
+{%- endif %}
+{%- if message.tool_calls %}
+{%- for tool_call in message.tool_calls %}
+{%- if (loop.first and content) or (not loop.first) %}
+{{- '\n' }}
+{%- endif %}
+{%- if tool_call.function %}
+{%- set tool_call = tool_call.function %}
+{%- endif %}
+{{- '<tool_call>\n{"name": "' }}
+{{- tool_call.name }}
+{{- '", "arguments": ' }}
+{%- if tool_call.arguments is string %}
+{{- tool_call.arguments }}
+{%- else %}
+{{- tool_call.arguments | tojson }}
+{%- endif %}
+{{- '}\n</tool_call>' }}
+{%- endfor %}
+{%- endif %}
+{{- '<|im_end|>\n' }}
+{%- elif message.role == "tool" %}
+{{- '<|im_start|>user\n<tool_response>\n' + content + '\n</tool_response><|im_end|>\n' }}
+{%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+{{- '<|im_start|>assistant\n<think>\n' }}
+{%- endif %}
+"#;
+
+    #[test]
+    fn qwen3_template_no_double_think_with_reasoning_content_extraction() {
+        let mut template = build_template(QWEN3_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "<think>\n</think>\nHi there!".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: "Do something".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        template.set_messages(&messages);
+
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+
+        // The generation prompt adds one unclosed <think> at the end - that's
+        // expected.  Prior assistant turns must not introduce extra pairs.
+        let open_count = rendered.matches("<think>").count();
+        let close_count = rendered.matches("</think>").count();
+        assert_eq!(
+            open_count,
+            close_count + 1,
+            "Expected exactly one more <think> (generation prompt) than </think>. \
+             Got {} opens and {} closes in:\n{}",
+            open_count, close_count, rendered
+        );
+
+        let double_pattern = "<think>\n\n</think>\n\n<think>";
+        assert!(
+            !rendered.contains(double_pattern),
+            "Double-think pattern must not appear. Got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn qwen3_template_reasoning_content_field_prevents_double_think() {
+        let mut template = build_template(QWEN3_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "Search for X".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "<think>\n</think>\n".to_string(),
+                num_images: 0,
+                tool_calls: Some(vec![serde_json::json!({
+                    "function": {"name": "search", "arguments": {"q": "X"}}
+                })]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "tool".to_string(),
+                content: "result: found X".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
+            },
+        ];
+        template.set_messages(&messages);
+
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+
+        let double_pattern = "<think>\n\n</think>\n\n<think>";
+        assert!(
+            !rendered.contains(double_pattern),
+            "Double-think pattern must not appear when reasoning_content is extracted. Got:\n{}",
+            rendered
+        );
+
+        assert!(
+            rendered.contains("<tool_call>"),
+            "Tool call must be present in rendered output. Got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn qwen3_template_prior_turn_reasoning_stripped_is_accepted() {
+        let mut template = build_template(QWEN3_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "<think>I need to think</think>\nHi!".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "user".to_string(),
+                content: "Next question".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+        ];
+        template.set_messages(&messages);
+
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+
+        assert!(
+            rendered.contains("Hi!"),
+            "Prior assistant turn content must be present. Got:\n{}",
+            rendered
+        );
+        let double_pattern = "<think>\n\n</think>\n\n<think>";
+        assert!(
+            !rendered.contains(double_pattern),
+            "No double-think pattern. Got:\n{}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn extract_reasoning_content_basic() {
+        let (reasoning, remaining) =
+            extract_reasoning_content("<think>hello</think>\nworld").unwrap();
+        assert_eq!(reasoning, "hello");
+        assert_eq!(remaining, "world");
+    }
+
+    #[test]
+    fn extract_reasoning_content_empty_think() {
+        let (reasoning, remaining) =
+            extract_reasoning_content("<think>\n</think>\nworld").unwrap();
+        assert_eq!(reasoning, "");
+        assert_eq!(remaining, "world");
+    }
+
+    #[test]
+    fn extract_reasoning_content_no_markers() {
+        assert!(extract_reasoning_content("no markers here").is_none());
+    }
+
+    #[test]
+    fn extract_reasoning_content_qwen_markers() {
+        let (reasoning, remaining) =
+            extract_reasoning_content("<|think|>hello<|/think|>\nworld").unwrap();
+        assert_eq!(reasoning, "hello");
+        assert_eq!(remaining, "world");
     }
 }

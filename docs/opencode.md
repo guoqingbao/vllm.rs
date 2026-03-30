@@ -12,7 +12,7 @@ OpenCode -> vLLM.rs (OpenAI-compatible)
 ```bash
 # Rust
 # Replace `flashinfer` with `flashattn` to use Flash attention backend
-./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3-Coder-Next-FP8 --server --d 0,1 --prefix-cache
+./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3.5-35B-A3B-FP8 --server --d 0 --prefix-cache
 
 # Different model
 ./run.sh --features cuda,nccl,graph,flashinfer,cutlass --release --m Qwen/Qwen3.5-27B-FP8 --d 0 --server --prefix-cache
@@ -23,15 +23,11 @@ python3 -m vllm_rs.server --m Qwen/Qwen3-Coder-Next-FP8 --d 0,1 --prefix-cache
 
 ## 2) Configure OpenCode
 
-Install opencode
+Install opencode (CLI)
 
 ```shell
 curl -fsSL https://opencode.ai/install | bash
-```
-
-Or install with npm
-
-```shell
+# Or install with npm
 npm i -g opencode-ai
 ```
 
@@ -59,13 +55,24 @@ Export config into `~/.config/opencode/config.json`
 }
 ```
 
+Install Desktop OpenCode (optional)
+
+```shell
+visit https://opencode.ai/download
+```
+
+Connect to provider -> custom -> base URL (http://localhost:8000/v1) -> Empty key
+
+
 ## 3) Run OpenCode
 
-run opencode
+run opencode (CLI)
 
 ```shell
 opencode
 ```
+
+Or, run OpenCode desktop (choose configured custom provider)
 
 ### Trouble shooting
 

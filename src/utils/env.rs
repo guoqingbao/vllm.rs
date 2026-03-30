@@ -1,7 +1,7 @@
 use std::env;
 
 pub const MAMBA_SNAPSHOT_BLOCK_STRIDE_ENV: &str = "VLLM_RS_MAMBA_SNAPSHOT_STRIDE_BLOCKS";
-pub const DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE: usize = 8;
+pub const DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE: usize = 1;
 
 pub fn mamba_snapshot_block_stride_blocks() -> usize {
     let default = DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE;

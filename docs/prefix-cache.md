@@ -28,8 +28,8 @@ For hybrid Mamba models (for example Qwen3.5), prefix reuse also needs a
 compatible Mamba snapshot at the matched boundary.
 
 Use environment variable `VLLM_RS_MAMBA_SNAPSHOT_STRIDE_BLOCKS` to control
-sparse snapshot capture during decode:
-- Default: `8` blocks
+sparse snapshot capture during decode (larger stride side usefull for limited GPU memory):
+- Default: `1` blocks
 - Minimum valid value: `1` (capture every block)
 - Effective snapshot boundary in tokens: `block_size * stride`
 
