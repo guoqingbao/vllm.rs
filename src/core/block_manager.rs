@@ -155,7 +155,10 @@ impl BlockManager {
         if self.prefix_cache.is_some() {
             let mut prefix_cache = self.prefix_cache.take().unwrap();
             let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-            let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
+            
+            // Use relaxed matching with 5% tolerance for tokenization differences
+            let prefix_match = prefix_cache.match_prefix_relaxed(&seq.token_ids, seed, 0.05);
+            
             let matched_blocks = self.resolve_mamba_matched_blocks(
                 &prefix_cache,
                 seq.id,
@@ -325,7 +328,8 @@ impl BlockManager {
 
         if prefix_cache.enabled() {
             let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-            let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed);
+            // Use relaxed matching to handle tokenization variations
+            let prefix_match = prefix_cache.match_prefix_relaxed(tokens, seed, 0.05);
             last_hash = prefix_match.last_hash;
             raw_matched_blocks =
                 self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);

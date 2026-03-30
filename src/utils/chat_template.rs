@@ -291,4 +291,33 @@ impl ChatTemplate {
             })
             .map_err(ApplyChatTemplateError::RenderTemplateError)
     }
+    
+    /// Apply chat template and validate tokenization consistency
+    pub fn apply_chat_template_and_validate(
+        &self,
+        tools: &Vec<Tool>,
+        log: bool,
+        tokenizer: &Tokenizer,
+    ) -> Result<String, ApplyChatTemplateError> {
+        let template_text = self.apply_chat_template(tools, log)?;
+        
+        // Tokenize the template to verify consistency
+        if log {
+            if let Ok(encoded) = tokenizer.encode(&*template_text, false) {
+                let token_ids = encoded.get_ids();
+                crate::log_info!(
+                    "Chat template rendered to {} tokens. First 10: {:?}",
+                    token_ids.len(),
+                    &token_ids[0..token_ids.len().min(10)]
+                );
+            }
+        }
+        
+        Ok(template_text)
+    }
+    
+    /// Get the template string for external use (e.g., validation checks)
+    pub fn get_template_string(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
 }
