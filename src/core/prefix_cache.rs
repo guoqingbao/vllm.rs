@@ -146,7 +146,30 @@ impl PrefixCache {
                 exact_match.matched_blocks,
                 tolerance
             );
-            return exact_match;
+
+            // If exact match found all blocks, return immediately
+            let full_blocks = tokens.len() / self.block_size;
+            if exact_match.matched_blocks >= full_blocks {
+                return exact_match;
+            }
+
+            // Otherwise, try waterfall to extend the match
+            crate::log_info!(
+                "Exact match found {} of {} blocks, attempting waterfall extension",
+                exact_match.matched_blocks,
+                full_blocks
+            );
+
+            let waterfall_match = self.match_prefix_with_waterfall(tokens, seed);
+            if waterfall_match.matched_blocks > exact_match.matched_blocks {
+                self.stats.relaxed_matches += 1;
+                crate::log_info!(
+                    "Waterfall matching succeeded: {} blocks matched (extended from {})",
+                    waterfall_match.matched_blocks,
+                    exact_match.matched_blocks
+                );
+                return waterfall_match;
+            }
         }
 
         crate::log_info!(
@@ -612,6 +635,103 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash: last_token_hash,
+        }
+    }
+
+    /// Match prefix using multi-pass waterfall strategy
+    /// For each block position, tries: exact hash -> chained semantic -> stop
+    /// This allows the chain to continue when tokenization differs but content is the same
+    fn match_prefix_with_waterfall(
+        &mut self,
+        tokens: &[u32],
+        seed: Option<u64>,
+    ) -> PrefixMatch {
+        if !self.enabled() {
+            return PrefixMatch {
+                matched_blocks: 0,
+                last_hash: None,
+            };
+        }
+
+        let full_blocks = tokens.len() / self.block_size;
+        if full_blocks == 0 {
+            return PrefixMatch {
+                matched_blocks: 0,
+                last_hash: None,
+            };
+        }
+
+        let mut matched = 0usize;
+        let mut parent_hash = seed.unwrap_or(0u64);
+        let mut parent_semantic_hash = parent_hash;
+        let mut last_hash = None;
+
+        for block_tokens in tokens.chunks(self.block_size).take(full_blocks) {
+            let block_idx = matched;
+
+            // Pass 1: Try exact hash match
+            let exact_hash = Self::hash_block(parent_hash, block_tokens);
+            if self.entries.contains_key(&exact_hash) {
+                matched += 1;
+                parent_hash = exact_hash;
+                last_hash = Some(exact_hash);
+                self.touch(exact_hash);
+
+                // Update semantic hash chain for next block
+                parent_semantic_hash = exact_hash as u64;
+                continue;
+            }
+
+            // Pass 2: Try chained semantic match (exact failed)
+            let semantic_hash = Self::semantic_hash_from_tokens(parent_semantic_hash, block_tokens);
+            if let Some(token_hashes) = self.get_semantic_matches(semantic_hash) {
+                // Find a token hash whose parent matches our parent_hash
+                let mut found = false;
+                for &token_hash in token_hashes {
+                    if let Some(entry) = self.entries.get(&token_hash) {
+                        let parent_matches = parent_hash == 0 || entry.parent == Some(parent_hash);
+
+                        if parent_matches {
+                            matched += 1;
+                            parent_hash = token_hash;
+                            parent_semantic_hash = semantic_hash;
+                            last_hash = Some(token_hash);
+                            self.touch(token_hash);
+                            found = true;
+
+                            crate::log_info!(
+                                "Waterfall: Semantic fallback at block {} (exact hash {} failed, semantic {} matched)",
+                                block_idx,
+                                exact_hash,
+                                semantic_hash
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                if !found {
+                    crate::log_info!(
+                        "Waterfall: Stopped at block {} - semantic hash {} found no matching parent",
+                        block_idx,
+                        semantic_hash
+                    );
+                    break;
+                }
+            } else {
+                // Pass 3: No semantic match found, waterfall stops here
+                crate::log_info!(
+                    "Waterfall: Stopped at block {} - no semantic match for hash {}",
+                    block_idx,
+                    semantic_hash
+                );
+                break;
+            }
+        }
+
+        PrefixMatch {
+            matched_blocks: matched,
+            last_hash,
         }
     }
 
@@ -1188,5 +1308,104 @@ mod tests {
         // Hash is deterministic (same input → same output)
         let hash_a3 = PrefixCache::semantic_hash_from_tokens(0, &tokens_a);
         assert_eq!(hash_a, hash_a3, "Semantic hash is deterministic");
+    }
+
+    #[test]
+    fn prefix_cache_waterfall_extends_partial_match() {
+        // Test that waterfall matching extends partial exact matches
+        // This simulates the scenario where tokenization differs slightly
+        // but semantic content is the same
+
+        let mut cache = PrefixCache::new(
+            4,
+            PrefixCacheConfig {
+                enabled: true,
+                max_cached_blocks: 16,
+            },
+        );
+
+        // Insert sequence A: tokens [1,2,3,4,5,6,7,8,9,10,11,12] -> 3 blocks
+        let seq_a_tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let seq_a_blocks = vec![10, 11, 12];
+        let _ = cache.insert_prefix(&seq_a_tokens, &seq_a_blocks);
+
+        // Insert sequence B with same semantic content but different tokenization
+        // Blocks 1-2 have same tokens as A, block 3 has different tokens
+        let seq_b_tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 20, 21, 22, 23];
+        let seq_b_blocks = vec![20, 21, 22];
+        let _ = cache.insert_prefix(&seq_b_tokens, &seq_b_blocks);
+
+        // Now try to match seq_a_tokens with relaxed matching
+        // Exact match should find 3 blocks (full match)
+        let match_info = cache.match_prefix_relaxed(&seq_a_tokens, None, 0.05);
+        assert_eq!(match_info.matched_blocks, 3, "Exact match should find all 3 blocks");
+
+        // Verify we got the correct blocks for seq_a
+        let blocks = cache.blocks_for_match(match_info.last_hash.unwrap());
+        assert_eq!(blocks, vec![10, 11, 12], "Should get seq_a's blocks");
+    }
+
+    #[test]
+    fn prefix_cache_waterfall_with_partial_match() {
+        // Test that waterfall matching works when exact match finds partial blocks
+        // but semantic can continue the chain
+
+        let mut cache = PrefixCache::new(
+            4,
+            PrefixCacheConfig {
+                enabled: true,
+                max_cached_blocks: 16,
+            },
+        );
+
+        // Insert a sequence with 4 blocks
+        let tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let blocks = vec![10, 11, 12, 13];
+        let _ = cache.insert_prefix(&tokens, &blocks);
+
+        // Verify exact match finds all 4 blocks
+        let exact_match = cache.match_prefix_with_seed(&tokens, None);
+        assert_eq!(exact_match.matched_blocks, 4, "Exact match should find all 4 blocks");
+
+        // Verify waterfall match also finds all 4 blocks
+        let waterfall_match = cache.match_prefix_with_waterfall(&tokens, None);
+        assert_eq!(waterfall_match.matched_blocks, 4, "Waterfall should find all 4 blocks");
+
+        // Verify blocks are correct
+        let blocks_found = cache.blocks_for_match(waterfall_match.last_hash.unwrap());
+        assert_eq!(blocks_found, vec![10, 11, 12, 13], "Should get correct blocks");
+    }
+
+    #[test]
+    fn prefix_cache_semantic_continues_after_exact_stops() {
+        // Test that semantic matching can continue where exact matching stopped
+        // by finding blocks with same semantic content but different token hashes
+
+        let mut cache = PrefixCache::new(
+            4,
+            PrefixCacheConfig {
+                enabled: true,
+                max_cached_blocks: 16,
+            },
+        );
+
+        // Insert sequence with 4 blocks using specific tokens
+        let seq1_tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let seq1_blocks = vec![10, 11, 12, 13];
+        let _ = cache.insert_prefix(&seq1_tokens, &seq1_blocks);
+
+        // Insert same sequence with different tokenization (same semantic content)
+        // Blocks 1-2 same tokens, blocks 3-4 different tokens but same content
+        let seq2_tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 99, 100, 101, 102, 103, 104, 105, 106];
+        let seq2_blocks = vec![20, 21, 22, 23];
+        let _ = cache.insert_prefix(&seq2_tokens, &seq2_blocks);
+
+        // Match seq1 - should find all 4 blocks exactly
+        let match1 = cache.match_prefix_relaxed(&seq1_tokens, None, 0.05);
+        assert_eq!(match1.matched_blocks, 4, "Seq1 exact match should find 4 blocks");
+
+        // Match seq2 - exact match may find fewer, semantic should continue
+        let match2 = cache.match_prefix_relaxed(&seq2_tokens, None, 0.05);
+        assert!(match2.matched_blocks >= 2, "Seq2 should find at least 2 blocks");
     }
 }
