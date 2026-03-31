@@ -86,6 +86,7 @@
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [结构化输出文档](docs/llguidance-integration.md)
 - [OpenCode使用vLLM.rs后端](docs/open_code.md)
+- [Kilo Code使用vLLM.rs后端](docs/kilocode.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)
 - [Goose AI Agent使用vLLM.rs后端](docs/goose.md)
 - [Embedding](docs/embeddings.md)
