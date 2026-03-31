@@ -62,6 +62,15 @@ const CLAUDE_REASONING_MARKERS: &[(&str, &str)] = &[
 ];
 const SYNTHETIC_THINKING_SIGNATURE_PREFIX: &str = "vllm-rs-thinking-v1:";
 
+fn strip_nested_reasoning_markers(text: &str) -> String {
+    let mut result = text.to_string();
+    for &(open, close) in CLAUDE_REASONING_MARKERS {
+        result = result.replace(open, "");
+        result = result.replace(close, "");
+    }
+    result
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ClaudeContent {
@@ -853,14 +862,20 @@ fn tool_result_content_to_text(content: &ClaudeToolResultContent) -> Result<Stri
     }
 }
 
-fn flush_content_message(out: &mut Vec<ChatMessage>, role: &str, items: &mut Vec<MessageContent>) {
-    if let Some(content) = build_message_content_type(std::mem::take(items)) {
+fn flush_content_message(
+    out: &mut Vec<ChatMessage>,
+    role: &str,
+    items: &mut Vec<MessageContent>,
+    reasoning_content: Option<String>,
+) {
+    let content = build_message_content_type(std::mem::take(items));
+    if content.is_some() || reasoning_content.is_some() {
         out.push(ChatMessage {
             role: role.to_string(),
-            content: Some(content),
+            content,
             tool_calls: None,
             tool_call_id: None,
-            reasoning_content: None,
+            reasoning_content,
         });
     }
 }
@@ -1049,6 +1064,7 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
             let mut out = Vec::new();
             let mut content_items: Vec<MessageContent> = Vec::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut thinking_content: Option<String> = None;
 
             for block in blocks {
                 match block {
@@ -1062,7 +1078,7 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                     }
                     ClaudeContentBlock::Thinking {
                         thinking,
-                        signature,
+                        signature: _,
                     } => {
                         if role != "assistant" {
                             return Err("thinking blocks must be in assistant messages".to_string());
@@ -1070,10 +1086,18 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         if !tool_calls.is_empty() {
                             flush_tool_call_message(&mut out, &mut tool_calls);
                         }
-                        push_text_content(
-                            &mut content_items,
-                            replay_text_for_thinking_block(thinking, signature.as_deref()),
-                        );
+                        let cleaned = strip_nested_reasoning_markers(thinking);
+                        if !cleaned.trim().is_empty() {
+                            match &mut thinking_content {
+                                Some(existing) => {
+                                    existing.push('\n');
+                                    existing.push_str(cleaned.trim());
+                                }
+                                None => {
+                                    thinking_content = Some(cleaned.trim().to_string());
+                                }
+                            }
+                        }
                     }
                     ClaudeContentBlock::RedactedThinking { .. } => {
                         if role != "assistant" {
@@ -1106,7 +1130,12 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         if role != "assistant" {
                             return Err("tool_use blocks must be in assistant messages".to_string());
                         }
-                        flush_content_message(&mut out, role, &mut content_items);
+                        flush_content_message(
+                            &mut out,
+                            role,
+                            &mut content_items,
+                            thinking_content.take(),
+                        );
                         let args = serde_json::to_string(input).map_err(|err| err.to_string())?;
                         tool_calls.push(crate::tools::new_tool_call(
                             id.clone(),
@@ -1122,7 +1151,7 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                         if role != "user" {
                             return Err("tool_result blocks must be in user messages".to_string());
                         }
-                        flush_content_message(&mut out, role, &mut content_items);
+                        flush_content_message(&mut out, role, &mut content_items, None);
                         flush_tool_call_message(&mut out, &mut tool_calls);
                         let raw_text = tool_result_content_to_text(content)?;
                         let is_error = is_error.unwrap_or(false);
@@ -1150,7 +1179,12 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                 }
             }
 
-            flush_content_message(&mut out, role, &mut content_items);
+            flush_content_message(
+                &mut out,
+                role,
+                &mut content_items,
+                thinking_content.take(),
+            );
             flush_tool_call_message(&mut out, &mut tool_calls);
             Ok(out)
         }
@@ -1264,6 +1298,15 @@ fn send_tool_use_block(
     stream_ctx.send_json_event("content_block_start", &start_payload)?;
 
     let input_json = call.function.arguments.clone().unwrap_or_default();
+
+    let empty_delta = ClaudeContentBlockDeltaEvent {
+        event_type: "content_block_delta",
+        index,
+        delta: ClaudeContentDelta::InputJsonDelta {
+            partial_json: String::new(),
+        },
+    };
+    stream_ctx.send_json_event("content_block_delta", &empty_delta)?;
 
     let delta = ClaudeContentBlockDeltaEvent {
         event_type: "content_block_delta",
@@ -1419,14 +1462,15 @@ impl ClaudeThinkingStreamEmitter {
         index: usize,
         text: &str,
     ) -> Result<(), StreamSendError> {
-        if text.is_empty() {
+        let cleaned = strip_nested_reasoning_markers(text);
+        if cleaned.is_empty() {
             return Ok(());
         }
         let delta = ClaudeContentBlockDeltaEvent {
             event_type: "content_block_delta",
             index,
             delta: ClaudeContentDelta::ThinkingDelta {
-                thinking: text.to_string(),
+                thinking: cleaned,
             },
         };
         stream_ctx.send_json_event("content_block_delta", &delta)
@@ -1556,9 +1600,22 @@ impl ClaudeThinkingStreamEmitter {
                         let delta_text = self.parse_buffer[..end_idx].to_string();
                         self.parse_buffer.drain(..end_idx + end_marker.len());
                         buffered.push_str(&delta_text);
-                        self.mode = ClaudeThinkingStreamMode::PendingEmptyThinking {
-                            placeholder: format!(" {}", normalize_suffix_thinking_text(&buffered)),
-                        };
+                        let cleaned = strip_nested_reasoning_markers(&buffered);
+                        if cleaned.trim().is_empty() {
+                            self.mode = ClaudeThinkingStreamMode::PendingEmptyThinking {
+                                placeholder: format!(
+                                    " {}",
+                                    normalize_suffix_thinking_text(&cleaned)
+                                ),
+                            };
+                        } else {
+                            let index = self.start_thinking_block(stream_ctx)?;
+                            Self::emit_thinking_delta(stream_ctx, index, &cleaned)?;
+                            self.mode = ClaudeThinkingStreamMode::PendingThinkingClose {
+                                index,
+                                trailing_ws: String::new(),
+                            };
+                        }
                         continue;
                     }
 
@@ -1572,14 +1629,17 @@ impl ClaudeThinkingStreamEmitter {
                         if finalize {
                             let remaining = std::mem::take(&mut self.parse_buffer);
                             buffered.push_str(&remaining);
-                            if buffered.trim().is_empty() {
-                                let placeholder =
-                                    format!(" {}", normalize_suffix_thinking_text(&buffered));
+                            let cleaned = strip_nested_reasoning_markers(&buffered);
+                            if cleaned.trim().is_empty() {
+                                let placeholder = format!(
+                                    " {}",
+                                    normalize_suffix_thinking_text(&cleaned)
+                                );
                                 self.emit_text(stream_ctx, logger, &placeholder)?;
                                 self.mode = ClaudeThinkingStreamMode::Text;
                             } else {
                                 let index = self.start_thinking_block(stream_ctx)?;
-                                Self::emit_thinking_delta(stream_ctx, index, &buffered)?;
+                                Self::emit_thinking_delta(stream_ctx, index, &cleaned)?;
                                 self.close_thinking_block(stream_ctx, index, " ")?;
                             }
                             continue;
@@ -1593,9 +1653,10 @@ impl ClaudeThinkingStreamEmitter {
                     let delta_text = self.parse_buffer[..emit_len].to_string();
                     self.parse_buffer.drain(..emit_len);
                     buffered.push_str(&delta_text);
-                    if !buffered.trim().is_empty() {
+                    let cleaned = strip_nested_reasoning_markers(&buffered);
+                    if !cleaned.trim().is_empty() {
                         let index = self.start_thinking_block(stream_ctx)?;
-                        Self::emit_thinking_delta(stream_ctx, index, &buffered)?;
+                        Self::emit_thinking_delta(stream_ctx, index, &cleaned)?;
                         self.mode = ClaudeThinkingStreamMode::Thinking { index, end_marker };
                     } else {
                         self.mode = ClaudeThinkingStreamMode::ThinkingCandidate {
@@ -2068,7 +2129,7 @@ pub async fn messages(
             StatusCode::UNPROCESSABLE_ENTITY,
         );
     }
-    let use_claude_thinking_blocks = anthropic_thinking_enabled && resolved_tools.is_empty();
+    let use_claude_thinking_blocks = anthropic_thinking_enabled;
 
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     params.mcp_mode = if !resolved_tools.is_empty() {
@@ -2264,9 +2325,12 @@ pub async fn messages(
             );
             tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end.clone());
             let should_parse_tools = !stream_tools.is_empty();
-            let use_claude_thinking_stream = anthropic_thinking_enabled && !should_parse_tools;
+            let use_claude_thinking_stream = anthropic_thinking_enabled;
             let mut thinking_stream =
                 use_claude_thinking_stream.then(ClaudeThinkingStreamEmitter::new);
+            if use_claude_thinking_stream && should_parse_tools {
+                tool_parser.set_detect_tools_in_reasoning(true);
+            }
 
             let mut current_stream = stream;
             'stream: loop {
@@ -2857,6 +2921,22 @@ pub async fn messages(
                             next_block_index
                         };
 
+                        if next_block_index == 0 && !has_tool_calls {
+                            let start_block = ClaudeContentBlockStartEvent {
+                                event_type: "content_block_start",
+                                index: 0,
+                                content_block: ClaudeContentBlockOut::Text {
+                                    text: String::new(),
+                                },
+                            };
+                            let _ = stream_ctx.send_json_event("content_block_start", &start_block);
+                            let stop_event = ClaudeContentBlockStopEvent {
+                                event_type: "content_block_stop",
+                                index: 0,
+                            };
+                            let _ = stream_ctx.send_json_event("content_block_stop", &stop_event);
+                        }
+
                         if has_tool_calls {
                             let tool_blocks = tool_calls_to_blocks(&tool_calls);
                             crate::log_info!("[Seq {}] Tool use blocks: {:?}", seq_id, tool_blocks);
@@ -3143,7 +3223,11 @@ pub async fn messages(
                     })
                     .collect::<Vec<_>>();
                 if !parsed.text.is_empty() {
-                    blocks.push(ClaudeContentBlockOut::Text { text: parsed.text });
+                    let safe_text =
+                        tool_parser.sanitize_tool_markup_for_display(&parsed.text);
+                    if !safe_text.is_empty() {
+                        blocks.push(ClaudeContentBlockOut::Text { text: safe_text });
+                    }
                 }
                 blocks.extend(tool_calls_to_blocks(&valid_calls));
                 blocks
@@ -3564,7 +3648,7 @@ mod tests {
     }
 
     #[test]
-    fn converts_assistant_thinking_blocks_back_to_placeholder_text() {
+    fn converts_assistant_thinking_blocks_to_reasoning_content() {
         let signature = encode_synthetic_thinking_signature(" \n\n");
         let message = ClaudeMessage {
             role: "assistant".to_string(),
@@ -3580,15 +3664,14 @@ mod tests {
         };
 
         let converted = convert_claude_message(&message).unwrap();
-        let text = match converted[0].content.as_ref() {
-            Some(MessageContentType::Single(MessageContent::Text { text })) => text.clone(),
-            Some(MessageContentType::Multi(items)) => match &items[0] {
-                MessageContent::Text { text } => text.clone(),
-                _ => String::new(),
-            },
-            _ => String::new(),
-        };
-        assert_eq!(text, " \nplan\n   done");
+        assert_eq!(converted.len(), 1);
+        assert_eq!(
+            converted[0].reasoning_content.as_deref(),
+            Some("plan"),
+            "thinking block content should be set as reasoning_content"
+        );
+        let text = crate::server::extract_text_content(converted[0].content.as_ref().unwrap());
+        assert_eq!(text, "done", "text block should be the regular content");
     }
 
     #[test]
@@ -3732,5 +3815,135 @@ mod tests {
         assert!(!serialized.contains("aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"));
         assert!(!serialized.contains("ffffffff-ffff-ffff-ffff-ffffffffffff"));
         assert!(!serialized.contains("12345678-1234-1234-1234-123456789abc"));
+    }
+
+    #[test]
+    fn converts_thinking_block_with_tool_use() {
+        let messages = convert_claude_message(&ClaudeMessage {
+            role: "assistant".to_string(),
+            content: ClaudeContent::Blocks(vec![
+                ClaudeContentBlock::Thinking {
+                    thinking: "I should use the tool".to_string(),
+                    signature: None,
+                },
+                ClaudeContentBlock::Text {
+                    text: "Let me check.".to_string(),
+                },
+                ClaudeContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "Read".to_string(),
+                    input: json!({"file_path": "/tmp/test.txt"}),
+                },
+            ]),
+        })
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "assistant");
+        assert!(messages[0].content.is_some());
+        assert_eq!(messages[1].role, "assistant");
+        assert!(messages[1].tool_calls.is_some());
+        let calls = messages[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "Read");
+    }
+
+    #[test]
+    fn converts_text_block_with_think_markers_and_tool_use() {
+        let messages = convert_claude_message(&ClaudeMessage {
+            role: "assistant".to_string(),
+            content: ClaudeContent::Blocks(vec![
+                ClaudeContentBlock::Text {
+                    text: "<think>\nI should use the tool\n</think>\n\nLet me check.".to_string(),
+                },
+                ClaudeContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "Read".to_string(),
+                    input: json!({"file_path": "/tmp/test.txt"}),
+                },
+            ]),
+        })
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        let text = crate::server::extract_text_content(messages[0].content.as_ref().unwrap());
+        assert!(
+            text.contains("<think>"),
+            "text block should preserve <think> markers for chat template processing"
+        );
+    }
+
+    #[test]
+    fn parse_output_extracts_thinking_with_tool_markup() {
+        let output = "<think>\nReasoning here\n</think>\n\nSome text\n<tool_call>\n<function=Read>\n<parameter=file_path>/tmp/test.txt</parameter>\n</function>";
+        let parsed = parse_claude_assistant_output(output);
+        assert_eq!(parsed.thinking_blocks.len(), 1);
+        assert!(
+            parsed.thinking_blocks[0].thinking.contains("Reasoning here"),
+            "thinking block should contain the reasoning text"
+        );
+        assert!(
+            parsed.text.contains("<tool_call>"),
+            "tool markup should remain in text for separate parsing"
+        );
+    }
+
+    #[test]
+    fn stop_reason_tool_use_when_has_tool_calls() {
+        assert_eq!(stop_reason_from_decoding(true, 100, 1000, None), "tool_use");
+    }
+
+    #[test]
+    fn stop_reason_end_turn_when_no_tool_calls() {
+        assert_eq!(
+            stop_reason_from_decoding(false, 100, 1000, None),
+            "end_turn"
+        );
+    }
+
+    #[test]
+    fn stop_reason_max_tokens() {
+        assert_eq!(
+            stop_reason_from_decoding(false, 1000, 1000, None),
+            "max_tokens"
+        );
+    }
+
+    #[test]
+    fn stop_reason_stop_sequence() {
+        assert_eq!(
+            stop_reason_from_decoding(false, 100, 1000, Some("\n")),
+            "stop_sequence"
+        );
+    }
+
+    #[test]
+    fn replay_text_for_thinking_preserves_content() {
+        let replay = replay_text_for_thinking_block("I need to think", None);
+        assert!(
+            replay.contains("I need to think"),
+            "replay text should contain the thinking content"
+        );
+        assert!(
+            !replay.contains("<think>"),
+            "replay text should not contain <think> markers"
+        );
+    }
+
+    #[test]
+    fn tool_calls_to_blocks_produces_valid_tool_use() {
+        let calls = vec![crate::tools::new_tool_call(
+            "call_1".to_string(),
+            "get_weather".to_string(),
+            r#"{"city":"tokyo"}"#.to_string(),
+        )];
+        let blocks = tool_calls_to_blocks(&calls);
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            ClaudeContentBlockOut::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "get_weather");
+                assert_eq!(input["city"], "tokyo");
+            }
+            _ => panic!("expected ToolUse block"),
+        }
     }
 }

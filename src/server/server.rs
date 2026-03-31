@@ -566,8 +566,9 @@ pub async fn chat_completion(
             let mut tool_parser = tool_parser;
             let should_parse_tools = has_tools.clone();
 
-            let reasoning_router =
-                ReasoningContentRouter::new(crate::utils::env::stream_as_reasoning_content());
+            let reasoning_router = ReasoningContentRouter::new(
+                crate::utils::env::stream_as_reasoning_content() && should_parse_tools,
+            );
 
             let mut current_stream = stream;
             let current_seq_id = seq_id;
@@ -1246,7 +1247,9 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
-            let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content() {
+            let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content()
+                && has_tools
+            {
                 match content {
                     Some(text) => {
                         match crate::utils::chat_template::extract_reasoning_content(&text) {
@@ -1566,6 +1569,25 @@ mod tests {
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].0.as_deref(), Some("<think>hello</think>world"));
         assert_eq!(deltas[0].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_disabled_no_tools_sends_reasoning_as_content() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(false);
+        assert!(router.send("<think>", true, &ctx));
+        assert!(router.send("reasoning text", true, &ctx));
+        assert!(router.send("</think>", false, &ctx));
+        assert!(router.send("main content", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 4);
+        for d in &deltas {
+            assert!(d.1.is_none(), "reasoning_content must be None when router is disabled");
+        }
+        assert_eq!(deltas[0].0.as_deref(), Some("<think>"));
+        assert_eq!(deltas[1].0.as_deref(), Some("reasoning text"));
+        assert_eq!(deltas[2].0.as_deref(), Some("</think>"));
+        assert_eq!(deltas[3].0.as_deref(), Some("main content"));
     }
 
     #[test]
