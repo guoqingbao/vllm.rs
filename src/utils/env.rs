@@ -1,7 +1,20 @@
 use std::env;
+use std::sync::OnceLock;
 
 pub const MAMBA_SNAPSHOT_BLOCK_STRIDE_ENV: &str = "VLLM_RS_MAMBA_SNAPSHOT_STRIDE_BLOCKS";
-pub const DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE: usize = 8;
+pub const DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE: usize = 1;
+
+pub const STREAM_AS_REASONING_CONTENT_ENV: &str = "VLLM_RS_STREAM_AS_REASONING_CONTENT";
+
+static STREAM_AS_REASONING_CONTENT: OnceLock<bool> = OnceLock::new();
+
+pub fn stream_as_reasoning_content() -> bool {
+    *STREAM_AS_REASONING_CONTENT.get_or_init(|| {
+        env::var(STREAM_AS_REASONING_CONTENT_ENV)
+            .map(|v| !matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no"))
+            .unwrap_or(true)
+    })
+}
 
 pub fn mamba_snapshot_block_stride_blocks() -> usize {
     let default = DEFAULT_MAMBA_SNAPSHOT_BLOCK_STRIDE;

@@ -686,7 +686,7 @@ pub struct GenerationConfig {
     pub eos_token_id: Option<EosTokenId>,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Clone)]
 pub struct QuantConfig {
     pub quant_method: String,
     #[serde(default)]
@@ -700,4 +700,19 @@ pub struct QuantConfig {
     pub weight_block_size: Option<Vec<usize>>,
     #[serde(default, alias = "ignore")]
     pub modules_to_not_convert: Vec<String>,
+}
+
+impl fmt::Debug for QuantConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuantConfig")
+            .field("quant_method", &self.quant_method)
+            .field("bits", &self.bits)
+            .field("group_size", &self.group_size)
+            .field("sym", &self.sym)
+            .field("desc_act", &self.desc_act)
+            .field("checkpoint_format", &self.checkpoint_format)
+            .field("fmt", &self.fmt)
+            .field("weight_block_size", &self.weight_block_size)
+            .finish()
+    }
 }

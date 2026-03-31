@@ -445,7 +445,7 @@ mod tests {
 
     #[test]
     fn memory_transport_client_roundtrip() {
-        let (mut client_transport, mut server_transport) = MemoryTransport::pair();
+        let (client_transport, mut server_transport) = MemoryTransport::pair();
         let server = thread::spawn(move || {
             let mut server = crate::mcp::server::McpServer::new("test", "0.1");
             server.register_tool(

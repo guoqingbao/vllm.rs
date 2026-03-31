@@ -81,12 +81,14 @@ pub struct LLMEngine {
     pub econfig: EngineConfig,
     default_chat_template: String,
     template: ChatTemplate,
+    prompt_replay_candidates: Vec<Vec<u32>>,
     stream_decoders: HashMap<usize, super::DecodeStreamType>,
     stream_senders: HashMap<usize, Sender<StreamItem>>,
     request_types: HashMap<usize, RequestType>,
     decode_start_times: HashMap<usize, usize>,
     decode_length: HashMap<usize, usize>,
     seq_prefilled_reasoning_end: HashMap<usize, String>,
+    seq_prompt_replays: HashMap<usize, Vec<u32>>,
     last_check_throughput_time: usize,
     active_requests: HashSet<usize>,
     cancelled_sequences: Vec<usize>,
@@ -454,7 +456,8 @@ impl LLMEngine {
         if let Some(cfg) = img_cfg.as_ref() {
             template.set_preserve_tokens(cfg.prompt_marker_tokens());
         }
-
+        let prompt_replay_candidates =
+            Self::build_prompt_replay_candidates(&tokenizer, &template, &Vec::new());
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()
         } else {
@@ -468,12 +471,14 @@ impl LLMEngine {
             econfig,
             default_chat_template,
             template,
+            prompt_replay_candidates,
             stream_decoders: HashMap::new(),
             stream_senders: HashMap::new(),
             request_types: HashMap::new(),
             decode_start_times: HashMap::new(),
             decode_length: HashMap::new(),
             seq_prefilled_reasoning_end: HashMap::new(),
+            seq_prompt_replays: HashMap::new(),
             last_check_throughput_time: 0,
             active_requests: HashSet::new(),
             cancelled_sequences: Vec::new(),
@@ -504,6 +509,7 @@ impl LLMEngine {
             .expect("encode failed!");
         let token_ids: Vec<u32> = tokens.get_ids().iter().map(|&x| x).collect();
         let length = token_ids.len();
+        let raw_replay_token_ids = self.match_prompt_replay_candidate(&token_ids);
         if let Some(max_model_len) = self.econfig.max_model_len {
             if length > max_model_len - 1 {
                 candle_core::bail!(
@@ -603,6 +609,9 @@ impl LLMEngine {
         if let Some(end_marker) = detect_prefilled_reasoning_end_marker(prompt) {
             self.seq_prefilled_reasoning_end.insert(seq_id, end_marker);
         }
+        if let Some(replay_ids) = raw_replay_token_ids {
+            self.seq_prompt_replays.insert(seq_id, replay_ids);
+        }
 
         if *request_type == RequestType::Stream {
             let tokenizer = self.tokenizer.clone();
@@ -648,8 +657,62 @@ impl LLMEngine {
         self.scheduler.get_num_cached_tokens()
     }
 
+    fn build_prompt_replay_candidates(
+        tokenizer: &Tokenizer,
+        template: &ChatTemplate,
+        tools: &Vec<Tool>,
+    ) -> Vec<Vec<u32>> {
+        let synthetic_messages = vec![Message {
+            role: "user".to_string(),
+            content: "__VLLM_RS_REPLAY_PROBE__".to_string(),
+            num_images: 0,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }];
+        let mut candidates = Vec::new();
+
+        for enable_thinking in [true, false] {
+            let mut replay_template = template.clone();
+            replay_template.set_enable_thinking(enable_thinking);
+            replay_template.set_messages(&synthetic_messages);
+            let rendered = match replay_template.apply_chat_template(tools, false) {
+                Ok(rendered) => rendered,
+                Err(_) => continue,
+            };
+            let Some(replay_suffix) =
+                replay_template.generation_prompt_replay_suffix(tools, &rendered)
+            else {
+                continue;
+            };
+            let Ok(encoding) = tokenizer.encode_fast(replay_suffix.as_str(), true) else {
+                continue;
+            };
+            let ids = encoding.get_ids().to_vec();
+            if !ids.is_empty() {
+                crate::log_info!("Missing suffix detected {} -> {:?}", replay_suffix, ids);
+                candidates.push(ids);
+            }
+        }
+
+        candidates.sort_by_key(|ids| std::cmp::Reverse(ids.len()));
+        candidates.dedup();
+        candidates
+    }
+
+    fn match_prompt_replay_candidate(&self, prompt_token_ids: &[u32]) -> Option<Vec<u32>> {
+        self.prompt_replay_candidates
+            .iter()
+            .find(|candidate| prompt_token_ids.ends_with(candidate.as_slice()))
+            .cloned()
+    }
+
     pub fn get_available_kv_tokens(&self) -> usize {
         self.scheduler.get_available_kv_tokens()
+    }
+
+    fn take_prompt_replay_token_ids(&mut self, seq_id: usize) -> Option<Vec<u32>> {
+        self.seq_prompt_replays.remove(&seq_id)
     }
 
     pub fn notify_runner_finished(&mut self, id: usize) -> Result<()> {
@@ -842,6 +905,7 @@ impl LLMEngine {
                     self.decode_start_times.remove(&seq_id);
                     self.decode_length.remove(&seq_id);
                     self.seq_prefilled_reasoning_end.remove(&seq_id);
+                    self.seq_prompt_replays.remove(&seq_id);
                     let _ = self.notify_runner_finished(seq_id);
                     if self.econfig.server_mode.unwrap_or(true) {
                         self.scheduler.print_free_blocks();
@@ -876,13 +940,17 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
-                    let token_ids =
+                    let mut token_ids =
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
                             // Special case, the real first token is generated on PD server
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
                         } else {
                             vec![s.last_token]
                         };
+                    if let Some(mut replay_ids) = self.take_prompt_replay_token_ids(seq_id) {
+                        replay_ids.extend(token_ids);
+                        token_ids = replay_ids;
+                    }
 
                     if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                         if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -980,6 +1048,7 @@ impl LLMEngine {
             self.stream_decoders.remove(&seq_id);
             self.decode_start_times.remove(&seq_id);
             self.seq_prefilled_reasoning_end.remove(&seq_id);
+            self.seq_prompt_replays.remove(&seq_id);
             if let Some(r) = &reason {
                 if let Some(sender) = self.stream_senders.get_mut(&seq_id) {
                     if let Some(request_type) = self.request_types.get(&seq_id) {
@@ -1062,7 +1131,7 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
-        prompt_template.set_enable_thinking(params.thinking.unwrap_or(false));
+        prompt_template.set_enable_thinking(params.thinking.unwrap_or(true));
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template
@@ -1088,7 +1157,6 @@ impl LLMEngine {
             }
             prompt
         };
-
         if log {
             log_info!(
                 "Prompt after applying Chat Template: {}",
@@ -1271,6 +1339,7 @@ impl LLMEngine {
         self.scheduler.clear_finished();
         self.scheduler.release_waitings();
         self.seq_prefilled_reasoning_end.clear();
+        self.seq_prompt_replays.clear();
     }
 
     /// Returns the reasoning end marker when the prompt for this sequence

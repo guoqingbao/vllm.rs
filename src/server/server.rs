@@ -43,6 +43,62 @@ struct StreamingContext {
     response_tx: flume::Sender<ChatResponse>,
 }
 
+/// Routes streaming tokens to either `content` or `reasoning_content` in SSE
+/// chunks based on reasoning marker state from the tool parser.
+///
+/// When `VLLM_RS_STREAM_AS_REASONING_CONTENT` is enabled (default), reasoning
+/// markers (`<think>`, `</think>`, etc.) are stripped from the stream and the
+/// inner text is emitted as `delta.reasoning_content` instead of `delta.content`.
+///
+/// The routing decision uses the tool parser's `in_reasoning()` state which
+/// correctly handles split tokens (e.g. `<thin` + `k>`). The router only
+/// strips complete markers from the text to avoid sending them to the client.
+struct ReasoningContentRouter {
+    enabled: bool,
+}
+
+impl ReasoningContentRouter {
+    fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
+    /// Route a content token to the appropriate SSE field.
+    /// `parser_in_reasoning` should be the tool parser's `in_reasoning()` state
+    /// captured BEFORE `process_token` was called for this token.
+    /// Returns false if the client disconnected.
+    fn send(&self, text: &str, parser_in_reasoning: bool, ctx: &StreamingContext) -> bool {
+        if text.is_empty() {
+            return true;
+        }
+        if !self.enabled {
+            return ctx.send_token(text);
+        }
+
+        let stripped = strip_reasoning_markers(text);
+        if stripped.is_empty() {
+            return true;
+        }
+
+        if parser_in_reasoning {
+            ctx.send_reasoning_token(&stripped)
+        } else {
+            ctx.send_token(&stripped)
+        }
+    }
+}
+
+/// Strip all reasoning start/end markers from a text fragment.
+/// Unlike `strip_reasoning_blocks` which removes matched pairs, this removes
+/// individual marker occurrences so they are never sent to the client.
+fn strip_reasoning_markers(text: &str) -> String {
+    let mut result = text.to_string();
+    for &(open, close) in crate::server::parser::reasoning_markers() {
+        result = result.replace(open, "");
+        result = result.replace(close, "");
+    }
+    result
+}
+
 const EMPTY_TOOL_RESULT_ACK: &str = "Tool executed successfully with no textual output.";
 
 fn extract_text_from_content(content: Option<&super::MessageContentType>) -> String {
@@ -220,6 +276,32 @@ impl StreamingContext {
                 delta: Delta {
                     role: None,
                     content: Some(token.to_string()),
+                    reasoning_content: None,
+                    tool_calls: None,
+                },
+                finish_reason: None,
+                error: None,
+            }],
+            usage: None,
+        };
+        self.response_tx
+            .try_send(ChatResponse::Chunk(chunk))
+            .is_ok()
+    }
+
+    /// Send a reasoning_content token chunk. Returns false if client disconnected.
+    fn send_reasoning_token(&self, token: &str) -> bool {
+        let chunk = ChatCompletionChunk {
+            id: format!("seq-{}", self.seq_id),
+            object: "chat.completion.chunk",
+            created: self.created,
+            model: self.model_id.clone(),
+            choices: vec![ChatChoiceChunk {
+                index: 0,
+                delta: Delta {
+                    role: None,
+                    content: None,
+                    reasoning_content: Some(token.to_string()),
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -244,6 +326,7 @@ impl StreamingContext {
                 delta: Delta {
                     role: Some("assistant".to_string()),
                     content: None,
+                    reasoning_content: None,
                     tool_calls: None,
                 },
                 finish_reason: None,
@@ -450,7 +533,8 @@ pub async fn chat_completion(
             resolved_tools.clone(),
             enforce_parser.clone(),
         );
-        tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end);
+        tool_parser.set_initial_reasoning_end_marker(prefilled_reasoning_end.clone());
+        tool_parser.set_detect_tools_in_reasoning(crate::utils::env::stream_as_reasoning_content());
         let forced_tool_name = forced_tool_name.clone();
         let stream_tool_schemas = tool_schemas.clone();
         if let Some(ref l) = logger {
@@ -481,6 +565,10 @@ pub async fn chat_completion(
             // Initialize the stream tool parser (handles all tool call detection internally)
             let mut tool_parser = tool_parser;
             let should_parse_tools = has_tools.clone();
+
+            let reasoning_router = ReasoningContentRouter::new(
+                crate::utils::env::stream_as_reasoning_content() && should_parse_tools,
+            );
 
             let mut current_stream = stream;
             let current_seq_id = seq_id;
@@ -519,6 +607,9 @@ pub async fn chat_completion(
                                 .as_millis() as u64;
                         }
 
+                        // Capture reasoning state before token processing for routing
+                        let was_in_reasoning = tool_parser.in_reasoning();
+
                         // Use StreamToolParser for all tool call detection and buffering
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
@@ -549,11 +640,12 @@ pub async fn chat_completion(
                                         );
                                         continue;
                                     }
-                                    // Send content to client
+                                    // Send content to client (routed to reasoning_content if inside <think>)
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&text);
                                     }
-                                    if !stream_ctx.send_token(&text) {
+                                    if !reasoning_router.send(&text, was_in_reasoning, &stream_ctx)
+                                    {
                                         crate::log_error!(
                                             "[Seq {}] Stream send error (disconnected)",
                                             current_seq_id
@@ -648,7 +740,7 @@ pub async fn chat_completion(
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&safe_text);
                                     }
-                                    if !stream_ctx.send_token(&safe_text) {
+                                    if !reasoning_router.send(&safe_text, false, &stream_ctx) {
                                         let mut e = engine_clone.write();
                                         e.cancel(current_seq_id);
                                         break;
@@ -669,7 +761,7 @@ pub async fn chat_completion(
                             if let Some(ref l) = stream_logger {
                                 l.log_stream_token(&token);
                             }
-                            if !stream_ctx.send_token(&token) {
+                            if !reasoning_router.send(&token, was_in_reasoning, &stream_ctx) {
                                 crate::log_error!(
                                     "[Seq {}] Stream send error (disconnected)",
                                     current_seq_id
@@ -734,9 +826,9 @@ pub async fn chat_completion(
                                 }
                             }
                             if pending_tool_calls.is_empty() {
-                                let reparsed = tool_parser
-                                    .parse_complete_with_fallback(tool_parser.accumulated_output())
-                                    .await;
+                                let accumulated = tool_parser.accumulated_output().to_string();
+                                let reparsed =
+                                    tool_parser.parse_complete_with_fallback(&accumulated).await;
                                 if !reparsed.is_empty() {
                                     crate::log_warn!(
                                         "[Seq {}] Recovered {} tool call(s) from full-output fallback parse",
@@ -744,6 +836,22 @@ pub async fn chat_completion(
                                         reparsed.len()
                                     );
                                     pending_tool_calls.extend(reparsed);
+                                } else {
+                                    let stripped =
+                                        tool_parser.accumulated_output_without_reasoning();
+                                    if stripped != accumulated && !stripped.trim().is_empty() {
+                                        let reparsed_stripped = tool_parser
+                                            .parse_complete_with_fallback(&stripped)
+                                            .await;
+                                        if !reparsed_stripped.is_empty() {
+                                            crate::log_warn!(
+                                                "[Seq {}] Recovered {} tool call(s) from reasoning-stripped fallback parse",
+                                                current_seq_id,
+                                                reparsed_stripped.len()
+                                            );
+                                            pending_tool_calls.extend(reparsed_stripped);
+                                        }
+                                    }
                                 }
                             }
                             if pending_tool_calls.is_empty() && !suppressed_tool_markup.is_empty() {
@@ -844,6 +952,7 @@ pub async fn chat_completion(
                                     delta: Delta {
                                         role: None,
                                         content: None,
+                                        reasoning_content: None,
                                         tool_calls: Some(streamed_tool_calls.clone()),
                                     },
                                     finish_reason: None,
@@ -886,6 +995,7 @@ pub async fn chat_completion(
                                 delta: Delta {
                                     role: None,
                                     content: None,
+                                    reasoning_content: None,
                                     tool_calls: None,
                                 },
                                 finish_reason: if has_any_tool_calls {
@@ -965,6 +1075,7 @@ pub async fn chat_completion(
                                 delta: Delta {
                                     role: None,
                                     content: None,
+                                    reasoning_content: None,
                                     tool_calls: None,
                                 },
                                 finish_reason: None,
@@ -1068,6 +1179,19 @@ pub async fn chat_completion(
                 let mut parsed_calls = tool_parser
                     .parse_complete_with_fallback(&output.decode_output)
                     .await;
+                if parsed_calls.is_empty() {
+                    let stripped =
+                        crate::server::parser::strip_reasoning_blocks(&output.decode_output);
+                    if stripped != output.decode_output && !stripped.trim().is_empty() {
+                        parsed_calls = tool_parser.parse_complete_with_fallback(&stripped).await;
+                        if !parsed_calls.is_empty() {
+                            crate::log_warn!(
+                                "Recovered {} tool call(s) from reasoning-stripped fallback parse",
+                                parsed_calls.len()
+                            );
+                        }
+                    }
+                }
                 let dropped =
                     retain_tool_calls_forced_name(&mut parsed_calls, forced_tool_name.as_deref());
                 if dropped > 0 {
@@ -1123,11 +1247,33 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
+            let (content, reasoning_content) =
+                if crate::utils::env::stream_as_reasoning_content() && has_tools {
+                    match content {
+                        Some(text) => {
+                            match crate::utils::chat_template::extract_reasoning_content(&text) {
+                                Some((reasoning, remaining)) => {
+                                    let c = if remaining.is_empty() {
+                                        None
+                                    } else {
+                                        Some(remaining)
+                                    };
+                                    (c, Some(reasoning))
+                                }
+                                None => (Some(text), None),
+                            }
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (content, None)
+                };
             choices.push(ChatChoice {
                 index: 0,
                 message: ChatResponseMessage {
                     role: "assistant".to_string(),
                     content,
+                    reasoning_content,
                     tool_calls,
                 },
                 finish_reason: if has_tool_calls {
@@ -1392,6 +1538,176 @@ pub async fn detokenize(
 mod tests {
     use super::*;
 
+    fn make_test_ctx() -> (StreamingContext, flume::Receiver<ChatResponse>) {
+        let (tx, rx) = flume::unbounded();
+        let ctx = StreamingContext::new(1, "test-model".to_string(), 0, tx);
+        (ctx, rx)
+    }
+
+    fn collect_deltas(rx: &flume::Receiver<ChatResponse>) -> Vec<(Option<String>, Option<String>)> {
+        let mut deltas = Vec::new();
+        while let Ok(resp) = rx.try_recv() {
+            if let ChatResponse::Chunk(chunk) = resp {
+                for choice in &chunk.choices {
+                    deltas.push((
+                        choice.delta.content.clone(),
+                        choice.delta.reasoning_content.clone(),
+                    ));
+                }
+            }
+        }
+        deltas
+    }
+
+    #[test]
+    fn reasoning_router_disabled_sends_all_as_content() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(false);
+        assert!(router.send("<think>hello</think>world", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].0.as_deref(), Some("<think>hello</think>world"));
+        assert_eq!(deltas[0].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_disabled_no_tools_sends_reasoning_as_content() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(false);
+        assert!(router.send("<think>", true, &ctx));
+        assert!(router.send("reasoning text", true, &ctx));
+        assert!(router.send("</think>", false, &ctx));
+        assert!(router.send("main content", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 4);
+        for d in &deltas {
+            assert!(
+                d.1.is_none(),
+                "reasoning_content must be None when router is disabled"
+            );
+        }
+        assert_eq!(deltas[0].0.as_deref(), Some("<think>"));
+        assert_eq!(deltas[1].0.as_deref(), Some("reasoning text"));
+        assert_eq!(deltas[2].0.as_deref(), Some("</think>"));
+        assert_eq!(deltas[3].0.as_deref(), Some("main content"));
+    }
+
+    #[test]
+    fn reasoning_router_strips_markers_and_routes_reasoning() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        // Token "<think>hello" arrives while parser says in_reasoning=true
+        assert!(router.send("<think>hello", true, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].0, None);
+        assert_eq!(deltas[0].1.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn reasoning_router_strips_end_marker_routes_content() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        // Token "</think>world" arrives while parser says in_reasoning=false (already transitioned)
+        assert!(router.send("</think>world", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].0.as_deref(), Some("world"));
+        assert_eq!(deltas[0].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_handles_split_tokens() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        // Simulating: <think> | reasoning part | </think> | content part
+        // Parser state: false→true for <think>, true for reasoning, true→false for </think>, false for content
+        assert!(router.send("<think>", true, &ctx)); // marker only, stripped
+        assert!(router.send("reasoning part", true, &ctx));
+        assert!(router.send("</think>", false, &ctx)); // marker only, stripped
+        assert!(router.send("content part", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].0, None);
+        assert_eq!(deltas[0].1.as_deref(), Some("reasoning part"));
+        assert_eq!(deltas[1].0.as_deref(), Some("content part"));
+        assert_eq!(deltas[1].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_handles_prefilled_reasoning() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        // Prefilled: prompt ends with <think>, parser starts in_reasoning=true
+        assert!(router.send("I'm thinking", true, &ctx));
+        assert!(router.send("</think>", false, &ctx));
+        assert!(router.send("answer", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].0, None);
+        assert_eq!(deltas[0].1.as_deref(), Some("I'm thinking"));
+        assert_eq!(deltas[1].0.as_deref(), Some("answer"));
+        assert_eq!(deltas[1].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_handles_qwen_markers() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        assert!(router.send("<|think|>reasoning", true, &ctx));
+        assert!(router.send("<|/think|>answer", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].0, None);
+        assert_eq!(deltas[0].1.as_deref(), Some("reasoning"));
+        assert_eq!(deltas[1].0.as_deref(), Some("answer"));
+        assert_eq!(deltas[1].1, None);
+    }
+
+    #[test]
+    fn reasoning_router_empty_text_is_noop() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        assert!(router.send("", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert!(deltas.is_empty());
+    }
+
+    #[test]
+    fn reasoning_router_marker_only_token_sends_nothing() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        assert!(router.send("<think>", true, &ctx));
+        assert!(router.send("</think>", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert!(
+            deltas.is_empty(),
+            "Pure marker tokens should produce no output"
+        );
+    }
+
+    #[test]
+    fn reasoning_router_plain_content_no_markers() {
+        let (ctx, rx) = make_test_ctx();
+        let router = ReasoningContentRouter::new(true);
+        assert!(router.send("hello world", false, &ctx));
+        let deltas = collect_deltas(&rx);
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].0.as_deref(), Some("hello world"));
+        assert_eq!(deltas[0].1, None);
+    }
+
+    #[test]
+    fn strip_reasoning_markers_removes_all_marker_types() {
+        assert_eq!(strip_reasoning_markers("<think>hello</think>"), "hello");
+        assert_eq!(strip_reasoning_markers("<|think|>hi<|/think|>"), "hi");
+        assert_eq!(strip_reasoning_markers("[THINK]hi[/THINK]"), "hi");
+        assert_eq!(strip_reasoning_markers("<thought>hi</thought>"), "hi");
+        assert_eq!(strip_reasoning_markers("no markers"), "no markers");
+        assert_eq!(strip_reasoning_markers("<think>"), "");
+        assert_eq!(strip_reasoning_markers("</think>world"), "world");
+    }
+
     #[test]
     fn validates_openai_tool_messages_with_known_tool_call_id() {
         let messages = vec![
@@ -1400,6 +1716,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
         ];
@@ -1415,6 +1732,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_unknown", "{\"ok\":true}"),
         ];
@@ -1431,6 +1749,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
             ChatMessage::tool_result("call_1", "{\"ok\":false}"),
@@ -1448,6 +1767,7 @@ mod tests {
                 content: None,
                 tool_calls: Some(vec![crate::tools::new_tool_call("call_1", "lookup", "{}")]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::text("user", "let us skip the tool result"),
         ];
@@ -1467,6 +1787,7 @@ mod tests {
                     crate::tools::new_tool_call("call_2", "lookup", "{}"),
                 ]),
                 tool_call_id: None,
+                reasoning_content: None,
             },
             ChatMessage::tool_result("call_1", "{\"ok\":true}"),
             ChatMessage::tool_result("call_2", "{\"ok\":true}"),
