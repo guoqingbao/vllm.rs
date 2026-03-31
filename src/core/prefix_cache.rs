@@ -160,7 +160,9 @@ impl PrefixCache {
                 full_blocks
             );
 
-            let waterfall_match = self.match_prefix_with_waterfall(tokens, seed);
+            // Use exact_match.last_hash as seed to continue chain from where exact match stopped
+            let waterfall_seed = exact_match.last_hash;
+            let waterfall_match = self.match_prefix_with_waterfall(tokens, waterfall_seed);
             if waterfall_match.matched_blocks > exact_match.matched_blocks {
                 self.stats.relaxed_matches += 1;
                 crate::log_info!(
@@ -667,7 +669,8 @@ impl PrefixCache {
         let mut last_hash = None;
 
         for block_tokens in tokens.chunks(self.block_size).take(full_blocks) {
-            let block_idx = matched;
+            // block_position tracks which block we're at in the chain (0-indexed)
+            let block_position = matched;
 
             // Pass 1: Try exact hash match
             let exact_hash = Self::hash_block(parent_hash, block_tokens);
@@ -677,8 +680,8 @@ impl PrefixCache {
                 last_hash = Some(exact_hash);
                 self.touch(exact_hash);
 
-                // Update semantic hash chain for next block
-                parent_semantic_hash = exact_hash as u64;
+                // Update semantic hash chain for next block using actual token content
+                parent_semantic_hash = Self::semantic_hash_from_tokens(parent_semantic_hash, block_tokens);
                 continue;
             }
 
@@ -701,7 +704,7 @@ impl PrefixCache {
 
                             crate::log_info!(
                                 "Waterfall: Semantic fallback at block {} (exact hash {} failed, semantic {} matched)",
-                                block_idx,
+                                block_position,
                                 exact_hash,
                                 semantic_hash
                             );
@@ -713,7 +716,7 @@ impl PrefixCache {
                 if !found {
                     crate::log_info!(
                         "Waterfall: Stopped at block {} - semantic hash {} found no matching parent",
-                        block_idx,
+                        block_position,
                         semantic_hash
                     );
                     break;
@@ -722,7 +725,7 @@ impl PrefixCache {
                 // Pass 3: No semantic match found, waterfall stops here
                 crate::log_info!(
                     "Waterfall: Stopped at block {} - no semantic match for hash {}",
-                    block_idx,
+                    block_position,
                     semantic_hash
                 );
                 break;
