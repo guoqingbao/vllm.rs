@@ -20,6 +20,7 @@ impl Default for PrefixCacheConfig {
 pub struct PrefixMatch {
     pub matched_blocks: usize,
     pub last_hash: Option<u64>,
+    pub last_semantic_hash: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +97,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -104,6 +106,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -125,6 +128,7 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash,
+            last_semantic_hash: None,  // match_prefix_with_seed only tracks token hashes
         }
     }
 
@@ -231,6 +235,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -240,6 +245,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -248,6 +254,7 @@ impl PrefixCache {
         let mut matched = 0usize;
         let mut parent_hash = seed.unwrap_or(0u64);
         let mut last_hash = None;
+        let mut last_semantic_hash = None;
 
         for (block_idx, block_tokens) in tokens.chunks(self.block_size).take(full_blocks).enumerate() {
             let hash = Self::hash_block(parent_hash, block_tokens);
@@ -256,6 +263,10 @@ impl PrefixCache {
                 matched += 1;
                 parent_hash = hash;
                 last_hash = Some(hash);
+                last_semantic_hash = Some(Self::semantic_hash_from_tokens(
+                    last_semantic_hash.unwrap_or(0),
+                    block_tokens,
+                ));
                 self.touch(hash);
                 mismatches = 0;  // Reset on success
             } else {
@@ -278,6 +289,10 @@ impl PrefixCache {
                     matched += 1;
                     parent_hash = fhash;
                     last_hash = Some(fhash);
+                    last_semantic_hash = Some(Self::semantic_hash_from_tokens(
+                        last_semantic_hash.unwrap_or(0),
+                        block_tokens,
+                    ));
                     self.touch(fhash);
                     mismatches = 0;
                     crate::log_info!(
@@ -297,6 +312,7 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash,
+            last_semantic_hash,
         }
     }
 
@@ -576,6 +592,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -584,12 +601,14 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
         let mut matched = 0usize;
         let mut parent_token_hash = seed.unwrap_or(0u64);
         let mut last_token_hash = None;
+        let mut last_semantic_hash = None;
 
         // Compute parent semantic hash from seed
         let parent_semantic_hash = seed.map(|s| s as u64).unwrap_or(0);
@@ -615,6 +634,7 @@ impl PrefixCache {
                             matched += 1;
                             parent_token_hash = token_hash;
                             last_token_hash = Some(token_hash);
+                            last_semantic_hash = Some(semantic_hash);
                             self.touch(token_hash);
                             found = true;
                             break;
@@ -637,6 +657,7 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash: last_token_hash,
+            last_semantic_hash,
         }
     }
 
@@ -652,6 +673,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -660,13 +682,16 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
         let mut matched = 0usize;
         let mut parent_hash = seed.unwrap_or(0u64);
-        let mut parent_semantic_hash = parent_hash;
+        // Start semantic hash chain from 0 (base case), not from token hash
+        let mut parent_semantic_hash = 0u64;
         let mut last_hash = None;
+        let mut last_semantic_hash = None;
 
         for block_tokens in tokens.chunks(self.block_size).take(full_blocks) {
             // block_position tracks which block we're at in the chain (0-indexed)
@@ -678,10 +703,10 @@ impl PrefixCache {
                 matched += 1;
                 parent_hash = exact_hash;
                 last_hash = Some(exact_hash);
-                self.touch(exact_hash);
-
-                // Update semantic hash chain for next block using actual token content
+                // Update semantic hash chain using actual token content
                 parent_semantic_hash = Self::semantic_hash_from_tokens(parent_semantic_hash, block_tokens);
+                last_semantic_hash = Some(parent_semantic_hash);
+                self.touch(exact_hash);
                 continue;
             }
 
@@ -699,6 +724,7 @@ impl PrefixCache {
                             parent_hash = token_hash;
                             parent_semantic_hash = semantic_hash;
                             last_hash = Some(token_hash);
+                            last_semantic_hash = Some(semantic_hash);
                             self.touch(token_hash);
                             found = true;
 
@@ -735,6 +761,7 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash,
+            last_semantic_hash,
         }
     }
 
@@ -749,6 +776,7 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
@@ -757,12 +785,15 @@ impl PrefixCache {
             return PrefixMatch {
                 matched_blocks: 0,
                 last_hash: None,
+                last_semantic_hash: None,
             };
         }
 
         let mut matched = 0usize;
         let mut parent_hash = seed.unwrap_or(0u64);
+        let mut parent_semantic_hash = seed.map(|s| s as u64).unwrap_or(0);
         let mut last_hash = None;
+        let mut last_semantic_hash = None;
 
         for block_idx in 0..full_blocks {
             let block_tokens = &tokens[block_idx * self.block_size..(block_idx + 1) * self.block_size];
@@ -773,13 +804,15 @@ impl PrefixCache {
                 matched += 1;
                 parent_hash = hash;
                 last_hash = Some(hash);
+                parent_semantic_hash = Self::semantic_hash_from_tokens(parent_semantic_hash, block_tokens);
+                last_semantic_hash = Some(parent_semantic_hash);
                 self.touch(hash);
                 continue;
             }
 
             // If exact match fails, try block_before/block_after reconstruction
             // Look for blocks that have similar content (same semantic hash)
-            let semantic_hash = Self::semantic_hash_from_tokens(parent_hash, block_tokens);
+            let semantic_hash = Self::semantic_hash_from_tokens(parent_semantic_hash, block_tokens);
             if let Some(token_hashes) = self.get_semantic_matches(semantic_hash) {
                 for &token_hash in token_hashes {
                     // Check if this block's parent matches our chain
@@ -788,6 +821,8 @@ impl PrefixCache {
                             matched += 1;
                             parent_hash = token_hash;
                             last_hash = Some(token_hash);
+                            parent_semantic_hash = semantic_hash;
+                            last_semantic_hash = Some(semantic_hash);
                             self.touch(token_hash);
                             break;
                         }
@@ -805,6 +840,7 @@ impl PrefixCache {
         PrefixMatch {
             matched_blocks: matched,
             last_hash,
+            last_semantic_hash,
         }
     }
 }
