@@ -85,7 +85,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Docker Build](docs/docker.md)
 - [Tool Parsing](docs/tool_parsing.md)
 - [MCP Integration and Tool Calling](docs/mcp_tool_calling.md)
-- [Structured Outputs](docs/llguidance-integration.md)
+- [Guided Decoding / Structured Output](docs/guided_decoding.md)
 - [Work with OpenCode](docs/opencode.md)
 - [Work with Kilo Code](docs/kilocode.md)
 - [Work with Claude Code](docs/claude_code.md)

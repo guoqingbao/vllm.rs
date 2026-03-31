@@ -38,7 +38,7 @@ Export config into `~/.config/opencode/config.json`
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "local-vllm-rs": {
+    "vllmrs": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "vLLM.rs Local",
       "options": {
@@ -46,12 +46,12 @@ Export config into `~/.config/opencode/config.json`
       },
       "models": {
         "qwen3-coder": {
-          "name": "Qwen3 Coder 80B"
+          "name": "Qwen3 Coder"
         }
       }
     }
   },
-  "model": "local-vllm-rs/qwen3-coder"
+  "model": "vllmrs/qwen3-coder"
 }
 ```
 

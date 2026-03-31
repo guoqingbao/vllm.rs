@@ -456,8 +456,12 @@ impl LLMEngine {
         if let Some(cfg) = img_cfg.as_ref() {
             template.set_preserve_tokens(cfg.prompt_marker_tokens());
         }
-        let prompt_replay_candidates =
-            Self::build_prompt_replay_candidates(&tokenizer, &template, &Vec::new());
+        let prompt_replay_candidates = Self::build_prompt_replay_candidates(
+            &tokenizer,
+            &template,
+            &Vec::new(),
+            &guidance_tokens,
+        );
         let model_name = if let Some(archs) = &config.architectures {
             archs[0].to_string()
         } else {
@@ -657,10 +661,20 @@ impl LLMEngine {
         self.scheduler.get_num_cached_tokens()
     }
 
+    fn has_valid_prompt_replay_prefix(
+        replay_ids: &[u32],
+        guidance_tokens: &GuidanceTokens,
+    ) -> bool {
+        replay_ids
+            .first()
+            .is_some_and(|token_id| guidance_tokens.reasoning_start_ids.contains(token_id))
+    }
+
     fn build_prompt_replay_candidates(
         tokenizer: &Tokenizer,
         template: &ChatTemplate,
         tools: &Vec<Tool>,
+        guidance_tokens: &GuidanceTokens,
     ) -> Vec<Vec<u32>> {
         let synthetic_messages = vec![Message {
             role: "user".to_string(),
@@ -689,7 +703,7 @@ impl LLMEngine {
                 continue;
             };
             let ids = encoding.get_ids().to_vec();
-            if !ids.is_empty() {
+            if Self::has_valid_prompt_replay_prefix(&ids, guidance_tokens) {
                 crate::log_info!("Missing suffix detected {} -> {:?}", replay_suffix, ids);
                 candidates.push(ids);
             }
@@ -1632,5 +1646,67 @@ impl LLMEngine {
     /// Get a clone of the chat template for external use (e.g., tokenization without generation)
     pub fn get_chat_template(&self) -> ChatTemplate {
         self.template.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LLMEngine;
+    use crate::utils::guidance::GuidanceTokens;
+
+    #[test]
+    fn has_valid_prompt_replay_prefix_accepts_single_reasoning_token() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: Vec::new(),
+            reasoning_start_ids: vec![42, 99],
+            reasoning_end_ids: vec![100],
+        };
+
+        assert!(LLMEngine::has_valid_prompt_replay_prefix(
+            &[99],
+            &guidance_tokens
+        ));
+    }
+
+    #[test]
+    fn has_valid_prompt_replay_prefix_accepts_multi_token_suffix_when_first_token_is_reasoning() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: Vec::new(),
+            reasoning_start_ids: vec![42],
+            reasoning_end_ids: vec![100],
+        };
+
+        assert!(LLMEngine::has_valid_prompt_replay_prefix(
+            &[42, 7],
+            &guidance_tokens
+        ));
+    }
+
+    #[test]
+    fn has_valid_prompt_replay_prefix_rejects_non_reasoning_prefix() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: Vec::new(),
+            reasoning_start_ids: vec![42],
+            reasoning_end_ids: vec![100],
+        };
+
+        assert!(!LLMEngine::has_valid_prompt_replay_prefix(
+            &[7, 42],
+            &guidance_tokens
+        ));
+    }
+
+    #[test]
+    fn has_valid_prompt_replay_prefix_rejects_empty_suffix() {
+        let guidance_tokens = GuidanceTokens {
+            eos_token_ids: Vec::new(),
+            reasoning_start_ids: vec![42],
+            reasoning_end_ids: vec![100],
+        };
+
+        assert!(!LLMEngine::has_valid_prompt_replay_prefix(
+            &[],
+            &guidance_tokens
+        ));
     }
 }

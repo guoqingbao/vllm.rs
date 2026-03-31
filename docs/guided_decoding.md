@@ -1,4 +1,4 @@
-# llguidance Integration
+# Guided Decoding
 
 This document describes the current guided decoding implementation in `vllm.rs`.
 

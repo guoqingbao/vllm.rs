@@ -2,6 +2,7 @@ use anyhow::Result;
 use candle_core::quantized::gguf_file::{self, Value};
 use itertools::Itertools;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use tokenizers::pre_tokenizers::{
     sequence::Sequence,
     split::{Split, SplitPattern},
@@ -249,6 +250,16 @@ pub fn get_gguf_chat_template<R: std::io::Seek + std::io::Read>(
     };
     let props = PropsGGUFTemplate::try_from(metadata)?;
     Ok(props.chat_template)
+}
+
+pub fn load_gguf_info_from_files(paths: &[PathBuf]) -> Result<GGUFInfo> {
+    let mut readers = paths
+        .iter()
+        .map(std::fs::File::open)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut reader_refs = readers.iter_mut().collect::<Vec<_>>();
+    let content = Content::from_readers(&mut reader_refs)?;
+    get_gguf_info(&content)
 }
 
 pub struct GGUFInfo {

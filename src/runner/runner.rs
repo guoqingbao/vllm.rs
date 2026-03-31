@@ -14,6 +14,7 @@ use vllm_rs::models::layers::VarBuilderX;
 use vllm_rs::runner::{receive_local, send_local, MessageType};
 use vllm_rs::transfer::PdRole;
 use vllm_rs::transfer::Transfer;
+use vllm_rs::utils::gguf_helper::load_gguf_info_from_files;
 use vllm_rs::utils::guidance::build_llg_factory;
 use vllm_rs::utils::heartbeat::heartbeat_worker;
 use vllm_rs::utils::new_device;
@@ -130,7 +131,25 @@ fn main() -> anyhow::Result<()> {
             let stream_kv = Some(stream.try_clone()?);
             let mut econfig = init_req.econfig.clone();
             let tokenizer_path = init_req.model_pathes.get_tokenizer_filename();
-            let llg_factory = if tokenizer_path.exists() {
+            let llg_factory = if init_req.is_gguf {
+                match load_gguf_info_from_files(&init_req.model_pathes.get_weight_filenames()) {
+                    Ok(info) => match build_llg_factory(info.tokenizer, init_req.config.vocab_size)
+                    {
+                        Ok(f) => Some(f),
+                        Err(e) => {
+                            vllm_rs::log_warn!("Failed to build llguidance factory: {}", e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        vllm_rs::log_warn!(
+                            "Failed to load GGUF tokenizer metadata; disabling optional llguidance: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else if tokenizer_path.exists() {
                 match Tokenizer::from_file(&tokenizer_path) {
                     Ok(tokenizer) => match build_llg_factory(tokenizer, init_req.config.vocab_size)
                     {
