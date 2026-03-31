@@ -1247,28 +1247,27 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
-            let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content()
-                && has_tools
-            {
-                match content {
-                    Some(text) => {
-                        match crate::utils::chat_template::extract_reasoning_content(&text) {
-                            Some((reasoning, remaining)) => {
-                                let c = if remaining.is_empty() {
-                                    None
-                                } else {
-                                    Some(remaining)
-                                };
-                                (c, Some(reasoning))
+            let (content, reasoning_content) =
+                if crate::utils::env::stream_as_reasoning_content() && has_tools {
+                    match content {
+                        Some(text) => {
+                            match crate::utils::chat_template::extract_reasoning_content(&text) {
+                                Some((reasoning, remaining)) => {
+                                    let c = if remaining.is_empty() {
+                                        None
+                                    } else {
+                                        Some(remaining)
+                                    };
+                                    (c, Some(reasoning))
+                                }
+                                None => (Some(text), None),
                             }
-                            None => (Some(text), None),
                         }
+                        None => (None, None),
                     }
-                    None => (None, None),
-                }
-            } else {
-                (content, None)
-            };
+                } else {
+                    (content, None)
+                };
             choices.push(ChatChoice {
                 index: 0,
                 message: ChatResponseMessage {
@@ -1582,7 +1581,10 @@ mod tests {
         let deltas = collect_deltas(&rx);
         assert_eq!(deltas.len(), 4);
         for d in &deltas {
-            assert!(d.1.is_none(), "reasoning_content must be None when router is disabled");
+            assert!(
+                d.1.is_none(),
+                "reasoning_content must be None when router is disabled"
+            );
         }
         assert_eq!(deltas[0].0.as_deref(), Some("<think>"));
         assert_eq!(deltas[1].0.as_deref(), Some("reasoning text"));

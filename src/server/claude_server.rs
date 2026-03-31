@@ -1179,12 +1179,7 @@ fn convert_claude_message(message: &ClaudeMessage) -> Result<Vec<ChatMessage>, S
                 }
             }
 
-            flush_content_message(
-                &mut out,
-                role,
-                &mut content_items,
-                thinking_content.take(),
-            );
+            flush_content_message(&mut out, role, &mut content_items, thinking_content.take());
             flush_tool_call_message(&mut out, &mut tool_calls);
             Ok(out)
         }
@@ -1469,9 +1464,7 @@ impl ClaudeThinkingStreamEmitter {
         let delta = ClaudeContentBlockDeltaEvent {
             event_type: "content_block_delta",
             index,
-            delta: ClaudeContentDelta::ThinkingDelta {
-                thinking: cleaned,
-            },
+            delta: ClaudeContentDelta::ThinkingDelta { thinking: cleaned },
         };
         stream_ctx.send_json_event("content_block_delta", &delta)
     }
@@ -1631,10 +1624,8 @@ impl ClaudeThinkingStreamEmitter {
                             buffered.push_str(&remaining);
                             let cleaned = strip_nested_reasoning_markers(&buffered);
                             if cleaned.trim().is_empty() {
-                                let placeholder = format!(
-                                    " {}",
-                                    normalize_suffix_thinking_text(&cleaned)
-                                );
+                                let placeholder =
+                                    format!(" {}", normalize_suffix_thinking_text(&cleaned));
                                 self.emit_text(stream_ctx, logger, &placeholder)?;
                                 self.mode = ClaudeThinkingStreamMode::Text;
                             } else {
@@ -3223,8 +3214,7 @@ pub async fn messages(
                     })
                     .collect::<Vec<_>>();
                 if !parsed.text.is_empty() {
-                    let safe_text =
-                        tool_parser.sanitize_tool_markup_for_display(&parsed.text);
+                    let safe_text = tool_parser.sanitize_tool_markup_for_display(&parsed.text);
                     if !safe_text.is_empty() {
                         blocks.push(ClaudeContentBlockOut::Text { text: safe_text });
                     }
@@ -3877,7 +3867,9 @@ mod tests {
         let parsed = parse_claude_assistant_output(output);
         assert_eq!(parsed.thinking_blocks.len(), 1);
         assert!(
-            parsed.thinking_blocks[0].thinking.contains("Reasoning here"),
+            parsed.thinking_blocks[0]
+                .thinking
+                .contains("Reasoning here"),
             "thinking block should contain the reasoning text"
         );
         assert!(
