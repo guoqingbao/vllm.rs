@@ -17,8 +17,10 @@ use crate::utils::progress::ProgressLike;
 use crate::utils::FlashInferKvParams;
 use crate::{
     core::sequence::{DecodeSequence, Sequence, ToDecodeInput},
+    models::deepseek3::DeepSeekForCausalLM,
     models::glm4::GLM4ForCausalLM,
     models::glm4_moe::GLM4MoEForCausalLM,
+    models::glm4_moe_lite::GLM4MoeLiteForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::phi4::Phi4ForCausalLM,
@@ -81,6 +83,8 @@ pub enum Model {
     Phi4(Arc<Phi4ForCausalLM>),
     GLM4(Arc<GLM4ForCausalLM>),
     GLM4MoE(Arc<GLM4MoEForCausalLM>),
+    GLM4MoeLite(Arc<GLM4MoeLiteForCausalLM>),
+    DeepSeek(Arc<DeepSeekForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
@@ -127,6 +131,13 @@ impl ModelRunner {
     const MAMBA_CACHE_FIXED_CAPACITY: usize = 64;
     #[cfg(all(feature = "cuda", feature = "graph"))]
     const GRAPH_CAPTURE_MIN_BATCH: usize = 16;
+
+    fn is_mla_model(&self) -> bool {
+        matches!(
+            self.model_type,
+            ModelType::GLM4MoeLite | ModelType::DeepSeek
+        )
+    }
 
     fn prepare_mamba_slot_mapping(
         &self,
@@ -393,6 +404,8 @@ impl ModelRunner {
                 Phi4 => Phi4ForCausalLM,
                 GLM4 => GLM4ForCausalLM,
                 GLM4MoE => GLM4MoEForCausalLM,
+                GLM4MoeLite => GLM4MoeLiteForCausalLM,
+                DeepSeek => DeepSeekForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
@@ -412,6 +425,8 @@ impl ModelRunner {
                 Phi4 => EmbedInputs,
                 GLM4 => EmbedInputs,
                 GLM4MoE => EmbedInputs,
+                GLM4MoeLite => EmbedInputs,
+                DeepSeek => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
                 Qwen3VL => NoneArg,
@@ -619,6 +634,7 @@ impl ModelRunner {
                 config.hidden_size,
                 #[cfg(feature = "flashinfer")]
                 &flashinfer_kv_params,
+                matches!(model_type, ModelType::GLM4MoeLite | ModelType::DeepSeek),
             ),
             #[cfg(feature = "flashinfer")]
             flashinfer_kv_params,
@@ -786,7 +802,23 @@ impl ModelRunner {
         #[cfg(feature = "flashinfer")]
         if !is_prefill {
             if let Some(fm) = input_metadata.flashinfer_metadata.as_mut() {
-                if fm.decode_plan_info.is_none() {
+                if input_metadata.is_mla {
+                    if fm.mla_decode_plan_info.is_none() {
+                        if let Some(params) = self.flashinfer_kv_params {
+                            fm.mla_decode_plan_info = Some(attention_rs::mla::mla_decode_plan(
+                                &self.device,
+                                params.kv_dtype,
+                                &fm.indptr_host,
+                                fm.last_len_host.as_deref(),
+                                fm.kv_len_arr_host.as_deref(),
+                                input_ids.dim(0)?,
+                                params.num_qo_heads,
+                                params.page_size,
+                                fm.use_cuda_graph,
+                            )?);
+                        }
+                    }
+                } else if fm.decode_plan_info.is_none() {
                     if let Some(params) = self.flashinfer_kv_params {
                         fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
                             &self.device,
@@ -844,6 +876,8 @@ impl ModelRunner {
                 Phi4 => false,
                 GLM4 => false,
                 GLM4MoE => false,
+                GLM4MoeLite => false,
+                DeepSeek => false,
                 Mistral3VL => images,
                 Gemma3 => images,
                 Qwen3VL => images,
@@ -1129,6 +1163,28 @@ impl ModelRunner {
             #[cfg(not(feature = "flashinfer"))]
             let prefill_plan_info = None;
 
+            #[cfg(feature = "flashinfer")]
+            let mla_prefill_plan_info = if self.is_mla_model() {
+                if let Some(params) = self.flashinfer_kv_params {
+                    Some(attention_rs::mla::mla_prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host_u32,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        last_len_host.len(),
+                        params.num_qo_heads,
+                        params.head_dim,
+                        true,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(not(feature = "flashinfer"))]
+            let mla_prefill_plan_info = None;
+
             Some(FlashInferMetadata {
                 indptr,
                 indptr_host,
@@ -1136,6 +1192,7 @@ impl ModelRunner {
                 last_len,
                 last_len_host: Some(last_len_host),
                 kv_len_arr_host: Some(kv_len_arr_host),
+                cu_seqlens_q_host: Some(cu_seqlens_q_host_u32),
                 total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
                 batch_indices: Some(batch_indices),
                 positions: Some(positions),
@@ -1143,7 +1200,7 @@ impl ModelRunner {
                 decode_plan_info: None,
                 prefill_plan_info,
                 mla_decode_plan_info: None,
-                mla_prefill_plan_info: None,
+                mla_prefill_plan_info,
             })
         } else {
             None
@@ -1155,7 +1212,7 @@ impl ModelRunner {
 
         let input_metadata = InputMetadata {
             is_prefill: true,
-            is_mla: false,
+            is_mla: self.is_mla_model(),
             sequence_ids,
             mamba_slot_mapping,
             slot_mapping,
@@ -1302,7 +1359,7 @@ impl ModelRunner {
 
         let input_metadata = InputMetadata {
             is_prefill: false,
-            is_mla: false,
+            is_mla: self.is_mla_model(),
             sequence_ids,
             mamba_slot_mapping,
             slot_mapping,
@@ -1526,6 +1583,8 @@ impl ModelRunner {
             Model::Phi4(model) => model.get_vocab_size(),
             Model::GLM4(model) => model.get_vocab_size(),
             Model::GLM4MoE(model) => model.get_vocab_size(),
+            Model::GLM4MoeLite(model) => model.get_vocab_size(),
+            Model::DeepSeek(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),

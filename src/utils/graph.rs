@@ -364,6 +364,7 @@ pub struct GraphCapturer<M: CudaGraphModule> {
     pub device: Option<Device>,
     #[cfg(feature = "flashinfer")]
     pub flashinfer_kv_params: Option<FlashInferKvParams>,
+    pub is_mla: bool,
 }
 
 pub fn planned_graph_capture_batches(max_num_seqs: usize) -> Vec<usize> {
@@ -383,6 +384,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         block_size: usize,
         hidden_size: usize,
         #[cfg(feature = "flashinfer")] flashinfer_kv_params: &Option<FlashInferKvParams>,
+        is_mla: bool,
     ) -> Self {
         let graph_bs = planned_graph_capture_batches(max_num_seqs);
         println!("The following batches for capture: {:?}", graph_bs);
@@ -398,6 +400,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             device: None,
             #[cfg(feature = "flashinfer")]
             flashinfer_kv_params: flashinfer_kv_params.clone(),
+            is_mla,
         }
     }
 
@@ -458,7 +461,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     indptr_host.push(((i + 1) * max_num_blocks) as u32);
                 }
 
-                let (decode_plan_info, kv_len_arr_host) =
+                let (decode_plan_info, mla_decode_plan_info, kv_len_arr_host) =
                     if let Some(params) = self.flashinfer_kv_params {
                         let mut kv_len_arr_host_bs = Vec::with_capacity(bs);
                         for i in 0..bs {
@@ -471,8 +474,21 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             }
                         }
                         let kv_len_arr_host = kv_len_arr_host_bs.to_vec();
-                        (
-                            Some(attention_rs::flashinfer::decode_plan(
+                        if self.is_mla {
+                            let mla_plan = attention_rs::mla::mla_decode_plan(
+                                device,
+                                params.kv_dtype,
+                                &indptr_host,
+                                Some(&last_len_host[..bs]),
+                                Some(kv_len_arr_host_bs.as_slice()),
+                                bs,
+                                params.num_qo_heads,
+                                params.page_size,
+                                true,
+                            )?;
+                            (None, Some(mla_plan), Some(kv_len_arr_host))
+                        } else {
+                            let plan = attention_rs::flashinfer::decode_plan(
                                 device,
                                 params.kv_dtype,
                                 params.out_dtype,
@@ -485,11 +501,11 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                                 params.head_dim,
                                 params.page_size,
                                 true,
-                            )?),
-                            Some(kv_len_arr_host),
-                        )
+                            )?;
+                            (Some(plan), None, Some(kv_len_arr_host))
+                        }
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
 
                 Some(attention_rs::FlashInferMetadata {
@@ -505,7 +521,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     use_cuda_graph: true,
                     decode_plan_info,
                     prefill_plan_info: None,
-                    mla_decode_plan_info: None,
+                    mla_decode_plan_info,
                     mla_prefill_plan_info: None,
                 })
             };
@@ -514,7 +530,7 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
 
             let input_metadata = InputMetadata {
                 is_prefill: false,
-                is_mla: false,
+                is_mla: self.is_mla,
                 sequence_ids: None,
                 mamba_slot_mapping: Some(mamba_slot_mapping.narrow(0, 0, bs)?),
                 slot_mapping: slot_mapping.narrow(0, 0, bs)?,
@@ -672,21 +688,34 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             .device
                             .as_ref()
                             .ok_or_else(|| candle_core::Error::msg("graph device is missing"))?;
-                        // Refresh decode plan
-                        let _ = attention_rs::flashinfer::decode_plan(
-                            dev,
-                            params.kv_dtype,
-                            params.out_dtype,
-                            &indptr_host,
-                            fm.last_len_host.as_deref(),
-                            fm.kv_len_arr_host.as_deref(),
-                            batch,
-                            params.num_qo_heads,
-                            params.num_kv_heads,
-                            params.head_dim,
-                            params.page_size,
-                            fm.use_cuda_graph,
-                        )?;
+                        if self.is_mla {
+                            let _ = attention_rs::mla::mla_decode_plan(
+                                dev,
+                                params.kv_dtype,
+                                &indptr_host,
+                                fm.last_len_host.as_deref(),
+                                fm.kv_len_arr_host.as_deref(),
+                                batch,
+                                params.num_qo_heads,
+                                params.page_size,
+                                fm.use_cuda_graph,
+                            )?;
+                        } else {
+                            let _ = attention_rs::flashinfer::decode_plan(
+                                dev,
+                                params.kv_dtype,
+                                params.out_dtype,
+                                &indptr_host,
+                                fm.last_len_host.as_deref(),
+                                fm.kv_len_arr_host.as_deref(),
+                                batch,
+                                params.num_qo_heads,
+                                params.num_kv_heads,
+                                params.head_dim,
+                                params.page_size,
+                                fm.use_cuda_graph,
+                            )?;
+                        }
                     }
                 }
 

@@ -1,6 +1,8 @@
+pub mod deepseek3;
 pub mod gemma3;
 pub mod glm4;
 pub mod glm4_moe;
+pub mod glm4_moe_lite;
 pub mod layers;
 pub mod llama;
 pub mod mistral3_vl;
