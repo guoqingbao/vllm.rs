@@ -113,6 +113,10 @@ pub struct KVCacheAllocator {
     model_dtype_size: usize,
     hybrid_mamba_slot_bytes: Option<usize>,
     hybrid_num_gdn_layers: usize,
+    // MLA-specific: compressed KV cache uses (1, kv_lora_rank) for ckv + (1, qk_rope_head_dim) for kpe
+    is_mla: bool,
+    mla_kv_lora_rank: usize,
+    mla_qk_rope_head_dim: usize,
 }
 
 impl KVCacheAllocator {
@@ -220,6 +224,27 @@ impl KVCacheAllocator {
             (None, 0)
         };
 
+        let (is_mla, mla_kv_lora_rank, mla_qk_rope_head_dim) = {
+            let extra: Option<serde_json::Value> = config
+                .extra_config_json
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok());
+            if let Some(ref extra) = extra {
+                let kv_lora_rank = extra.get("kv_lora_rank").and_then(|v| v.as_u64());
+                if let Some(rank) = kv_lora_rank {
+                    let rope_dim = extra
+                        .get("qk_rope_head_dim")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(64) as usize;
+                    (true, rank as usize, rope_dim)
+                } else {
+                    (false, 0, 0)
+                }
+            } else {
+                (false, 0, 0)
+            }
+        };
+
         Self {
             num_hidden_layers: config.num_hidden_layers,
             num_kv_layers,
@@ -245,6 +270,9 @@ impl KVCacheAllocator {
             model_dtype_size,
             hybrid_mamba_slot_bytes,
             hybrid_num_gdn_layers,
+            is_mla,
+            mla_kv_lora_rank,
+            mla_qk_rope_head_dim,
         }
     }
 
@@ -346,12 +374,20 @@ impl KVCacheAllocator {
     }
     /// Calculate per-block memory size in bytes
     pub fn per_block_bytes(&self) -> usize {
-        self.block_size
-            * self.kv_heads_per_shard()
-            * self.head_dim
-            * self.dtype_size
-            * 2 // K and V
-            * self.num_kv_layers
+        if self.is_mla {
+            // MLA: ckv_cache (1, kv_lora_rank) + kpe_cache (1, qk_rope_head_dim) per token
+            self.block_size
+                * (self.mla_kv_lora_rank + self.mla_qk_rope_head_dim)
+                * self.dtype_size
+                * self.num_kv_layers
+        } else {
+            self.block_size
+                * self.kv_heads_per_shard()
+                * self.head_dim
+                * self.dtype_size
+                * 2 // K and V
+                * self.num_kv_layers
+        }
     }
 
     /// Calculate required memory for given parameters
@@ -668,7 +704,52 @@ impl KVCacheAllocator {
             cache_dtype
         );
 
-        if cfg!(feature = "flashinfer") || cfg!(feature = "flashattn") {
+        if self.is_mla {
+            // MLA cache: (ckv_cache, kpe_cache) per layer
+            // ckv_cache: [num_blocks, block_size, 1, kv_lora_rank]
+            // kpe_cache: [num_blocks, block_size, 1, qk_rope_head_dim]
+            let mut gpu_cache = Vec::new();
+            let mut cpu_cache = Vec::new();
+            for _ in 0..self.num_kv_layers {
+                let ckv_blocks = Tensor::empty(
+                    (num_gpu_blocks, self.block_size, 1, self.mla_kv_lora_rank),
+                    cache_dtype,
+                    device,
+                    Some(sync_alloc),
+                )?;
+                let kpe_blocks = Tensor::empty(
+                    (
+                        num_gpu_blocks,
+                        self.block_size,
+                        1,
+                        self.mla_qk_rope_head_dim,
+                    ),
+                    cache_dtype,
+                    device,
+                    Some(sync_alloc),
+                )?;
+                gpu_cache.push((ckv_blocks, kpe_blocks));
+            }
+            for _ in 0..self.num_kv_layers {
+                let ckv_blocks = Tensor::zeros(
+                    (num_cpu_blocks, self.block_size, 1, self.mla_kv_lora_rank),
+                    cache_dtype,
+                    &Device::Cpu,
+                )?;
+                let kpe_blocks = Tensor::zeros(
+                    (
+                        num_cpu_blocks,
+                        self.block_size,
+                        1,
+                        self.mla_qk_rope_head_dim,
+                    ),
+                    cache_dtype,
+                    &Device::Cpu,
+                )?;
+                cpu_cache.push((ckv_blocks, kpe_blocks));
+            }
+            Ok((gpu_cache, cpu_cache))
+        } else if cfg!(feature = "flashinfer") || cfg!(feature = "flashattn") {
             assert!(
                 !self.fp8_kvcache,
                 "fp8 kvcache is not compatible with flashinfer or flashattn feature!"

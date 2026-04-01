@@ -1,0 +1,368 @@
+use crate::models::layers::distributed::{shard, Comm, ReplicatedLinear, TensorParallelRowLinear};
+use crate::models::layers::others::{rms_norm, NormX};
+use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
+use crate::models::layers::VarBuilderX;
+use crate::utils::config::Config;
+use attention_rs::InputMetadata;
+use candle_core::{DType, Result, Tensor, D};
+use std::rc::Rc;
+use std::sync::Arc;
+
+pub struct MlaConfig {
+    pub hidden_size: usize,
+    pub num_attention_heads: usize,
+    pub q_lora_rank: Option<usize>,
+    pub kv_lora_rank: usize,
+    pub qk_nope_head_dim: usize,
+    pub qk_rope_head_dim: usize,
+    pub v_head_dim: usize,
+    pub rms_norm_eps: f64,
+    pub attention_bias: bool,
+}
+
+impl MlaConfig {
+    pub fn from_config(config: &Config) -> Self {
+        let extra: serde_json::Value = config
+            .extra_config_json
+            .as_ref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        Self {
+            hidden_size: config.hidden_size,
+            num_attention_heads: config.num_attention_heads,
+            q_lora_rank: extra
+                .get("q_lora_rank")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize),
+            kv_lora_rank: extra
+                .get("kv_lora_rank")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(512) as usize,
+            qk_nope_head_dim: extra
+                .get("qk_nope_head_dim")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(128) as usize,
+            qk_rope_head_dim: extra
+                .get("qk_rope_head_dim")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(64) as usize,
+            v_head_dim: extra
+                .get("v_head_dim")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(128) as usize,
+            rms_norm_eps: config.rms_norm_eps,
+            attention_bias: config.attention_bias.unwrap_or(false),
+        }
+    }
+}
+
+pub struct MlaAttention {
+    q_a_proj: Option<ReplicatedLinear>,
+    q_a_layernorm: Option<NormX>,
+    q_b_proj: Option<ReplicatedLinear>,
+    q_proj: Option<ReplicatedLinear>,
+    kv_a_proj_with_mqa: ReplicatedLinear,
+    kv_a_layernorm: NormX,
+    kv_b_proj: ReplicatedLinear,
+    o_proj: TensorParallelRowLinear,
+    w_uk: Tensor,
+    w_uv_t: Tensor,
+    num_heads: usize,
+    q_head_dim: usize,
+    qk_nope_head_dim: usize,
+    qk_rope_head_dim: usize,
+    kv_lora_rank: usize,
+    v_head_dim: usize,
+    sm_scale: f32,
+    rope_scale: f32,
+    rope_theta: f32,
+    dtype: DType,
+}
+
+impl MlaAttention {
+    pub fn new(
+        vb: VarBuilderX,
+        comm: Rc<Comm>,
+        mla_cfg: &MlaConfig,
+        config: &Config,
+        dtype: DType,
+    ) -> Result<Self> {
+        let hidden_size = mla_cfg.hidden_size;
+        let num_heads = mla_cfg.num_attention_heads;
+        let kv_lora_rank = mla_cfg.kv_lora_rank;
+        let qk_nope_head_dim = mla_cfg.qk_nope_head_dim;
+        let qk_rope_head_dim = mla_cfg.qk_rope_head_dim;
+        let v_head_dim = mla_cfg.v_head_dim;
+        let q_head_dim = qk_nope_head_dim + qk_rope_head_dim;
+
+        let (q_a_proj, q_a_layernorm, q_b_proj, q_proj) =
+            if let Some(q_lora_rank) = mla_cfg.q_lora_rank {
+                let q_a = ReplicatedLinear::load_b(
+                    hidden_size,
+                    q_lora_rank,
+                    mla_cfg.attention_bias,
+                    vb.pp("q_a_proj"),
+                    &config.quantization_config,
+                    &config.quant,
+                    dtype,
+                )?;
+                let q_a_ln = rms_norm(
+                    q_lora_rank,
+                    mla_cfg.rms_norm_eps,
+                    vb.pp("q_a_layernorm"),
+                    dtype,
+                    false,
+                )?;
+                let q_b = ReplicatedLinear::load_b(
+                    q_lora_rank,
+                    num_heads * q_head_dim,
+                    false,
+                    vb.pp("q_b_proj"),
+                    &config.quantization_config,
+                    &config.quant,
+                    dtype,
+                )?;
+                (Some(q_a), Some(q_a_ln), Some(q_b), None)
+            } else {
+                let q = ReplicatedLinear::load_b(
+                    hidden_size,
+                    num_heads * q_head_dim,
+                    mla_cfg.attention_bias,
+                    vb.pp("q_proj"),
+                    &config.quantization_config,
+                    &config.quant,
+                    dtype,
+                )?;
+                (None, None, None, Some(q))
+            };
+
+        let kv_a_proj_with_mqa = ReplicatedLinear::load_b(
+            hidden_size,
+            kv_lora_rank + qk_rope_head_dim,
+            mla_cfg.attention_bias,
+            vb.pp("kv_a_proj_with_mqa"),
+            &config.quantization_config,
+            &config.quant,
+            dtype,
+        )?;
+
+        let kv_a_layernorm = rms_norm(
+            kv_lora_rank,
+            mla_cfg.rms_norm_eps,
+            vb.pp("kv_a_layernorm"),
+            dtype,
+            false,
+        )?;
+
+        let kv_b_proj = ReplicatedLinear::load_b(
+            kv_lora_rank,
+            num_heads * (qk_nope_head_dim + v_head_dim),
+            false,
+            vb.pp("kv_b_proj"),
+            &config.quantization_config,
+            &config.quant,
+            dtype,
+        )?;
+
+        let o_proj = TensorParallelRowLinear::load_with_hints(
+            num_heads * v_head_dim,
+            hidden_size,
+            vb.pp("o_proj"),
+            comm,
+            &config.quantization_config,
+            &config.quant,
+            dtype,
+        )?;
+
+        // Pre-compute absorbed MLA weights from kv_b_proj
+        let kv_b_weight = vb.pp("kv_b_proj").get_with_hints_dtype(
+            (num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank),
+            "weight",
+            shard(0, 0, 1),
+            dtype,
+        )?;
+        let w = kv_b_weight.reshape((num_heads, qk_nope_head_dim + v_head_dim, kv_lora_rank))?;
+        let w_uk = w.narrow(1, 0, qk_nope_head_dim)?.contiguous()?;
+        let w_uv = w.narrow(1, qk_nope_head_dim, v_head_dim)?.contiguous()?;
+        let w_uv_t = w_uv.transpose(1, 2)?.contiguous()?;
+
+        let sm_scale = 1.0 / (q_head_dim as f32).sqrt();
+
+        Ok(Self {
+            q_a_proj,
+            q_a_layernorm,
+            q_b_proj,
+            q_proj,
+            kv_a_proj_with_mqa,
+            kv_a_layernorm,
+            kv_b_proj,
+            o_proj,
+            w_uk,
+            w_uv_t,
+            num_heads,
+            q_head_dim,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            kv_lora_rank,
+            v_head_dim,
+            sm_scale,
+            rope_scale: 1.0,
+            rope_theta: 10000.0,
+            dtype,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward(
+        &self,
+        xs: &Tensor,
+        rotary_emb: &Option<Arc<dyn ApplyRotaryEmbedding>>,
+        _attention_mask: Option<&Vec<Tensor>>,
+        positions: &Tensor,
+        _cache: Option<(&Tensor, &Tensor)>,
+        _input_metadata: &InputMetadata,
+    ) -> Result<Tensor> {
+        let (seq_len, _) = xs.dims2()?;
+
+        // Q projection
+        let q = if let (Some(q_a), Some(q_a_ln), Some(q_b)) =
+            (&self.q_a_proj, &self.q_a_layernorm, &self.q_b_proj)
+        {
+            let q_a_out = q_a.forward(xs)?;
+            let q_a_normed = q_a_ln.forward(&q_a_out)?;
+            q_b.forward(&q_a_normed)?
+        } else {
+            self.q_proj.as_ref().unwrap().forward(xs)?
+        };
+
+        let q = q.reshape((seq_len, self.num_heads, self.q_head_dim))?;
+        let q_nope = q.narrow(D::Minus1, 0, self.qk_nope_head_dim)?;
+        let q_pe = q.narrow(D::Minus1, self.qk_nope_head_dim, self.qk_rope_head_dim)?;
+
+        // KV projection
+        let kv_a = self.kv_a_proj_with_mqa.forward(xs)?;
+        let ckv = kv_a.narrow(D::Minus1, 0, self.kv_lora_rank)?;
+        let k_pe_raw = kv_a.narrow(D::Minus1, self.kv_lora_rank, self.qk_rope_head_dim)?;
+
+        let ckv = self.kv_a_layernorm.forward(&ckv)?;
+
+        // RoPE on q_pe and k_pe
+        let k_pe = k_pe_raw.reshape((seq_len, 1, self.qk_rope_head_dim))?;
+        let q_pe_for_rope = q_pe.contiguous()?;
+        let (q_pe, k_pe) = if let Some(rotary_emb) = &rotary_emb {
+            match rotary_emb.apply_rotary_emb_qkv(&q_pe_for_rope, &k_pe, positions)? {
+                Some((q_new, k_new)) => (q_new, k_new),
+                None => (q_pe_for_rope, k_pe),
+            }
+        } else {
+            (q_pe_for_rope, k_pe)
+        };
+        let k_pe = k_pe.squeeze(1)?;
+
+        let q_pe = q_pe.to_dtype(self.dtype)?;
+        let q_nope = q_nope.contiguous()?.to_dtype(self.dtype)?;
+        let ckv = ckv.to_dtype(self.dtype)?;
+        let k_pe = k_pe.to_dtype(self.dtype)?;
+
+        // MLA path: use fused FlashInfer MLA kernels
+        #[cfg(feature = "flashinfer")]
+        if let Some(fm) = input_metadata.flashinfer_metadata.as_ref() {
+            if let Some((ckv_cache, kpe_cache)) = cache {
+                // Write ckv and k_pe into paged cache
+                attention_rs::mla::concat_and_cache_mla(
+                    &ckv,
+                    &k_pe,
+                    ckv_cache,
+                    kpe_cache,
+                    &input_metadata.slot_mapping,
+                )?;
+
+                // Absorb w_uk into q_nope: q_nope_absorbed = q_nope @ w_uk
+                // q_nope: [seq_len, num_heads, qk_nope_head_dim]
+                // w_uk: [num_heads, qk_nope_head_dim, kv_lora_rank]
+                let q_nope_absorbed = q_nope.matmul(&self.w_uk)?;
+                // q_nope_absorbed: [seq_len, num_heads, kv_lora_rank]
+
+                let page_size = ckv_cache.dim(1)?;
+
+                let attn_out = if _input_metadata.is_prefill {
+                    let plan_info = fm.mla_prefill_plan_info.as_ref().ok_or_else(|| {
+                        candle_core::Error::msg("MLA prefill requires mla_prefill_plan_info")
+                    })?;
+                    attention_rs::mla::mla_prefill_run(
+                        &q_nope_absorbed,
+                        &q_pe,
+                        ckv_cache,
+                        kpe_cache,
+                        &fm.indices,
+                        self.num_heads,
+                        page_size,
+                        self.sm_scale,
+                        plan_info,
+                        true, // causal
+                    )?
+                } else {
+                    let plan_info = fm.mla_decode_plan_info.as_ref().ok_or_else(|| {
+                        candle_core::Error::msg("MLA decode requires mla_decode_plan_info")
+                    })?;
+                    attention_rs::mla::mla_decode_run(
+                        &q_nope_absorbed,
+                        &q_pe,
+                        ckv_cache,
+                        kpe_cache,
+                        &fm.indptr,
+                        &fm.indices,
+                        &fm.last_len,
+                        seq_len,
+                        self.num_heads,
+                        page_size,
+                        self.sm_scale,
+                        self.rope_scale,
+                        self.rope_theta,
+                        plan_info,
+                        fm.use_cuda_graph,
+                    )?
+                };
+
+                // attn_out: [seq_len, num_heads, kv_lora_rank]
+                // Project via w_uv_t: [num_heads, kv_lora_rank, v_head_dim]
+                let y = attn_out.matmul(&self.w_uv_t)?;
+                // y: [seq_len, num_heads, v_head_dim]
+                let y = y.reshape((seq_len, self.num_heads * self.v_head_dim))?;
+                let y = y.to_dtype(xs.dtype())?;
+                return self.o_proj.forward(&y);
+            }
+        }
+
+        // Fallback: materialize full K/V via kv_b_proj for non-FlashInfer paths
+        let kv_b_out = self.kv_b_proj.forward(&ckv)?;
+        let kv_b_out = kv_b_out.reshape((
+            seq_len,
+            self.num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        ))?;
+        let k_nope = kv_b_out.narrow(D::Minus1, 0, self.qk_nope_head_dim)?;
+        let v = kv_b_out.narrow(D::Minus1, self.qk_nope_head_dim, self.v_head_dim)?;
+
+        // Concatenate q = [q_nope, q_pe], k = [k_nope, k_pe_broadcast]
+        let k_pe_broadcast =
+            k_pe.unsqueeze(1)?
+                .broadcast_as((seq_len, self.num_heads, self.qk_rope_head_dim))?;
+        let q_full = Tensor::cat(&[&q_nope, &q_pe], D::Minus1)?;
+        let k_full = Tensor::cat(&[&k_nope, &k_pe_broadcast], D::Minus1)?;
+
+        // Simple scaled dot-product attention
+        let q_t = q_full.transpose(0, 1)?;
+        let k_t = k_full.transpose(0, 1)?;
+        let v_t = v.transpose(0, 1)?;
+
+        let att = (q_t.matmul(&k_t.t()?)? * f64::from(self.sm_scale))?;
+        let att =
+            candle_nn::ops::softmax_last_dim(&att.to_dtype(DType::F32)?)?.to_dtype(self.dtype)?;
+        let y = att.matmul(&v_t)?.transpose(0, 1)?;
+        let y = y.reshape((seq_len, self.num_heads * self.v_head_dim))?;
+        let y = y.to_dtype(xs.dtype())?;
+        self.o_proj.forward(&y)
+    }
+}

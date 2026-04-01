@@ -382,6 +382,9 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             first_k_dense_replace: leading_dense_block_count,
             n_shared_experts: expert_shared_count,
             routed_scaling_factor: expert_weights_scale,
+            n_group: None,
+            topk_group: None,
+            scoring_func: None,
         })
     } else {
         None
@@ -1026,6 +1029,9 @@ pub fn init_config_tokenizer(
                 "Qwen2MoeForCausalLM"
                     | "Qwen3MoeForCausalLM"
                     | "Glm4MoeForCausalLM"
+                    | "Glm4MoeLiteForCausalLM"
+                    | "DeepseekV3ForCausalLM"
+                    | "DeepseekForCausalLM"
                     | "Qwen3_5MoeForCausalLM"
                     | "Qwen3_5MoeForConditionalGeneration"
                     | "Qwen3NextForCausalLM"
@@ -1431,6 +1437,9 @@ pub fn get_arch_rope(
         ("Qwen3VLForConditionalGeneration", false),
         ("Qwen3VLMoeForConditionalGeneration", false),
         ("Glm4MoeForCausalLM", false),
+        ("Glm4MoeLiteForCausalLM", false),
+        ("DeepseekV3ForCausalLM", false),
+        ("DeepseekForCausalLM", false),
         ("Phi3ForCausalLM", false),
         ("Phi4ForCausalLM", false),
         ("MistralForCausalLM", false),
@@ -1536,6 +1545,13 @@ pub fn get_arch_rope(
             ModelType::GLM4MoE,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
+        "Glm4MoeLiteForCausalLM" | "glm4moelite" => (
+            ModelType::GLM4MoeLite,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "DeepseekV3ForCausalLM" | "DeepseekForCausalLM" | "deepseek3" | "deepseek" => {
+            (ModelType::DeepSeek, "<|User|>{}<|Assistant|>".to_string())
+        }
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
             (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
         }
