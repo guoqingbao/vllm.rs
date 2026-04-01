@@ -996,8 +996,9 @@ pub fn init_config_tokenizer(
             assert!(
                 qcfg.quant_method == "gptq"
                     || qcfg.quant_method == "awq"
-                    || qcfg.quant_method == "fp8",
-                "Invalid quantization format! Only `gptq`, `awq` and `fp8` supported"
+                    || qcfg.quant_method == "fp8"
+                    || qcfg.quant_method == "mxfp4",
+                "Invalid quantization format! Only `gptq`, `awq`, `fp8` and `mxfp4` supported"
             );
             if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
                 assert!(
