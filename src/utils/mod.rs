@@ -26,7 +26,7 @@ use crate::utils::config::ModelType;
 use crate::utils::config::QuantConfig;
 use crate::utils::config::RopeScalingValue;
 use crate::utils::downloader::ModelPaths;
-use crate::utils::gguf_helper::{get_gguf_info, GGUFInfo};
+use crate::utils::gguf_helper::{load_gguf_info_from_files, GGUFInfo};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_core::{DType, Device, Result};
 use config::{Config, EngineConfig, EosTokenId, GenerationConfig, TokenizerConfig};
@@ -1118,20 +1118,12 @@ pub fn init_config_tokenizer(
             unk: _,
             context_length,
             chat_template,
-        } = {
-            let file = std::fs::File::open(&model_pathes.get_weight_filenames()[0])
-                .map_err(candle_core::Error::wrap)?;
-            let mut readers = vec![file];
-            let mut readers = readers.iter_mut().collect::<Vec<_>>();
-            let content = crate::utils::gguf_helper::Content::from_readers(&mut readers)
-                .map_err(|e| {
-                    candle_core::Error::msg(format!(
-                        "Unable to read {:?} as a GGUF file: {e}\n\t***Tips: use `--w` to specify safetensor model directory!***",
-                        model_pathes.get_weight_filenames()[0]
-                    ))
-                })?;
-            get_gguf_info(&content).map_err(candle_core::Error::wrap)?
-        };
+        } = load_gguf_info_from_files(&model_pathes.get_weight_filenames()).map_err(|e| {
+            candle_core::Error::msg(format!(
+                "Unable to read {:?} as a GGUF file: {e}\n\t***Tips: use `--w` to specify safetensor model directory!***",
+                model_pathes.get_weight_filenames()[0]
+            ))
+        })?;
 
         let config = {
             let mut file = std::fs::File::open(&model_pathes.get_weight_filenames()[0]).unwrap();
