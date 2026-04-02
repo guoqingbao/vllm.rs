@@ -63,6 +63,12 @@ pub fn compute_tokens_per_image(
                 })
                 .collect()
         }
+        ModelType::LLaMa4 => {
+            if let Some(tokens) = cfg.mm_tokens_per_image {
+                return vec![tokens; image_sizes.len()];
+            }
+            vec![0; image_sizes.len()]
+        }
         _ => {
             let denom = cfg.patch_size * cfg.spatial_merge_size;
             if denom == 0 {
@@ -575,6 +581,38 @@ pub fn get_image_config(
             );
             img_cfg.model_type = ModelType::Qwen3VL;
             img_cfg.image_token_id = Some(cfg.image_token_id);
+            img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
+            img_cfg.image_std = Some([0.5, 0.5, 0.5]);
+            Some(img_cfg)
+        }
+        ModelType::LLaMa4 => {
+            use crate::models::llama4::config::Llama4Config;
+            let Some(extra_config_json) = config.extra_config_json.as_ref() else {
+                return Ok(None);
+            };
+            let cfg: Llama4Config =
+                serde_json::from_str(extra_config_json).map_err(candle_core::Error::wrap)?;
+            let patch_size = cfg.vision_config.patch_size;
+            let image_size = cfg.vision_config.image_size;
+            let pixel_shuffle_ratio = cfg.vision_config.pixel_shuffle_ratio;
+            let num_patches = (image_size / patch_size).pow(2);
+            let downsampled = ((num_patches as f32).sqrt() * pixel_shuffle_ratio).powi(2) as usize;
+
+            let mut img_cfg = ImageProcessConfig::default(
+                None,
+                "<|image|>".to_string(),
+                None,
+                "".to_string(),
+                1,
+                None,
+                patch_size,
+                image_size,
+                true,
+            );
+            img_cfg.model_type = ModelType::LLaMa4;
+            img_cfg.image_token_id = Some(cfg.image_token_index as u32);
+            img_cfg.mm_tokens_per_image = Some(downsampled);
+            img_cfg.scale_factor = Some(1.0 / 255.0);
             img_cfg.image_mean = Some([0.5, 0.5, 0.5]);
             img_cfg.image_std = Some([0.5, 0.5, 0.5]);
             Some(img_cfg)

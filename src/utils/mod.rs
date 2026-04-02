@@ -1543,6 +1543,10 @@ pub fn get_arch_rope(
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
         ),
+        "Llama4ForConditionalGeneration" | "llama4" => (
+            ModelType::LLaMa4,
+            "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+        ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
     };
 

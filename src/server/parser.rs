@@ -61,8 +61,8 @@ impl ToolConfig {
         let mut end_ids = HashSet::new();
 
         match model_type {
-            ModelType::LLaMa => {
-                // Llama 3/3.1
+            ModelType::LLaMa | ModelType::LLaMa4 => {
+                // Llama 3/3.1/4
                 start_ids.insert(128010); // <|python_tag|>
                 end_ids.insert(128008); // <|eom_id|>
                 ToolConfig {
@@ -1246,6 +1246,7 @@ impl StreamToolParser {
                 }
             }
             ModelType::Gemma | ModelType::Gemma3 => "json",
+            ModelType::LLaMa4 => "llama",
             ModelType::Phi | ModelType::Phi4 => "qwen",
             ModelType::GLM4 | ModelType::GLM4MoE => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
