@@ -317,7 +317,27 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mod_cfg = if matches!(arch.as_str(), "qwen3moe" | "qwen2moe" | "qwen35moe") {
+    let mod_cfg = if arch == "gpt-oss" {
+        let expert_count = md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize;
+        let expert_used_count =
+            md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()? as usize;
+        let expert_ff_length = md_get(format!("{arch}.expert_feed_forward_length").as_str())
+            .and_then(|v| v.to_u32())
+            .map(|v| v as usize)
+            .unwrap_or(feed_forward_length);
+        Some(MoEConfig {
+            moe_intermediate_size: expert_ff_length,
+            shared_expert_intermediate_size: None,
+            num_experts: Some(expert_count),
+            mlp_only_layers: Some(Vec::new()),
+            decoder_sparse_step: Some(1),
+            norm_topk_prob: false,
+            num_experts_per_tok: expert_used_count,
+            first_k_dense_replace: None,
+            n_shared_experts: None,
+            routed_scaling_factor: None,
+        })
+    } else if matches!(arch.as_str(), "qwen3moe" | "qwen2moe" | "qwen35moe") {
         let expert_feed_forward_length =
             md_get(format!("{arch}.expert_feed_forward_length").as_str())?.to_u32()? as usize;
         let expert_weights_norm = md_get(format!("{arch}.expert_weights_norm").as_str());
@@ -387,7 +407,31 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let extra_config_json = if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
+    let extra_config_json = if arch == "gpt-oss" {
+        let sw = md_get(format!("{arch}.attention.sliding_window").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let mut layer_types_vec = Vec::new();
+        for i in 0..block_count {
+            if i % 2 == 0 {
+                layer_types_vec.push("sliding_attention");
+            } else {
+                layer_types_vec.push("full_attention");
+            }
+        }
+        Some(
+            serde_json::json!({
+                "architectures": ["GptOssForCausalLM"],
+                "layer_types": layer_types_vec,
+                "sliding_window": sw,
+                "swiglu_limit": 7.0,
+                "alpha": 1.702,
+                "attention_bias": true,
+            })
+            .to_string(),
+        )
+    } else if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
         let conv_kernel_size =
             md_get(format!("{arch}.ssm.conv_kernel").as_str())?.to_u32()? as usize;
         let num_k_heads = md_get(format!("{arch}.ssm.group_count").as_str())?.to_u32()? as usize;
@@ -417,6 +461,11 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
+    let gguf_sliding_window = md_get(format!("{arch}.attention.sliding_window").as_str())
+        .and_then(|v| v.to_u32())
+        .ok()
+        .map(|v| v as usize);
+
     let cfg = Config {
         architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
@@ -438,8 +487,12 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
         eos_token_id: Some(eos_token_id),
-        use_sliding_window: None,
-        sliding_window: None,
+        use_sliding_window: if gguf_sliding_window.is_some() {
+            Some(true)
+        } else {
+            None
+        },
+        sliding_window: gguf_sliding_window,
         max_window_layers: None,
         partial_rotary_factor,
         hidden_act: candle_nn::Activation::Silu,
@@ -1460,6 +1513,9 @@ pub fn get_arch_rope(
         ("qwen3vl", false),
         ("qwen3vlmoe", false),
         ("gemma3", false),
+        ("GptOssForCausalLM", false),
+        ("gpt-oss", false),
+        ("gpt_oss", false),
     ]
     .iter()
     .cloned()
@@ -1542,6 +1598,10 @@ pub fn get_arch_rope(
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" | "gemma3" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+        ),
+        "GptOssForCausalLM" | "gpt-oss" | "gpt_oss" => (
+            ModelType::GptOss,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
     };

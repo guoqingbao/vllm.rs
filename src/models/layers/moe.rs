@@ -18,6 +18,29 @@ use either::Either;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[derive(Clone, Debug)]
+pub enum MoeActFn {
+    Standard(candle_nn::Activation),
+    GptOssSwiglu { alpha: f32, limit: f32 },
+}
+
+impl MoeActFn {
+    pub fn apply_gate_up(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Standard(act) => Ok((up * gate.apply(act)?)?),
+            Self::GptOssSwiglu { alpha, limit } => {
+                attention_rs::swiglu::gptoss_swiglu(gate, up, *alpha, *limit)
+            }
+        }
+    }
+}
+
+impl Default for MoeActFn {
+    fn default() -> Self {
+        Self::Standard(candle_nn::Activation::Silu)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum PackedGateUpLayout {
     // [experts, hidden, 2*intermediate]
@@ -95,7 +118,7 @@ pub struct FusedMoe {
     gate_up_w: Tensor,
     down_w: Tensor,
     w_size_n: usize,
-    act: candle_nn::Activation,
+    act: MoeActFn,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
@@ -290,7 +313,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             gate_up_w,
             down_w,
             w_size_n,
-            act: candle_nn::Activation::Silu,
+            act: MoeActFn::default(),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -298,6 +321,10 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             world_size,
             dtype,
         })
+    }
+
+    pub fn set_act(&mut self, act: MoeActFn) {
+        self.act = act;
     }
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
@@ -346,10 +373,8 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         let up = gate_up
             .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
             .contiguous()?;
-        //(M * top_k, N // 2)
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = self.act.apply_gate_up(&gate, &up)?;
 
-        //view(M, top_k, K) -> sum -> (M, K)
         let mut ys = moe::moe_gemm(
             &down_inputs,
             &self.down_w,
@@ -374,7 +399,7 @@ pub struct FusedMoeGGUF {
     gate_experts: Arc<QTensor>,
     up_experts: Arc<QTensor>,
     down_experts: Arc<QTensor>,
-    act: candle_nn::Activation,
+    act: MoeActFn,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
@@ -473,7 +498,7 @@ impl FusedMoeGGUF {
             gate_experts,
             up_experts,
             down_experts,
-            act: cfg.hidden_act,
+            act: MoeActFn::Standard(cfg.hidden_act),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -525,7 +550,7 @@ impl FusedMoeGGUF {
             gate_experts,
             up_experts,
             down_experts,
-            act: cfg.hidden_act,
+            act: MoeActFn::Standard(cfg.hidden_act),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -533,6 +558,10 @@ impl FusedMoeGGUF {
             world_size: 1,
             dtype,
         })
+    }
+
+    pub fn set_act(&mut self, act: MoeActFn) {
+        self.act = act;
     }
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
@@ -590,7 +619,7 @@ impl FusedMoeGGUF {
                 self.dtype,
             )?;
 
-            let down_inputs = (up * gate.apply(&self.act)?)?;
+            let down_inputs = self.act.apply_gate_up(&gate, &up)?;
             moe::moe_gemm_gguf(
                 &down_inputs,
                 &self.down_experts,
@@ -618,7 +647,7 @@ pub struct FusedMoeISQ {
     gate_experts: QTensor,
     up_experts: QTensor,
     down_experts: QTensor,
-    act: candle_nn::Activation,
+    act: MoeActFn,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
@@ -844,7 +873,7 @@ impl FusedMoeISQ {
             gate_experts,
             up_experts,
             down_experts,
-            act: candle_nn::Activation::Silu,
+            act: MoeActFn::default(),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -852,6 +881,10 @@ impl FusedMoeISQ {
             world_size,
             dtype,
         })
+    }
+
+    pub fn set_act(&mut self, act: MoeActFn) {
+        self.act = act;
     }
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
@@ -907,7 +940,7 @@ impl FusedMoeISQ {
                 is_prefill,
                 self.dtype,
             )?;
-            let down_inputs = (up * gate.apply(&self.act)?)?;
+            let down_inputs = self.act.apply_gate_up(&gate, &up)?;
             moe::moe_gemm_gguf(
                 &down_inputs,
                 &self.down_experts,
@@ -937,7 +970,7 @@ pub struct FusedMoeFp8 {
     down_experts: Tensor,
     down_experts_scale: Tensor,
     w_size_n: usize,
-    act: candle_nn::Activation,
+    act: MoeActFn,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
@@ -1176,7 +1209,7 @@ impl FusedMoeFp8 {
             down_experts,
             down_experts_scale,
             w_size_n,
-            act: candle_nn::Activation::Silu,
+            act: MoeActFn::default(),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -1185,6 +1218,10 @@ impl FusedMoeFp8 {
             dtype,
             block_size: vec![by, bx],
         })
+    }
+
+    pub fn set_act(&mut self, act: MoeActFn) {
+        self.act = act;
     }
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
@@ -1241,7 +1278,7 @@ impl FusedMoeFp8 {
         let up = gate_up
             .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
             .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = self.act.apply_gate_up(&gate, &up)?;
 
         let mut ys = moe_gemm_fp8(
             &down_inputs,
@@ -1272,7 +1309,7 @@ pub struct FusedMoeMxfp4 {
     down_blocks: Tensor,
     down_scales: Tensor,
     w_size_n: usize,
-    act: candle_nn::Activation,
+    act: MoeActFn,
     norm_topk_prob: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
@@ -1407,7 +1444,7 @@ impl FusedMoeMxfp4 {
             down_blocks,
             down_scales,
             w_size_n,
-            act: candle_nn::Activation::Silu,
+            act: MoeActFn::default(),
             norm_topk_prob: moe_cfg.norm_topk_prob,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
@@ -1415,6 +1452,10 @@ impl FusedMoeMxfp4 {
             world_size: comm.world_size(),
             dtype,
         })
+    }
+
+    pub fn set_act(&mut self, act: MoeActFn) {
+        self.act = act;
     }
 
     pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
@@ -1454,7 +1495,7 @@ impl FusedMoeMxfp4 {
         let up = gate_up
             .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
             .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = self.act.apply_gate_up(&gate, &up)?;
 
         let down = mxfp4_linear::mxfp4_moe_gemm(
             &down_inputs,
