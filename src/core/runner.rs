@@ -809,8 +809,6 @@ impl ModelRunner {
                                 &self.device,
                                 params.kv_dtype,
                                 &fm.indptr_host,
-                                fm.last_len_host.as_deref(),
-                                fm.kv_len_arr_host.as_deref(),
                                 input_ids.dim(0)?,
                                 params.num_qo_heads,
                                 params.page_size,
@@ -1137,6 +1135,7 @@ impl ModelRunner {
                 Tensor::from_vec(batch_indices_vec, (batch_indices_len,), &self.device)?;
             let positions = Tensor::from_vec(positions_vec, (positions_len,), &self.device)?;
 
+            #[cfg(feature = "flashinfer")]
             let cu_seqlens_q_host_u32: Vec<u32> =
                 cu_seqlens_q_vec.iter().map(|&x| x as u32).collect();
 
@@ -1162,6 +1161,32 @@ impl ModelRunner {
             #[cfg(not(feature = "flashinfer"))]
             let mla_prefill_plan_info = None;
 
+            #[cfg(feature = "flashinfer")]
+            let prefill_plan_info = if !self.is_mla_model() {
+                if let Some(params) = self.flashinfer_kv_params {
+                    Some(attention_rs::flashinfer::prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host_u32,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        *cu_seqlens_q_vec.last().unwrap() as u32,
+                        last_len_host.len(),
+                        params.num_qo_heads,
+                        params.num_kv_heads,
+                        params.head_dim,
+                        params.page_size,
+                        params.out_dtype,
+                        None,
+                    )?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            #[cfg(not(feature = "flashinfer"))]
+            let prefill_plan_info = None;
+
             Some(FlashInferMetadata {
                 indptr,
                 indptr_host,
@@ -1169,12 +1194,12 @@ impl ModelRunner {
                 last_len,
                 last_len_host: Some(last_len_host),
                 kv_len_arr_host: Some(kv_len_arr_host),
-                cu_seqlens_q_host: Some(cu_seqlens_q_host_u32),
                 total_num_rows: Some(*cu_seqlens_q_vec.last().unwrap() as u32),
                 batch_indices: Some(batch_indices),
                 positions: Some(positions),
                 use_cuda_graph: false,
                 decode_plan_info: None,
+                prefill_plan_info,
                 mla_decode_plan_info: None,
                 mla_prefill_plan_info,
             })
@@ -1312,12 +1337,12 @@ impl ModelRunner {
                 last_len,
                 last_len_host: Some(last_len_host),
                 kv_len_arr_host: Some(kv_len_arr_host),
-                cu_seqlens_q_host: None,
                 total_num_rows: None,
                 batch_indices: None,
                 positions: None,
                 use_cuda_graph,
                 decode_plan_info: None,
+                prefill_plan_info: None,
                 mla_decode_plan_info: None,
                 mla_prefill_plan_info: None,
             })

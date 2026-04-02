@@ -376,6 +376,47 @@ pub fn planned_graph_capture_batches(max_num_seqs: usize) -> Vec<usize> {
     graph_bs
 }
 
+#[cfg(feature = "flashinfer")]
+fn graph_decode_plan(
+    device: &Device,
+    params: &FlashInferKvParams,
+    indptr_host: &[u32],
+    last_len_host: &[u32],
+    kv_len_arr_host: &[u32],
+    batch_size: usize,
+    is_mla: bool,
+    enable_cuda_graph: bool,
+) -> Result<(Option<Vec<i64>>, Option<Vec<i64>>)> {
+    if is_mla {
+        let plan = attention_rs::mla::mla_decode_plan(
+            device,
+            params.kv_dtype,
+            indptr_host,
+            batch_size,
+            params.num_qo_heads,
+            params.page_size,
+            enable_cuda_graph,
+        )?;
+        Ok((None, Some(plan)))
+    } else {
+        let plan = attention_rs::flashinfer::decode_plan(
+            device,
+            params.kv_dtype,
+            params.out_dtype,
+            indptr_host,
+            Some(last_len_host),
+            Some(kv_len_arr_host),
+            batch_size,
+            params.num_qo_heads,
+            params.num_kv_heads,
+            params.head_dim,
+            params.page_size,
+            enable_cuda_graph,
+        )?;
+        Ok((Some(plan), None))
+    }
+}
+
 impl<M: CudaGraphModule> GraphCapturer<M> {
     pub fn new(
         model: M,
@@ -473,37 +514,17 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                                 kv_len_arr_host_bs.push(full + last_len_host[i]);
                             }
                         }
-                        let kv_len_arr_host = kv_len_arr_host_bs.to_vec();
-                        if self.is_mla {
-                            let mla_plan = attention_rs::mla::mla_decode_plan(
-                                device,
-                                params.kv_dtype,
-                                &indptr_host,
-                                Some(&last_len_host[..bs]),
-                                Some(kv_len_arr_host_bs.as_slice()),
-                                bs,
-                                params.num_qo_heads,
-                                params.page_size,
-                                true,
-                            )?;
-                            (None, Some(mla_plan), Some(kv_len_arr_host))
-                        } else {
-                            let plan = attention_rs::flashinfer::decode_plan(
-                                device,
-                                params.kv_dtype,
-                                params.out_dtype,
-                                &indptr_host,
-                                Some(&last_len_host[..bs]),
-                                Some(kv_len_arr_host_bs.as_slice()),
-                                bs,
-                                params.num_qo_heads,
-                                params.num_kv_heads,
-                                params.head_dim,
-                                params.page_size,
-                                true,
-                            )?;
-                            (Some(plan), None, Some(kv_len_arr_host))
-                        }
+                        let (dp, mdp) = graph_decode_plan(
+                            device,
+                            &params,
+                            &indptr_host,
+                            &last_len_host[..bs],
+                            &kv_len_arr_host_bs,
+                            bs,
+                            self.is_mla,
+                            true,
+                        )?;
+                        (dp, mdp, Some(kv_len_arr_host_bs))
                     } else {
                         (None, None, None)
                     };
@@ -515,12 +536,12 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                     last_len: flashinfer_last_len.narrow(0, 0, bs)?,
                     last_len_host: Some(last_len_host[..bs].to_vec()),
                     kv_len_arr_host,
-                    cu_seqlens_q_host: None,
                     total_num_rows: None,
                     batch_indices: None,
                     positions: None,
                     use_cuda_graph: true,
                     decode_plan_info,
+                    prefill_plan_info: None,
                     mla_decode_plan_info,
                     mla_prefill_plan_info: None,
                 })
@@ -688,34 +709,22 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                             .device
                             .as_ref()
                             .ok_or_else(|| candle_core::Error::msg("graph device is missing"))?;
-                        if self.is_mla {
-                            let _ = attention_rs::mla::mla_decode_plan(
-                                dev,
-                                params.kv_dtype,
-                                &indptr_host,
-                                fm.last_len_host.as_deref(),
-                                fm.kv_len_arr_host.as_deref(),
-                                batch,
-                                params.num_qo_heads,
-                                params.page_size,
-                                fm.use_cuda_graph,
-                            )?;
-                        } else {
-                            let _ = attention_rs::flashinfer::decode_plan(
-                                dev,
-                                params.kv_dtype,
-                                params.out_dtype,
-                                &indptr_host,
-                                fm.last_len_host.as_deref(),
-                                fm.kv_len_arr_host.as_deref(),
-                                batch,
-                                params.num_qo_heads,
-                                params.num_kv_heads,
-                                params.head_dim,
-                                params.page_size,
-                                fm.use_cuda_graph,
-                            )?;
-                        }
+                        let last_len_host = fm.last_len_host.as_deref().ok_or_else(|| {
+                            candle_core::Error::msg("graph replay requires last_len_host")
+                        })?;
+                        let kv_len_arr_host = fm.kv_len_arr_host.as_deref().ok_or_else(|| {
+                            candle_core::Error::msg("graph replay requires kv_len_arr_host")
+                        })?;
+                        let _ = graph_decode_plan(
+                            dev,
+                            &params,
+                            &indptr_host,
+                            last_len_host,
+                            kv_len_arr_host,
+                            batch,
+                            self.is_mla,
+                            fm.use_cuda_graph,
+                        )?;
                     }
                 }
 
