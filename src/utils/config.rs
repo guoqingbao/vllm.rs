@@ -664,6 +664,7 @@ pub enum ModelType {
     DeepSeek,
     Mistral3VL,
     Qwen3VL,
+    GptOss,
 }
 
 #[cfg_attr(feature = "python", pyclass)]

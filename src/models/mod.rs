@@ -1,6 +1,7 @@
 pub mod gemma3;
 pub mod glm4;
 pub mod glm4_moe;
+pub mod gpt_oss;
 pub mod layers;
 pub mod llama;
 pub mod mistral3_vl;
