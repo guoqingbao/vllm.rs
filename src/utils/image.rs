@@ -641,6 +641,9 @@ mod tests {
             quantization_config: None,
             is_multi_model: None,
             extra_config_json,
+            mtp_num_hidden_layers: None,
+            mtp_num_tokens: 0,
+            num_nextn_predict_layers: None,
         }
     }
 
