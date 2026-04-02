@@ -36,6 +36,7 @@ pub struct EngineBuilder {
     pd_client_prefix_cache_ratio: Option<f32>,
     yarn_scaling_factor: Option<f64>,
     device_ids: Option<Vec<usize>>,
+    mtp_num_tokens: usize,  // 0 = disabled, N = number of speculative tokens
 }
 
 impl EngineBuilder {
@@ -53,6 +54,7 @@ impl EngineBuilder {
             pd_client_prefix_cache_ratio: None,
             yarn_scaling_factor: None,
             device_ids: None,
+            mtp_num_tokens: 0,  // disabled by default
         }
     }
 
@@ -159,6 +161,7 @@ impl EngineBuilder {
             self.pd_server_prefix_cache_ratio,
             self.pd_client_prefix_cache_ratio,
             self.yarn_scaling_factor,
+            self.mtp_num_tokens,  // mtp_num_tokens: 0 = disabled by default
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

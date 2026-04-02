@@ -12,13 +12,14 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 ## ✨ Key Features
 
 * 🔧 **Pure Rust Backend** – Absolutely **no** PyTorch required
-* 🚀 **High Performance** (with **Context-cache** and **PD Disaggregation**)
+* 🚀 **High Performance** (with **Context-cache**, **PD Disaggregation**, **MTP Speculative Decoding**)
 * 🧠 **Minimalist Core** – Core logic written in **<3000 lines** of clean Rust
 * 💻 **Cross-Platform** – Supports **CUDA** (Linux/Windows) and **Metal** (macOS)
 * 🤖 **Built-in API Server and ChatGPT-like Web UI** – Native Rust server for both CUDA and Metal
 * 🔌 **MCP Integration** – Model Context Protocol for tool calling support
 * 📊 **Embedding & Tokenizer APIs** – Full text processing support
 * 🐍 **Lightweight Python Interface** – PyO3-powered bindings for chat completion
+* 🎯 **Multi-Token Prediction (MTP)** – Speculative decoding for faster generation
 
 ---
 
@@ -92,6 +93,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Prefix cache](docs/prefix-cache.md)
+- [MTP Speculative Decoding](docs/mtp.md)
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
@@ -137,9 +139,9 @@ Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.
 
 ```bash
 # CUDA
-python3 -m vllm_rs.server --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache --mtp-num-tokens 16
 # Metal/MacOS (response can be seriously degradated on MacOS pre-Tahoe, use a smaller `--max-model-len` or `--kv-fraction` parameter)
-python3 -m vllm_rs.server --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache --mtp-num-tokens 16
 ```
 
   </details>
@@ -275,11 +277,11 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
     <summary>Single GPU</summary>
 
   ```bash
-  # CUDA
-  vllm-rs --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache
-  # Metal/MacOS
-  vllm-rs --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache
-  ```
+   # CUDA
+   vllm-rs --m unsloth/Qwen3.5-27B-GGUF --f Qwen3.5-27B-Q4_K_M.gguf --ui-server --prefix-cache --mtp-num-tokens 16
+   # Metal/MacOS
+   vllm-rs --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf --ui-server --prefix-cache --mtp-num-tokens 16
+   ```
 
   <details open>
     <summary>Multi-GPU + Unquantized Model</summary>
@@ -521,6 +523,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--prefix-cache`   | Enable prefix caching for multi-turn conversations |
 | `--prefix-cache-max-tokens`   | Cap prefix cache size in tokens (rounded down to block size) |
 | `--yarn-scaling-factor`       | YARN RoPE scaling factor for context extension (e.g., `4.0` extends 4x context) |
+| `--mtp-num-tokens`       | MTP speculative decoding tokens (0 = disabled, N = number of speculative tokens) |
 
 ### MCP Configuration
 
