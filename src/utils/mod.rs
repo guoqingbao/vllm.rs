@@ -1862,3 +1862,20 @@ mod tests {
         assert!(!is_rope_i);
     }
 }
+
+/// Fail fast if `host:port` is already bound, before spending minutes loading
+/// model weights.  Prints a user-friendly error and exits the process when the
+/// port is occupied.
+pub fn ensure_port_free(host: &str, port: u16) {
+    let addr = format!("{host}:{port}");
+    match std::net::TcpListener::bind(&addr) {
+        Ok(_listener) => { /* port is free; drop the listener immediately */ }
+        Err(e) => {
+            eprintln!(
+                "\n❌ Port {port} is already in use ({e}).\n   \
+                 Free the port or choose a different one with --port <port>.\n"
+            );
+            std::process::exit(1);
+        }
+    }
+}
