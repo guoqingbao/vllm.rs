@@ -16,6 +16,327 @@ use either::Either;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Quantization method for MoE experts
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum QuantMethod {
+    /// No quantization (FP32/FP16/BF16)
+    None,
+    /// FP8 quantization
+    Fp8,
+    /// ISQ quantization (GGUF)
+    Isq,
+    /// QBlock quantization
+    QBlock,
+    /// QKT quantization
+    QKT,
+}
+
+impl std::fmt::Display for QuantMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QuantMethod::None => write!(f, "none"),
+            QuantMethod::Fp8 => write!(f, "fp8"),
+            QuantMethod::Isq => write!(f, "isq"),
+            QuantMethod::QBlock => write!(f, "qblock"),
+            QuantMethod::QKT => write!(f, "qkt"),
+        }
+    }
+}
+
+/// Expert parameter mapping entry
+/// (param_name, weight_name, expert_id, shard_id)
+pub type ExpertMappingEntry = (String, String, usize, String);
+
+/// Build initial global physical to logical expert mapping
+///
+/// This mirrors Python vLLM's `EplbState.build_initial_global_physical_to_logical_map`.
+/// Creates a mapping from physical expert IDs to logical expert IDs.
+///
+/// For redundant experts, the mapping wraps around using modulo:
+/// physical_to_logical[physical_id] = physical_id % num_routed_experts
+///
+/// # Arguments
+/// * `num_routed_experts` - Number of routed (logical) experts
+/// * `num_redundant_experts` - Number of redundant experts
+///
+/// # Returns
+/// A vector where index is physical expert ID and value is logical expert ID
+pub fn build_initial_global_physical_to_logical_map(
+    num_routed_experts: usize,
+    num_redundant_experts: usize,
+) -> Vec<usize> {
+    // Start with identity mapping for routed experts
+    let mut map: Vec<usize> = (0..num_routed_experts).collect();
+
+    // Add redundant experts mapping (wrap around using modulo)
+    for i in 0..num_redundant_experts {
+        map.push(i % num_routed_experts);
+    }
+
+    map
+}
+
+/// Check if any parameter names contain the base_layer prefix
+///
+/// # Arguments
+/// * `params` - List of (param_name, param_tensor) tuples
+///
+/// # Returns
+/// true if any parameter name contains ".base_layer."
+pub fn has_base_layer_prefix(params: &[(&str, candle_core::Tensor)]) -> bool {
+    params.iter().any(|(name, _)| name.contains(".base_layer."))
+}
+
+/// Generate expert parameter mapping for Qwen3Next/Qwen3.5 MoE models
+///
+/// This mirrors the Python vLLM `SharedFusedMoE.make_expert_params_mapping` behavior.
+/// Returns a list of tuples: (param_name, weight_name, expert_id, shard_id)
+///
+/// - param_name: The parameter name in the model (e.g., "experts.w13_" or "experts.w2_")
+/// - weight_name: The weight name in the checkpoint (e.g., "experts.0.gate_proj" or "experts.0.up_proj")
+/// - expert_id: The physical expert ID (0 to num_physical_experts-1)
+/// - shard_id: The shard identifier ("w1", "w2", or "w3")
+pub fn make_expert_params_mapping(
+    num_experts: usize,
+    num_redundant_experts: usize,
+) -> Vec<ExpertMappingEntry> {
+    let num_physical_experts = num_experts + num_redundant_experts;
+
+    // Build physical to logical expert mapping
+    let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, num_redundant_experts);
+
+    let mut mappings = Vec::new();
+
+    for expert_id in 0..num_physical_experts {
+        let logical_expert_id = physical_to_logical_map[expert_id];
+
+        // For each expert, generate mappings for w1, w2, w3 shards
+        // w1/w3 correspond to gate_proj/up_proj (combined as w13)
+        // w2 corresponds to down_proj
+
+        // Gate projection (w1)
+        mappings.push((
+            format!("experts.w13_"),
+            format!("experts.{logical_expert_id}.gate_proj"),
+            expert_id,
+            "w1".to_string(),
+        ));
+
+        // Up projection (w3)
+        mappings.push((
+            format!("experts.w13_"),
+            format!("experts.{logical_expert_id}.up_proj"),
+            expert_id,
+            "w3".to_string(),
+        ));
+
+        // Down projection (w2)
+        mappings.push((
+            format!("experts.w2_"),
+            format!("experts.{logical_expert_id}.down_proj"),
+            expert_id,
+            "w2".to_string(),
+        ));
+    }
+
+    mappings
+}
+
+/// Generate expert parameter mapping with base_layer prefix support
+///
+/// This mirrors Python vLLM's behavior where checkpoints may have weights
+/// under a `base_layer.` prefix (e.g., from PEFT adapters).
+///
+/// # Arguments
+/// * `num_experts` - Number of routed experts
+/// * `num_redundant_experts` - Number of redundant experts
+/// * `has_base_layer` - Whether the checkpoint uses base_layer prefix
+///
+/// # Returns
+/// List of (param_name, weight_name, expert_id, shard_id) tuples
+pub fn make_expert_params_mapping_with_base_layer(
+    num_experts: usize,
+    num_redundant_experts: usize,
+    has_base_layer: bool,
+) -> Vec<ExpertMappingEntry> {
+    let num_physical_experts = num_experts + num_redundant_experts;
+
+    let base_layer_prefix = if has_base_layer { "base_layer." } else { "" };
+    let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, num_redundant_experts);
+
+    let mut mappings = Vec::new();
+
+    for expert_id in 0..num_physical_experts {
+        let logical_expert_id = physical_to_logical_map[expert_id];
+
+        // Gate projection (w1)
+        mappings.push((
+            format!("experts.{base_layer_prefix}w13_"),
+            format!("experts.{logical_expert_id}.gate_proj.{base_layer_prefix}"),
+            expert_id,
+            "w1".to_string(),
+        ));
+
+        // Up projection (w3)
+        mappings.push((
+            format!("experts.{base_layer_prefix}w13_"),
+            format!("experts.{logical_expert_id}.up_proj.{base_layer_prefix}"),
+            expert_id,
+            "w3".to_string(),
+        ));
+
+        // Down projection (w2)
+        mappings.push((
+            format!("experts.{base_layer_prefix}w2_"),
+            format!("experts.{logical_expert_id}.down_proj.{base_layer_prefix}"),
+            expert_id,
+            "w2".to_string(),
+        ));
+    }
+
+    mappings
+}
+
+/// Generate expert parameter mapping for FP8 weight scales
+///
+/// FP8 quantized experts have weight_scale/weight_scale_inv tensors
+/// that need to be mapped to the correct experts.
+///
+/// # Arguments
+/// * `num_experts` - Number of routed experts
+/// * `num_redundant_experts` - Number of redundant experts
+/// * `is_weight_scale` - Whether this is for weight scale (vs activation scale)
+///
+/// # Returns
+/// List of (param_name, weight_name, expert_id, shard_id) tuples for FP8 scales
+pub fn make_expert_fp8_weight_scale_mapping(
+    num_experts: usize,
+    num_redundant_experts: usize,
+    is_weight_scale: bool,
+) -> Vec<ExpertMappingEntry> {
+    let num_physical_experts = num_experts + num_redundant_experts;
+    let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, num_redundant_experts);
+
+    let scale_name = if is_weight_scale { "weight_scale_inv" } else { "weight_scale" };
+
+    let mut mappings = Vec::new();
+
+    for expert_id in 0..num_physical_experts {
+        let logical_expert_id = physical_to_logical_map[expert_id];
+
+        // Gate projection weight scale (w1)
+        mappings.push((
+            format!("experts.w13_{scale_name}"),
+            format!("experts.{logical_expert_id}.gate_proj.{scale_name}"),
+            expert_id,
+            "w1".to_string(),
+        ));
+
+        // Up projection weight scale (w3)
+        mappings.push((
+            format!("experts.w13_{scale_name}"),
+            format!("experts.{logical_expert_id}.up_proj.{scale_name}"),
+            expert_id,
+            "w3".to_string(),
+        ));
+
+        // Down projection weight scale (w2)
+        mappings.push((
+            format!("experts.w2_{scale_name}"),
+            format!("experts.{logical_expert_id}.down_proj.{scale_name}"),
+            expert_id,
+            "w2".to_string(),
+        ));
+    }
+
+    mappings
+}
+
+/// Generate expert parameter mapping for FP8 activation scales
+///
+/// # Arguments
+/// * `num_experts` - Number of routed experts
+/// * `num_redundant_experts` - Number of redundant experts
+///
+/// # Returns
+/// List of (param_name, weight_name, expert_id, shard_id) tuples for FP8 activation scales
+pub fn make_expert_fp8_activation_scale_mapping(
+    num_experts: usize,
+    num_redundant_experts: usize,
+) -> Vec<ExpertMappingEntry> {
+    let num_physical_experts = num_experts + num_redundant_experts;
+    let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, num_redundant_experts);
+
+    let scale_name = "activation_scale_inv";
+
+    let mut mappings = Vec::new();
+
+    for expert_id in 0..num_physical_experts {
+        let logical_expert_id = physical_to_logical_map[expert_id];
+
+        // Gate projection activation scale (w1)
+        mappings.push((
+            format!("experts.w13_{scale_name}"),
+            format!("experts.{logical_expert_id}.gate_proj.{scale_name}"),
+            expert_id,
+            "w1".to_string(),
+        ));
+
+        // Up projection activation scale (w3)
+        mappings.push((
+            format!("experts.w13_{scale_name}"),
+            format!("experts.{logical_expert_id}.up_proj.{scale_name}"),
+            expert_id,
+            "w3".to_string(),
+        ));
+
+        // Down projection activation scale (w2)
+        mappings.push((
+            format!("experts.w2_{scale_name}"),
+            format!("experts.{logical_expert_id}.down_proj.{scale_name}"),
+            expert_id,
+            "w2".to_string(),
+        ));
+    }
+
+    mappings
+}
+
+/// Load fused expert weights using expert parameter mapping
+///
+/// This helper function mirrors Python vLLM's `load_fused_expert_weights` behavior.
+/// It loads expert weights using the VarBuilderX path resolution based on expert mapping.
+///
+/// # Arguments
+/// * `vb` - VarBuilderX for the base module path
+/// * `experts_vb` - VarBuilderX for the experts submodule path
+/// * `expert_id` - The physical expert ID to load
+/// * `weight_name` - The weight name in checkpoint (e.g., "gate_proj", "up_proj", "down_proj")
+/// * `shard_id` - The shard identifier (e.g., "w1", "w3", "w2")
+/// * `num_experts` - Total number of routed experts in the model
+///
+/// # Returns
+/// * `Result<Tensor>` - The loaded tensor
+pub fn load_fused_expert_weights(
+    _vb: &VarBuilderX,
+    experts_vb: &VarBuilderX,
+    expert_id: usize,
+    weight_name: &str,
+    _shard_id: &str,
+    num_experts: usize,
+) -> Result<Tensor> {
+    // Get the logical expert ID from physical expert ID
+    let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, 0);
+    let logical_expert_id = physical_to_logical_map[expert_id];
+
+    // Construct the path to the expert's weight
+    let expert_vb = experts_vb.pp(format!("{}", logical_expert_id).as_str());
+    let weight_vb = expert_vb.pp(weight_name);
+
+    // Load the weight tensor
+    weight_vb.get_with_hints_dtype((), "weight", Shard::default(), DType::F32)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum PackedGateUpLayout {
     // [experts, hidden, 2*intermediate]
@@ -103,7 +424,72 @@ pub struct FusedMoe {
 }
 
 impl FusedMoe {
-    pub fn load_packed(
+        /// Load expert weights using expert parameter mapping
+        /// This is the core method that uses the expert mapping functions to load weights
+        /// from checkpoints with varying weight naming conventions.
+        pub fn load_packed_with_mapping(
+            cfg: &Config,
+            experts_vb: &VarBuilderX,
+            comm: Rc<Comm>,
+            num_experts: usize,
+            num_redundant_experts: usize,
+        ) -> Result<(Tensor, Tensor, Tensor)> {
+            let num_physical_experts = num_experts + num_redundant_experts;
+            let mut gate_experts = Vec::with_capacity(num_physical_experts);
+            let mut up_experts = Vec::with_capacity(num_physical_experts);
+            let mut down_experts = Vec::with_capacity(num_physical_experts);
+
+            // Get the logical expert mapping
+            let physical_to_logical_map = build_initial_global_physical_to_logical_map(num_experts, num_redundant_experts);
+
+            crate::log_info!("MoE experts: using per-expert checkpoint format with logical mapping");
+            crate::log_info!("MoE experts: num_experts={}, num_redundant={}, num_physical={}", num_experts, num_redundant_experts, num_physical_experts);
+
+            for physical_expert_id in 0..num_physical_experts {
+                let logical_expert_id = physical_to_logical_map[physical_expert_id];
+
+                // Construct the expert path using logical expert ID
+                let expert_vb = experts_vb.pp(format!("{}", logical_expert_id).as_str());
+
+                // Load gate_proj (w1 shard)
+                let gate_expert = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    (cfg.moe_cfg.as_ref().unwrap().moe_intermediate_size, cfg.hidden_size),
+                    "weight",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ).map_err(|e| candle_core::Error::msg(format!("Failed to load gate_proj for logical_expert_id={} (physical_expert_id={}): {}", logical_expert_id, physical_expert_id, e)))?;
+                gate_experts.push(gate_expert);
+
+                // Load up_proj (w3 shard)
+                let up_expert = expert_vb.pp("up_proj").get_with_hints_dtype(
+                    (cfg.moe_cfg.as_ref().unwrap().moe_intermediate_size, cfg.hidden_size),
+                    "weight",
+                    shard(0, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ).map_err(|e| candle_core::Error::msg(format!("Failed to load up_proj for logical_expert_id={} (physical_expert_id={}): {}", logical_expert_id, physical_expert_id, e)))?;
+                up_experts.push(up_expert);
+
+                // Load down_proj (w2 shard)
+                let down_expert = expert_vb.pp("down_proj").get_with_hints_dtype(
+                    (cfg.hidden_size, cfg.moe_cfg.as_ref().unwrap().moe_intermediate_size),
+                    "weight",
+                    shard(1, comm.rank(), comm.world_size()),
+                    DType::F32,
+                ).map_err(|e| candle_core::Error::msg(format!("Failed to load down_proj for logical_expert_id={} (physical_expert_id={}): {}", logical_expert_id, physical_expert_id, e)))?;
+                down_experts.push(down_expert);
+            }
+
+            Ok((
+                Tensor::stack(&gate_experts, 0)?,
+                Tensor::stack(&up_experts, 0)?,
+                Tensor::stack(&down_experts, 0)?,
+            ))
+        }
+
+        /// Legacy method - loads experts directly by physical index without mapping
+        /// Use this only for checkpoints where experts are stored with physical indices.
+        /// For new checkpoints with logical expert mapping, use load_packed instead.
+        pub fn load_packed_physical(
         cfg: &Config,
         experts_vb: VarBuilderX,
         comm: Rc<Comm>,
@@ -261,6 +647,63 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         Ok((gate_experts, up_experts, down_experts))
     }
 
+    /// Load expert weights with automatic dispatch based on checkpoint format
+    ///
+    /// This function uses tensor dimension checking to determine the checkpoint
+    /// format, similar to Python vLLM's approach:
+    /// - Fused experts (gate_up_proj): 3D tensor shape (num_experts, hidden, 2*intermediate)
+    /// - Per-expert (gate_proj/up_proj/down_proj): 2D tensor shape (intermediate, hidden)
+    ///
+    /// The dispatch logic:
+    /// 1. Try load_packed_with_mapping() first (per-expert with logical mapping)
+    /// 2. If that fails, fallback to load_packed_physical() (packed or per-expert with physical IDs)
+    pub fn load_packed(
+        cfg: &Config,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        quant_method: &QuantMethod,
+    ) -> Result<(Tensor, Tensor, Tensor)> {
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+
+        // Determine checkpoint format by checking tensor dimensions
+        // Fused experts (gate_up_proj): 3D tensor (num_experts, hidden, 2*intermediate)
+        // Per-expert (gate_proj/up_proj/down_proj): 2D tensors (intermediate, hidden)
+        //
+        // We check tensor dimensions by attempting to load a sample expert weight
+        // and examining its shape, similar to Python vLLM's approach.
+
+        // First try experts.0.gate_proj (safetensors per-expert format)
+        let expert_vb = experts_vb.pp("0");
+        let has_expert_weights = match expert_vb.0 {
+            either::Either::Left(ref vb) => vb.contains_tensor("gate_proj"),
+            either::Either::Right(ref vb) => vb.tensor_shape("gate_proj").is_some(),
+        };
+
+        if has_expert_weights {
+            // Per-expert format: experts.0.gate_proj exists
+            crate::log_info!("MoE experts: trying per-expert checkpoint format (experts.0.gate_proj)");
+            crate::log_info!("MoE experts: quant_method={}, num_experts={}", quant_method, num_experts);
+            match Self::load_packed_with_mapping(cfg, &experts_vb, comm.clone(), num_experts, 0) {
+                Ok(tensors) => {
+                    crate::log_info!("MoE experts: per-expert with logical mapping succeeded");
+                    return Ok(tensors);
+                }
+                Err(e) => {
+                    crate::log_info!("MoE experts: per-expert with logical mapping failed: {:?}", e);
+                    crate::log_info!("MoE experts: falling back to physical per-expert loading");
+                }
+            }
+            // Fallback to physical per-expert loading
+            Self::load_packed_physical(cfg, experts_vb, comm)
+        } else {
+            // Fused expert format: gate_up_proj exists
+            crate::log_info!("MoE experts: using fused expert checkpoint format (gate_up_proj detected)");
+            crate::log_info!("MoE experts: quant_method={}, num_experts={}", quant_method, num_experts);
+            Self::load_packed_physical(cfg, experts_vb, comm)
+        }
+    }
+
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
@@ -279,7 +722,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             dtype,
         )?;
 
-        let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone(), &QuantMethod::None)?;
         let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
@@ -680,7 +1123,7 @@ impl FusedMoeISQ {
             % block_size
             == 0
         {
-            FusedMoe::load_packed(cfg, vb.pp("experts"), comm.clone())?
+            FusedMoe::load_packed(cfg, vb.pp("experts"), comm.clone(), &QuantMethod::Isq)?
         } else {
             let experts_vb = vb.pp("experts");
             let mut gate_experts = Vec::with_capacity(num_experts);
