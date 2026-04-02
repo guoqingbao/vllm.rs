@@ -1281,6 +1281,22 @@ pub struct FusedMoeMxfp4 {
 }
 
 impl FusedMoeMxfp4 {
+    fn mxfp4_tensor_name_packed(vb: &candle_nn::var_builder::ShardedVarBuilder) -> &'static str {
+        if vb.contains_tensor("weight_packed") {
+            "weight_packed"
+        } else {
+            "blocks"
+        }
+    }
+
+    fn mxfp4_tensor_name_scale(vb: &candle_nn::var_builder::ShardedVarBuilder) -> &'static str {
+        if vb.contains_tensor("weight_scale") {
+            "weight_scale"
+        } else {
+            "scales"
+        }
+    }
+
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
@@ -1290,7 +1306,7 @@ impl FusedMoeMxfp4 {
             num_experts,
             vb.pp("gate"),
             Shard::default(),
-            &None,
+            &cfg.quantization_config,
             &None,
             dtype,
         )?;
@@ -1309,41 +1325,53 @@ impl FusedMoeMxfp4 {
                 for i in 0..num_experts {
                     let expert_vb = vb.pp(i.to_string());
 
-                    let gate_b = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    let gate_proj_vb = expert_vb.pp("gate_proj");
+                    let packed_name = Self::mxfp4_tensor_name_packed(&gate_proj_vb);
+                    let scale_name = Self::mxfp4_tensor_name_scale(&gate_proj_vb);
+
+                    let gate_b = gate_proj_vb.get_with_hints_dtype(
                         (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
-                        "blocks",
+                        packed_name,
                         shard(0, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
-                    let gate_s = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    let gate_s = gate_proj_vb.get_with_hints_dtype(
                         (moe_cfg.moe_intermediate_size, cfg.hidden_size / 32),
-                        "scales",
+                        scale_name,
                         shard(0, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
 
-                    let up_b = expert_vb.pp("up_proj").get_with_hints_dtype(
+                    let up_proj_vb = expert_vb.pp("up_proj");
+                    let packed_name = Self::mxfp4_tensor_name_packed(&up_proj_vb);
+                    let scale_name = Self::mxfp4_tensor_name_scale(&up_proj_vb);
+
+                    let up_b = up_proj_vb.get_with_hints_dtype(
                         (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
-                        "blocks",
+                        packed_name,
                         shard(0, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
-                    let up_s = expert_vb.pp("up_proj").get_with_hints_dtype(
+                    let up_s = up_proj_vb.get_with_hints_dtype(
                         (moe_cfg.moe_intermediate_size, cfg.hidden_size / 32),
-                        "scales",
+                        scale_name,
                         shard(0, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
 
-                    let down_b = expert_vb.pp("down_proj").get_with_hints_dtype(
+                    let down_proj_vb = expert_vb.pp("down_proj");
+                    let packed_name = Self::mxfp4_tensor_name_packed(&down_proj_vb);
+                    let scale_name = Self::mxfp4_tensor_name_scale(&down_proj_vb);
+
+                    let down_b = down_proj_vb.get_with_hints_dtype(
                         (cfg.hidden_size, moe_cfg.moe_intermediate_size / 2),
-                        "blocks",
+                        packed_name,
                         shard(1, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
-                    let down_s = expert_vb.pp("down_proj").get_with_hints_dtype(
+                    let down_s = down_proj_vb.get_with_hints_dtype(
                         (cfg.hidden_size, moe_cfg.moe_intermediate_size / 32),
-                        "scales",
+                        scale_name,
                         shard(1, comm.rank(), comm.world_size()),
                         DType::U8,
                     )?;
@@ -1427,17 +1455,17 @@ impl FusedMoeMxfp4 {
             .contiguous()?;
         let down_inputs = (up * gate.apply(&self.act)?)?;
 
-        let down_inputs_2d = down_inputs.reshape((num_tokens * self.num_experts_per_tok, ()))?;
-
         let down = mxfp4_linear::mxfp4_moe_gemm(
-            &down_inputs_2d,
+            &down_inputs,
             &self.down_blocks,
             &self.down_scales,
             None,
             &topk_ids,
         )?;
 
-        let mut ys = (down * topk_weights.unsqueeze(D::Minus1)?)?
+        let topk_weights = topk_weights.to_dtype(down.dtype())?;
+        let mut ys = down
+            .broadcast_mul(&topk_weights.unsqueeze(D::Minus1)?)?
             .reshape((num_tokens, self.num_experts_per_tok, hidden_dim))?
             .sum(1)?;
 

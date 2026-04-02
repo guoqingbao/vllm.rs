@@ -3,6 +3,7 @@ use super::wna16::WNA16;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::QuantConfig;
 use crate::utils::should_skip_fp8_for_module;
+use crate::utils::should_skip_quant_for_module;
 use candle_core::quantized;
 use candle_core::quantized::GgmlDType;
 use candle_core::Module;
@@ -525,6 +526,10 @@ pub fn linear_x(
                 }
 
                 if cfg.quant_method == "mxfp4" {
+                    if should_skip_quant_for_module(&module_path, cfg) {
+                        let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
                     let ln = LnMxfp4::load(in_dim, out_dim, vb.clone(), shards, true)?;
                     return Ok(LinearX::LnMxfp4(ln));
                 }
@@ -608,6 +613,10 @@ pub fn linear_no_bias_x(
                 }
 
                 if cfg.quant_method == "mxfp4" {
+                    if should_skip_quant_for_module(&module_path, cfg) {
+                        let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
                     let ln = LnMxfp4::load(in_dim, out_dim, vb.clone(), shards, false)?;
                     return Ok(LinearX::LnMxfp4(ln));
                 }
@@ -1098,9 +1107,17 @@ impl LnMxfp4 {
         shard: Shard,
         load_bias: bool,
     ) -> Result<Self> {
-        let blocks = vb.get_with_hints_dtype((out_dim, in_dim / 2), "blocks", shard, DType::U8)?;
-        let scales = vb.get_with_hints_dtype((out_dim, in_dim / 32), "scales", shard, DType::U8)?;
-        let bias = if load_bias {
+        let blocks = if vb.contains_tensor("weight_packed") {
+            vb.get_with_hints_dtype((out_dim, in_dim / 2), "weight_packed", shard, DType::U8)?
+        } else {
+            vb.get_with_hints_dtype((out_dim, in_dim / 2), "blocks", shard, DType::U8)?
+        };
+        let scales = if vb.contains_tensor("weight_scale") {
+            vb.get_with_hints_dtype((out_dim, in_dim / 32), "weight_scale", shard, DType::U8)?
+        } else {
+            vb.get_with_hints_dtype((out_dim, in_dim / 32), "scales", shard, DType::U8)?
+        };
+        let bias = if load_bias && vb.contains_tensor("bias") {
             Some(vb.get((out_dim,), "bias")?)
         } else {
             None

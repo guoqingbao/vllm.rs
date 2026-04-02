@@ -697,9 +697,77 @@ pub struct QuantConfig {
     pub desc_act: Option<bool>,
     pub checkpoint_format: Option<String>,
     pub fmt: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
     pub weight_block_size: Option<Vec<usize>>,
     #[serde(default, alias = "ignore")]
     pub modules_to_not_convert: Vec<String>,
+    #[serde(default)]
+    pub config_groups: Option<serde_json::Value>,
+}
+
+impl QuantConfig {
+    /// Normalizes a compressed-tensors config into a flat quant_method.
+    /// If `quant_method == "compressed-tensors"` and the `format` field (or a
+    /// `config_groups` entry) indicates `mxfp4-pack-quantized`, rewrites
+    /// `quant_method` to `"mxfp4"` and extracts `group_size` / `ignore` list.
+    pub fn normalize_compressed_tensors(&mut self) {
+        if self.quant_method != "compressed-tensors" {
+            return;
+        }
+
+        let is_mxfp4 = self
+            .format
+            .as_deref()
+            .map(|f| f.contains("mxfp4"))
+            .unwrap_or(false)
+            || self.detect_mxfp4_from_config_groups();
+
+        if is_mxfp4 {
+            self.quant_method = "mxfp4".to_string();
+            self.extract_compressed_tensors_params();
+        }
+    }
+
+    fn detect_mxfp4_from_config_groups(&self) -> bool {
+        let groups = match &self.config_groups {
+            Some(v) => v,
+            None => return false,
+        };
+        if let Some(obj) = groups.as_object() {
+            for (_key, group) in obj {
+                if let Some(fmt) = group.get("format").and_then(|v| v.as_str()) {
+                    if fmt.contains("mxfp4") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn extract_compressed_tensors_params(&mut self) {
+        let groups = match &self.config_groups {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        if let Some(obj) = groups.as_object() {
+            for (_key, group) in obj {
+                if let Some(weights) = group.get("weights") {
+                    if self.group_size == 0 {
+                        if let Some(gs) = weights.get("group_size").and_then(|v| v.as_i64()) {
+                            self.group_size = gs as i32;
+                        }
+                    }
+                    if self.bits == 0 {
+                        if let Some(nb) = weights.get("num_bits").and_then(|v| v.as_u64()) {
+                            self.bits = nb as usize;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl fmt::Debug for QuantConfig {
@@ -712,7 +780,9 @@ impl fmt::Debug for QuantConfig {
             .field("desc_act", &self.desc_act)
             .field("checkpoint_format", &self.checkpoint_format)
             .field("fmt", &self.fmt)
+            .field("format", &self.format)
             .field("weight_block_size", &self.weight_block_size)
+            .field("modules_to_not_convert", &self.modules_to_not_convert)
             .finish()
     }
 }

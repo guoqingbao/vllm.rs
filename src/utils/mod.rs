@@ -78,6 +78,10 @@ pub fn should_skip_fp8_for_module(module_path: &str, cfg: &QuantConfig) -> bool 
         .any(|item| module_path_matches_not_convert(module_path, item))
 }
 
+pub fn should_skip_quant_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
+    should_skip_fp8_for_module(module_path, cfg)
+}
+
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
     crate::log_info!("{:}", Path::new(path).join(json_file).display());
     let jsfile = std::fs::File::open(Path::new(path).join(json_file))?;
@@ -698,10 +702,10 @@ fn merge_multimodal_top_level_config(
 ) -> Result<()> {
     if let Some(qcfg) = raw_root.get("quantization_config") {
         if !qcfg.is_null() {
-            config.quantization_config = Some(
-                serde_json::from_value::<QuantConfig>(qcfg.clone())
-                    .map_err(candle_core::Error::wrap)?,
-            );
+            let mut parsed = serde_json::from_value::<QuantConfig>(qcfg.clone())
+                .map_err(candle_core::Error::wrap)?;
+            parsed.normalize_compressed_tensors();
+            config.quantization_config = Some(parsed);
         }
     }
 
@@ -992,13 +996,15 @@ pub fn init_config_tokenizer(
             }
         }
 
-        if let Some(qcfg) = &config.quantization_config {
+        if let Some(qcfg) = &mut config.quantization_config {
+            qcfg.normalize_compressed_tensors();
             assert!(
                 qcfg.quant_method == "gptq"
                     || qcfg.quant_method == "awq"
                     || qcfg.quant_method == "fp8"
                     || qcfg.quant_method == "mxfp4",
-                "Invalid quantization format! Only `gptq`, `awq`, `fp8` and `mxfp4` supported"
+                "Invalid quantization format! Only `gptq`, `awq`, `fp8` and `mxfp4` supported, got `{}`",
+                qcfg.quant_method
             );
             if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
                 assert!(
