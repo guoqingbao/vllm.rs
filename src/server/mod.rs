@@ -978,6 +978,10 @@ pub struct Args {
     /// YARN RoPE scaling factor (explicit override, no auto-calculation)
     #[arg(long, default_value = None)]
     pub yarn_scaling_factor: Option<f64>,
+
+    /// MTP speculative decoding tokens (0 = disabled, N = number of speculative tokens)
+    #[arg(long, default_value = "0")]
+    pub mtp_num_tokens: usize,
 }
 
 /// Result of executing tool calls via MCP

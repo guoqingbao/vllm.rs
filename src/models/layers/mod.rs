@@ -123,6 +123,22 @@ impl VarBuilderX<'_> {
         }
     }
 
+    /// Get all tensor keys from the weight file
+    /// This enables dynamic discovery of MTP layers and other model components
+    pub fn get_all_tensor_keys(&self) -> Vec<String> {
+        match &self.0 {
+            Either::Left(_vb) => {
+                // For safetensors VarBuilder, we return an empty vector
+                // since ShardedVarBuilder doesn't expose tensor names directly
+                Vec::new()
+            }
+            Either::Right(qvb) => {
+                // For GGUF QVarBuilder, delegate to the public method
+                qvb.get_all_tensor_keys()
+            }
+        }
+    }
+
     pub fn tensor_shape(&self, name: &str) -> Option<Vec<usize>> {
         match &self.0 {
             Either::Left(_) => None,

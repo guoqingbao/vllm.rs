@@ -107,4 +107,9 @@ impl VarBuilder {
             .get(&self.path(key))
             .map(|info| info.shape.dims().to_vec())
     }
+
+    /// Get all tensor keys from the weight file
+    pub fn get_all_tensor_keys(&self) -> Vec<String> {
+        self.content.tensor_infos.keys().cloned().collect()
+    }
 }
