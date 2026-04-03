@@ -40,7 +40,7 @@
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
-| **Qwen3.5-35B-A3B** | Q3_K_M | **35B (MoE)**| **106** tokens/s (**Hopper**)  |
+| **Qwen3.5-35B-A3B** | Q3_K_M/MXFP4 | **35B (MoE)**| **95-106** tokens/s (**Hopper**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -74,7 +74,7 @@
 * ✅ Qwen3-VL (Dense, 多模态)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
-支持 **Safetensor** (包含GPTQ, AWQ, FP8-blockwise 量化格式) 和 **GGUF** 格式。
+支持 **Safetensor** (包含GPTQ, AWQ, MXFP4, NVFP4, FP8-blockwise 量化格式) 和 **GGUF** 格式。
 
 所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flashinfer` 或 `flashattn` 特性）。
 
@@ -162,6 +162,7 @@ python3 -m pip install vllm_rs
   <details open>
     <summary>FP8模型</summary>
 
+_FP8-Blockwise格式:_
 ```bash
 # CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
 vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
@@ -169,6 +170,15 @@ vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
 vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
+_MXFP4 格式:_
+```bash
+python3 -m vllm_rs.server --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
+```
+
+_NVFP4 格式:_
+```bash
+python3 -m vllm_rs.server --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+```
   </details>
 
 <details open>
@@ -284,13 +294,24 @@ cargo install --features metal
   </details>
 
   <details open>
-    <summary>FP8模型</summary>
+    <summary>FP8/FP4模型</summary>
 
+  _FP8格式:_
    ```bash
    vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
     # Or Qwen3-Next 80B
    vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
    ```
+
+  _MXFP4格式:_
+  ```bash
+  vllm-rs --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
+  ```
+
+  _NVFP4格式:_
+  ```bash
+  vllm-rs --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+  ```
   </details>
 
    <details open>
@@ -492,14 +513,15 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
 * [x] 内置 ChatGPT风格 Web 网页服务
-* [x] **Embedding API**
-* [x] **Tokenize/Detokenize API**
-* [x] **MCP集成与工具调用**
-* [x] **公共前缀缓存**
-* [x] **Claude/Anthropic API 兼容服务器**
-* [x] **支持CUDA 13**
+* [x] Embedding API
+* [x] Tokenize/Detokenize API
+* [x] MCP集成与工具调用
+* [x] 公共前缀缓存
+* [x] Claude/Anthropic API 兼容服务器
+* [x] 支持CUDA 13
 * [x] **支持FlashInfer后端**
 * [x] **支持DeepGEMM后端 (Hopper)**
+* [x] **MXFP4/NVFP4模型支持**
 * [ ] TentorRT-LLM 后端
 
 ## 📚 参考项目
