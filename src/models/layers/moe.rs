@@ -1637,17 +1637,22 @@ impl FusedMoeNvfp4 {
                         DType::U8,
                     )?;
                     let gate_up_gscale = if vb.contains_tensor("gate_up_proj_weight_scale_2") {
-                        vb.get_with_hints_dtype((), "gate_up_proj_weight_scale_2", no_shard, DType::F32)
-                            .or_else(|_| {
-                                vb.get_with_hints_dtype(
-                                    (1,),
-                                    "gate_up_proj_weight_scale_2",
-                                    no_shard,
-                                    DType::F32,
-                                )
-                            })
-                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
-                            .unwrap_or(1.0)
+                        vb.get_with_hints_dtype(
+                            (),
+                            "gate_up_proj_weight_scale_2",
+                            no_shard,
+                            DType::F32,
+                        )
+                        .or_else(|_| {
+                            vb.get_with_hints_dtype(
+                                (1,),
+                                "gate_up_proj_weight_scale_2",
+                                no_shard,
+                                DType::F32,
+                            )
+                        })
+                        .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                        .unwrap_or(1.0)
                     } else if vb.contains_tensor("gate_up_proj_weight_global_scale") {
                         let raw = vb
                             .get_with_hints_dtype(
@@ -1699,17 +1704,22 @@ impl FusedMoeNvfp4 {
                         DType::U8,
                     )?;
                     let down_gscale = if vb.contains_tensor("down_proj_weight_scale_2") {
-                        vb.get_with_hints_dtype((), "down_proj_weight_scale_2", no_shard, DType::F32)
-                            .or_else(|_| {
-                                vb.get_with_hints_dtype(
-                                    (1,),
-                                    "down_proj_weight_scale_2",
-                                    no_shard,
-                                    DType::F32,
-                                )
-                            })
-                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
-                            .unwrap_or(1.0)
+                        vb.get_with_hints_dtype(
+                            (),
+                            "down_proj_weight_scale_2",
+                            no_shard,
+                            DType::F32,
+                        )
+                        .or_else(|_| {
+                            vb.get_with_hints_dtype(
+                                (1,),
+                                "down_proj_weight_scale_2",
+                                no_shard,
+                                DType::F32,
+                            )
+                        })
+                        .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                        .unwrap_or(1.0)
                     } else if vb.contains_tensor("down_proj_weight_global_scale") {
                         let raw = vb
                             .get_with_hints_dtype(
