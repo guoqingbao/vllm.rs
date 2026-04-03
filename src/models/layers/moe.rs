@@ -1513,12 +1513,15 @@ impl FusedMoeNvfp4 {
         }
     }
 
-    fn load_global_scale(vb: &candle_nn::var_builder::ShardedVarBuilder, shard: Shard) -> f32 {
+    fn load_global_scale(vb: &candle_nn::var_builder::ShardedVarBuilder) -> f32 {
+        let no_shard = Shard::default();
         if vb.contains_tensor("weight_global_scale") {
             // compressed-tensors format: weight_global_scale is a divisor, invert it
             let raw = vb
-                .get_with_hints_dtype((1,), "weight_global_scale", shard, DType::F32)
-                .or_else(|_| vb.get_with_hints_dtype((), "weight_global_scale", shard, DType::F32))
+                .get_with_hints_dtype((1,), "weight_global_scale", no_shard, DType::F32)
+                .or_else(|_| {
+                    vb.get_with_hints_dtype((), "weight_global_scale", no_shard, DType::F32)
+                })
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                 .unwrap_or(1.0);
             if raw != 0.0 {
@@ -1528,8 +1531,8 @@ impl FusedMoeNvfp4 {
             }
         } else if vb.contains_tensor("weight_scale_2") {
             // modelopt format: weight_scale_2 is the direct multiplier
-            vb.get_with_hints_dtype((1,), "weight_scale_2", shard, DType::F32)
-                .or_else(|_| vb.get_with_hints_dtype((), "weight_scale_2", shard, DType::F32))
+            vb.get_with_hints_dtype((1,), "weight_scale_2", no_shard, DType::F32)
+                .or_else(|_| vb.get_with_hints_dtype((), "weight_scale_2", no_shard, DType::F32))
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                 .unwrap_or(1.0)
         } else {
@@ -1585,7 +1588,7 @@ impl FusedMoeNvfp4 {
                         sh0,
                         DType::U8,
                     )?);
-                    gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb, sh0));
+                    gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb));
 
                     let up_proj_vb = expert_vb.pp("up_proj");
                     let packed_name = Self::tensor_name_packed(&up_proj_vb);
@@ -1603,7 +1606,7 @@ impl FusedMoeNvfp4 {
                         sh0,
                         DType::U8,
                     )?);
-                    up_gscales_vec.push(Self::load_global_scale(&up_proj_vb, sh0));
+                    up_gscales_vec.push(Self::load_global_scale(&up_proj_vb));
 
                     let down_proj_vb = expert_vb.pp("down_proj");
                     let packed_name = Self::tensor_name_packed(&down_proj_vb);
@@ -1622,7 +1625,7 @@ impl FusedMoeNvfp4 {
                         sh1,
                         DType::U8,
                     )?);
-                    down_gscales_vec.push(Self::load_global_scale(&down_proj_vb, sh1));
+                    down_gscales_vec.push(Self::load_global_scale(&down_proj_vb));
                 }
             }
             _ => candle_core::bail!("FusedMoeNvfp4: GGUF loading not supported for NVFP4"),

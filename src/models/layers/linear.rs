@@ -1212,11 +1212,15 @@ impl LnNvfp4 {
             vb.get_with_hints_dtype((out_dim, scale_dim), "scales", shard, DType::U8)?
         };
 
+        let no_shard = Shard::default();
         let global_scale = if vb.contains_tensor("weight_global_scale") {
             // compressed-tensors format: weight_global_scale is a divisor, invert it
-            let t = match vb.get_with_hints_dtype((1,), "weight_global_scale", shard, DType::F32) {
+            let t = match vb.get_with_hints_dtype((1,), "weight_global_scale", no_shard, DType::F32)
+            {
                 Ok(t) => t,
-                Err(_) => vb.get_with_hints_dtype((), "weight_global_scale", shard, DType::F32)?,
+                Err(_) => {
+                    vb.get_with_hints_dtype((), "weight_global_scale", no_shard, DType::F32)?
+                }
             };
             let raw = t.flatten_all()?.to_vec1::<f32>()?[0];
             if raw != 0.0 {
@@ -1226,9 +1230,9 @@ impl LnNvfp4 {
             }
         } else if vb.contains_tensor("weight_scale_2") {
             // modelopt format: weight_scale_2 is the direct multiplier
-            let t = match vb.get_with_hints_dtype((1,), "weight_scale_2", shard, DType::F32) {
+            let t = match vb.get_with_hints_dtype((1,), "weight_scale_2", no_shard, DType::F32) {
                 Ok(t) => t,
-                Err(_) => vb.get_with_hints_dtype((), "weight_scale_2", shard, DType::F32)?,
+                Err(_) => vb.get_with_hints_dtype((), "weight_scale_2", no_shard, DType::F32)?,
             };
             t.flatten_all()?.to_vec1::<f32>()?[0]
         } else {
