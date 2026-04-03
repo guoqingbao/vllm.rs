@@ -3,6 +3,7 @@ pub mod glm4;
 pub mod glm4_moe;
 pub mod layers;
 pub mod llama;
+pub mod llama4;
 pub mod mistral3_vl;
 pub mod phi4;
 pub mod qwen3;

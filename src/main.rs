@@ -214,11 +214,18 @@ async fn main() -> Result<()> {
         args.yarn_scaling_factor,
     );
 
-    let engine = LLMEngine::new(&econfig, dtype)?;
-    if args.server || args.ui_server || args.pd_server {
+    let server_port = if args.server || args.ui_server || args.pd_server {
         let port = args
             .port
             .unwrap_or(if args.pd_server { 7000 } else { 8000 });
+        vllm_rs::utils::ensure_port_free("0.0.0.0", port as u16);
+        Some(port)
+    } else {
+        None
+    };
+
+    let engine = LLMEngine::new(&econfig, dtype)?;
+    if let Some(port) = server_port {
         run_server(engine.clone(), econfig.clone(), port, args.ui_server).await?;
         return Ok(());
     }
