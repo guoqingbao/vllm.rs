@@ -60,22 +60,15 @@ macro_rules! serde_default {
 }
 
 pub fn module_path_matches_not_convert(module_path: &str, item: &str) -> bool {
-    let module_path = module_path.trim_end_matches(".weight");
-    let item = item.trim_end_matches(".weight");
-    module_path == item
-        || module_path.ends_with(item)
-        || module_path.ends_with(&format!(".{item}"))
-        || item.ends_with(module_path)
-        || item.ends_with(&format!(".{module_path}"))
+    crate::utils::config::match_ignore_pattern(module_path, item)
 }
 
 pub fn should_skip_fp8_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
-    if module_path.is_empty() || cfg.modules_to_not_convert.is_empty() {
-        return false;
-    }
-    cfg.modules_to_not_convert
-        .iter()
-        .any(|item| module_path_matches_not_convert(module_path, item))
+    cfg.should_skip_module(module_path)
+}
+
+pub fn should_skip_quant_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
+    cfg.should_skip_module(module_path)
 }
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
@@ -142,6 +135,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         "qwen3vl" => "Qwen3VLForConditionalGeneration".to_string(),
         "qwen3vlmoe" => "Qwen3VLMoeForConditionalGeneration".to_string(),
         "gemma3" => "Gemma3ForConditionalGeneration".to_string(),
+        "gemma4" => "Gemma4ForConditionalGeneration".to_string(),
         "mistral3" => "Mistral3ForConditionalGeneration".to_string(),
         _ => arch.clone(),
     };
@@ -324,7 +318,60 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mod_cfg = if matches!(arch.as_str(), "qwen3moe" | "qwen2moe" | "qwen35moe") {
+    let mod_cfg = if arch == "gemma4" {
+        let expert_count = md_get(format!("{arch}.expert_count").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let expert_used_count = md_get(format!("{arch}.expert_used_count").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let expert_ff_length = md_get(format!("{arch}.expert_feed_forward_length").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        if let (Some(ec), Some(euc)) = (expert_count, expert_used_count) {
+            if ec > 0 {
+                Some(MoEConfig {
+                    moe_intermediate_size: expert_ff_length.unwrap_or(feed_forward_length),
+                    shared_expert_intermediate_size: None,
+                    num_experts: Some(ec),
+                    mlp_only_layers: Some(Vec::new()),
+                    decoder_sparse_step: Some(1),
+                    norm_topk_prob: true,
+                    num_experts_per_tok: euc,
+                    first_k_dense_replace: None,
+                    n_shared_experts: None,
+                    routed_scaling_factor: None,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if arch == "gpt-oss" {
+        let expert_count = md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize;
+        let expert_used_count =
+            md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()? as usize;
+        let expert_ff_length = md_get(format!("{arch}.expert_feed_forward_length").as_str())
+            .and_then(|v| v.to_u32())
+            .map(|v| v as usize)
+            .unwrap_or(feed_forward_length);
+        Some(MoEConfig {
+            moe_intermediate_size: expert_ff_length,
+            shared_expert_intermediate_size: None,
+            num_experts: Some(expert_count),
+            mlp_only_layers: Some(Vec::new()),
+            decoder_sparse_step: Some(1),
+            norm_topk_prob: false,
+            num_experts_per_tok: expert_used_count,
+            first_k_dense_replace: None,
+            n_shared_experts: None,
+            routed_scaling_factor: None,
+        })
+    } else if matches!(arch.as_str(), "qwen3moe" | "qwen2moe" | "qwen35moe") {
         let expert_feed_forward_length =
             md_get(format!("{arch}.expert_feed_forward_length").as_str())?.to_u32()? as usize;
         let expert_weights_norm = md_get(format!("{arch}.expert_weights_norm").as_str());
@@ -394,7 +441,117 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let extra_config_json = if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
+    let extra_config_json = if arch == "gemma4" {
+        let sw = md_get(format!("{arch}.attention.sliding_window").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+
+        let sliding_window_pattern: Vec<bool> =
+            match md_get(format!("{arch}.attention.sliding_window_pattern").as_str()) {
+                Ok(v) => match v.to_vec() {
+                    Ok(arr) => arr.iter().map(|v| v.to_bool().unwrap_or(true)).collect(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
+            };
+
+        let layer_types_vec: Vec<&str> = if sliding_window_pattern.is_empty() {
+            (0..block_count)
+                .map(|i| {
+                    if (i + 1) % 6 == 0 {
+                        "full_attention"
+                    } else {
+                        "sliding_attention"
+                    }
+                })
+                .collect()
+        } else {
+            sliding_window_pattern
+                .iter()
+                .map(|&is_sliding| {
+                    if is_sliding {
+                        "sliding_attention"
+                    } else {
+                        "full_attention"
+                    }
+                })
+                .collect()
+        };
+
+        let global_head_dim = md_get(format!("{arch}.attention.key_length").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize)
+            .unwrap_or(head_dim);
+
+        let swa_head_dim = md_get(format!("{arch}.attention.key_length_swa").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+
+        let rope_freq_base_swa = md_get(format!("{arch}.rope.freq_base_swa").as_str())
+            .and_then(|v| v.to_f64())
+            .ok()
+            .unwrap_or(10000.0);
+
+        let final_logit_softcapping = md_get(format!("{arch}.final_logit_softcapping").as_str())
+            .and_then(|v| v.to_f64())
+            .ok();
+
+        let enable_moe = mod_cfg.is_some();
+
+        let num_global_kv_heads = md_get(format!("{arch}.attention.head_count_kv").as_str())
+            .ok()
+            .and_then(|v| {
+                v.to_u32().ok().map(|val| val as usize).or_else(|| {
+                    v.to_vec().ok().and_then(|arr| {
+                        arr.last()
+                            .and_then(|val| val.to_u32().ok())
+                            .map(|val| val as usize)
+                    })
+                })
+            });
+
+        Some(
+            serde_json::json!({
+                "architectures": ["Gemma4ForConditionalGeneration"],
+                "layer_types": layer_types_vec,
+                "sliding_window": sw,
+                "global_head_dim": global_head_dim,
+                "swa_head_dim": swa_head_dim,
+                "rope_local_base_freq": rope_freq_base_swa,
+                "final_logit_softcapping": final_logit_softcapping,
+                "enable_moe_block": enable_moe,
+                "num_global_key_value_heads": num_global_kv_heads,
+            })
+            .to_string(),
+        )
+    } else if arch == "gpt-oss" {
+        let sw = md_get(format!("{arch}.attention.sliding_window").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let mut layer_types_vec = Vec::new();
+        for i in 0..block_count {
+            if i % 2 == 0 {
+                layer_types_vec.push("sliding_attention");
+            } else {
+                layer_types_vec.push("full_attention");
+            }
+        }
+        Some(
+            serde_json::json!({
+                "architectures": ["GptOssForCausalLM"],
+                "layer_types": layer_types_vec,
+                "sliding_window": sw,
+                "swiglu_limit": 7.0,
+                "alpha": 1.702,
+                "attention_bias": true,
+            })
+            .to_string(),
+        )
+    } else if matches!(arch.as_str(), "qwen35" | "qwen35moe") {
         let conv_kernel_size =
             md_get(format!("{arch}.ssm.conv_kernel").as_str())?.to_u32()? as usize;
         let num_k_heads = md_get(format!("{arch}.ssm.group_count").as_str())?.to_u32()? as usize;
@@ -424,7 +581,12 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let cfg = Config {
+    let gguf_sliding_window = md_get(format!("{arch}.attention.sliding_window").as_str())
+        .and_then(|v| v.to_u32())
+        .ok()
+        .map(|v| v as usize);
+
+    let mut cfg = Config {
         architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
@@ -445,8 +607,12 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         tie_word_embeddings: Some(!has_output_weight),
         bos_token_id,
         eos_token_id: Some(eos_token_id),
-        use_sliding_window: None,
-        sliding_window: None,
+        use_sliding_window: if gguf_sliding_window.is_some() {
+            Some(true)
+        } else {
+            None
+        },
+        sliding_window: gguf_sliding_window,
         max_window_layers: None,
         partial_rotary_factor,
         hidden_act: candle_nn::Activation::Silu,
@@ -458,6 +624,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         is_multi_model: None,
         extra_config_json,
     };
+
+    if arch == "gemma4" || arch == "gemma3" {
+        cfg.hidden_act = candle_nn::Activation::GeluPytorchTanh;
+    }
 
     Ok(cfg)
 }
@@ -698,10 +868,10 @@ fn merge_multimodal_top_level_config(
 ) -> Result<()> {
     if let Some(qcfg) = raw_root.get("quantization_config") {
         if !qcfg.is_null() {
-            config.quantization_config = Some(
-                serde_json::from_value::<QuantConfig>(qcfg.clone())
-                    .map_err(candle_core::Error::wrap)?,
-            );
+            let mut parsed = serde_json::from_value::<QuantConfig>(qcfg.clone())
+                .map_err(candle_core::Error::wrap)?;
+            parsed.normalize_compressed_tensors();
+            config.quantization_config = Some(parsed);
         }
     }
 
@@ -867,6 +1037,8 @@ fn require_model_penalty(arch: String) -> bool {
             | "phi4"
             | "Gemma3ForConditionalGeneration"
             | "Gemma3ForCausalLM"
+            | "Gemma4ForConditionalGeneration"
+            | "Gemma4ForCausalLM"
     )
 }
 
@@ -944,6 +1116,52 @@ pub fn init_config_tokenizer(
                         config.eos_token_id = gemma3_cfg.eos_token_id;
                         config
                     }
+                    "Gemma4ForConditionalGeneration" => {
+                        let mut config: Config = serde_json::from_value(config_value.clone())
+                            .map_err(candle_core::Error::wrap)?;
+                        let tc = &raw_config_json["text_config"];
+                        if let Some(num_experts) = tc.get("num_experts").and_then(|v| v.as_u64()) {
+                            if num_experts > 0 {
+                                let top_k =
+                                    tc.get("top_k_experts")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(8) as usize;
+                                let moe_intermediate = tc
+                                    .get("moe_intermediate_size")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(config.intermediate_size as u64)
+                                    as usize;
+                                config.moe_cfg = Some(MoEConfig {
+                                    moe_intermediate_size: moe_intermediate,
+                                    shared_expert_intermediate_size: None,
+                                    num_experts: Some(num_experts as usize),
+                                    mlp_only_layers: Some(Vec::new()),
+                                    decoder_sparse_step: Some(1),
+                                    norm_topk_prob: true,
+                                    num_experts_per_tok: top_k,
+                                    first_k_dense_replace: None,
+                                    n_shared_experts: None,
+                                    routed_scaling_factor: None,
+                                });
+                            }
+                        }
+                        if let Some(rp) = tc.get("rope_parameters") {
+                            if let Some(fa) = rp.get("full_attention") {
+                                if let Some(theta) = fa.get("rope_theta").and_then(|v| v.as_f64()) {
+                                    config.rope_theta = Some(theta);
+                                }
+                                if let Some(prf) =
+                                    fa.get("partial_rotary_factor").and_then(|v| v.as_f64())
+                                {
+                                    config.partial_rotary_factor = Some(prf as f32);
+                                }
+                            }
+                        }
+                        if let Some(eos) = raw_config_json.get("eos_token_id") {
+                            config.eos_token_id = serde_json::from_value(eos.clone()).ok();
+                        }
+                        config
+                    }
                     "Qwen3VLMoeForConditionalGeneration" | "Qwen3_5MoeForConditionalGeneration" => {
                         let mut config: Config = serde_json::from_value(config_value.clone())
                             .map_err(candle_core::Error::wrap)?;
@@ -992,12 +1210,27 @@ pub fn init_config_tokenizer(
             }
         }
 
-        if let Some(qcfg) = &config.quantization_config {
+        if let Some(qcfg) = &mut config.quantization_config {
+            qcfg.normalize_compressed_tensors();
+            if let Some(mode) = &qcfg.mode {
+                if mode.eq_ignore_ascii_case("nvfp4") || mode.eq_ignore_ascii_case("mxfp4") {
+                    panic!(
+                        "MLX-quantized models (mode=\"{}\") are not supported. \
+                         MLX uses an incompatible packing format (U32 weights with integer scales). \
+                         Please use a modelopt or compressed-tensors quantized model instead \
+                         (e.g. AxionML/Qwen3.5-*-NVFP4 or nvidia/*-NVFP4).",
+                        mode
+                    );
+                }
+            }
             assert!(
                 qcfg.quant_method == "gptq"
                     || qcfg.quant_method == "awq"
-                    || qcfg.quant_method == "fp8",
-                "Invalid quantization format! Only `gptq`, `awq` and `fp8` supported"
+                    || qcfg.quant_method == "fp8"
+                    || qcfg.quant_method == "mxfp4"
+                    || qcfg.quant_method == "nvfp4",
+                "Invalid quantization format! Only `gptq`, `awq`, `fp8`, `mxfp4` and `nvfp4` supported, got `{}`",
+                qcfg.quant_method
             );
             if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
                 assert!(
@@ -1169,6 +1402,7 @@ pub fn init_config_tokenizer(
                         | "Qwen3VLForConditionalGeneration"
                         | "Qwen3VLMoeForConditionalGeneration"
                         | "Gemma3ForConditionalGeneration"
+                        | "Gemma4ForConditionalGeneration"
                         | "Mistral3ForConditionalGeneration"
                 ) {
                     crate::log_error!(
@@ -1452,6 +1686,12 @@ pub fn get_arch_rope(
         ("qwen3vl", false),
         ("qwen3vlmoe", false),
         ("gemma3", false),
+        ("Gemma4ForConditionalGeneration", false),
+        ("Gemma4ForCausalLM", false),
+        ("gemma4", false),
+        ("GptOssForCausalLM", false),
+        ("gpt-oss", false),
+        ("gpt_oss", false),
     ]
     .iter()
     .cloned()
@@ -1468,20 +1708,16 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
+        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
+            ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
         "Qwen3_5ForCausalLM" | "qwen35" => (
             ModelType::Qwen3_5,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3NextForCausalLM" => (
+        "Qwen3_5MoeForCausalLM" | "Qwen3NextForCausalLM" | "qwen35moe" => (
             ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "Qwen3_5MoeForCausalLM" | "qwen35moe" => (
-            ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
-            ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "Qwen3VLForConditionalGeneration"
@@ -1538,6 +1774,14 @@ pub fn get_arch_rope(
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" | "gemma3" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+        ),
+        "Gemma4ForConditionalGeneration" | "Gemma4ForCausalLM" | "gemma4" => (
+            ModelType::Gemma4,
+            "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n".to_string(),
+        ),
+        "GptOssForCausalLM" | "gpt-oss" | "gpt_oss" => (
+            ModelType::GptOss,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
     };
@@ -1853,5 +2097,22 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
+    }
+}
+
+/// Fail fast if `host:port` is already bound, before spending minutes loading
+/// model weights.  Prints a user-friendly error and exits the process when the
+/// port is occupied.
+pub fn ensure_port_free(host: &str, port: u16) {
+    let addr = format!("{host}:{port}");
+    match std::net::TcpListener::bind(&addr) {
+        Ok(_listener) => { /* port is free; drop the listener immediately */ }
+        Err(e) => {
+            eprintln!(
+                "\n❌ Port {port} is already in use ({e}).\n   \
+                 Free the port or choose a different one with --port <port>.\n"
+            );
+            std::process::exit(1);
+        }
     }
 }
