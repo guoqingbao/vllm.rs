@@ -1514,7 +1514,20 @@ impl FusedMoeNvfp4 {
     }
 
     fn load_global_scale(vb: &candle_nn::var_builder::ShardedVarBuilder, shard: Shard) -> f32 {
-        if vb.contains_tensor("weight_scale_2") {
+        if vb.contains_tensor("weight_global_scale") {
+            // compressed-tensors format: weight_global_scale is a divisor, invert it
+            let raw = vb
+                .get_with_hints_dtype((1,), "weight_global_scale", shard, DType::F32)
+                .or_else(|_| vb.get_with_hints_dtype((), "weight_global_scale", shard, DType::F32))
+                .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                .unwrap_or(1.0);
+            if raw != 0.0 {
+                1.0 / raw
+            } else {
+                1.0
+            }
+        } else if vb.contains_tensor("weight_scale_2") {
+            // modelopt format: weight_scale_2 is the direct multiplier
             vb.get_with_hints_dtype((1,), "weight_scale_2", shard, DType::F32)
                 .or_else(|_| vb.get_with_hints_dtype((), "weight_scale_2", shard, DType::F32))
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
@@ -1628,7 +1641,14 @@ impl FusedMoeNvfp4 {
         let gate_up_gscales: Vec<f32> = gate_gscales_vec
             .iter()
             .zip(up_gscales_vec.iter())
-            .map(|(g, u)| (g + u) / 2.0)
+            .map(|(g, u)| {
+                if (g - u).abs() > f32::EPSILON {
+                    crate::log_warn!(
+                        "NVFP4 MoE: gate/up global scales differ ({g} vs {u}), using gate scale"
+                    );
+                }
+                *g
+            })
             .collect();
         let gate_up_global_scales = Tensor::from_vec(gate_up_gscales, (num_experts,), dev)?;
 
