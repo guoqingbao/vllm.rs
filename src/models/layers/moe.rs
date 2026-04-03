@@ -72,6 +72,8 @@ fn resolve_packed_gate_up_layout(cfg: &Config) -> Result<PackedGateUpLayout> {
             | "Qwen3_5MoeForConditionalGeneration"
             | "Qwen3NextForCausalLM"
             | "Qwen3NextForConditionalGeneration"
+            | "Gemma4ForConditionalGeneration"
+            | "Gemma4ForCausalLM"
     ) {
         return Ok(PackedGateUpLayout::InterPacked);
     }
@@ -105,6 +107,8 @@ fn resolve_packed_down_layout(cfg: &Config) -> PackedDownLayout {
             | "Qwen3_5MoeForConditionalGeneration"
             | "Qwen3NextForCausalLM"
             | "Qwen3NextForConditionalGeneration"
+            | "Gemma4ForConditionalGeneration"
+            | "Gemma4ForCausalLM"
     ) {
         PackedDownLayout::HiddenInter
     } else {
@@ -323,6 +327,45 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         })
     }
 
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+
+        let gate = linear_no_bias(
+            cfg.hidden_size,
+            num_experts,
+            gate_vb,
+            Shard::default(),
+            &None,
+            &None,
+            dtype,
+        )?;
+
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, experts_vb, comm.clone())?;
+        let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
+        let world_size = comm.world_size();
+        let w_size_n = gate_up_w.dim(1)? / 2;
+        Ok(Self {
+            gate,
+            gate_up_w,
+            down_w,
+            w_size_n,
+            act: MoeActFn::default(),
+            norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
+            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            all_reduce: AllReduce::new(comm),
+            world_size,
+            dtype,
+        })
+    }
+
     pub fn set_act(&mut self, act: MoeActFn) {
         self.act = act;
     }
@@ -425,26 +468,58 @@ impl FusedMoeGGUF {
         let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
-            Either::Right(v) => (
-                v.pp("ffn_gate_exps")
-                    .get(
-                        (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                    )?
-                    .dequantize_f16(&v.device())?,
-                v.pp("ffn_up_exps")
-                    .get(
-                        (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                        "weight",
-                    )?
-                    .dequantize_f16(&v.device())?,
-                v.pp("ffn_down_exps")
-                    .get(
-                        (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                        "weight",
-                    )?
-                    .dequantize_f16(&v.device())?,
-            ),
+            Either::Right(v) => {
+                let packed_result = v.pp("ffn_gate_up_exps").get(
+                    (
+                        num_experts,
+                        moe_cfg.moe_intermediate_size * 2,
+                        cfg.hidden_size,
+                    ),
+                    "weight",
+                );
+                if let Ok(packed) = packed_result {
+                    let deq = packed.dequantize_f16(&v.device())?;
+                    let gate_exp = deq
+                        .narrow(1, 0, moe_cfg.moe_intermediate_size)?
+                        .contiguous()?;
+                    let up_exp = deq
+                        .narrow(
+                            1,
+                            moe_cfg.moe_intermediate_size,
+                            moe_cfg.moe_intermediate_size,
+                        )?
+                        .contiguous()?;
+                    let down = v
+                        .pp("ffn_down_exps")
+                        .get(
+                            (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                            "weight",
+                        )?
+                        .dequantize_f16(&v.device())?;
+                    (gate_exp, up_exp, down)
+                } else {
+                    (
+                        v.pp("ffn_gate_exps")
+                            .get(
+                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "weight",
+                            )?
+                            .dequantize_f16(&v.device())?,
+                        v.pp("ffn_up_exps")
+                            .get(
+                                (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                                "weight",
+                            )?
+                            .dequantize_f16(&v.device())?,
+                        v.pp("ffn_down_exps")
+                            .get(
+                                (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                                "weight",
+                            )?
+                            .dequantize_f16(&v.device())?,
+                    )
+                }
+            }
             _ => {
                 panic!("Invalid varbuilder!");
             }
@@ -526,20 +601,54 @@ impl FusedMoeGGUF {
         let gate = Linear::new(gate_ws, None, &None)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
-            Either::Right(v) => (
-                v.pp("ffn_gate_exps").get(
-                    (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+            Either::Right(v) => {
+                let packed_result = v.pp("ffn_gate_up_exps").get(
+                    (
+                        num_experts,
+                        moe_cfg.moe_intermediate_size * 2,
+                        cfg.hidden_size,
+                    ),
                     "weight",
-                )?,
-                v.pp("ffn_up_exps").get(
-                    (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
-                    "weight",
-                )?,
-                v.pp("ffn_down_exps").get(
-                    (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
-                    "weight",
-                )?,
-            ),
+                );
+                if let Ok(packed) = packed_result {
+                    let orig_dtype = packed.dtype();
+                    let deq = packed.dequantize_f16(&v.device())?;
+                    let gate_exp = deq
+                        .narrow(1, 0, moe_cfg.moe_intermediate_size)?
+                        .contiguous()?;
+                    let up_exp = deq
+                        .narrow(
+                            1,
+                            moe_cfg.moe_intermediate_size,
+                            moe_cfg.moe_intermediate_size,
+                        )?
+                        .contiguous()?;
+                    let down = v.pp("ffn_down_exps").get(
+                        (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                        "weight",
+                    )?;
+                    (
+                        Arc::new(QTensor::quantize(&gate_exp, orig_dtype)?),
+                        Arc::new(QTensor::quantize(&up_exp, orig_dtype)?),
+                        down,
+                    )
+                } else {
+                    (
+                        v.pp("ffn_gate_exps").get(
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "weight",
+                        )?,
+                        v.pp("ffn_up_exps").get(
+                            (num_experts, moe_cfg.moe_intermediate_size, cfg.hidden_size),
+                            "weight",
+                        )?,
+                        v.pp("ffn_down_exps").get(
+                            (num_experts, cfg.hidden_size, moe_cfg.moe_intermediate_size),
+                            "weight",
+                        )?,
+                    )
+                }
+            }
             _ => {
                 panic!("Invalid varbuilder!");
             }
@@ -862,6 +971,70 @@ impl FusedMoeISQ {
 
             (gate_experts, up_experts, down_experts)
         };
+
+        let gate_experts = QTensor::quantize(&gate_experts, quant_type)?;
+        let up_experts = QTensor::quantize(&up_experts, quant_type)?;
+        let down_experts = QTensor::quantize(&down_experts, GgmlDType::Q8_0)?;
+        let world_size = comm.world_size();
+
+        Ok(Self {
+            gate,
+            gate_experts,
+            up_experts,
+            down_experts,
+            act: MoeActFn::default(),
+            norm_topk_prob: moe_cfg.norm_topk_prob,
+            routed_scaling_factor: moe_cfg.routed_scaling_factor,
+            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            all_reduce: AllReduce::new(comm),
+            world_size,
+            dtype,
+        })
+    }
+
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+
+        let mut quant_type = match cfg.quant.as_ref().unwrap().as_str() {
+            "q40" | "q4_0" => GgmlDType::Q4_0,
+            "q4" | "q41" | "q4_1" => GgmlDType::Q4_1,
+            "q50" | "q5_0" => GgmlDType::Q5_0,
+            "q5" | "q51" | "q5_1" => GgmlDType::Q5_1,
+            "q8" | "q80" | "q8_0" => GgmlDType::Q8_0,
+            "q2k" | "q2_k" => GgmlDType::Q2K,
+            "q3k" | "q3_k" => GgmlDType::Q3K,
+            "q4k" | "q4_k" => GgmlDType::Q4K,
+            "q5k" | "q5_k" => GgmlDType::Q5K,
+            "q6k" | "q6_k" => GgmlDType::Q6K,
+            _ => panic!("Unsupported GGML data type!"),
+        };
+
+        let block_size = quant_type.block_size();
+        if comm.world_size() > 1
+            && moe_cfg.moe_intermediate_size / comm.world_size() % block_size != 0
+        {
+            quant_type = GgmlDType::Q8_0;
+        }
+
+        let gate = linear_no_bias(
+            cfg.hidden_size,
+            num_experts,
+            gate_vb,
+            Shard::default(),
+            &None,
+            &None,
+            DType::F32,
+        )?;
+
+        let (gate_experts, up_experts, down_experts) =
+            FusedMoe::load_packed(cfg, experts_vb, comm.clone())?;
 
         let gate_experts = QTensor::quantize(&gate_experts, quant_type)?;
         let up_experts = QTensor::quantize(&up_experts, quant_type)?;

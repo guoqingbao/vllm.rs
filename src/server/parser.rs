@@ -103,7 +103,7 @@ impl ToolConfig {
                     end_is_special: false,
                 }
             }
-            ModelType::Gemma | ModelType::Gemma3 => {
+            ModelType::Gemma | ModelType::Gemma3 | ModelType::Gemma4 => {
                 // Gemma 2/3 - uses text-only matching
                 ToolConfig {
                     start_token_ids: start_ids,
@@ -1246,7 +1246,7 @@ impl StreamToolParser {
                     "qwen"
                 }
             }
-            ModelType::Gemma | ModelType::Gemma3 => "json",
+            ModelType::Gemma | ModelType::Gemma3 | ModelType::Gemma4 => "json",
             ModelType::Phi | ModelType::Phi4 => "qwen",
             ModelType::GLM4 | ModelType::GLM4MoE => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",

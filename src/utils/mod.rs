@@ -135,6 +135,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         "qwen3vl" => "Qwen3VLForConditionalGeneration".to_string(),
         "qwen3vlmoe" => "Qwen3VLMoeForConditionalGeneration".to_string(),
         "gemma3" => "Gemma3ForConditionalGeneration".to_string(),
+        "gemma4" => "Gemma4ForConditionalGeneration".to_string(),
         "mistral3" => "Mistral3ForConditionalGeneration".to_string(),
         _ => arch.clone(),
     };
@@ -317,7 +318,40 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let mod_cfg = if arch == "gpt-oss" {
+    let mod_cfg = if arch == "gemma4" {
+        let expert_count = md_get(format!("{arch}.expert_count").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let expert_used_count = md_get(format!("{arch}.expert_used_count").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        let expert_ff_length = md_get(format!("{arch}.expert_feed_forward_length").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+        if let (Some(ec), Some(euc)) = (expert_count, expert_used_count) {
+            if ec > 0 {
+                Some(MoEConfig {
+                    moe_intermediate_size: expert_ff_length.unwrap_or(feed_forward_length),
+                    shared_expert_intermediate_size: None,
+                    num_experts: Some(ec),
+                    mlp_only_layers: Some(Vec::new()),
+                    decoder_sparse_step: Some(1),
+                    norm_topk_prob: true,
+                    num_experts_per_tok: euc,
+                    first_k_dense_replace: None,
+                    n_shared_experts: None,
+                    routed_scaling_factor: None,
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if arch == "gpt-oss" {
         let expert_count = md_get(format!("{arch}.expert_count").as_str())?.to_u32()? as usize;
         let expert_used_count =
             md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()? as usize;
@@ -407,7 +441,93 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let extra_config_json = if arch == "gpt-oss" {
+    let extra_config_json = if arch == "gemma4" {
+        let sw = md_get(format!("{arch}.attention.sliding_window").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+
+        let sliding_window_pattern: Vec<bool> =
+            match md_get(format!("{arch}.attention.sliding_window_pattern").as_str()) {
+                Ok(v) => match v.to_vec() {
+                    Ok(arr) => arr.iter().map(|v| v.to_bool().unwrap_or(true)).collect(),
+                    Err(_) => Vec::new(),
+                },
+                Err(_) => Vec::new(),
+            };
+
+        let layer_types_vec: Vec<&str> = if sliding_window_pattern.is_empty() {
+            (0..block_count)
+                .map(|i| {
+                    if (i + 1) % 6 == 0 {
+                        "full_attention"
+                    } else {
+                        "sliding_attention"
+                    }
+                })
+                .collect()
+        } else {
+            sliding_window_pattern
+                .iter()
+                .map(|&is_sliding| {
+                    if is_sliding {
+                        "sliding_attention"
+                    } else {
+                        "full_attention"
+                    }
+                })
+                .collect()
+        };
+
+        let global_head_dim = md_get(format!("{arch}.attention.key_length").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize)
+            .unwrap_or(head_dim);
+
+        let swa_head_dim = md_get(format!("{arch}.attention.key_length_swa").as_str())
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize);
+
+        let rope_freq_base_swa = md_get(format!("{arch}.rope.freq_base_swa").as_str())
+            .and_then(|v| v.to_f64())
+            .ok()
+            .unwrap_or(10000.0);
+
+        let final_logit_softcapping = md_get(format!("{arch}.final_logit_softcapping").as_str())
+            .and_then(|v| v.to_f64())
+            .ok();
+
+        let enable_moe = mod_cfg.is_some();
+
+        let num_global_kv_heads = md_get(format!("{arch}.attention.head_count_kv").as_str())
+            .ok()
+            .and_then(|v| {
+                v.to_u32().ok().map(|val| val as usize).or_else(|| {
+                    v.to_vec().ok().and_then(|arr| {
+                        arr.last()
+                            .and_then(|val| val.to_u32().ok())
+                            .map(|val| val as usize)
+                    })
+                })
+            });
+
+        Some(
+            serde_json::json!({
+                "architectures": ["Gemma4ForConditionalGeneration"],
+                "layer_types": layer_types_vec,
+                "sliding_window": sw,
+                "global_head_dim": global_head_dim,
+                "swa_head_dim": swa_head_dim,
+                "rope_local_base_freq": rope_freq_base_swa,
+                "final_logit_softcapping": final_logit_softcapping,
+                "enable_moe_block": enable_moe,
+                "num_global_key_value_heads": num_global_kv_heads,
+            })
+            .to_string(),
+        )
+    } else if arch == "gpt-oss" {
         let sw = md_get(format!("{arch}.attention.sliding_window").as_str())
             .and_then(|v| v.to_u32())
             .ok()
@@ -466,7 +586,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         .ok()
         .map(|v| v as usize);
 
-    let cfg = Config {
+    let mut cfg = Config {
         architectures: Some(vec![canonical_arch.clone()]),
         head_dim: Some(head_dim),
         num_attention_heads: head_count,
@@ -504,6 +624,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         is_multi_model: None,
         extra_config_json,
     };
+
+    if arch == "gemma4" || arch == "gemma3" {
+        cfg.hidden_act = candle_nn::Activation::GeluPytorchTanh;
+    }
 
     Ok(cfg)
 }
@@ -913,6 +1037,8 @@ fn require_model_penalty(arch: String) -> bool {
             | "phi4"
             | "Gemma3ForConditionalGeneration"
             | "Gemma3ForCausalLM"
+            | "Gemma4ForConditionalGeneration"
+            | "Gemma4ForCausalLM"
     )
 }
 
@@ -988,6 +1114,52 @@ pub fn init_config_tokenizer(
                         let mut config: Config = serde_json::from_value(config_value)
                             .map_err(candle_core::Error::wrap)?;
                         config.eos_token_id = gemma3_cfg.eos_token_id;
+                        config
+                    }
+                    "Gemma4ForConditionalGeneration" => {
+                        let mut config: Config = serde_json::from_value(config_value.clone())
+                            .map_err(candle_core::Error::wrap)?;
+                        let tc = &raw_config_json["text_config"];
+                        if let Some(num_experts) = tc.get("num_experts").and_then(|v| v.as_u64()) {
+                            if num_experts > 0 {
+                                let top_k =
+                                    tc.get("top_k_experts")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(8) as usize;
+                                let moe_intermediate = tc
+                                    .get("moe_intermediate_size")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(config.intermediate_size as u64)
+                                    as usize;
+                                config.moe_cfg = Some(MoEConfig {
+                                    moe_intermediate_size: moe_intermediate,
+                                    shared_expert_intermediate_size: None,
+                                    num_experts: Some(num_experts as usize),
+                                    mlp_only_layers: Some(Vec::new()),
+                                    decoder_sparse_step: Some(1),
+                                    norm_topk_prob: true,
+                                    num_experts_per_tok: top_k,
+                                    first_k_dense_replace: None,
+                                    n_shared_experts: None,
+                                    routed_scaling_factor: None,
+                                });
+                            }
+                        }
+                        if let Some(rp) = tc.get("rope_parameters") {
+                            if let Some(fa) = rp.get("full_attention") {
+                                if let Some(theta) = fa.get("rope_theta").and_then(|v| v.as_f64()) {
+                                    config.rope_theta = Some(theta);
+                                }
+                                if let Some(prf) =
+                                    fa.get("partial_rotary_factor").and_then(|v| v.as_f64())
+                                {
+                                    config.partial_rotary_factor = Some(prf as f32);
+                                }
+                            }
+                        }
+                        if let Some(eos) = raw_config_json.get("eos_token_id") {
+                            config.eos_token_id = serde_json::from_value(eos.clone()).ok();
+                        }
                         config
                     }
                     "Qwen3VLMoeForConditionalGeneration" | "Qwen3_5MoeForConditionalGeneration" => {
@@ -1230,6 +1402,7 @@ pub fn init_config_tokenizer(
                         | "Qwen3VLForConditionalGeneration"
                         | "Qwen3VLMoeForConditionalGeneration"
                         | "Gemma3ForConditionalGeneration"
+                        | "Gemma4ForConditionalGeneration"
                         | "Mistral3ForConditionalGeneration"
                 ) {
                     crate::log_error!(
@@ -1513,6 +1686,9 @@ pub fn get_arch_rope(
         ("qwen3vl", false),
         ("qwen3vlmoe", false),
         ("gemma3", false),
+        ("Gemma4ForConditionalGeneration", false),
+        ("Gemma4ForCausalLM", false),
+        ("gemma4", false),
         ("GptOssForCausalLM", false),
         ("gpt-oss", false),
         ("gpt_oss", false),
@@ -1598,6 +1774,10 @@ pub fn get_arch_rope(
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" | "gemma3" => (
             ModelType::Gemma3,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+        ),
+        "Gemma4ForConditionalGeneration" | "Gemma4ForCausalLM" | "gemma4" => (
+            ModelType::Gemma4,
+            "<start_of_turn>user\n{}<end_of_turn>\n<start_of_turn>model\n".to_string(),
         ),
         "GptOssForCausalLM" | "gpt-oss" | "gpt_oss" => (
             ModelType::GptOss,
