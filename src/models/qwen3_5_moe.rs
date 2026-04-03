@@ -6,7 +6,9 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::linear::LinearX as Linear;
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::{FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeISQ};
+use crate::models::layers::moe::{
+    FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4, FusedMoeNvfp4,
+};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -32,6 +34,8 @@ enum MoeOrMlp {
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
     FusedMoeFp8(FusedMoeFp8),
+    FusedMoeMxfp4(FusedMoeMxfp4),
+    FusedMoeNvfp4(FusedMoeNvfp4),
 }
 
 impl MoeOrMlp {
@@ -41,6 +45,8 @@ impl MoeOrMlp {
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
             Self::FusedMoeFp8(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeMxfp4(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeNvfp4(m) => m.forward(xs, is_prefill),
         }
     }
 }
@@ -126,8 +132,22 @@ impl Qwen3_5MoEDecoderLayer {
                     dtype,
                     quant_config,
                 )?)
+            } else if quant_config.quant_method == "mxfp4" {
+                MoeOrMlp::FusedMoeMxfp4(FusedMoeMxfp4::new(
+                    config,
+                    vb.pp("mlp").clone(),
+                    comm.clone(),
+                    dtype,
+                )?)
+            } else if quant_config.quant_method == "nvfp4" {
+                MoeOrMlp::FusedMoeNvfp4(FusedMoeNvfp4::new(
+                    config,
+                    vb.pp("mlp").clone(),
+                    comm.clone(),
+                    dtype,
+                )?)
             } else {
-                panic!("Unsupported quant method for MoE (use unquantized, gguf or fp8)!");
+                panic!("Unsupported quant method for MoE (use unquantized, gguf, fp8, mxfp4 or nvfp4)!");
             }
         } else if config.quant.is_some() {
             MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(

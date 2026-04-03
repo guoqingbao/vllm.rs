@@ -121,7 +121,8 @@ impl ToolConfig {
             | ModelType::GLM4MoE
             | ModelType::Yi
             | ModelType::StableLM
-            | ModelType::DeepSeek => ToolConfig {
+            | ModelType::DeepSeek
+            | ModelType::GptOss => ToolConfig {
                 start_token_ids: HashSet::new(),
                 end_token_ids: HashSet::new(),
                 start_token_str: "<tool_call>".to_string(),
@@ -1250,6 +1251,7 @@ impl StreamToolParser {
             ModelType::GLM4 | ModelType::GLM4MoE => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
+            ModelType::GptOss => "json",
         }
     }
 
