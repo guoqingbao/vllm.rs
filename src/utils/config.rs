@@ -743,37 +743,15 @@ impl QuantConfig {
     /// Normalizes a quantization config into a canonical quant_method string.
     ///
     /// Handles the following families:
-    ///   1. MLX-style: `mode` == `"nvfp4"` or `"mxfp4"` (quant_method may be empty)
-    ///   2. `modelopt` with `quant_algo` == `NVFP4` / `FP4`
-    ///   3. `compressed-tensors` with `format` containing `nvfp4` or `mxfp4`
-    ///   4. `compressed-tensors` detected from `config_groups` content
+    ///   1. `modelopt` with `quant_algo` == `NVFP4` / `FP4`
+    ///   2. `compressed-tensors` with `format` containing `nvfp4` or `mxfp4`
+    ///   3. `compressed-tensors` detected from `config_groups` content
+    ///
+    /// MLX-style quantization (`"mode": "nvfp4"/"mxfp4"`) uses an incompatible
+    /// packing format (U32 weights, integer scales) and is NOT supported.
     ///
     /// Also extracts group_size / bits from config_groups when present.
     pub fn normalize_compressed_tensors(&mut self) {
-        // MLX-style: {"mode": "nvfp4", "bits": 4, "group_size": 16}
-        if let Some(mode) = &self.mode {
-            if mode.eq_ignore_ascii_case("nvfp4") {
-                self.quant_method = "nvfp4".to_string();
-                if self.group_size == 0 {
-                    self.group_size = 16;
-                }
-                if self.bits == 0 {
-                    self.bits = 4;
-                }
-                return;
-            }
-            if mode.eq_ignore_ascii_case("mxfp4") {
-                self.quant_method = "mxfp4".to_string();
-                if self.group_size == 0 {
-                    self.group_size = 32;
-                }
-                if self.bits == 0 {
-                    self.bits = 4;
-                }
-                return;
-            }
-        }
-
         // modelopt: {"quant_method": "modelopt", "quant_algo": "NVFP4"}
         if self.quant_method == "modelopt" {
             if let Some(algo) = &self.quant_algo {
@@ -1376,19 +1354,22 @@ mod tests {
     }
 
     #[test]
-    fn test_nvfp4_mlx_community_config() {
-        // mlx-community/Qwen3.5-0.8B-nvfp4 style: mode field, no quant_method
+    fn test_mlx_nvfp4_not_normalized() {
+        // MLX-community models use an incompatible quantization format:
+        // U32-packed weights + integer U8 scales (NOT FP8 E4M3 block scales).
+        // These must NOT be normalized to our "nvfp4" quant_method.
         let json = r#"{
             "group_size": 16,
             "bits": 4,
             "mode": "nvfp4"
         }"#;
         let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(cfg.quant_method, ""); // default empty before normalization
+        assert_eq!(cfg.quant_method, "");
         cfg.normalize_compressed_tensors();
-        assert_eq!(cfg.quant_method, "nvfp4");
-        assert_eq!(cfg.bits, 4);
-        assert_eq!(cfg.group_size, 16);
+        assert_eq!(
+            cfg.quant_method, "",
+            "MLX mode=nvfp4 must not normalize to nvfp4"
+        );
     }
 
     #[test]
