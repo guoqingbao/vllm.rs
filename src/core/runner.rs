@@ -1,4 +1,5 @@
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
+use crate::models::gemma4::Gemma4ForCausalLM;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::linear::set_fp8_linear_is_prefill;
@@ -89,6 +90,7 @@ pub enum Model {
     DeepSeek(Arc<DeepSeekForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
+    Gemma4(Arc<Gemma4ForCausalLM>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
 }
 
@@ -405,6 +407,7 @@ impl ModelRunner {
                 DeepSeek => DeepSeekForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
+                Gemma4 => Gemma4ForCausalLM,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
             }
         )?;
@@ -427,6 +430,7 @@ impl ModelRunner {
                 DeepSeek => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
+                Gemma4 => EmbedInputs,
                 Qwen3VL => NoneArg,
             }
         );
@@ -877,6 +881,7 @@ impl ModelRunner {
                 DeepSeek => false,
                 Mistral3VL => images,
                 Gemma3 => images,
+                Gemma4 => false,
                 Qwen3VL => images,
             }
         )?;
@@ -904,6 +909,7 @@ impl ModelRunner {
                 Phi4 => false,
                 GLM4 => false,
                 Gemma3 => None,
+                Gemma4 => false,
             },
             candle_core::bail!("Embedding is not supported for this model type")
         )?;
@@ -1069,7 +1075,8 @@ impl ModelRunner {
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
-        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3) {
+        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3 | ModelType::Gemma4)
+        {
             Some(true)
         } else {
             None
@@ -1581,6 +1588,7 @@ impl ModelRunner {
             Model::DeepSeek(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
+            Model::Gemma4(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),
         }
     }
