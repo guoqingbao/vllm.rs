@@ -1,13 +1,14 @@
 use super::{
-    build_messages_and_images, ChatMessage, ImageUrlContent, MessageContent, MessageContentType,
-    ServerData,
+    build_guided_decoding_grammar, build_messages_and_images, ChatMessage, ImageUrlContent,
+    MessageContent, MessageContentType, ServerData,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::logger::ChatCompletionLogger;
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
 use crate::tools::helpers::{
     build_invalid_tool_call_feedback, build_tool_schema_map, filter_tool_calls,
-    retain_tool_calls_forced_name, strict_tool_call_validation_enabled,
+    retain_tool_calls_forced_name, sanitize_tools_for_llguidance,
+    strict_tool_call_validation_enabled,
 };
 use crate::tools::{Tool, ToolCall, ToolChoice};
 use crate::utils::config::SamplingParams;
@@ -2122,6 +2123,7 @@ pub async fn messages(
     }
     let use_claude_thinking_blocks = anthropic_thinking_enabled;
 
+    let sanitized_tools = sanitize_tools_for_llguidance(&resolved_tools);
     let tool_schemas = Arc::new(build_tool_schema_map(&resolved_tools));
     params.mcp_mode = if !resolved_tools.is_empty() {
         Some(true)
@@ -2141,11 +2143,39 @@ pub async fn messages(
     let parser_model_id =
         super::resolve_engine_model_id(&engine_config).unwrap_or_else(|| model_id.clone());
     let enforce_parser = engine_config.enforce_parser.clone();
+    let tool_parser_name = if let Some(ref enforced) = enforce_parser {
+        enforced.clone()
+    } else {
+        StreamToolParser::parser_name_for_model(&model_type, &parser_model_id).to_string()
+    };
 
     let img_cfg = {
         let e = data.engine.read();
         e.img_cfg.clone()
     };
+
+    {
+        let engine = data.engine.read();
+
+        params.grammar = build_guided_decoding_grammar(
+            &engine.guidance_tokens,
+            &tool_config,
+            &sanitized_tools,
+            &tool_parser_name,
+            None,
+            tool_choice_required,
+            forced_tool_name.clone(),
+            max_tokens,
+            None,
+            engine_config.enable_tool_grammar,
+            engine_config.allow_constraint_api,
+        );
+
+        if let Some(ref grammar) = params.grammar {
+            let lark = crate::utils::guidance::get_lark_from_top_level_grammar(grammar);
+            crate::log_info!("[llg] Final Claude grammar:\n{}", lark);
+        }
+    }
 
     let (messages, image_data) = match build_messages_and_images(&chat_messages, img_cfg.as_ref()) {
         Ok(output) => output,

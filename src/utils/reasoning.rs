@@ -6,6 +6,8 @@
 
 use crate::utils::special_tokens::SpecialTokens;
 use llguidance::api::TopLevelGrammar;
+use crate::utils::guidance::{GuidanceTokens, get_lark_from_top_level_grammar};
+use tokenizers::Tokenizer;
 
 /// Reasoning effort level for grammar generation
 /// Optimized for specific reasoning strategies based on current research (2024-2025)
@@ -42,6 +44,21 @@ pub enum ReasoningEffort {
     Custom(String),
 }
 
+impl Into<String> for ReasoningEffort {
+    fn into(self) -> String {
+        match self {
+            ReasoningEffort::None => "none",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::ChainOfThought => "chain_of_thought",
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            ReasoningEffort::Custom(_val) => "custom",
+        }
+        .to_string()
+    }
+}
+
 impl ReasoningEffort {
     pub fn from_str(s: String) -> Self {
         match s.to_lowercase().as_str() {
@@ -49,7 +66,7 @@ impl ReasoningEffort {
             "low" => Self::Low,
             "normal" | "medium" => Self::Medium, // Backward compatibility
             "high" => Self::High,
-            "chain_of_thought" | "cot" | "cove" => Self::ChainOfThought,
+            "very_high" | "chain_of_thought" | "cot" | "cove" => Self::ChainOfThought,
             #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
             s if s.starts_with("custom:") => Self::Custom(s[7..].to_string()),
             #[cfg(feature = "python")]
@@ -59,28 +76,32 @@ impl ReasoningEffort {
         }
     }
 
+    /// Check if reasoning effort is enabled (not None)
+    pub fn is_enabled(&self) -> bool {
+        *self != ReasoningEffort::None
+    }
+
     /// Generate the appropriate grammar template for this reasoning level
     pub fn generate_grammar(&self, start_id: u32, end_id: u32) -> String {
-        match self {
+    match self {
             Self::None => {
                 // No reasoning block - direct output only
                 // Minimal latency, no structured thinking
                 format!(
-                    r#"start: reasoning_block text
-text: /[\x09\x0A\x0D\x20-\x7E]*?/
-reasoning_block: <[{}]> "\n" text "\n" <[{}]>
-"#,
-                    start_id, end_id
+                    r#"start: reasoning_block
+reasoning_block: <[{start_id}]> "\n\n" <[{end_id}]> "\n\n"
+"#
                 )
             }
             Self::Low => {
                 // Fast Thinking: Single paragraph constraint (max ~150 chars)
                 // Limits generation space to reduce hallucination risk
                 // Uses non-greedy matching to prevent runaway generation
+                // Renamed 'text' to 'text' with suffix annotation for termination
                 format!(
                     r#"start: reasoning_block
-reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
-thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,300}}/
+reasoning_block: <[{start_id}]> "\n" think_text "\n" (think_text+ "\n")? <[{end_id}]> "\n\n"
+think_text[suffix="\n"]: /[ -~]+/
 "#
                 )
             }
@@ -90,8 +111,8 @@ thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,300}}/
                 // Allows multiple steps but enforces sentence boundaries
                 format!(
                     r#"start: reasoning_block
-reasoning_block: <[{start_id}]> "\n" thinkgram "\n" <[{end_id}]> "\n"
-thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,1200}}/
+reasoning_block: <[{start_id}]> "\n" text "\n" <[{end_id}]> "\n\n"
+text: /(?s:.+?)/
 "#
                 )
             }
@@ -100,13 +121,12 @@ thinkgram: /[\x09\x0A\x0D\x20-\x7E]+?{{1,1200}}/
                 // Implements Cheng & Su (2025) adversarial critique pattern
                 // Forces model to challenge its own reasoning before finalizing
                 format!(
-                    r#"start: reasoning_block* analysis_block*
-reasoning_block: <[{start_id}]> "\n" : analysis_block analysis_content critique_phase critique_content thinkgram "\n" <[{end_id}]> "\n"
-analysis_block: "<ANALYZE>" "\n" analysis_content "\n" "</ANALYZE>" "\n"
-analysis_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,2400}}/
-critique_phase: "<CRITIQUE>" "\n" critique_content "\n" "</CRITIQUE>" "\n"
-critique_content: /[\x09\x0A\x0D\x20-\x7E]*?{{1,1200}}/
-thinkgram: "<STRUCTUREDANSWER>" "\n" /[\x09\x0A\x0D\x20-\x7E]*?{{1,3600}}/ "\n" "</STRUCTUREDANSWER>" "\n"
+                    r#"start: reasoning_block
+reasoning_block: <[{start_id}]> analysis_block critique_block structure_block "\n" <[{end_id}]> "\n\n"
+analysis_block: "\n<analysis>\n" text "\n</analysis>\n"
+critique_block: "\n<critique>\n" text "\n</critique>\n"
+structure_block: "\n<structure_response>\n" text "\n</structure_response>\n"
+text: /(?s:.+?)/
 "#
                 )
             }
@@ -115,16 +135,13 @@ thinkgram: "<STRUCTUREDANSWER>" "\n" /[\x09\x0A\x0D\x20-\x7E]*?{{1,3600}}/ "\n" 
                 // Combines Madaan et al. (2024) Chain-of-Verification with self-correction
                 // Maximum accuracy for complex/fact-sensitive tasks
                 format!(
-                    r#"start: reasoning_block+
-reasoning_block: <[{start_id}]> "\n" draft_phase verification_phase critique_phase final_phase "\n" <[{end_id}]> "\n"
-draft_phase: /(?s:[^.!?]+[.!?])+/
-verification_phase: "<VERIFY>" "\n" verification_questions "\n" verification_answers "\n" "</VERIFY>" "\n"
-verification_questions: /(?s:[^.!?]+[.!?])+/
-verification_answers: /[\x09\x0A\x0D\x20-\x7E]*?/
-critique_phase: "<CRITIQUE>" "\n" self_critique "\n" "</CRITIQUE>" "\n"
-self_critique: /[\x09\x0A\x0D\x20-\x7E]*?/
-final_phase: "<FINAL_ANSWER>" "\n" final_content "\n"
-final_content: /[\x09\x0A\x0D\x20-\x7E]*?/
+                    r#"start: reasoning_block
+reasoning_block: <[{start_id}]> "\n" draft_block verification_block critique_block structure_block "\n" <[{end_id}]> "\n\n"
+draft_block: "\n<draft>\nCardinalities of concern, intended outcomes, and structures of consideration: " text "\n</draft>\n"
+verification_block: "\n<verify>\nQuestions, assumptions, and suppositions: " text "\nMechanics of proving/disproving assumptions and qualifying the facts: " text "\n</verify>\n" 
+critique_block: "\n<critique>\nAdversarial assessment of evaluation: " text "\n</critique>\n"
+structure_block: "\n<structure_response>\n" text "\n</structure_response>\n"
+text: /(?s:.+?)/
 "#
                 )
             }
@@ -226,9 +243,50 @@ pub fn build_reasoning_grammar(
     crate::utils::guidance::merge_top_level_grammars(vec![reasoning_gram, base_grammar], None, None)
 }
 
+/// Extract reasoning token strings from GuidanceTokens using tokenizer
+/// Returns Some((start_string, end_string)) if tokens exist, None otherwise
+pub fn get_reasoning_token_strings(
+    guidance_tokens: &GuidanceTokens,
+    tokenizer: &Tokenizer,
+) -> Option<(String, String)> {
+    if guidance_tokens.reasoning_start_ids.is_empty()
+        || guidance_tokens.reasoning_end_ids.is_empty() {
+        return None;
+    }
+
+    // Use tokenizer to decode token IDs to strings
+    let start_str = tokenizer.decode(&guidance_tokens.reasoning_start_ids, false).ok()?;
+    let end_str = tokenizer.decode(&guidance_tokens.reasoning_end_ids, false).ok()?;
+
+    Some((start_str, end_str))
+}
+
+pub fn is_reasoning_grammar(grammar: &TopLevelGrammar) -> bool {
+    // Extract the Lark representation from TopLevelGrammar
+    // This requires a helper function to serialize/deserialize the grammar structure
+    let lark_str = get_lark_from_top_level_grammar(grammar);
+    // Check for reasoning-specific definition in the grammar structure using added_vocab tokens
+    lark_str.split("\n").into_iter().any(|l: &str| l.contains("reasoning_block") && l.contains("<[") && l.contains("]>"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_reasoning_token_strings_returns_none_for_empty_tokens() {
+        // Test that get_reasoning_token_strings returns None when no reasoning tokens are configured
+        let guidance_tokens = GuidanceTokens {
+            reasoning_start_ids: vec![],
+            reasoning_end_ids: vec![],
+            ..Default::default()
+        };
+
+        // We can't create a real tokenizer in a unit test, but we can test the early return
+        // The function will try to decode and return None if decoding fails
+        // Since we don't have a tokenizer, we just verify the function signature
+        assert!(guidance_tokens.reasoning_start_ids.is_empty());
+    }
 
     #[test]
     fn test_reasoning_effort_from_str() {

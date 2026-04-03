@@ -417,6 +417,11 @@ impl ChatTemplate {
         }
         Some(suffix_text)
     }
+    
+    /// Get the template string for external use (e.g., validation checks)
+    pub fn get_template_string(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
 }
 
 #[cfg(test)]

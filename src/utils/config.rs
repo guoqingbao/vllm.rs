@@ -8,7 +8,7 @@ use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -113,7 +113,14 @@ impl EosTokenId {
     pub fn to_vec(&self) -> Vec<u32> {
         match self {
             EosTokenId::Single(x) => vec![*x],
-            EosTokenId::Multiple(v) => v.clone(),
+            EosTokenId::Multiple(v) => {
+                // Deduplicate while preserving order
+                let mut seen = HashSet::new();
+                v.iter()
+                    .filter(|&id| seen.insert(*id))
+                    .cloned()
+                    .collect()
+            }
         }
     }
 
@@ -309,6 +316,10 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
     pub yarn_scaling_factor: Option<f64>,
+    /// Allow client-submitted constraints via HTTP API
+    pub allow_constraint_api: bool,
+    /// Whether to automatically build LLG grammar from tools
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(feature = "python")]
@@ -388,6 +399,9 @@ pub struct EngineConfig {
     pub pd_client_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub yarn_scaling_factor: Option<f64>,
+    pub allow_constraint_api: bool,
+    #[pyo3(get, set)]
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -423,6 +437,8 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -474,6 +490,8 @@ impl EngineConfig {
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }
@@ -664,6 +682,31 @@ pub enum ModelType {
     DeepSeek,
     Mistral3VL,
     Qwen3VL,
+}
+impl ModelType {
+    /// Convert architecture string to ModelType
+    pub fn from_architectures(architectures: &[String]) -> Option<Self> {
+        architectures.first().and_then(|arch| match arch.as_str() {
+            "Qwen3ForCausalLM" => Some(ModelType::Qwen3),
+            "Qwen3MoEForCausalLM" => Some(ModelType::Qwen3MoE),
+            "Qwen3_5ForCausalLM" => Some(ModelType::Qwen3_5),
+            "Qwen3_5MoEForCausalLM" => Some(ModelType::Qwen3_5MoE),
+            "LlamaForCausalLM" => Some(ModelType::LLaMa),
+            "GemmaForCausalLM" => Some(ModelType::Gemma),
+            "Gemma3ForConditionalGeneration" => Some(ModelType::Gemma3),
+            "PhiForCausalLM" => Some(ModelType::Phi),
+            "Phi4ForCausalLM" => Some(ModelType::Phi4),
+            "MistralForCausalLM" => Some(ModelType::Mistral),
+            "GLM4ForCausalLM" => Some(ModelType::GLM4),
+            "GLM4MoEForCausalLM" => Some(ModelType::GLM4MoE),
+            "YiForCausalLM" => Some(ModelType::Yi),
+            "StableLmForCausalLM" => Some(ModelType::StableLM),
+            "DeepSeekForCausalLM" => Some(ModelType::DeepSeek),
+            "Mistral3VForConditionalGeneration" => Some(ModelType::Mistral3VL),
+            "Qwen3VLMoEForConditionalGeneration" => Some(ModelType::Qwen3VL),
+            _ => None,
+        })
+    }
 }
 
 #[cfg_attr(feature = "python", pyclass)]

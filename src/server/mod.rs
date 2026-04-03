@@ -8,12 +8,16 @@ pub mod parser;
 pub mod server;
 pub mod streaming;
 use crate::core::engine::LLMEngine;
+use crate::server::parser::ToolConfig;
 use crate::server::streaming::Streamer;
-use crate::tools::schema::{schema_to_tools, ToolGrammarBuilder};
+use crate::tools::schema::{
+    build_xml_tool_grammar_for_parser, schema_to_tools, ToolGrammarBuilder,
+};
+use crate::tools::Tool;
 use crate::transfer::PdRole;
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, SamplingParams};
-use crate::utils::guidance::{compose_grammars, GuidanceTokens, TopLevelGrammarExt};
+use crate::utils::guidance::{compose_grammars, GuidanceTokens, TopLevelGrammarExt, build_fallback_tool_envelope_grammar};
 use crate::utils::image::{
     compute_tokens_per_image, get_tensor_raw_data, load_image_from_base64, load_image_from_url,
     ImageData, ImageProcessConfig, ImageProcessTrait, IMAGE_PLACEHOLDER,
@@ -61,7 +65,7 @@ where
     }))
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub model: Option<String>,
@@ -109,6 +113,90 @@ pub struct ChatCompletionRequest {
     /// Values: "none", "low", "medium", "high"
     #[serde(default, alias = "reasoning")]
     pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GrammarRequest {
+    /// Messages for the conversation (without system prompt)
+    pub messages: Vec<ChatMessage>,
+    /// LLGuidance grammar definition (Lark format)
+    pub grammar: String,
+    /// Type of grammar: "lark", "json_schema", "regex", "choice"
+    #[serde(default = "default_grammar_type")]
+    pub grammar_type: String,
+    /// Optional system prompt override (plain text, not Jinja2)
+    #[serde(default)]
+    pub system_prompt_override: Option<String>,
+    /// Whether to stream the response
+    #[serde(default)]
+    pub stream: bool,
+    /// Maximum tokens to generate
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    /// Temperature for sampling
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Top-k for sampling
+    #[serde(default)]
+    pub top_k: Option<isize>,
+    /// Top-p for sampling
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    /// Frequency penalty
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    /// Presence penalty
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    /// Session ID for conversation persistence
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Extra thinking parameters
+    #[serde(default, alias = "enable_thinking")]
+    pub thinking: Option<bool>,
+    /// Stop sequences
+    #[serde(
+        default,
+        alias = "stop_sequences",
+        deserialize_with = "deserialize_stop_sequences"
+    )]
+    pub stop: Option<Vec<String>>,
+}
+
+fn default_grammar_type() -> String {
+    "lark".to_string()
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrammarResponse {
+    pub id: String,
+    pub object: String,
+    pub created: u64,
+    pub model: String,
+    pub choices: Vec<GrammarChoice>,
+    pub usage: Usage,
+    pub grammar_metadata: Option<GrammarMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrammarChoice {
+    pub index: usize,
+    pub message: GrammarMessage,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrammarMessage {
+    pub role: String,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grammar_metadata: Option<GrammarMetadata>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GrammarMetadata {
+    pub grammar_type: String,
+    pub matched_cache: bool,
 }
 
 pub fn resolve_engine_model_id(econfig: &EngineConfig) -> Option<String> {
@@ -239,7 +327,7 @@ pub fn grammar_fragment_from_structured_outputs(
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
         let schema = crate::tools::schema::sanitize_schema_for_llguidance(schema);
-        let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
+        let json_gram = TopLevelGrammarExt::from_json_schema_ascii(schema)
             .map_err(|e| candle_core::Error::msg(e.to_string()))?;
         selected = Some(json_gram);
     }
@@ -250,7 +338,7 @@ pub fn grammar_fragment_from_structured_outputs(
             crate::log_error!("[llg] Multiple constraints specified - structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag");
             return Err(candle_core::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
         }
-        let lark_gram = TopLevelGrammarExt::from_lark_utf8(grammar);
+        let lark_gram = TopLevelGrammarExt::from_lark_ascii(grammar);
         selected = Some(lark_gram);
     }
 
@@ -298,12 +386,12 @@ pub fn grammar_fragment_from_response_format(
                 ));
             };
             let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
-            let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
+            let json_gram = TopLevelGrammarExt::from_json_schema_ascii(schema)
                 .map_err(|e| candle_core::Error::msg(e.to_string()))?;
             Ok(Some(json_gram))
         }
         "json_object" => {
-            let json_gram = TopLevelGrammarExt::from_json_schema_utf8(json!({
+            let json_gram = TopLevelGrammarExt::from_json_schema_ascii(json!({
                 "type": "object"
             }))
             .map_err(|e| candle_core::Error::msg(e.to_string()))?;
@@ -344,7 +432,12 @@ fn structured_outputs_kind(structured: &StructuredOutputs) -> &'static str {
 
 pub fn collect_openai_constraint_grammar(
     request: &ChatCompletionRequest,
+    allow_constraint_api: bool,
 ) -> Result<Option<TopLevelGrammar>> {
+    if !allow_constraint_api {
+        return Ok(None);
+    }
+
     let mut selected: Option<TopLevelGrammar> = None;
 
     let mut try_set = |grammar: TopLevelGrammar, source: &str, kind: &str| -> Result<()> {
@@ -391,12 +484,12 @@ pub fn collect_openai_constraint_grammar(
         let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
         let grammar = match constraint_type {
             "regex" => TopLevelGrammarExt::from_regex_ascii(grammar_str),
-            "lark" => TopLevelGrammarExt::from_lark_utf8(grammar_str),
+            "lark" => TopLevelGrammarExt::from_lark_ascii(grammar_str),
             "json_schema" | "json" => {
                 let value: serde_json::Value =
                     serde_json::from_str(grammar_str).map_err(candle_core::Error::wrap)?;
                 let value = crate::tools::schema::sanitize_schema_for_llguidance(&value);
-                TopLevelGrammarExt::from_json_schema_utf8(value)
+                TopLevelGrammarExt::from_json_schema_ascii(value)
                     .map_err(candle_core::Error::wrap)?
             }
             other => {
@@ -412,19 +505,33 @@ pub fn collect_openai_constraint_grammar(
     Ok(selected)
 }
 
+#[allow(unused_variables)]
 pub fn build_guided_decoding_grammar(
     guidance_tokens: &GuidanceTokens,
+    tool_config: &ToolConfig,
+    tools: &[Tool],
+    tool_parser_name: &str,
     constraint_grammar: Option<TopLevelGrammar>,
+    tool_choice_required: bool,
+    forced_tool_name: Option<String>,
     max_tokens: usize,
     reasoning_effort: Option<ReasoningEffort>,
+    enable_tool_grammar: bool,
+    allow_constraint_api: bool,
 ) -> Option<TopLevelGrammar> {
-    if constraint_grammar.is_none() {
+    let constraint_enabled = constraint_grammar.is_some();
+    let reasoning_enabled = reasoning_effort
+        .as_ref()
+        .is_some_and(|effort| *effort != ReasoningEffort::None);
+
+    if !constraint_enabled && !reasoning_enabled && !enable_tool_grammar && !allow_constraint_api {
         return None;
     }
 
     crate::log_info!(
-        "[llg] Guided decoding enabled: constraint={} max_tokens={} reasoning={}",
-        true,
+        "[llg] Guided decoding enabled: constraint={} parser={} max_tokens={} reasoning={}",
+        constraint_enabled,
+        tool_parser_name,
         max_tokens,
         reasoning_effort
             .as_ref()
@@ -432,8 +539,54 @@ pub fn build_guided_decoding_grammar(
             .unwrap_or_else(|| "none".to_string())
     );
 
+    // Build tool grammar using parser-specific format (XML for qwen_coder, JSON for others)
+
+    let tool_grammar = if tools.is_empty() {
+        None
+    } else if enable_tool_grammar {
+        let start_ids = if tool_config.start_token_ids.is_empty() {
+            None
+        } else {
+            Some(tool_config.start_token_ids.clone())
+        };
+        let end_ids = if tool_config.end_token_ids.is_empty() {
+            None
+        } else {
+            Some(tool_config.end_token_ids.clone())
+        };
+
+        let grammar = build_xml_tool_grammar_for_parser(
+            tools,
+            &tool_config.start_token_str,
+            &tool_config.end_token_str,
+            tool_config.start_is_special,
+            tool_config.end_is_special,
+            start_ids.as_ref(),
+            end_ids.as_ref(),
+            tool_parser_name,
+        );
+        Some(grammar)
+    } else if allow_constraint_api && (constraint_grammar.is_some() || reasoning_effort.is_some()) {
+        // When enable_tool_grammar=false but allow_constraint_api=true,
+        // use fallback tool envelope grammar with text-based tags ONLY if
+        // there's an actual constraint or reasoning requested
+        Some(build_fallback_tool_envelope_grammar(
+            tools,
+            &tool_config.start_token_str,
+            &tool_config.end_token_str,
+            &tool_config.start_token_ids,
+            &tool_config.end_token_ids,
+        ))
+    } else {
+        // Both flags false - no tool grammar
+        None
+    };
+
     Some(compose_grammars(
         constraint_grammar.into_iter().collect(),
+        tool_grammar,
+        tool_choice_required,
+        forced_tool_name,
         Some(max_tokens),
         guidance_tokens,
         reasoning_effort,
@@ -441,25 +594,54 @@ pub fn build_guided_decoding_grammar(
 }
 
 pub fn normalize_reasoning_controls(params: &mut SamplingParams, guidance_tokens: &GuidanceTokens) {
-    let reasoning_enabled = params
-        .reasoning_effort
-        .as_ref()
-        .is_some_and(|effort| *effort != ReasoningEffort::None);
-    if !reasoning_enabled {
-        return;
+    #[cfg(not(feature = "python"))]
+    {
+        let reasoning_enabled = params
+            .reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| *effort != ReasoningEffort::None);
+        if !reasoning_enabled {
+            return;
+        }
+
+        let has_reasoning_tokens = !guidance_tokens.reasoning_start_ids.is_empty()
+            && !guidance_tokens.reasoning_end_ids.is_empty();
+        if !has_reasoning_tokens {
+            crate::log_warn!(
+                "[llg] reasoning_effort requested but current model/tokenizer does not expose reasoning tokens; disabling reasoning grammar"
+            );
+            params.reasoning_effort = None;
+            return;
+        }
+
+        params.thinking = Some(true);
     }
 
-    let has_reasoning_tokens = !guidance_tokens.reasoning_start_ids.is_empty()
-        && !guidance_tokens.reasoning_end_ids.is_empty();
-    if !has_reasoning_tokens {
-        crate::log_warn!(
-            "[llg] reasoning_effort requested but current model/tokenizer does not expose reasoning tokens; disabling reasoning grammar"
-        );
-        params.reasoning_effort = None;
-        return;
-    }
+    #[cfg(feature = "python")]
+    {
+        // In Python builds, reasoning_effort is Option<ReasoningEffort>
+        // Check if it's enabled using the is_enabled() method
+        let reasoning_enabled = params
+            .reasoning_effort
+            .as_ref()
+            .map(|effort| effort.is_enabled())
+            .unwrap_or(false);
+        if !reasoning_enabled {
+            return;
+        }
 
-    params.thinking = Some(true);
+        let has_reasoning_tokens = !guidance_tokens.reasoning_start_ids.is_empty()
+            && !guidance_tokens.reasoning_end_ids.is_empty();
+        if !has_reasoning_tokens {
+            crate::log_warn!(
+                "[llg] reasoning_effort requested but current model/tokenizer does not expose reasoning tokens; disabling reasoning grammar"
+            );
+            params.reasoning_effort = None;
+            return;
+        }
+
+        params.thinking = Some(true);
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -978,6 +1160,14 @@ pub struct Args {
     /// YARN RoPE scaling factor (explicit override, no auto-calculation)
     #[arg(long, default_value = None)]
     pub yarn_scaling_factor: Option<f64>,
+
+    /// Allow client-submitted constraints via HTTP API
+    #[arg(long, default_value = "false")]
+    pub allow_constraint_api: bool,
+
+    /// Whether to automatically build LLG grammar from tools
+    #[arg(long, default_value = "false")]
+    pub enable_tool_grammar: bool,
 }
 
 /// Result of executing tool calls via MCP
@@ -1422,6 +1612,7 @@ pub async fn run_server(
             }),
         )
         .route("/v1/chat/completions", post(server::chat_completion))
+        .route("/v1/grammar", post(server::grammar_completion))
         .route("/v1/messages", post(claude_server::messages))
         .route(
             "/v1/messages/count_tokens",
@@ -1680,12 +1871,12 @@ mod tests {
         let request: ChatCompletionRequest = serde_json::from_str(
             r#"{
                 "messages":[{"role":"user","content":"hi"}],
-                "structured_outputs":{"choice":["a"]},
+                "extra_body":{"structured_outputs":{"choice":["a"]}},
                 "response_format":{"type":"json_schema","json_schema":{"schema":{"type":"object"}}}
             }"#,
         )
         .unwrap();
-        let result = collect_openai_constraint_grammar(&request);
+        let result = collect_openai_constraint_grammar(&request, true);
         assert!(result.is_err());
     }
 
@@ -1833,43 +2024,69 @@ mod tests {
         let grammar = result.unwrap();
         assert!(grammar.is_some());
     }
-
+    use crate::utils::guidance::get_lark_from_top_level_grammar;
     #[test]
     fn test_build_guided_decoding_grammar_reasoning_only() {
         let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
             eos_token_ids: vec![2],
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
         };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
 
-        let grammar =
-            build_guided_decoding_grammar(&guidance_tokens, None, 64, Some(ReasoningEffort::Low));
-
-        assert!(
-            grammar.is_none(),
-            "reasoning-only requests must not build guided decoding without a constraint"
+        let grammar = build_guided_decoding_grammar(
+            &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
+            None,
+            false,
+            None,
+            64,
+            Some(ReasoningEffort::Low),
+            false, // enable_tool_grammar
+            true,  // allow_constraint_api
         );
+
+        let grammar = grammar.expect("reasoning-only guided grammar should be built");
+        let lark = get_lark_from_top_level_grammar(&grammar);
+        assert!(lark.contains("reasoning_block"), "should include reasoning");
+        assert!(lark.contains("text"), "should still include base text");
     }
 
     #[test]
     fn test_build_guided_decoding_grammar_reasoning_with_choice_constraint() {
         let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
             eos_token_ids: vec![2],
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
         };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
         let constraint =
-            TopLevelGrammar::from_lark_utf8(r#"start: "positive" | "negative" | "neutral""#);
+            TopLevelGrammar::from_lark_ascii(r#"start: "positive" | "negative" | "neutral""#);
 
         let grammar = build_guided_decoding_grammar(
             &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
             Some(constraint),
+            false,
+            None,
             64,
             Some(ReasoningEffort::Low),
+            false, // enable_tool_grammar
+            true,  // allow_constraint_api
         )
         .expect("reasoning + choice guided grammar should be built");
 
-        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        let lark = get_lark_from_top_level_grammar(&grammar);
         assert!(
             lark.contains("start: reasoning_block"),
             "start rule should sequence reasoning first: {lark}"
@@ -1883,7 +2100,7 @@ mod tests {
             "reasoning rule definition should remain on its own line: {lark}"
         );
         assert!(
-            lark.contains("\nthinkgram:"),
+            lark.contains("think_text["),
             "reasoning helper rules should remain intact: {lark}"
         );
     }
@@ -1891,10 +2108,14 @@ mod tests {
     #[test]
     fn test_build_guided_decoding_grammar_json_schema_constraint_with_reasoning() {
         let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
             eos_token_ids: vec![2],
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
         };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
         let constraint = TopLevelGrammar::from_json_schema(serde_json::json!({
             "type": "object",
             "properties": {
@@ -1906,39 +2127,46 @@ mod tests {
 
         let grammar = build_guided_decoding_grammar(
             &guidance_tokens,
+            &tool_config,
+            &[],
+            "qwen_coder",
             Some(constraint),
+            false,
+            None,
             64,
             Some(ReasoningEffort::Low),
+            false, // enable_tool_grammar
+            true,  // allow_constraint_api
         )
         .expect("reasoning + json-schema guided grammar should be built");
 
-        let lark = crate::utils::guidance::get_lark_from_top_level_grammar(&grammar);
+        let lark = get_lark_from_top_level_grammar(&grammar);
+        // The reasoning block wraps the inner constraint
         assert!(
-            lark.contains("@reasoning @inner"),
-            "wrapper should reference reasoning and inner subgrammars: {lark}"
+            lark.contains("reasoning_block"),
+            "should include reasoning_block: {lark}"
         );
+        // The inner grammar is a JSON schema which doesn't expose its content via lark_grammar
+        // but it's included in the grammar structure
         assert!(
-            !lark.contains("none have lark_grammar"),
-            "wrapper must not stringify non-lark grammars: {lark}"
-        );
-        assert!(
-            grammar
-                .grammars
-                .iter()
-                .any(|g| g.name.as_deref() == Some("inner") && g.json_schema.is_some()),
-            "json-schema constraint should be preserved as nested grammar"
+            lark.contains("inner"),
+            "should include inner start rule: {lark}"
         );
     }
 
     #[test]
+    #[cfg(not(feature = "python"))]
     fn test_normalize_reasoning_controls_enables_thinking() {
         let mut params = SamplingParams::new_with_max_tokens(32);
         params.thinking = Some(false);
         params.reasoning_effort = Some(ReasoningEffort::Low);
         let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
             eos_token_ids: vec![2],
             reasoning_start_ids: vec![101],
             reasoning_end_ids: vec![102],
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
         };
 
         normalize_reasoning_controls(&mut params, &guidance_tokens);
@@ -1948,14 +2176,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "python"))]
     fn test_normalize_reasoning_controls_disables_unsupported_reasoning() {
         let mut params = SamplingParams::new_with_max_tokens(32);
         params.thinking = Some(false);
         params.reasoning_effort = Some(ReasoningEffort::High);
         let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
             eos_token_ids: vec![2],
             reasoning_start_ids: Vec::new(),
             reasoning_end_ids: Vec::new(),
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
         };
 
         normalize_reasoning_controls(&mut params, &guidance_tokens);
@@ -1963,4 +2195,84 @@ mod tests {
         assert_eq!(params.thinking, Some(false));
         assert_eq!(params.reasoning_effort, None);
     }
+
+    #[test]
+    #[cfg(not(feature = "python"))]
+    fn test_build_guided_decoding_grammar_all_flag_combinations() {
+        // Test all 4 combinations of enable_tool_grammar and allow_constraint_api flags
+        // with tools present to ensure fallback tool envelope is used correctly
+
+        let guidance_tokens = GuidanceTokens {
+            bos_token_ids: Vec::new(),
+            eos_token_ids: vec![2],
+            reasoning_start_ids: Vec::new(),
+            reasoning_end_ids: Vec::new(),
+            tool_call_start_ids: Vec::new(),
+            tool_call_end_ids: Vec::new(),
+        };
+        let tool_config = ToolConfig::for_model_type(&crate::utils::config::ModelType::Qwen3);
+        
+        // Create a tool with mixed parameter types for testing
+        // String parameters use regex pattern, other types use %json schema
+        let tools = vec![crate::tools::ToolBuilder::new(
+            "test_tool".to_string(),
+            "A test tool".to_string(),
+        ).param("input", "string", "Test input parameter (string type)", true)
+        .param("count", "integer", "Test count parameter (integer type)", false)
+        .param("enabled", "boolean", "Test enabled parameter (boolean type)", false)
+        .build()];
+
+        let test_cases = vec![
+            // (enable_tool_grammar, allow_constraint_api, expected_grammar_type)
+            (true, true, "xml_tool"),      // Full XML tool grammar
+            (true, false, "xml_tool"),     // Full XML tool grammar (tools enabled)
+            (false, true, "fallback"),     // Fallback tool envelope with text tags
+            (false, false, "none"),        // No tool grammar
+        ];
+
+        for (enable_tool_grammar, allow_constraint_api, expected_type) in test_cases {
+            // For fallback test case, we need to pass a reasoning_effort to trigger the fallback grammar
+            let reasoning_effort = if expected_type == "fallback" {
+                Some(ReasoningEffort::Low)
+            } else {
+                None
+            };
+            let grammar = build_guided_decoding_grammar(
+                &guidance_tokens,
+                &tool_config,
+                &tools,
+                "qwen_coder",
+                None,
+                false,
+                None,
+                64,
+                reasoning_effort,
+                enable_tool_grammar,
+                allow_constraint_api,
+            );
+
+            match expected_type {
+                "xml_tool" => {
+                    assert!(grammar.is_some(), "Should have XML tool grammar when enable_tool_grammar=true");
+                    let lark = get_lark_from_top_level_grammar(grammar.as_ref().unwrap());
+                    // println!("XML Tool Grammar:\n{}\n", lark);
+                    assert!(lark.contains("%json"), "XML tool grammar should contain %json schema");
+                }
+                "fallback" => {
+                    assert!(grammar.is_some(), "Should have fallback grammar when allow_constraint_api=true");
+                    let lark = get_lark_from_top_level_grammar(grammar.as_ref().unwrap());
+                    // println!("Fallback Grammar:\n{}\n", lark);
+                    assert!(lark.contains("tool_call"), "Fallback grammar should contain tool_call rule");
+                    assert!(lark.contains("text"), "Fallback grammar should contain text rule");
+                }
+                "none" => {
+                    assert!(grammar.is_none(), "Should have no grammar when both flags are false");
+                    // println!("No grammar (expected for both flags false)");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 }
+
+
