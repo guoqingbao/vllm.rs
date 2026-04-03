@@ -95,6 +95,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
+- [Adding New Model Architectures to this project (AI-Assisted)](docs/add_model.md)
 
 ## 📘 Usage in Python
 
