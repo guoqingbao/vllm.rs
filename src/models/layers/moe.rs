@@ -1487,6 +1487,7 @@ pub struct FusedMoeNvfp4 {
     w_size_n: usize,
     act: candle_nn::Activation,
     norm_topk_prob: bool,
+    sigmoid_routing: bool,
     routed_scaling_factor: Option<f64>,
     num_experts_per_tok: usize,
     all_reduce: AllReduce,
@@ -1554,8 +1555,49 @@ impl FusedMoeNvfp4 {
             dtype,
         )?;
 
-        let experts_vb = vb.pp("experts");
+        Self::load_experts(
+            cfg,
+            moe_cfg,
+            num_experts,
+            gate,
+            vb.pp("experts"),
+            comm,
+            dtype,
+        )
+    }
 
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
+        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
+        let num_experts = moe_cfg.num_experts.unwrap();
+
+        let gate = linear_no_bias(
+            cfg.hidden_size,
+            num_experts,
+            gate_vb,
+            Shard::default(),
+            &cfg.quantization_config,
+            &None,
+            dtype,
+        )?;
+
+        Self::load_experts(cfg, moe_cfg, num_experts, gate, experts_vb, comm, dtype)
+    }
+
+    fn load_experts(
+        cfg: &Config,
+        moe_cfg: &crate::utils::config::MoEConfig,
+        num_experts: usize,
+        gate: Linear,
+        experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
         let mut gate_blocks_vec = Vec::new();
         let mut gate_scales_vec = Vec::new();
         let mut gate_gscales_vec: Vec<f32> = Vec::new();
@@ -1568,64 +1610,199 @@ impl FusedMoeNvfp4 {
 
         match &experts_vb.0 {
             Either::Left(vb) => {
-                for i in 0..num_experts {
-                    let expert_vb = vb.pp(i.to_string());
+                let has_packed_gate_up = vb.contains_tensor("gate_up_proj")
+                    || vb.contains_tensor("gate_up_proj_weight_scale_2");
 
-                    let gate_proj_vb = expert_vb.pp("gate_proj");
-                    let packed_name = Self::tensor_name_packed(&gate_proj_vb);
-                    let scale_name = Self::tensor_name_scale(&gate_proj_vb);
+                if has_packed_gate_up {
+                    // Fused format: gate_up_proj [E, K/2, 2*N], down_proj [E, N/2, K]
+                    // Transpose per expert to [2*N, K/2] / [K, N/2], then split
+                    // gate_up into gate [N, K/2] + up [N, K/2] to reuse the
+                    // standard stack-then-cat assembly below.
+                    let inter = moe_cfg.moe_intermediate_size;
+                    let hidden = cfg.hidden_size;
                     let sh0 = shard(0, comm.rank(), comm.world_size());
-
-                    gate_blocks_vec.push(gate_proj_vb.get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
-                        packed_name,
-                        sh0,
-                        DType::U8,
-                    )?);
-                    gate_scales_vec.push(gate_proj_vb.get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size / 16),
-                        scale_name,
-                        sh0,
-                        DType::U8,
-                    )?);
-                    gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb));
-
-                    let up_proj_vb = expert_vb.pp("up_proj");
-                    let packed_name = Self::tensor_name_packed(&up_proj_vb);
-                    let scale_name = Self::tensor_name_scale(&up_proj_vb);
-
-                    up_blocks_vec.push(up_proj_vb.get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
-                        packed_name,
-                        sh0,
-                        DType::U8,
-                    )?);
-                    up_scales_vec.push(up_proj_vb.get_with_hints_dtype(
-                        (moe_cfg.moe_intermediate_size, cfg.hidden_size / 16),
-                        scale_name,
-                        sh0,
-                        DType::U8,
-                    )?);
-                    up_gscales_vec.push(Self::load_global_scale(&up_proj_vb));
-
-                    let down_proj_vb = expert_vb.pp("down_proj");
-                    let packed_name = Self::tensor_name_packed(&down_proj_vb);
-                    let scale_name = Self::tensor_name_scale(&down_proj_vb);
                     let sh1 = shard(1, comm.rank(), comm.world_size());
+                    let no_shard = Shard::default();
 
-                    down_blocks_vec.push(down_proj_vb.get_with_hints_dtype(
-                        (cfg.hidden_size, moe_cfg.moe_intermediate_size / 2),
-                        packed_name,
+                    let gu_raw = vb.get_with_hints_dtype(
+                        (num_experts, hidden / 2, 2 * inter),
+                        "gate_up_proj",
+                        sh0,
+                        DType::U8,
+                    )?;
+                    let gu_sc_raw = vb.get_with_hints_dtype(
+                        (num_experts, hidden / 16, 2 * inter),
+                        "gate_up_proj_weight_scale",
+                        sh0,
+                        DType::U8,
+                    )?;
+                    let gate_up_gscale = if vb.contains_tensor("gate_up_proj_weight_scale_2") {
+                        vb.get_with_hints_dtype((), "gate_up_proj_weight_scale_2", no_shard, DType::F32)
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "gate_up_proj_weight_scale_2",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0)
+                    } else if vb.contains_tensor("gate_up_proj_weight_global_scale") {
+                        let raw = vb
+                            .get_with_hints_dtype(
+                                (),
+                                "gate_up_proj_weight_global_scale",
+                                no_shard,
+                                DType::F32,
+                            )
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "gate_up_proj_weight_global_scale",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0);
+                        if raw != 0.0 {
+                            1.0 / raw
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    };
+
+                    for i in 0..num_experts {
+                        let gu = gu_raw.get(i)?.t()?.contiguous()?;
+                        let gs = gu_sc_raw.get(i)?.t()?.contiguous()?;
+                        gate_blocks_vec.push(gu.narrow(0, 0, inter)?.contiguous()?);
+                        up_blocks_vec.push(gu.narrow(0, inter, inter)?.contiguous()?);
+                        gate_scales_vec.push(gs.narrow(0, 0, inter)?.contiguous()?);
+                        up_scales_vec.push(gs.narrow(0, inter, inter)?.contiguous()?);
+                        gate_gscales_vec.push(gate_up_gscale);
+                        up_gscales_vec.push(gate_up_gscale);
+                    }
+
+                    let d_raw = vb.get_with_hints_dtype(
+                        (num_experts, inter / 2, hidden),
+                        "down_proj",
                         sh1,
                         DType::U8,
-                    )?);
-                    down_scales_vec.push(down_proj_vb.get_with_hints_dtype(
-                        (cfg.hidden_size, moe_cfg.moe_intermediate_size / 16),
-                        scale_name,
+                    )?;
+                    let d_sc_raw = vb.get_with_hints_dtype(
+                        (num_experts, inter / 16, hidden),
+                        "down_proj_weight_scale",
                         sh1,
                         DType::U8,
-                    )?);
-                    down_gscales_vec.push(Self::load_global_scale(&down_proj_vb));
+                    )?;
+                    let down_gscale = if vb.contains_tensor("down_proj_weight_scale_2") {
+                        vb.get_with_hints_dtype((), "down_proj_weight_scale_2", no_shard, DType::F32)
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "down_proj_weight_scale_2",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0)
+                    } else if vb.contains_tensor("down_proj_weight_global_scale") {
+                        let raw = vb
+                            .get_with_hints_dtype(
+                                (),
+                                "down_proj_weight_global_scale",
+                                no_shard,
+                                DType::F32,
+                            )
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "down_proj_weight_global_scale",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0);
+                        if raw != 0.0 {
+                            1.0 / raw
+                        } else {
+                            1.0
+                        }
+                    } else {
+                        1.0
+                    };
+
+                    for i in 0..num_experts {
+                        down_blocks_vec.push(d_raw.get(i)?.t()?.contiguous()?);
+                        down_scales_vec.push(d_sc_raw.get(i)?.t()?.contiguous()?);
+                        down_gscales_vec.push(down_gscale);
+                    }
+                } else {
+                    // Per-expert: experts.{i}.gate_proj / up_proj / down_proj
+                    for i in 0..num_experts {
+                        let expert_vb = vb.pp(i.to_string());
+
+                        let gate_proj_vb = expert_vb.pp("gate_proj");
+                        let packed_name = Self::tensor_name_packed(&gate_proj_vb);
+                        let scale_name = Self::tensor_name_scale(&gate_proj_vb);
+                        let sh0 = shard(0, comm.rank(), comm.world_size());
+
+                        gate_blocks_vec.push(gate_proj_vb.get_with_hints_dtype(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
+                            packed_name,
+                            sh0,
+                            DType::U8,
+                        )?);
+                        gate_scales_vec.push(gate_proj_vb.get_with_hints_dtype(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size / 16),
+                            scale_name,
+                            sh0,
+                            DType::U8,
+                        )?);
+                        gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb));
+
+                        let up_proj_vb = expert_vb.pp("up_proj");
+                        let packed_name = Self::tensor_name_packed(&up_proj_vb);
+                        let scale_name = Self::tensor_name_scale(&up_proj_vb);
+
+                        up_blocks_vec.push(up_proj_vb.get_with_hints_dtype(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size / 2),
+                            packed_name,
+                            sh0,
+                            DType::U8,
+                        )?);
+                        up_scales_vec.push(up_proj_vb.get_with_hints_dtype(
+                            (moe_cfg.moe_intermediate_size, cfg.hidden_size / 16),
+                            scale_name,
+                            sh0,
+                            DType::U8,
+                        )?);
+                        up_gscales_vec.push(Self::load_global_scale(&up_proj_vb));
+
+                        let down_proj_vb = expert_vb.pp("down_proj");
+                        let packed_name = Self::tensor_name_packed(&down_proj_vb);
+                        let scale_name = Self::tensor_name_scale(&down_proj_vb);
+                        let sh1 = shard(1, comm.rank(), comm.world_size());
+
+                        down_blocks_vec.push(down_proj_vb.get_with_hints_dtype(
+                            (cfg.hidden_size, moe_cfg.moe_intermediate_size / 2),
+                            packed_name,
+                            sh1,
+                            DType::U8,
+                        )?);
+                        down_scales_vec.push(down_proj_vb.get_with_hints_dtype(
+                            (cfg.hidden_size, moe_cfg.moe_intermediate_size / 16),
+                            scale_name,
+                            sh1,
+                            DType::U8,
+                        )?);
+                        down_gscales_vec.push(Self::load_global_scale(&down_proj_vb));
+                    }
                 }
             }
             _ => candle_core::bail!("FusedMoeNvfp4: GGUF loading not supported for NVFP4"),
@@ -1670,6 +1847,7 @@ impl FusedMoeNvfp4 {
             w_size_n,
             act: candle_nn::Activation::Silu,
             norm_topk_prob: moe_cfg.norm_topk_prob,
+            sigmoid_routing: false,
             routed_scaling_factor: moe_cfg.routed_scaling_factor,
             num_experts_per_tok: moe_cfg.num_experts_per_tok,
             all_reduce: AllReduce::new(comm.clone()),
@@ -1678,14 +1856,30 @@ impl FusedMoeNvfp4 {
         })
     }
 
+    pub fn set_sigmoid_routing(&mut self) {
+        self.sigmoid_routing = true;
+    }
+
     pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let router_logits = self.gate.forward(xs)?;
 
-        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
-            &router_logits.to_dtype(DType::F32)?,
-            self.num_experts_per_tok,
-        )?;
+        let (mut topk_weights, topk_ids) = if self.sigmoid_routing {
+            let logits_f32 = router_logits.to_dtype(DType::F32)?;
+            let topk_ids = logits_f32.arg_sort_last_dim(false)?.narrow(
+                D::Minus1,
+                0,
+                self.num_experts_per_tok,
+            )?;
+            let sigmoid_weights = (logits_f32.neg()?.exp()? + 1.0)?.recip()?;
+            let topk_weights = sigmoid_weights.gather(&topk_ids, D::Minus1)?;
+            (topk_weights, topk_ids.to_dtype(DType::U32)?)
+        } else {
+            attention_rs::topk::topk_softmax(
+                &router_logits.to_dtype(DType::F32)?,
+                self.num_experts_per_tok,
+            )?
+        };
 
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
