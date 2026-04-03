@@ -60,26 +60,15 @@ macro_rules! serde_default {
 }
 
 pub fn module_path_matches_not_convert(module_path: &str, item: &str) -> bool {
-    let module_path = module_path.trim_end_matches(".weight");
-    let item = item.trim_end_matches(".weight");
-    module_path == item
-        || module_path.ends_with(item)
-        || module_path.ends_with(&format!(".{item}"))
-        || item.ends_with(module_path)
-        || item.ends_with(&format!(".{module_path}"))
+    crate::utils::config::match_ignore_pattern(module_path, item)
 }
 
 pub fn should_skip_fp8_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
-    if module_path.is_empty() || cfg.modules_to_not_convert.is_empty() {
-        return false;
-    }
-    cfg.modules_to_not_convert
-        .iter()
-        .any(|item| module_path_matches_not_convert(module_path, item))
+    cfg.should_skip_module(module_path)
 }
 
 pub fn should_skip_quant_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
-    should_skip_fp8_for_module(module_path, cfg)
+    cfg.should_skip_module(module_path)
 }
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
@@ -1002,8 +991,9 @@ pub fn init_config_tokenizer(
                 qcfg.quant_method == "gptq"
                     || qcfg.quant_method == "awq"
                     || qcfg.quant_method == "fp8"
-                    || qcfg.quant_method == "mxfp4",
-                "Invalid quantization format! Only `gptq`, `awq`, `fp8` and `mxfp4` supported, got `{}`",
+                    || qcfg.quant_method == "mxfp4"
+                    || qcfg.quant_method == "nvfp4",
+                "Invalid quantization format! Only `gptq`, `awq`, `fp8`, `mxfp4` and `nvfp4` supported, got `{}`",
                 qcfg.quant_method
             );
             if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
@@ -1475,20 +1465,16 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
+        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
+            ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
         "Qwen3_5ForCausalLM" | "qwen35" => (
             ModelType::Qwen3_5,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3NextForCausalLM" => (
+        "Qwen3_5MoeForCausalLM" | "Qwen3NextForCausalLM" | "qwen35moe" => (
             ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "Qwen3_5MoeForCausalLM" | "qwen35moe" => (
-            ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
-            ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "Qwen3VLForConditionalGeneration"
