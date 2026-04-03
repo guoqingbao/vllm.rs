@@ -5,10 +5,11 @@ use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
+use crate::models::layers::moe::FusedMoeNvfp4;
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
-use crate::utils::config::Config;
+use crate::utils::config::{Config, MoEConfig};
 use crate::utils::image::ImageData;
 use crate::utils::progress::ProgressLike;
 use attention_rs::ops::NonZeroOp;
@@ -26,11 +27,18 @@ use vision::Llama4VisionModel;
 // Llama4 MoE with shared expert and sigmoid routing
 // ---------------------------------------------------------------------------
 
+enum Llama4Experts {
+    Dense {
+        router: ReplicatedLinear,
+        experts: Vec<MLP>,
+        topk: usize,
+    },
+    Nvfp4(FusedMoeNvfp4),
+}
+
 struct Llama4TextMoe {
-    router: ReplicatedLinear,
-    experts: Vec<MLP>,
+    experts: Llama4Experts,
     shared_expert: MLP,
-    topk: usize,
 }
 
 impl Llama4TextMoe {
@@ -41,30 +49,69 @@ impl Llama4TextMoe {
         text_cfg: &TextConfig,
         dtype: DType,
     ) -> Result<Self> {
-        let router = ReplicatedLinear::load_no_bias(
-            config.hidden_size,
-            text_cfg.num_local_experts,
-            vb.pp("router"),
-            &None,
-            &None,
-            dtype,
-        )?;
+        let is_nvfp4 = config
+            .quantization_config
+            .as_ref()
+            .map_or(false, |q| q.quant_method == "nvfp4");
 
-        let mut experts = Vec::new();
-        for i in 0..text_cfg.num_local_experts {
-            experts.push(MLP::new(
-                vb.pp(format!("experts.{}", i).as_str()),
+        let experts = if is_nvfp4 {
+            let moe_cfg = MoEConfig {
+                moe_intermediate_size: text_cfg.intermediate_size,
+                shared_expert_intermediate_size: None,
+                num_experts: Some(text_cfg.num_local_experts),
+                mlp_only_layers: None,
+                decoder_sparse_step: None,
+                norm_topk_prob: false,
+                num_experts_per_tok: text_cfg.num_experts_per_tok,
+                first_k_dense_replace: None,
+                n_shared_experts: None,
+                routed_scaling_factor: None,
+                n_group: None,
+                topk_group: None,
+                scoring_func: None,
+                topk_method: None,
+            };
+            let mut nvfp4_cfg = config.clone();
+            nvfp4_cfg.moe_cfg = Some(moe_cfg);
+            let mut fused = FusedMoeNvfp4::new_with_gate(
+                &nvfp4_cfg,
+                vb.pp("router"),
+                vb.pp("experts"),
                 comm.clone(),
-                config.hidden_size,
-                text_cfg.intermediate_size,
-                &config.hidden_act,
-                &config.quantization_config,
-                &config.quant,
-                false,
                 dtype,
-                "",
-            )?);
-        }
+            )?;
+            fused.set_sigmoid_routing();
+            Llama4Experts::Nvfp4(fused)
+        } else {
+            let router = ReplicatedLinear::load_no_bias(
+                config.hidden_size,
+                text_cfg.num_local_experts,
+                vb.pp("router"),
+                &None,
+                &None,
+                dtype,
+            )?;
+            let mut experts = Vec::new();
+            for i in 0..text_cfg.num_local_experts {
+                experts.push(MLP::new(
+                    vb.pp(format!("experts.{}", i).as_str()),
+                    comm.clone(),
+                    config.hidden_size,
+                    text_cfg.intermediate_size,
+                    &config.hidden_act,
+                    &config.quantization_config,
+                    &config.quant,
+                    false,
+                    dtype,
+                    "",
+                )?);
+            }
+            Llama4Experts::Dense {
+                router,
+                experts,
+                topk: text_cfg.num_experts_per_tok,
+            }
+        };
 
         let shared_expert = MLP::new(
             vb.pp("shared_expert"),
@@ -80,44 +127,52 @@ impl Llama4TextMoe {
         )?;
 
         Ok(Self {
-            router,
             experts,
             shared_expert,
-            topk: text_cfg.num_experts_per_tok,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (bs, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
-        let router_logits = self.router.forward(&xs_flat)?;
 
-        // Use CPU-side top-k + sigmoid routing
-        let router_f32: Vec<Vec<f32>> = router_logits.to_dtype(DType::F32)?.to_vec2()?;
-        let num_tokens = xs_flat.dim(0)?;
-        let mut routed_output = Tensor::zeros((num_tokens, hidden_dim), xs.dtype(), xs.device())?;
+        let routed_output = match &self.experts {
+            Llama4Experts::Nvfp4(fused_moe) => fused_moe.forward(&xs_flat, false)?,
+            Llama4Experts::Dense {
+                router,
+                experts,
+                topk,
+            } => {
+                let router_logits = router.forward(&xs_flat)?;
+                let router_f32: Vec<Vec<f32>> = router_logits.to_dtype(DType::F32)?.to_vec2()?;
+                let num_tokens = xs_flat.dim(0)?;
+                let mut routed = Tensor::zeros((num_tokens, hidden_dim), xs.dtype(), xs.device())?;
 
-        for token_idx in 0..num_tokens {
-            let logits = &router_f32[token_idx];
-            let mut indexed: Vec<(usize, f32)> =
-                logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                for token_idx in 0..num_tokens {
+                    let logits = &router_f32[token_idx];
+                    let mut indexed: Vec<(usize, f32)> =
+                        logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-            for k in 0..self.topk.min(indexed.len()) {
-                let (expert_idx, logit_val) = indexed[k];
-                let weight = 1.0 / (1.0 + (-logit_val).exp()); // sigmoid
+                    for k in 0..(*topk).min(indexed.len()) {
+                        let (expert_idx, logit_val) = indexed[k];
+                        let weight = 1.0 / (1.0 + (-logit_val).exp());
 
-                let token_indices = Tensor::from_vec(vec![token_idx as u32], 1, xs.device())?;
-                let expert_input = xs_flat.index_select(&token_indices, 0)?;
-                let expert_output = self.experts[expert_idx].forward(&expert_input)?;
-                let weight_tensor = Tensor::new(&[weight], xs.device())?
-                    .to_dtype(xs.dtype())?
-                    .unsqueeze(0)?;
-                let weighted = expert_output.broadcast_mul(&weight_tensor)?;
+                        let token_indices =
+                            Tensor::from_vec(vec![token_idx as u32], 1, xs.device())?;
+                        let expert_input = xs_flat.index_select(&token_indices, 0)?;
+                        let expert_output = experts[expert_idx].forward(&expert_input)?;
+                        let weight_tensor = Tensor::new(&[weight], xs.device())?
+                            .to_dtype(xs.dtype())?
+                            .unsqueeze(0)?;
+                        let weighted = expert_output.broadcast_mul(&weight_tensor)?;
 
-                routed_output = routed_output.index_add(&token_indices, &weighted, 0)?;
+                        routed = routed.index_add(&token_indices, &weighted, 0)?;
+                    }
+                }
+                routed
             }
-        }
+        };
 
         let routed_output = routed_output.reshape((bs, seq_len, hidden_dim))?;
         let shared_output = self.shared_expert.forward(xs)?;

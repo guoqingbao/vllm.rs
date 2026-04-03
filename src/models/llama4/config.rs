@@ -1,5 +1,47 @@
 use serde::Deserialize;
 
+fn deserialize_bool_or_f32<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+    struct BoolOrF32Visitor;
+
+    impl<'de> de::Visitor<'de> for BoolOrF32Visitor {
+        type Value = Option<f32>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a float, integer, or boolean")
+        }
+
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(if v { Some(4.0) } else { None })
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some(v as f32))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v as f32))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v as f32))
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(BoolOrF32Visitor)
+}
+
 fn default_floor_scale() -> Option<f32> {
     Some(8192.)
 }
@@ -23,11 +65,20 @@ pub struct TextConfig {
     pub max_position_embeddings: usize,
     #[serde(default)]
     pub tie_word_embeddings: bool,
-    #[serde(default = "default_floor_scale")]
+    #[serde(
+        default = "default_floor_scale",
+        deserialize_with = "deserialize_bool_or_f32"
+    )]
     pub floor_scale: Option<f32>,
-    #[serde(default = "default_attn_scale")]
+    #[serde(
+        default = "default_attn_scale",
+        deserialize_with = "deserialize_bool_or_f32"
+    )]
     pub attn_scale: Option<f32>,
-    #[serde(default = "default_attn_temperature_tuning")]
+    #[serde(
+        default = "default_attn_temperature_tuning",
+        deserialize_with = "deserialize_bool_or_f32"
+    )]
     pub attn_temperature_tuning: Option<f32>,
     #[serde(default)]
     pub use_qk_norm: bool,
