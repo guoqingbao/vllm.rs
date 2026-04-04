@@ -585,41 +585,51 @@ impl Qwen3_5MoEForCausalLM {
               // Check if MTP module exists by looking for any MTP-related keys
               // The embed_tokens.weight key may not exist in all model variants
               // NOTE: Check for actual tensor paths, not path prefixes
-              let has_mtp_module = vb.has_key("mtp.fc.weight")
-                  || vb.has_key("mtp.layers.0.self_attn.weight")
-                  || vb.has_key("mtp.embed_tokens.weight");
- 
+              // Use the prefix from the parent model (e.g., "model.") for MTP checks
+              let mtp_prefix = format!("{}mtp.", prefix);
+              let has_mtp_module = vb.has_key(&format!("{}fc.weight", mtp_prefix))
+                  || vb.has_key(&format!("{}layers.0.self_attn.weight", mtp_prefix))
+                  || vb.has_key(&format!("{}embed_tokens.weight", mtp_prefix));
+
              if !has_mtp_module {
-                 crate::log_warn!("MTP enabled but no MTP module weights found. Disabling MTP.");
+                 crate::log_warn!("MTP enabled but no MTP module weights found at '{}'. Disabling MTP.", mtp_prefix);
                  (None, None)
              } else {
                  // MTP module detected, proceed with loading
-                 let mtp_vb = vb.pp("mtp");
+                 // Build the correct path for MTP weights based on the prefix used in detection
+                 let mtp_vb = if prefix.is_empty() || prefix == "model." {
+                     // Standard case: weights are at "mtp.*" relative to current vb
+                     vb.pp("mtp")
+                 } else {
+                     // Non-standard prefix: weights are at "{prefix}mtp.*"
+                     vb.pp(&format!("{}mtp", prefix.trim_end_matches('.')))
+                 };
                  let predictor = Qwen3_5MoEMultiTokenPredictor::new(
-                     mtp_vb,
+                     mtp_vb.clone(),
                      comm.clone(),
                      config,
                      dtype,
                  );
- 
+
                  match predictor {
                      Ok(predictor) => {
                          // Load MTP lm_head - try separate weights first, fall back to tied
-                         let mtp_lm_head = if vb.has_key("mtp.lm_head.weight") {
+                         // Check for lm_head at the same path as predictor
+                         let mtp_lm_head = if mtp_vb.has_key("lm_head.weight") {
                              ReplicatedLinear::load_no_bias(
                                  config.hidden_size,
                                  vocab_size,
-                                 vb.pp("mtp.lm_head"),
+                                 mtp_vb.pp("lm_head"),
                                  &None,
                                  &None,
                                  dtype,
                              )
-                         } else if vb.has_key("mtp.embed_tokens.weight") {
+                         } else if mtp_vb.has_key("embed_tokens.weight") {
                              // Tied with embed_tokens
                              ReplicatedLinear::load_no_bias(
                                  config.hidden_size,
                                  vocab_size,
-                                 vb.pp("mtp.embed_tokens"),
+                                 mtp_vb.pp("embed_tokens"),
                                  &None,
                                  &None,
                                  dtype,
@@ -636,7 +646,7 @@ impl Qwen3_5MoEForCausalLM {
                                  dtype,
                              )
                          };
- 
+
                          match mtp_lm_head {
                              Ok(mtp_lm_head) => (Some(predictor), Some(mtp_lm_head)),
                              Err(e) => {
