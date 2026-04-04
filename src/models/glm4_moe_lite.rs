@@ -2,7 +2,9 @@ use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mla_attention::{MlaAttention, MlaConfig};
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::{FusedMoe, FusedMoeGGUF, FusedMoeISQ};
+use crate::models::layers::moe::{
+    FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4, FusedMoeNvfp4,
+};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -20,6 +22,9 @@ enum MoeOrMlp {
     FusedMoe(FusedMoe),
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
+    FusedMoeFp8(FusedMoeFp8),
+    FusedMoeMxfp4(FusedMoeMxfp4),
+    FusedMoeNvfp4(FusedMoeNvfp4),
     Mlp(MLP),
 }
 
@@ -30,6 +35,9 @@ impl MoeOrMlp {
             Self::FusedMoe(m) => m.forward(xs, is_prefill),
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeFp8(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeMxfp4(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeNvfp4(m) => m.forward(xs, is_prefill),
         }
     }
 }
@@ -74,8 +82,37 @@ impl GLM4MoeLiteDecoderLayer {
         let mlp = if layer_idx >= moe_cfg.first_k_dense_replace.unwrap_or(0) {
             if is_qvar_builder {
                 MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
-            } else if config.quantization_config.is_some() {
-                panic!("Quantized MoE not yet supported for GLM4MoeLite");
+            } else if let Some(quant_config) = &config.quantization_config {
+                if quant_config.quant_method == "fp8" {
+                    MoeOrMlp::FusedMoeFp8(FusedMoeFp8::new(
+                        config,
+                        vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                        quant_config,
+                    )?)
+                } else if quant_config.quant_method == "mxfp4" {
+                    MoeOrMlp::FusedMoeMxfp4(FusedMoeMxfp4::new(
+                        config,
+                        vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                    )?)
+                } else if quant_config.quant_method == "nvfp4" {
+                    MoeOrMlp::FusedMoeNvfp4(FusedMoeNvfp4::new(
+                        config,
+                        vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                    )?)
+                } else {
+                    MoeOrMlp::FusedMoe(FusedMoe::new(
+                        config,
+                        vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                    )?)
+                }
             } else if config.quant.is_some() {
                 MoeOrMlp::FusedMoeISQ(FusedMoeISQ::new(
                     config,
@@ -111,26 +148,30 @@ impl GLM4MoeLiteDecoderLayer {
             MoeOrMlp::Mlp(mlp)
         };
 
-        let shared_expert = if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size
-        {
-            if intermediate_size > 0 {
-                let mlp = MLP::new(
-                    if is_qvar_builder {
-                        vb.clone()
-                    } else {
-                        vb.pp("mlp.shared_expert").clone()
-                    },
-                    comm.clone(),
-                    config.hidden_size,
-                    intermediate_size * moe_cfg.n_shared_experts.unwrap_or(1),
-                    &config.hidden_act,
-                    &config.quantization_config,
-                    &config.quant,
-                    false,
-                    dtype,
-                    if is_qvar_builder { "_shexp" } else { "" },
-                )?;
-                Some(mlp)
+        let is_moe_layer = layer_idx >= moe_cfg.first_k_dense_replace.unwrap_or(0);
+        let shared_expert = if is_moe_layer {
+            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
+                if intermediate_size > 0 {
+                    let mlp = MLP::new(
+                        if is_qvar_builder {
+                            vb.clone()
+                        } else {
+                            vb.pp("mlp.shared_experts").clone()
+                        },
+                        comm.clone(),
+                        config.hidden_size,
+                        intermediate_size * moe_cfg.n_shared_experts.unwrap_or(1),
+                        &config.hidden_act,
+                        &config.quantization_config,
+                        &config.quant,
+                        false,
+                        dtype,
+                        if is_qvar_builder { "_shexp" } else { "" },
+                    )?;
+                    Some(mlp)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -179,6 +220,7 @@ impl GLM4MoeLiteDecoderLayer {
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
+        _layer_idx: usize,
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
@@ -201,11 +243,12 @@ impl GLM4MoeLiteDecoderLayer {
             None
         };
         let mlp_output = self.mlp.forward(&xs, input_metadata.is_prefill)?;
-        if let Some(shared_output) = shared_output {
-            residual + (mlp_output + shared_output)?
+        let out = if let Some(shared_output) = shared_output {
+            (residual + (mlp_output + shared_output)?)?
         } else {
-            residual + mlp_output
-        }
+            (residual + mlp_output)?
+        };
+        Ok(out)
     }
 }
 
@@ -246,17 +289,22 @@ impl GLM4MoeLiteForCausalLM {
             dtype,
         )?;
 
-        let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
-            config,
-            &vb.device(),
-            is_rope_i,
-            config.rope_theta,
-        )?);
+        let rotary_emb = {
+            let mut mla_config = config.clone();
+            mla_config.head_dim = Some(mla_cfg.qk_rope_head_dim);
+            mla_config.partial_rotary_factor = None;
+            Arc::new(ScalingRotaryEmbedding::new(
+                if is_qvar_builder || config.quant.is_some() {
+                    DType::F32
+                } else {
+                    dtype
+                },
+                &mla_config,
+                &vb.device(),
+                is_rope_i,
+                config.rope_theta,
+            )?)
+        };
 
         let reporter = progress_reporter.clone();
         let mut layers = Vec::new();
@@ -362,13 +410,16 @@ impl GLM4MoeLiteForCausalLM {
         };
 
         if let Some(kv_caches) = kv_caches {
-            for ((k_cache, v_cache), layer) in zip(kv_caches.iter(), self.layers.iter()) {
+            for (i, ((k_cache, v_cache), layer)) in
+                zip(kv_caches.iter(), self.layers.iter()).enumerate()
+            {
                 xs = layer.forward(
                     &xs,
                     attention_mask.as_ref(),
                     positions,
                     Some((k_cache, v_cache)),
                     input_metadata,
+                    i,
                 )?;
             }
         }
@@ -379,13 +430,14 @@ impl GLM4MoeLiteForCausalLM {
             xs = xs.index_select(&Tensor::from_vec(indices, (batch,), xs.device())?, 0)?;
         }
         let xs = self.norm.forward(&xs)?;
-        if self.is_qvar_builder {
-            self.lm_head.forward(&xs)
+        let logits = if self.is_qvar_builder {
+            self.lm_head.forward(&xs)?
         } else {
             self.lm_head
                 .forward(&xs.to_dtype(self.dtype)?)?
-                .to_dtype(DType::F32)
-        }
+                .to_dtype(DType::F32)?
+        };
+        Ok(logits)
     }
 
     pub fn forward_embedding(

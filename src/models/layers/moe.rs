@@ -18,6 +18,122 @@ use either::Either;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// Shared MoE routing config extracted from MoEConfig at construction time.
+#[derive(Clone, Debug)]
+pub struct MoeRouting {
+    pub e_score_correction_bias: Option<Tensor>,
+    pub use_sigmoid_scoring: bool,
+    pub n_group: usize,
+    pub topk_group: usize,
+    pub norm_topk_prob: bool,
+    pub routed_scaling_factor: Option<f64>,
+    pub num_experts_per_tok: usize,
+}
+
+impl MoeRouting {
+    /// Build routing config from the MoE config section.
+    pub fn from_moe_cfg(cfg: &crate::utils::config::MoEConfig, bias: Option<Tensor>) -> Self {
+        let use_sigmoid = cfg.topk_method.as_deref().is_some_and(|m| m == "noaux_tc")
+            || cfg.scoring_func.as_deref().is_some_and(|s| s == "sigmoid");
+        Self {
+            e_score_correction_bias: bias,
+            use_sigmoid_scoring: use_sigmoid,
+            n_group: cfg.n_group.unwrap_or(1),
+            topk_group: cfg.topk_group.unwrap_or(1),
+            norm_topk_prob: cfg.norm_topk_prob,
+            routed_scaling_factor: cfg.routed_scaling_factor,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+        }
+    }
+
+    /// Route tokens to experts, returning `(topk_weights, topk_ids)`.
+    /// `router_logits` must be F32 with shape `[num_tokens, num_experts]`.
+    pub fn route(&self, router_logits: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (mut topk_weights, topk_ids) = if self.use_sigmoid_scoring {
+            let scores = candle_nn::ops::sigmoid(router_logits)?;
+
+            let scores_for_choice = if let Some(bias) = &self.e_score_correction_bias {
+                scores.broadcast_add(&bias.to_dtype(DType::F32)?)?
+            } else {
+                scores.clone()
+            };
+
+            let topk_indices = if self.n_group > 1 {
+                let num_tokens = scores_for_choice.dim(0)?;
+                let num_experts = scores_for_choice.dim(1)?;
+                let experts_per_group = num_experts / self.n_group;
+                // [num_tokens, n_group, experts_per_group]
+                let grouped =
+                    scores_for_choice.reshape((num_tokens, self.n_group, experts_per_group))?;
+                // top-2 per group summed -> [num_tokens, n_group]
+                let sorted_idx = grouped.arg_sort_last_dim(false)?;
+                let top2_idx = sorted_idx.narrow(D::Minus1, 0, 2)?;
+                let top2_vals = grouped.gather(&top2_idx, D::Minus1)?;
+                let group_scores = top2_vals.sum(D::Minus1)?;
+                // top topk_group groups -> [num_tokens, topk_group]
+                let group_sorted = group_scores.arg_sort_last_dim(false)?;
+                let group_idx = group_sorted
+                    .narrow(D::Minus1, 0, self.topk_group)?
+                    .contiguous()?;
+                // build group mask [num_tokens, n_group]
+                let group_mask = group_scores.zeros_like()?.scatter_add(
+                    &group_idx,
+                    &group_idx.ones_like()?.to_dtype(DType::F32)?,
+                    1,
+                )?;
+                // expand to per-expert mask [num_tokens, num_experts]
+                let score_mask = group_mask
+                    .unsqueeze(D::Minus1)?
+                    .broadcast_as((num_tokens, self.n_group, experts_per_group))?
+                    .reshape((num_tokens, num_experts))?;
+                let masked = scores_for_choice.broadcast_mul(&score_mask)?;
+                masked
+                    .arg_sort_last_dim(false)?
+                    .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+                    .contiguous()?
+            } else {
+                scores_for_choice
+                    .arg_sort_last_dim(false)?
+                    .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+                    .contiguous()?
+            };
+
+            let topk_weights = scores.gather(&topk_indices, D::Minus1)?;
+            let topk_ids = topk_indices.to_dtype(DType::U32)?;
+            (topk_weights, topk_ids)
+        } else {
+            let mut logits = router_logits.clone();
+            if let Some(bias) = &self.e_score_correction_bias {
+                logits = logits.broadcast_add(&bias.to_dtype(DType::F32)?)?;
+            }
+            attention_rs::topk::topk_softmax(&logits, self.num_experts_per_tok)?
+        };
+
+        if self.norm_topk_prob {
+            let denom = (topk_weights.sum_keepdim(D::Minus1)? + 1e-20)?;
+            topk_weights = topk_weights.broadcast_div(&denom)?;
+        }
+        if let Some(factor) = self.routed_scaling_factor {
+            topk_weights = (topk_weights * factor)?;
+        }
+
+        Ok((topk_weights, topk_ids))
+    }
+}
+
+/// Try to load `e_score_correction_bias` from the gate var-builder.
+fn try_load_e_score_correction_bias(vb: &VarBuilderX, num_experts: usize) -> Option<Tensor> {
+    let vb_gate = vb.pp("gate");
+    vb_gate
+        .get_with_hints_dtype(
+            num_experts,
+            "e_score_correction_bias",
+            shard(0, 0, 1),
+            DType::F32,
+        )
+        .ok()
+}
+
 #[derive(Clone, Copy, Debug)]
 enum PackedGateUpLayout {
     // [experts, hidden, 2*intermediate]
@@ -96,9 +212,7 @@ pub struct FusedMoe {
     down_w: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -291,9 +405,10 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             down_w,
             w_size_n,
             act: candle_nn::Activation::Silu,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(&vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm),
             world_size,
             dtype,
@@ -302,20 +417,8 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(&xs)?;
-
-        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
-            &router_logits.to_dtype(DType::F32)?,
-            self.num_experts_per_tok,
-        )?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
 
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
@@ -330,13 +433,14 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         };
 
         //out (M, top_k, N)
+        let topk = self.routing.num_experts_per_tok;
         let gate_up = moe::moe_gemm(
             &xs,
             &self.gate_up_w,
             &None,
             &sorted_token_ids,
             &expert_ids,
-            self.num_experts_per_tok,
+            topk,
             is_prefill,
         )?;
 
@@ -346,17 +450,15 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         let up = gate_up
             .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
             .contiguous()?;
-        //(M * top_k, N // 2)
         let down_inputs = (up * gate.apply(&self.act)?)?;
 
-        //view(M, top_k, K) -> sum -> (M, K)
         let mut ys = moe::moe_gemm(
             &down_inputs,
             &self.down_w,
             &Some(topk_weights),
             &sorted_token_ids,
             &expert_ids,
-            self.num_experts_per_tok,
+            topk,
             is_prefill,
         )?
         .reshape((num_tokens, (), hidden_dim))?
@@ -375,9 +477,7 @@ pub struct FusedMoeGGUF {
     up_experts: Arc<QTensor>,
     down_experts: Arc<QTensor>,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -474,9 +574,7 @@ impl FusedMoeGGUF {
             up_experts,
             down_experts,
             act: cfg.hidden_act,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
             all_reduce: AllReduce::new(comm),
             world_size,
             dtype,
@@ -526,9 +624,7 @@ impl FusedMoeGGUF {
             up_experts,
             down_experts,
             act: cfg.hidden_act,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
             all_reduce: AllReduce::new(comm),
             world_size: 1,
             dtype,
@@ -545,17 +641,7 @@ impl FusedMoeGGUF {
         };
 
         let router_logits = self.gate.forward(&xs)?;
-
-        let (mut topk_weights, topk_ids) =
-            attention_rs::topk::topk_softmax(&router_logits, self.num_experts_per_tok)?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
             {
@@ -575,7 +661,7 @@ impl FusedMoeGGUF {
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?;
@@ -585,7 +671,7 @@ impl FusedMoeGGUF {
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?;
@@ -597,7 +683,7 @@ impl FusedMoeGGUF {
                 &Some(topk_weights),
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?
@@ -619,9 +705,7 @@ pub struct FusedMoeISQ {
     up_experts: QTensor,
     down_experts: QTensor,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -845,9 +929,10 @@ impl FusedMoeISQ {
             up_experts,
             down_experts,
             act: candle_nn::Activation::Silu,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(&vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm),
             world_size,
             dtype,
@@ -864,16 +949,7 @@ impl FusedMoeISQ {
         };
 
         let router_logits = self.gate.forward(&xs)?;
-
-        let (mut topk_weights, topk_ids) =
-            attention_rs::topk::topk_softmax(&router_logits, self.num_experts_per_tok)?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
             {
@@ -893,7 +969,7 @@ impl FusedMoeISQ {
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?;
@@ -903,7 +979,7 @@ impl FusedMoeISQ {
                 &None,
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?;
@@ -914,7 +990,7 @@ impl FusedMoeISQ {
                 &Some(topk_weights),
                 &sorted_token_ids,
                 &expert_ids,
-                self.num_experts_per_tok,
+                self.routing.num_experts_per_tok,
                 is_prefill,
                 self.dtype,
             )?
@@ -938,9 +1014,7 @@ pub struct FusedMoeFp8 {
     down_experts_scale: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -1177,9 +1251,10 @@ impl FusedMoeFp8 {
             down_experts_scale,
             w_size_n,
             act: candle_nn::Activation::Silu,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(&vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
@@ -1189,20 +1264,8 @@ impl FusedMoeFp8 {
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(&xs)?;
-
-        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
-            &router_logits.to_dtype(DType::F32)?,
-            self.num_experts_per_tok,
-        )?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -1229,7 +1292,7 @@ impl FusedMoeFp8 {
             &None,
             &sorted_token_ids,
             &expert_ids,
-            self.num_experts_per_tok,
+            self.routing.num_experts_per_tok,
             self.block_size[0],
             self.block_size[1],
             is_prefill,
@@ -1250,7 +1313,7 @@ impl FusedMoeFp8 {
             &Some(topk_weights),
             &sorted_token_ids,
             &expert_ids,
-            self.num_experts_per_tok,
+            self.routing.num_experts_per_tok,
             self.block_size[0],
             self.block_size[1],
             is_prefill,
@@ -1273,9 +1336,7 @@ pub struct FusedMoeMxfp4 {
     down_scales: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -1408,9 +1469,10 @@ impl FusedMoeMxfp4 {
             down_scales,
             w_size_n,
             act: candle_nn::Activation::Silu,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(&vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
@@ -1419,20 +1481,8 @@ impl FusedMoeMxfp4 {
 
     pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(xs)?;
-
-        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
-            &router_logits.to_dtype(DType::F32)?,
-            self.num_experts_per_tok,
-        )?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -1467,7 +1517,7 @@ impl FusedMoeMxfp4 {
         let topk_weights = topk_weights.to_dtype(down.dtype())?;
         let mut ys = down
             .broadcast_mul(&topk_weights.unsqueeze(D::Minus1)?)?
-            .reshape((num_tokens, self.num_experts_per_tok, hidden_dim))?
+            .reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
             .sum(1)?;
 
         if self.world_size > 1 {
@@ -1486,9 +1536,7 @@ pub struct FusedMoeNvfp4 {
     down_global_scales: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
-    norm_topk_prob: bool,
-    routed_scaling_factor: Option<f64>,
-    num_experts_per_tok: usize,
+    routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
@@ -1669,9 +1717,10 @@ impl FusedMoeNvfp4 {
             down_global_scales,
             w_size_n,
             act: candle_nn::Activation::Silu,
-            norm_topk_prob: moe_cfg.norm_topk_prob,
-            routed_scaling_factor: moe_cfg.routed_scaling_factor,
-            num_experts_per_tok: moe_cfg.num_experts_per_tok,
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(&vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
@@ -1680,20 +1729,8 @@ impl FusedMoeNvfp4 {
 
     pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(xs)?;
-
-        let (mut topk_weights, topk_ids) = attention_rs::topk::topk_softmax(
-            &router_logits.to_dtype(DType::F32)?,
-            self.num_experts_per_tok,
-        )?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        if let Some(routed_scaling_factor) = self.routed_scaling_factor {
-            topk_weights = (topk_weights * routed_scaling_factor)?;
-        }
+        let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -1729,8 +1766,8 @@ impl FusedMoeNvfp4 {
 
         let topk_weights = topk_weights.to_dtype(down.dtype())?;
         let mut ys = down
-            .broadcast_mul(&topk_weights.unsqueeze(D::Minus1)?)?
-            .reshape((num_tokens, self.num_experts_per_tok, hidden_dim))?
+            .broadcast_mul(&topk_weights.unsqueeze(candle_core::D::Minus1)?)?
+            .reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
             .sum(1)?;
 
         if self.world_size > 1 {

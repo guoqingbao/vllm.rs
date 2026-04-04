@@ -186,6 +186,8 @@ pub struct MoEConfig {
     pub topk_group: Option<usize>,
     #[serde(default)]
     pub scoring_func: Option<String>,
+    #[serde(default)]
+    pub topk_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
