@@ -182,6 +182,12 @@ pub struct MoEConfig {
     pub routed_scaling_factor: Option<f64>,
     pub first_k_dense_replace: Option<usize>,
     pub n_shared_experts: Option<usize>,
+    pub n_group: Option<usize>,
+    pub topk_group: Option<usize>,
+    #[serde(default)]
+    pub scoring_func: Option<String>,
+    #[serde(default)]
+    pub topk_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,6 +665,7 @@ pub enum ModelType {
     Mistral,
     GLM4,
     GLM4MoE,
+    GLM4MoeLite,
     Yi,
     StableLM,
     DeepSeek,
@@ -686,8 +693,37 @@ pub struct GenerationConfig {
     pub eos_token_id: Option<EosTokenId>,
 }
 
+/// Match a module path against an ignore pattern.
+/// Supports three pattern types:
+///   - `re:` prefix → regex match
+///   - Contains `*` → glob match (converted to regex: `*` becomes `.*`)
+///   - Otherwise → literal suffix matching
+pub fn match_ignore_pattern(module_path: &str, pattern: &str) -> bool {
+    if let Some(re_pat) = pattern.strip_prefix("re:") {
+        if let Ok(re) = regex::Regex::new(re_pat) {
+            return re.is_match(module_path);
+        }
+        return false;
+    }
+    if pattern.contains('*') {
+        let re_pat = format!("^{}$", regex::escape(pattern).replace(r"\*", ".*"));
+        if let Ok(re) = regex::Regex::new(&re_pat) {
+            return re.is_match(module_path);
+        }
+        return false;
+    }
+    let module_path = module_path.trim_end_matches(".weight");
+    let item = pattern.trim_end_matches(".weight");
+    module_path == item
+        || module_path.ends_with(item)
+        || module_path.ends_with(&format!(".{item}"))
+        || item.ends_with(module_path)
+        || item.ends_with(&format!(".{module_path}"))
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Clone)]
 pub struct QuantConfig {
+    #[serde(default)]
     pub quant_method: String,
     #[serde(default)]
     pub bits: usize,
@@ -697,9 +733,190 @@ pub struct QuantConfig {
     pub desc_act: Option<bool>,
     pub checkpoint_format: Option<String>,
     pub fmt: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
     pub weight_block_size: Option<Vec<usize>>,
     #[serde(default, alias = "ignore")]
     pub modules_to_not_convert: Vec<String>,
+    #[serde(default)]
+    pub config_groups: Option<serde_json::Value>,
+    #[serde(default)]
+    pub quant_algo: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+impl QuantConfig {
+    /// Normalizes a quantization config into a canonical quant_method string.
+    ///
+    /// Handles the following families:
+    ///   1. `modelopt` with `quant_algo` == `NVFP4` / `FP4`
+    ///   2. `compressed-tensors` with `format` containing `nvfp4` or `mxfp4`
+    ///   3. `compressed-tensors` detected from `config_groups` content
+    ///
+    /// MLX-style quantization (`"mode": "nvfp4"/"mxfp4"`) uses an incompatible
+    /// packing format (U32 weights, integer scales) and is NOT supported.
+    ///
+    /// Also extracts group_size / bits from config_groups when present.
+    pub fn normalize_compressed_tensors(&mut self) {
+        // modelopt: {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+        if self.quant_method == "modelopt" {
+            if let Some(algo) = &self.quant_algo {
+                if algo.eq_ignore_ascii_case("NVFP4") || algo.eq_ignore_ascii_case("FP4") {
+                    self.quant_method = "nvfp4".to_string();
+                    self.extract_compressed_tensors_params();
+                    if self.group_size == 0 {
+                        self.group_size = 16;
+                    }
+                    if self.bits == 0 {
+                        self.bits = 4;
+                    }
+                    return;
+                }
+            }
+            if self.detect_nvfp4_from_config_groups() {
+                self.quant_method = "nvfp4".to_string();
+                self.extract_compressed_tensors_params();
+                if self.group_size == 0 {
+                    self.group_size = 16;
+                }
+                if self.bits == 0 {
+                    self.bits = 4;
+                }
+                return;
+            }
+        }
+
+        if self.quant_method != "compressed-tensors" {
+            return;
+        }
+
+        // compressed-tensors: check format string for nvfp4 or mxfp4
+        let format_str = self.format.as_deref().unwrap_or("");
+
+        let is_nvfp4 = format_str.contains("nvfp4") || self.detect_nvfp4_from_config_groups();
+
+        if is_nvfp4 {
+            self.quant_method = "nvfp4".to_string();
+            self.extract_compressed_tensors_params();
+            if self.group_size == 0 {
+                self.group_size = 16;
+            }
+            if self.bits == 0 {
+                self.bits = 4;
+            }
+            return;
+        }
+
+        let is_mxfp4 = format_str.contains("mxfp4") || self.detect_mxfp4_from_config_groups();
+
+        if is_mxfp4 {
+            self.quant_method = "mxfp4".to_string();
+            self.extract_compressed_tensors_params();
+        }
+    }
+
+    fn detect_nvfp4_from_config_groups(&self) -> bool {
+        let groups = match &self.config_groups {
+            Some(v) => v,
+            None => return false,
+        };
+        if let Some(obj) = groups.as_object() {
+            for (_key, group) in obj {
+                // Check group-level format (e.g. "nvfp4-pack-quantized")
+                if let Some(fmt) = group.get("format").and_then(|v| v.as_str()) {
+                    if fmt.contains("nvfp4") {
+                        return true;
+                    }
+                }
+                if let Some(weights) = group.get("weights") {
+                    // Check weights-level format
+                    if let Some(fmt) = weights.get("format").and_then(|v| v.as_str()) {
+                        if fmt.contains("nvfp4") {
+                            return true;
+                        }
+                    }
+                    // Detect by parameters: 4-bit float with group_size=16
+                    if let Some(num_bits) = weights.get("num_bits").and_then(|v| v.as_u64()) {
+                        if num_bits == 4 {
+                            let is_float = weights
+                                .get("type")
+                                .and_then(|v| v.as_str())
+                                .map(|t| t == "float")
+                                .unwrap_or(false);
+                            let gs = weights
+                                .get("group_size")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if is_float && gs == 16 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn detect_mxfp4_from_config_groups(&self) -> bool {
+        let groups = match &self.config_groups {
+            Some(v) => v,
+            None => return false,
+        };
+        if let Some(obj) = groups.as_object() {
+            for (_key, group) in obj {
+                if let Some(fmt) = group.get("format").and_then(|v| v.as_str()) {
+                    if fmt.contains("mxfp4") {
+                        return true;
+                    }
+                }
+                if let Some(weights) = group.get("weights") {
+                    if let Some(fmt) = weights.get("format").and_then(|v| v.as_str()) {
+                        if fmt.contains("mxfp4") {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn extract_compressed_tensors_params(&mut self) {
+        let groups = match &self.config_groups {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        if let Some(obj) = groups.as_object() {
+            for (_key, group) in obj {
+                if let Some(weights) = group.get("weights") {
+                    if self.group_size == 0 {
+                        if let Some(gs) = weights.get("group_size").and_then(|v| v.as_i64()) {
+                            self.group_size = gs as i32;
+                        }
+                    }
+                    if self.bits == 0 {
+                        if let Some(nb) = weights.get("num_bits").and_then(|v| v.as_u64()) {
+                            self.bits = nb as usize;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a module path should be skipped for this quantization config.
+    /// Supports literal paths and `re:` prefixed regex patterns in
+    /// `modules_to_not_convert` / `ignore`.
+    pub fn should_skip_module(&self, module_path: &str) -> bool {
+        if module_path.is_empty() || self.modules_to_not_convert.is_empty() {
+            return false;
+        }
+        self.modules_to_not_convert
+            .iter()
+            .any(|item| match_ignore_pattern(module_path, item))
+    }
 }
 
 impl fmt::Debug for QuantConfig {
@@ -712,7 +929,527 @@ impl fmt::Debug for QuantConfig {
             .field("desc_act", &self.desc_act)
             .field("checkpoint_format", &self.checkpoint_format)
             .field("fmt", &self.fmt)
+            .field("format", &self.format)
             .field("weight_block_size", &self.weight_block_size)
+            .field("modules_to_not_convert", &self.modules_to_not_convert)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_match_ignore_literal_exact() {
+        assert!(match_ignore_pattern("lm_head", "lm_head"));
+        assert!(match_ignore_pattern(
+            "model.layers.0.self_attn.q_proj",
+            "model.layers.0.self_attn.q_proj"
+        ));
+    }
+
+    #[test]
+    fn test_match_ignore_literal_suffix() {
+        assert!(match_ignore_pattern(
+            "model.language_model.layers.0.linear_attn.out_proj",
+            "model.language_model.layers.0.linear_attn.out_proj"
+        ));
+        assert!(match_ignore_pattern("model.lm_head.weight", "lm_head"));
+    }
+
+    #[test]
+    fn test_match_ignore_regex() {
+        assert!(match_ignore_pattern(
+            "model.layers.5.self_attn.q_proj",
+            "re:.*self_attn.*"
+        ));
+        assert!(match_ignore_pattern(
+            "model.layers.10.linear_attn.in_proj_qkv",
+            "re:.*linear_attn.*"
+        ));
+        assert!(match_ignore_pattern(
+            "model.layers.3.mlp.gate",
+            "re:.*.mlp.gate$"
+        ));
+        assert!(!match_ignore_pattern(
+            "model.layers.3.mlp.gate_proj",
+            "re:.*.mlp.gate$"
+        ));
+        assert!(match_ignore_pattern(
+            "model.visual.blocks.0.attn.qkv",
+            "re:.*visual.*"
+        ));
+        assert!(match_ignore_pattern("mtp.fc", "re:.*mtp.*"));
+        assert!(match_ignore_pattern(
+            "model.embed_tokens",
+            "re:.*embed_tokens.*"
+        ));
+    }
+
+    #[test]
+    fn test_match_ignore_regex_no_false_positive() {
+        assert!(!match_ignore_pattern(
+            "model.layers.5.mlp.up_proj",
+            "re:.*self_attn.*"
+        ));
+        assert!(!match_ignore_pattern(
+            "model.layers.5.mlp.up_proj",
+            "re:.*linear_attn.*"
+        ));
+        assert!(!match_ignore_pattern(
+            "model.layers.5.mlp.up_proj",
+            "re:.*lm_head.*"
+        ));
+    }
+
+    #[test]
+    fn test_should_skip_module() {
+        let cfg = QuantConfig {
+            quant_method: "mxfp4".to_string(),
+            bits: 4,
+            group_size: 32,
+            sym: None,
+            desc_act: None,
+            checkpoint_format: None,
+            fmt: None,
+            format: Some("mxfp4-pack-quantized".to_string()),
+            weight_block_size: None,
+            modules_to_not_convert: vec![
+                "re:.*self_attn.*".to_string(),
+                "re:.*linear_attn.*".to_string(),
+                "re:.*.mlp.gate$".to_string(),
+                "re:.*lm_head.*".to_string(),
+                "re:.*embed_tokens.*".to_string(),
+                "re:.*visual.*".to_string(),
+                "re:.*mtp.*".to_string(),
+            ],
+            config_groups: None,
+            quant_algo: None,
+            mode: None,
+        };
+        assert!(cfg.should_skip_module("model.layers.0.self_attn.q_proj"));
+        assert!(cfg.should_skip_module("model.layers.5.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("model.layers.3.mlp.gate"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.gate_proj"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.up_proj"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.down_proj"));
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(cfg.should_skip_module("model.visual.blocks.0.attn.qkv"));
+        assert!(cfg.should_skip_module("mtp.fc"));
+    }
+
+    #[test]
+    fn test_normalize_compressed_tensors_regex_ignore() {
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "weights": {"num_bits": 4, "group_size": 32, "strategy": "group", "symmetric": true}
+                }
+            },
+            "ignore": [
+                "re:.*self_attn.*",
+                "re:.*linear_attn.*",
+                "re:.*.mlp.gate$",
+                "re:.*lm_head.*",
+                "re:.*embed_tokens.*",
+                "re:.*visual.*",
+                "re:.*mtp.*"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+        assert_eq!(cfg.bits, 4);
+        assert_eq!(cfg.modules_to_not_convert.len(), 7);
+        assert!(cfg.should_skip_module("model.layers.5.self_attn.q_proj"));
+        assert!(!cfg.should_skip_module("model.layers.5.mlp.up_proj"));
+    }
+
+    #[test]
+    fn test_normalize_compressed_tensors_literal_ignore() {
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "weights": {"num_bits": 4, "group_size": 32}
+                }
+            },
+            "ignore": [
+                "model.layers.0.linear_attn.out_proj",
+                "model.layers.0.linear_attn.in_proj_qkv",
+                "lm_head"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert!(cfg.should_skip_module("model.layers.0.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(!cfg.should_skip_module("model.layers.1.mlp.up_proj"));
+    }
+
+    #[test]
+    fn test_normalize_format_in_config_groups_only() {
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "weights": {"num_bits": 4, "group_size": 32, "type": "float", "strategy": "group", "symmetric": true}
+                }
+            },
+            "ignore": ["lm_head"]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+    }
+
+    #[test]
+    fn test_olka_4b_config() {
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "symmetric": true
+                    }
+                }
+            },
+            "ignore": [
+                "model.language_model.embed_tokens",
+                "model.language_model.layers.0.input_layernorm",
+                "model.language_model.layers.0.linear_attn.conv1d",
+                "model.language_model.layers.0.linear_attn.in_proj_a",
+                "model.language_model.norm",
+                "model.visual.blocks.0.attn.proj",
+                "mtp.fc"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+        assert_eq!(cfg.bits, 4);
+        assert!(cfg.should_skip_module("model.language_model.embed_tokens"));
+        assert!(cfg.should_skip_module("model.language_model.layers.0.linear_attn.conv1d"));
+        assert!(!cfg.should_skip_module("model.language_model.layers.0.mlp.up_proj"));
+    }
+
+    #[test]
+    fn test_kaitchup_27b_config() {
+        let json = r#"{
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "input_activations": null,
+                    "output_activations": null,
+                    "targets": ["Linear"],
+                    "weights": {
+                        "actorder": null,
+                        "block_structure": null,
+                        "dynamic": false,
+                        "group_size": 32,
+                        "num_bits": 4,
+                        "observer": "memoryless_minmax",
+                        "observer_kwargs": {},
+                        "scale_dtype": "torch.uint8",
+                        "strategy": "group",
+                        "symmetric": true,
+                        "type": "float",
+                        "zp_dtype": null
+                    }
+                }
+            },
+            "format": "mxfp4-pack-quantized",
+            "global_compression_ratio": null,
+            "ignore": [
+                "model.visual.blocks.0.attn.qkv",
+                "model.language_model.layers.0.linear_attn.out_proj",
+                "lm_head"
+            ],
+            "kv_cache_scheme": null,
+            "quant_method": "compressed-tensors",
+            "quantization_status": "compressed",
+            "sparsity_config": {},
+            "transform_config": {},
+            "version": "0.13.1.dev53+gd96634b"
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+        assert_eq!(cfg.bits, 4);
+        assert!(cfg.should_skip_module("model.language_model.layers.0.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("lm_head"));
+    }
+
+    #[test]
+    fn test_122b_regex_config() {
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "format": "mxfp4-pack-quantized",
+            "quantization_status": "compressed",
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "strategy": "group",
+                        "group_size": 32,
+                        "symmetric": true,
+                        "scale_dtype": "torch.uint8",
+                        "dynamic": false,
+                        "actorder": null,
+                        "block_structure": null,
+                        "observer": "minmax",
+                        "observer_kwargs": {},
+                        "zp_dtype": null
+                    },
+                    "targets": ["Linear"],
+                    "input_activations": null,
+                    "output_activations": null
+                }
+            },
+            "ignore": [
+                "re:.*self_attn.*",
+                "re:.*linear_attn.*",
+                "re:.*.mlp.gate$",
+                "re:.*shared_expert_gate.*",
+                "re:.*lm_head.*",
+                "re:.*embed_tokens.*",
+                "re:.*visual.*",
+                "re:.*mtp.*"
+            ],
+            "kv_cache_scheme": null,
+            "sparsity_config": {},
+            "transform_config": {}
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+        assert_eq!(cfg.bits, 4);
+        assert!(cfg.should_skip_module("model.layers.5.self_attn.q_proj"));
+        assert!(cfg.should_skip_module("model.layers.5.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("model.layers.3.mlp.gate"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.gate_proj"));
+        assert!(cfg.should_skip_module("model.layers.3.shared_expert_gate"));
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(cfg.should_skip_module("model.embed_tokens"));
+        assert!(cfg.should_skip_module("model.visual.blocks.0.attn.qkv"));
+        assert!(cfg.should_skip_module("mtp.fc"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.up_proj"));
+        assert!(!cfg.should_skip_module("model.layers.3.mlp.down_proj"));
+    }
+
+    #[test]
+    fn test_2imi9_9b_config() {
+        let json = r#"{
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "input_activations": null,
+                    "output_activations": null,
+                    "targets": ["Linear"],
+                    "weights": {
+                        "actorder": null,
+                        "block_structure": null,
+                        "dynamic": false,
+                        "group_size": 32,
+                        "num_bits": 4,
+                        "observer": "memoryless_minmax",
+                        "observer_kwargs": {},
+                        "scale_dtype": "torch.uint8",
+                        "strategy": "group",
+                        "symmetric": true,
+                        "type": "float",
+                        "zp_dtype": null
+                    }
+                }
+            },
+            "format": "mxfp4-pack-quantized",
+            "global_compression_ratio": null,
+            "ignore": [
+                "model.layers.0.linear_attn.out_proj",
+                "model.layers.0.linear_attn.in_proj_qkv",
+                "lm_head"
+            ],
+            "kv_cache_scheme": null,
+            "quant_method": "compressed-tensors",
+            "quantization_status": "compressed",
+            "sparsity_config": {},
+            "transform_config": {},
+            "version": "0.14.1.a20260310"
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "mxfp4");
+        assert_eq!(cfg.group_size, 32);
+        assert_eq!(cfg.bits, 4);
+        assert!(cfg.should_skip_module("model.layers.0.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(!cfg.should_skip_module("model.layers.1.mlp.up_proj"));
+    }
+
+    #[test]
+    fn test_nvfp4_axionml_4b_config() {
+        let json = r#"{
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": {
+                "group_0": {
+                    "input_activations": {"dynamic": false, "num_bits": 4, "type": "float", "group_size": 16},
+                    "weights": {"dynamic": false, "num_bits": 4, "type": "float", "group_size": 16},
+                    "targets": ["Linear"]
+                }
+            },
+            "ignore": [
+                "lm_head",
+                "model.language_model.layers.0.linear_attn.conv1d",
+                "model.visual*",
+                "mtp.layers.0*"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "nvfp4");
+        assert_eq!(cfg.group_size, 16);
+        assert_eq!(cfg.bits, 4);
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(cfg.should_skip_module("model.visual.encoder.layers.0.self_attn"));
+        assert!(cfg.should_skip_module("mtp.layers.0.mlp.gate_proj"));
+        assert!(!cfg.should_skip_module("model.language_model.layers.1.mlp.up_proj"));
+    }
+
+    #[test]
+    fn test_nvfp4_glob_wildcards() {
+        let json = r#"{
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "ignore": [
+                "lm_head",
+                "*.mlp.shared_expert.*",
+                "model.layers.0.self_attn*",
+                "model.layers.92*"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "nvfp4");
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(cfg.should_skip_module("model.layers.5.mlp.shared_expert.gate_proj"));
+        assert!(cfg.should_skip_module("model.layers.0.self_attn.q_proj"));
+        assert!(cfg.should_skip_module("model.layers.0.self_attn.k_proj"));
+        assert!(cfg.should_skip_module("model.layers.92.self_attn.q_proj"));
+        assert!(!cfg.should_skip_module("model.layers.1.self_attn.q_proj"));
+        assert!(!cfg.should_skip_module("model.layers.5.mlp.gate_proj"));
+    }
+
+    #[test]
+    fn test_mlx_nvfp4_not_normalized() {
+        // MLX-community models use an incompatible quantization format:
+        // U32-packed weights + integer U8 scales (NOT FP8 E4M3 block scales).
+        // These must NOT be normalized to our "nvfp4" quant_method.
+        let json = r#"{
+            "group_size": 16,
+            "bits": 4,
+            "mode": "nvfp4"
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.quant_method, "");
+        cfg.normalize_compressed_tensors();
+        assert_eq!(
+            cfg.quant_method, "",
+            "MLX mode=nvfp4 must not normalize to nvfp4"
+        );
+    }
+
+    #[test]
+    fn test_nvfp4_compressed_tensors_format() {
+        // RedHatAI/Qwen3.5-122B-A10B-NVFP4 style: compressed-tensors + nvfp4-pack-quantized
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "format": "nvfp4-pack-quantized",
+            "config_groups": {
+                "group_0": {
+                    "format": "nvfp4-pack-quantized",
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "group_size": 16,
+                        "strategy": "tensor_group",
+                        "symmetric": true,
+                        "dynamic": false,
+                        "scale_dtype": "torch.float8_e4m3fn"
+                    },
+                    "input_activations": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "group_size": 16,
+                        "dynamic": "local",
+                        "scale_dtype": "torch.float8_e4m3fn"
+                    }
+                }
+            },
+            "ignore": [
+                "lm_head",
+                "model.visual.blocks.0.attn.qkv",
+                "model.language_model.layers.0.linear_attn.out_proj",
+                "model.language_model.layers.0.mlp.gate",
+                "model.language_model.layers.0.mlp.shared_expert_gate"
+            ]
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "nvfp4");
+        assert_eq!(cfg.bits, 4);
+        assert_eq!(cfg.group_size, 16);
+        assert!(cfg.should_skip_module("lm_head"));
+        assert!(cfg.should_skip_module("model.visual.blocks.0.attn.qkv"));
+        assert!(cfg.should_skip_module("model.language_model.layers.0.linear_attn.out_proj"));
+        assert!(cfg.should_skip_module("model.language_model.layers.0.mlp.gate"));
+        assert!(cfg.should_skip_module("model.language_model.layers.0.mlp.shared_expert_gate"));
+        assert!(!cfg.should_skip_module("model.language_model.layers.0.mlp.gate_proj"));
+        assert!(!cfg.should_skip_module("model.language_model.layers.0.mlp.down_proj"));
+    }
+
+    #[test]
+    fn test_nvfp4_compressed_tensors_detect_from_groups() {
+        // compressed-tensors without top-level format, detected from config_groups
+        let json = r#"{
+            "quant_method": "compressed-tensors",
+            "config_groups": {
+                "group_0": {
+                    "format": "nvfp4-pack-quantized",
+                    "targets": ["Linear"],
+                    "weights": {
+                        "num_bits": 4,
+                        "type": "float",
+                        "group_size": 16
+                    }
+                }
+            }
+        }"#;
+        let mut cfg: QuantConfig = serde_json::from_str(json).unwrap();
+        cfg.normalize_compressed_tensors();
+        assert_eq!(cfg.quant_method, "nvfp4");
+        assert_eq!(cfg.bits, 4);
+        assert_eq!(cfg.group_size, 16);
     }
 }

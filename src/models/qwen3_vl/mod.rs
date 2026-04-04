@@ -69,8 +69,9 @@ impl Qwen3VLForConditionalGeneration {
         let mut vision_end_token_id = 0;
 
         if let Some(cfg) = try_parse_multimodal_extra_config(config)? {
-            if cfg.quantization_config.is_some() {
-                config_text.quantization_config = cfg.quantization_config.clone();
+            if let Some(mut qcfg) = cfg.quantization_config.clone() {
+                qcfg.normalize_compressed_tensors();
+                config_text.quantization_config = Some(qcfg);
             }
 
             spatial_merge_size = cfg.vision_config.spatial_merge_size;

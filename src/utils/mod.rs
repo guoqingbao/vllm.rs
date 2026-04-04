@@ -60,22 +60,15 @@ macro_rules! serde_default {
 }
 
 pub fn module_path_matches_not_convert(module_path: &str, item: &str) -> bool {
-    let module_path = module_path.trim_end_matches(".weight");
-    let item = item.trim_end_matches(".weight");
-    module_path == item
-        || module_path.ends_with(item)
-        || module_path.ends_with(&format!(".{item}"))
-        || item.ends_with(module_path)
-        || item.ends_with(&format!(".{module_path}"))
+    crate::utils::config::match_ignore_pattern(module_path, item)
 }
 
 pub fn should_skip_fp8_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
-    if module_path.is_empty() || cfg.modules_to_not_convert.is_empty() {
-        return false;
-    }
-    cfg.modules_to_not_convert
-        .iter()
-        .any(|item| module_path_matches_not_convert(module_path, item))
+    cfg.should_skip_module(module_path)
+}
+
+pub fn should_skip_quant_for_module(module_path: &str, cfg: &QuantConfig) -> bool {
+    cfg.should_skip_module(module_path)
 }
 
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
@@ -389,6 +382,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             first_k_dense_replace: leading_dense_block_count,
             n_shared_experts: expert_shared_count,
             routed_scaling_factor: expert_weights_scale,
+            n_group: None,
+            topk_group: None,
+            scoring_func: None,
+            topk_method: None,
         })
     } else {
         None
@@ -698,10 +695,10 @@ fn merge_multimodal_top_level_config(
 ) -> Result<()> {
     if let Some(qcfg) = raw_root.get("quantization_config") {
         if !qcfg.is_null() {
-            config.quantization_config = Some(
-                serde_json::from_value::<QuantConfig>(qcfg.clone())
-                    .map_err(candle_core::Error::wrap)?,
-            );
+            let mut parsed = serde_json::from_value::<QuantConfig>(qcfg.clone())
+                .map_err(candle_core::Error::wrap)?;
+            parsed.normalize_compressed_tensors();
+            config.quantization_config = Some(parsed);
         }
     }
 
@@ -992,12 +989,27 @@ pub fn init_config_tokenizer(
             }
         }
 
-        if let Some(qcfg) = &config.quantization_config {
+        if let Some(qcfg) = &mut config.quantization_config {
+            qcfg.normalize_compressed_tensors();
+            if let Some(mode) = &qcfg.mode {
+                if mode.eq_ignore_ascii_case("nvfp4") || mode.eq_ignore_ascii_case("mxfp4") {
+                    panic!(
+                        "MLX-quantized models (mode=\"{}\") are not supported. \
+                         MLX uses an incompatible packing format (U32 weights with integer scales). \
+                         Please use a modelopt or compressed-tensors quantized model instead \
+                         (e.g. AxionML/Qwen3.5-*-NVFP4 or nvidia/*-NVFP4).",
+                        mode
+                    );
+                }
+            }
             assert!(
                 qcfg.quant_method == "gptq"
                     || qcfg.quant_method == "awq"
-                    || qcfg.quant_method == "fp8",
-                "Invalid quantization format! Only `gptq`, `awq` and `fp8` supported"
+                    || qcfg.quant_method == "fp8"
+                    || qcfg.quant_method == "mxfp4"
+                    || qcfg.quant_method == "nvfp4",
+                "Invalid quantization format! Only `gptq`, `awq`, `fp8`, `mxfp4` and `nvfp4` supported, got `{}`",
+                qcfg.quant_method
             );
             if qcfg.quant_method == "gptq" || qcfg.quant_method == "awq" {
                 assert!(
@@ -1018,6 +1030,10 @@ pub fn init_config_tokenizer(
                 "Qwen2MoeForCausalLM"
                     | "Qwen3MoeForCausalLM"
                     | "Glm4MoeForCausalLM"
+                    | "Glm4MoeLiteForCausalLM"
+                    | "DeepseekV3ForCausalLM"
+                    | "DeepseekV32ForCausalLM"
+                    | "DeepseekForCausalLM"
                     | "Qwen3_5MoeForCausalLM"
                     | "Qwen3_5MoeForConditionalGeneration"
                     | "Qwen3NextForCausalLM"
@@ -1033,6 +1049,17 @@ pub fn init_config_tokenizer(
             }
         }
         apply_qwen35_next_moe_norm_topk_default(&mut config);
+
+        if let Some(moe_cfg) = config.moe_cfg.as_mut() {
+            if moe_cfg.shared_expert_intermediate_size.is_none() {
+                if let Some(n_shared) = moe_cfg.n_shared_experts {
+                    if n_shared > 0 {
+                        moe_cfg.shared_expert_intermediate_size =
+                            Some(moe_cfg.moe_intermediate_size);
+                    }
+                }
+            }
+        }
 
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
@@ -1423,6 +1450,10 @@ pub fn get_arch_rope(
         ("Qwen3VLForConditionalGeneration", false),
         ("Qwen3VLMoeForConditionalGeneration", false),
         ("Glm4MoeForCausalLM", false),
+        ("Glm4MoeLiteForCausalLM", false),
+        ("DeepseekV3ForCausalLM", false),
+        ("DeepseekV32ForCausalLM", false),
+        ("DeepseekForCausalLM", false),
         ("Phi3ForCausalLM", false),
         ("Phi4ForCausalLM", false),
         ("MistralForCausalLM", false),
@@ -1468,20 +1499,16 @@ pub fn get_arch_rope(
             ModelType::Qwen3,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
+        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
+            ModelType::Qwen3MoE,
+            "<|im_start|>user\n {} <|im_end|>".to_string(),
+        ),
         "Qwen3_5ForCausalLM" | "qwen35" => (
             ModelType::Qwen3_5,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
-        "Qwen3NextForCausalLM" => (
+        "Qwen3_5MoeForCausalLM" | "Qwen3NextForCausalLM" | "qwen35moe" => (
             ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "Qwen3_5MoeForCausalLM" | "qwen35moe" => (
-            ModelType::Qwen3_5MoE,
-            "<|im_start|>user\n {} <|im_end|>".to_string(),
-        ),
-        "qwen2moe" | "Qwen2MoeForCausalLM" | "qwen3moe" | "Qwen3MoeForCausalLM" => (
-            ModelType::Qwen3MoE,
             "<|im_start|>user\n {} <|im_end|>".to_string(),
         ),
         "Qwen3VLForConditionalGeneration"
@@ -1532,6 +1559,15 @@ pub fn get_arch_rope(
             ModelType::GLM4MoE,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
+        "Glm4MoeLiteForCausalLM" | "glm4moelite" => (
+            ModelType::GLM4MoeLite,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "DeepseekV3ForCausalLM"
+        | "DeepseekV32ForCausalLM"
+        | "DeepseekForCausalLM"
+        | "deepseek3"
+        | "deepseek" => (ModelType::DeepSeek, "<|User|>{}<|Assistant|>".to_string()),
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
             (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
         }
@@ -1853,5 +1889,22 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
+    }
+}
+
+/// Fail fast if `host:port` is already bound, before spending minutes loading
+/// model weights.  Prints a user-friendly error and exits the process when the
+/// port is occupied.
+pub fn ensure_port_free(host: &str, port: u16) {
+    let addr = format!("{host}:{port}");
+    match std::net::TcpListener::bind(&addr) {
+        Ok(_listener) => { /* port is free; drop the listener immediately */ }
+        Err(e) => {
+            eprintln!(
+                "\n❌ Port {port} is already in use ({e}).\n   \
+                 Free the port or choose a different one with --port <port>.\n"
+            );
+            std::process::exit(1);
+        }
     }
 }

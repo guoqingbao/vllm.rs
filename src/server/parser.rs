@@ -119,6 +119,7 @@ impl ToolConfig {
             | ModelType::Phi4
             | ModelType::GLM4
             | ModelType::GLM4MoE
+            | ModelType::GLM4MoeLite
             | ModelType::Yi
             | ModelType::StableLM
             | ModelType::DeepSeek => ToolConfig {
@@ -1247,7 +1248,7 @@ impl StreamToolParser {
             }
             ModelType::Gemma | ModelType::Gemma3 => "json",
             ModelType::Phi | ModelType::Phi4 => "qwen",
-            ModelType::GLM4 | ModelType::GLM4MoE => "glm47_moe",
+            ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
         }

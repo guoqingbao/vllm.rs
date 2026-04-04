@@ -75,9 +75,9 @@ impl GatedDeltaNet {
         comm: Rc<Comm>,
         config: &Config,
         dtype: DType,
-        is_fp8_quant: bool,
+        is_quantized: bool,
     ) -> Result<GdnProjection> {
-        let (quantization_config, quant) = if is_fp8_quant {
+        let (quantization_config, quant) = if is_quantized {
             (config.quantization_config.clone(), config.quant.clone())
         } else {
             (None, None)
@@ -110,8 +110,8 @@ impl GatedDeltaNet {
             false,
             vb.pp("in_proj_ba"),
             comm.clone(),
-            &None,
-            &None,
+            &quantization_config,
+            &quant,
             dtype,
         );
 
@@ -171,8 +171,8 @@ impl GatedDeltaNet {
                 false,
                 vb.pp(projection_key_map["in_proj_b"]),
                 comm.clone(),
-                &None,
-                &None,
+                &quantization_config,
+                &quant,
                 dtype,
             )
         };
@@ -193,8 +193,8 @@ impl GatedDeltaNet {
                 false,
                 vb.pp(projection_key_map["in_proj_a"]),
                 comm.clone(),
-                &None,
-                &None,
+                &quantization_config,
+                &quant,
                 dtype,
             )
         };
@@ -242,9 +242,9 @@ impl GatedDeltaNet {
                         });
                     }
                     Err(err) => {
-                        if is_fp8_quant {
+                        if is_quantized {
                             candle_core::bail!(
-                                "Unable to load TP-safe FP8 Qwen3.5 split in_proj_qkv: {}",
+                                "Unable to load TP-safe quantized Qwen3.5 split in_proj_qkv: {}",
                                 err
                             );
                         }
@@ -435,11 +435,7 @@ impl GatedDeltaNet {
             );
         }
 
-        let is_fp8_quant = if let Some(cfg) = config.quantization_config.as_ref() {
-            cfg.quant_method == "fp8"
-        } else {
-            false
-        };
+        let is_quantized = config.quantization_config.is_some();
         let kernel_dtype = if vb.is_qvar_builder() {
             DType::F32
         } else {
@@ -507,7 +503,7 @@ impl GatedDeltaNet {
             comm.clone(),
             config,
             dtype,
-            is_fp8_quant,
+            is_quantized,
         )?;
 
         // Conv1D weights are stored global; slice rank-local q/k/v channel blocks.
@@ -584,12 +580,12 @@ impl GatedDeltaNet {
                 hidden_size,
                 vb.pp(gdn_key_map["out_proj"]),
                 comm.clone(),
-                if is_fp8_quant {
+                if is_quantized {
                     &config.quantization_config
                 } else {
                     &None
                 },
-                if is_fp8_quant { &config.quant } else { &None },
+                if is_quantized { &config.quant } else { &None },
                 dtype,
             )?
         };
