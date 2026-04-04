@@ -187,7 +187,34 @@ impl MlaAttention {
         let w_uv = w.narrow(1, qk_nope_head_dim, v_head_dim)?.contiguous()?;
         let w_uv_t = w_uv.transpose(1, 2)?.contiguous()?;
 
-        let sm_scale = 1.0 / (q_head_dim as f32).sqrt();
+        let mut sm_scale = 1.0 / (q_head_dim as f32).sqrt();
+        let mut rope_scale = 1.0f32;
+
+        if let Some(ref rope_scaling) = config.rope_scaling {
+            use crate::utils::config::RopeScalingValue;
+            let is_yarn = rope_scaling.get("type").and_then(|v| {
+                if let RopeScalingValue::String(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            }) == Some("yarn");
+            if is_yarn {
+                let factor = rope_scaling
+                    .get("factor")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0) as f32;
+                let mscale_all_dim = rope_scaling
+                    .get("mscale_all_dim")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+                if mscale_all_dim > 0.0 && factor > 1.0 {
+                    let mscale = 0.1 * mscale_all_dim * factor.ln() + 1.0;
+                    sm_scale *= mscale * mscale;
+                }
+                rope_scale = 1.0;
+            }
+        }
 
         Ok(Self {
             q_a_proj,
@@ -207,21 +234,22 @@ impl MlaAttention {
             kv_lora_rank,
             v_head_dim,
             sm_scale,
-            rope_scale: 1.0,
-            rope_theta: 10000.0,
+            rope_scale,
+            rope_theta: config.rope_theta.unwrap_or(10000.0) as f32,
             dtype,
         })
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(unused_variables)]
     pub fn forward(
         &self,
         xs: &Tensor,
         rotary_emb: &Option<Arc<dyn ApplyRotaryEmbedding>>,
         _attention_mask: Option<&Vec<Tensor>>,
         positions: &Tensor,
-        _cache: Option<(&Tensor, &Tensor)>,
-        _input_metadata: &InputMetadata,
+        cache: Option<(&Tensor, &Tensor)>,
+        input_metadata: &InputMetadata,
     ) -> Result<Tensor> {
         let (seq_len, _) = xs.dims2()?;
 
@@ -281,12 +309,18 @@ impl MlaAttention {
                 // Absorb w_uk into q_nope: q_nope_absorbed = q_nope @ w_uk
                 // q_nope: [seq_len, num_heads, qk_nope_head_dim]
                 // w_uk: [num_heads, qk_nope_head_dim, kv_lora_rank]
-                let q_nope_absorbed = q_nope.matmul(&self.w_uk)?;
+                let q_nope_t = q_nope.transpose(0, 1)?.contiguous()?;
+                let q_nope_absorbed = q_nope_t
+                    .matmul(&self.w_uk)?
+                    .transpose(0, 1)?
+                    .contiguous()?
+                    .to_dtype(self.dtype)?;
                 // q_nope_absorbed: [seq_len, num_heads, kv_lora_rank]
+                let q_pe = q_pe.to_dtype(self.dtype)?;
 
                 let page_size = ckv_cache.dim(1)?;
 
-                let attn_out = if _input_metadata.is_prefill {
+                let attn_out = if input_metadata.is_prefill {
                     let plan_info = fm.mla_prefill_plan_info.as_ref().ok_or_else(|| {
                         candle_core::Error::msg("MLA prefill requires mla_prefill_plan_info")
                     })?;
@@ -327,7 +361,11 @@ impl MlaAttention {
 
                 // attn_out: [seq_len, num_heads, kv_lora_rank]
                 // Project via w_uv_t: [num_heads, kv_lora_rank, v_head_dim]
-                let y = attn_out.matmul(&self.w_uv_t)?;
+                let attn_out_t = attn_out.transpose(0, 1)?.contiguous()?;
+                let y = attn_out_t
+                    .matmul(&self.w_uv_t)?
+                    .transpose(0, 1)?
+                    .contiguous()?;
                 // y: [seq_len, num_heads, v_head_dim]
                 let y = y.reshape((seq_len, self.num_heads * self.v_head_dim))?;
                 let y = y.to_dtype(xs.dtype())?;
