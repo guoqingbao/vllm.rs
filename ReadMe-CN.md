@@ -95,6 +95,7 @@
 - [Rust库](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [性能测试](docs/performance.md)
+- [模型测试 (AI辅助)](docs/test_model.md)
 
 ## 📘 使用方法（Python）
 ### 📦 使用 pip 安装
