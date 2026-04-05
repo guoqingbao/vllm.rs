@@ -508,6 +508,38 @@ text[stop=""]: /((?s).*?)/"#
     }
 }
 
+/// Removes all zero-width and invisible control characters from a string
+/// 
+/// Filters out characters in these ranges:
+/// - U+0000 to U+001F (C0 control characters except tab, newline, carriage return)
+/// - U+007F (DEL)
+/// - U+200B to U+200F (Zero-width and directionality marks)
+/// - U+2028 to U+202F (Line/paragraph separators and special spaces)
+/// - U+2060 to U+206F (Invisible operators and word joiner)
+/// - U+FEFF (BOM)
+/// - U+FFF0 to U+FFFF (Non-characters)
+/// - U+0080 to U+009F (C1 control characters)
+fn strip_invisible_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let code = *c as u32;
+            // Allow standard whitespace: tab (9), newline (10), carriage return (13)
+            if code == 9 || code == 10 || code == 13 {
+                return true;
+            }
+            // Filter out all other control characters and invisible characters
+            !(code < 32 ||           // C0 controls (except allowed whitespace)
+              code == 127 ||         // DEL
+              (code >= 0x200B && code <= 0x200F) ||  // Zero-width marks
+              (code >= 0x2028 && code <= 0x202F) ||  // Line/para separators
+              (code >= 0x2060 && code <= 0x206F) ||  // Invisible operators
+              code == 0xFEFF ||      // BOM
+              (code >= 0xFFF0 && code <= 0xFFFF) ||  // Non-characters
+              (code >= 0x0080 && code <= 0x009F))   // C1 controls
+        })
+        .collect()
+}
+
 /// Build EOS pattern for text completion
 /// Returns just the EOS rule definition (not combined with text)
 pub fn eos_expression(eos_token_ids: &[u32]) -> String {
@@ -527,7 +559,7 @@ pub fn eos_expression(eos_token_ids: &[u32]) -> String {
 
 /// Simplified EOS insertion function for use in compose()
 /// Appends 'eos' to the start rule and adds the EOS rule definition
-pub fn eos_insertion(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLevelGrammar {
+pub fn finalize_grammar(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLevelGrammar {
     if eos_token_ids.is_empty() {
         return grammar.clone();
     }
@@ -579,9 +611,10 @@ pub fn eos_insertion(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLev
     };
 
     // Combine: new start rule, existing rules, eos rule
-    let final_grammar = format!("{}\n{}\n{}", new_start_line, other_rules, eos_line);
+    let terminated_lark = format!("{}\n{}\n{}", new_start_line, other_rules, eos_line);
+    let sanitized_lark = strip_invisible_chars(&terminated_lark);
 
-    TopLevelGrammar::from_lark_ascii(&final_grammar)
+    TopLevelGrammar::from_lark_ascii(&sanitized_lark)
 }
 
 
@@ -1112,7 +1145,7 @@ pub fn compose_grammars(
             grammar.max_tokens = Some(max);
         }
         // Add EOS termination to the tool-only grammar
-        return eos_insertion(&grammar, &guidance_tokens.eos_token_ids);
+        return finalize_grammar(&grammar, &guidance_tokens.eos_token_ids);
     }
     
     // Build GrammarInput from constraint grammar(s)
@@ -1151,7 +1184,7 @@ pub fn compose_grammars(
         grammar = TopLevelGrammar::from_lark_ascii(&modified_lark);
     }
     // Add EOS termination to the composed grammar (single point of entry)
-    grammar = eos_insertion(&grammar, &guidance_tokens.eos_token_ids);
+    grammar = finalize_grammar(&grammar, &guidance_tokens.eos_token_ids);
     
     grammar
 }
