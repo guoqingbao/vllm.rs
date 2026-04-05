@@ -3,36 +3,60 @@ use crate::utils::special_tokens::SpecialTokens;
 use anyhow::Result;
 use candle_core::Tensor;
 use llguidance::{api::TopLevelGrammar, Matcher, ParserFactory as LlgParserFactory};
-use std::collections::HashMap;
+use regex::Regex;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use toktrie::{SimpleVob, TokTrie};
 use toktrie_hf_tokenizers::{ByteTokenizer, ByteTokenizerEnv};
 
-use crate::tools::schema::ToolGrammarBuilder;
+use crate::tools::schema::{build_tool_grammar_for_parser, ToolGrammarBuilder};
+
 use crate::tools::Tool;
 use crate::utils::logits_processor::{LogitsProcessor, Sampling};
 use serde_json::json;
 
+// Import types from server/mod.rs for grammar parsing
+use crate::server::parser::{StreamToolParser, ToolConfig};
+use crate::server::{ChatCompletionRequest, ResponseFormat, StructuredOutputs};
+use crate::tools::{ToolChoice, ToolChoiceMode};
+use crate::utils::chat_template::ChatTemplate;
+
+use once_cell::sync::Lazy;
+
 // Re-export reasoning types for convenience (without pyclass since it causes compilation issues)
 pub use crate::utils::reasoning::{
     build_reasoning_grammar, thinking_grammar_with_reasoning_block, ReasoningEffort,
-    ThinkingGrammarBuilder,
+    ThinkingGrammarBuilder, get_reasoning_token_strings
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct GuidanceTokens {
+    pub bos_token_ids: Vec<u32>,
     pub eos_token_ids: Vec<u32>,
     pub reasoning_start_ids: Vec<u32>,
     pub reasoning_end_ids: Vec<u32>,
+    pub tool_call_start_ids: Vec<u32>,
+    pub tool_call_end_ids: Vec<u32>,
 }
 
-pub fn extract_guidance_tokens(tokenizer: &Tokenizer, eos_token_ids: Vec<u32>) -> GuidanceTokens {
+pub fn extract_guidance_tokens(tokenizer: &Tokenizer, eos_token_ids: Vec<u32>, bos_token_ids: Vec<u32>) -> GuidanceTokens {
     let special_tokens = SpecialTokens::new(tokenizer);
+
+    // If no BOS token IDs were provided, scan tokenizer vocab for common BOS tokens
+    let bos_token_ids = if bos_token_ids.is_empty() {
+        special_tokens.bos_token_ids()
+    } else {
+        bos_token_ids
+    };
+
     GuidanceTokens {
+        bos_token_ids,
         eos_token_ids,
         reasoning_start_ids: special_tokens.reasoning_start_ids(),
         reasoning_end_ids: special_tokens.reasoning_end_ids(),
+        tool_call_start_ids: special_tokens.tool_call_start_ids(),
+        tool_call_end_ids: special_tokens.tool_call_end_ids(),
     }
 }
 
@@ -50,279 +74,416 @@ pub enum GrammarError {
 
     #[error("invalid grammar: {0}")]
     InvalidGrammar(String),
+
+    #[error("tool grammar construction failed: {0}")]
+    ToolGrammarError(String),
 }
 
 pub type GrammarResult<T> = Result<T, GrammarError>;
 
-/// Builder for structured output constraint grammars
-pub struct ConstraintBuilder {
-    choice: Option<Vec<String>>,
-    regex: Option<String>,
-    json: Option<serde_json::Value>,
-    grammar: Option<String>,
-    structural_tag: Option<serde_json::Value>,
+/// Configuration for structural tag constraints
+#[derive(Debug, Clone)]
+pub struct StructuralTagConfig {
+    pub start_tag: String,
+    pub end_tag: String,
+    pub schema: serde_json::Value,
 }
 
-impl ConstraintBuilder {
-    pub fn new() -> Self {
-        Self {
-            choice: None,
-            regex: None,
-            json: None,
-            grammar: None,
-            structural_tag: None,
-        }
-    }
+/// All constraint/grammar input variants - unified entry point for grammar composition
+/// This enum replaces UserConstraint, GrammarComposers, GrammarBuilder, ConstraintBuilder
+#[derive(Debug, Clone)]
+pub enum GrammarInput {
+    /// Choice constraint: list of string options
+    Choice(Vec<String>),
+    /// Regex constraint: raw regex pattern string
+    Regex(String),
+    /// JSON schema constraint: parsed JSON value
+    Json(serde_json::Value),
+    /// Lark grammar constraint: raw Lark grammar string
+    Lark(String),
+    /// Structural tag constraint: parsed JSON value with start/end tags
+    StructuralTag(StructuralTagConfig),
 
-    pub fn choice(mut self, choice: Vec<String>) -> Self {
-        self.choice = Some(choice);
-        self
-    }
+    /// Tool required - all tools available
+    ToolRequired,
+    /// Tool optional - tools available but not required
+    ToolOptional,
+    /// Tool with specific name forced
+    ToolForced(String),
 
-    pub fn regex(mut self, regex: String) -> Self {
-        self.regex = Some(regex);
-        self
-    }
+    /// Combined constraint and tool - sequential composition
+    ConstraintThenTool {
+        constraint: Box<GrammarInput>,
+        tool_name: Option<String>,
+    },
+    /// Combined tool and constraint - sequential composition
+    ToolThenConstraint {
+        tool_name: Option<String>,
+        constraint: Box<GrammarInput>,
+    },
 
-    pub fn json(mut self, json: serde_json::Value) -> Self {
-        self.json = Some(json);
-        self
-    }
-
-    pub fn grammar(mut self, grammar: String) -> Self {
-        self.grammar = Some(grammar);
-        self
-    }
-
-    pub fn structural_tag(mut self, tag: serde_json::Value) -> Self {
-        self.structural_tag = Some(tag);
-        self
-    }
-
-    pub fn build(self) -> Result<Option<TopLevelGrammar>> {
-        let mut selected: Option<TopLevelGrammar> = None;
-        let mut constraint_count = 0;
-
-        if let Some(choice) = self.choice {
-            constraint_count += 1;
-            if constraint_count > 1 {
-                return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-            }
-            let choice_gram = crate::tools::schema::build_choice_lark_grammar(&choice)
-                .map_err(|e| anyhow::Error::msg(e))?;
-            selected = Some(choice_gram);
-        }
-
-        if let Some(regex) = self.regex {
-            constraint_count += 1;
-            if constraint_count > 1 {
-                return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-            }
-            let regex_gram = TopLevelGrammarExt::from_regex_ascii(&regex);
-            selected = Some(regex_gram);
-        }
-
-        if let Some(schema) = self.json {
-            constraint_count += 1;
-            if constraint_count > 1 {
-                return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-            }
-            let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
-            let json_gram = TopLevelGrammarExt::from_json_schema_utf8(schema)
-                .map_err(|e| anyhow::Error::msg(e.to_string()))?;
-            selected = Some(json_gram);
-        }
-
-        if let Some(grammar) = self.grammar {
-            constraint_count += 1;
-            if constraint_count > 1 {
-                return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-            }
-            let lark_gram = TopLevelGrammarExt::from_lark_utf8(&grammar);
-            selected = Some(lark_gram);
-        }
-
-        if let Some(tag) = self.structural_tag {
-            constraint_count += 1;
-            if constraint_count > 1 {
-                return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-            }
-            let (start, end, schema) = crate::tools::schema::parse_structural_tag(&tag)
-                .map_err(|e| anyhow::Error::msg(e))?;
-            let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
-            let tools = crate::tools::schema::schema_to_tools(&schema);
-            let tool_gram = ToolGrammarBuilder::new()
-                .tools(&tools)
-                .start_tag(&start)
-                .end_tag(&end)
-                .start_is_special(false)
-                .end_is_special(false)
-                .build_json();
-            selected = Some(tool_gram);
-        }
-
-        if selected.is_none() {
-            return Err(anyhow::Error::msg("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag"));
-        }
-
-        Ok(selected)
-    }
+    /// Reasoning with base grammar
+    Reasoning {
+        effort: ReasoningEffort,
+        base: Box<GrammarInput>,
+    },
 }
 
-/// Builder for composing multiple grammars with alternation
-/// This provides a more readable, declarative way to build composed grammars
-pub struct GrammarBuilder {
-    alternatives: Vec<TopLevelGrammar>,
-    max_tokens: Option<usize>,
-}
-
-impl GrammarBuilder {
-    pub fn new() -> Self {
-        Self {
-            alternatives: Vec::new(),
-            max_tokens: None,
-        }
-    }
-
-    pub fn alternative(mut self, grammar: TopLevelGrammar) -> Self {
-        self.alternatives.push(grammar);
-        self
-    }
-
-    pub fn max_tokens(mut self, tokens: usize) -> Self {
-        self.max_tokens = Some(tokens);
-        self
-    }
-
-    pub fn build(self) -> TopLevelGrammar {
-        // Note: GrammarBuilder currently uses chat_text_expression() without EOS tokens
-        // EOS token support is provided through compose_grammars() directly
-        match self.alternatives.len() {
-            0 => {
-                let lark = chat_text_expression(false);
-                TopLevelGrammar::from_lark_utf8(&lark)
-            }
-            1 => {
-                let mut gram = self.alternatives.into_iter().next().unwrap();
-                gram.max_tokens = self.max_tokens;
-                gram
-            }
-            _ => {
-                let merged = merge_top_level_grammars(
-                    self.alternatives,
-                    self.max_tokens,
-                    Some("|".to_string()),
-                );
-                merged
-            }
-        }
-    }
-}
-
-/// Grammar composition variant - represents all possible grammar configurations
-#[derive(Clone, Debug)]
-pub enum GrammarComposers {
-    TextWithEos,
-    Constraint(TopLevelGrammar),
-    WithReasoning(TopLevelGrammar, TopLevelGrammar),
-}
-
-/// Builder for constructing GrammarComposers
-pub struct GrammarComposerBuilder {
-    constraint_grammars: Vec<TopLevelGrammar>,
-    reasoning_effort: Option<ReasoningEffort>,
-}
-
-impl GrammarComposerBuilder {
-    pub fn new() -> Self {
-        Self {
-            constraint_grammars: Vec::new(),
-            reasoning_effort: None,
-        }
-    }
-
-    pub fn constraints(mut self, grammars: Vec<TopLevelGrammar>) -> Self {
-        self.constraint_grammars = grammars;
-        self
-    }
-
-    pub fn reasoning_effort(mut self, effort: Option<ReasoningEffort>) -> Self {
-        self.reasoning_effort = effort;
-        self
-    }
-
-    pub fn into_composer(self, guidance_tokens: &GuidanceTokens) -> GrammarComposers {
-        let base = self.build_base_composer(guidance_tokens);
-        self.build_with_reasoning(base, guidance_tokens)
-    }
-
-    fn build_base_composer(&self, _guidance_tokens: &GuidanceTokens) -> GrammarComposers {
-        match self.constraint_grammars.is_empty() {
-            true => GrammarComposers::TextWithEos,
-            false => GrammarComposers::Constraint(self.constraint_grammars[0].clone()),
-        }
-    }
-
-    fn build_with_reasoning(
-        self,
-        base: GrammarComposers,
-        guidance_tokens: &GuidanceTokens,
-    ) -> GrammarComposers {
-        match self.reasoning_effort {
-            Some(ReasoningEffort::None) => base,
-            Some(effort) => {
-                let start_ids = &guidance_tokens.reasoning_start_ids;
-                let end_ids = &guidance_tokens.reasoning_end_ids;
-
-                if start_ids.is_empty() || end_ids.is_empty() {
-                    crate::log_warn!(
-                        "[llg] Reasoning effort {:?} set but no reasoning tokens found",
-                        effort
-                    );
-                    base
-                } else {
-                    let start_id = start_ids[0];
-                    let end_id = end_ids[0];
-                    let reasoning_lark =
-                        thinking_grammar_with_reasoning_block(start_id, end_id, Some(effort));
-                    let reasoning_gram = TopLevelGrammar::from_lark_utf8(&reasoning_lark);
-                    let base_gram = base.to_grammar(guidance_tokens);
-                    GrammarComposers::WithReasoning(reasoning_gram, base_gram)
-                }
-            }
-            None => base,
-        }
-    }
-
-    pub fn build(self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
-        let composer = self.into_composer(guidance_tokens);
-        composer.to_grammar(guidance_tokens)
-    }
-}
-
-impl GrammarComposers {
-    pub fn to_grammar(&self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
-        let base_grammar = self.build_base_grammar(guidance_tokens);
-
-        // Add eos? termination to ensure all grammars can terminate
-        add_eos_termination(&base_grammar, &guidance_tokens.eos_token_ids)
-    }
-
-    fn build_base_grammar(&self, guidance_tokens: &GuidanceTokens) -> TopLevelGrammar {
+impl GrammarInput {
+    /// Build base grammar from this input without tool or reasoning composition
+    pub fn build_base_grammar(&self, guidance_tokens: &GuidanceTokens) -> GrammarResult<TopLevelGrammar> {
         match self {
-            GrammarComposers::TextWithEos => {
-                let has_eos = !guidance_tokens.eos_token_ids.is_empty();
-                let lark = chat_text_expression(has_eos);
-                TopLevelGrammar::from_lark_utf8(&lark)
+            GrammarInput::Choice(choice) => {
+                let choice_gram = crate::tools::schema::build_choice_lark_grammar(choice)
+                    .map_err(|e| GrammarError::InvalidGrammar(e.to_string()))?;
+                Ok(choice_gram)
             }
-            GrammarComposers::Constraint(c) => c.clone(),
-            GrammarComposers::WithReasoning(reasoning, inner) => wrap_with_subgrammars(
-                "@reasoning @inner",
-                None,
-                &[("reasoning", reasoning), ("inner", inner)],
-                None,
-            ),
+            GrammarInput::Regex(regex) => {
+                let sanitized = sanitize_ascii_only(regex);
+                Ok(TopLevelGrammar::from_regex(&sanitized))
+            }
+            GrammarInput::Json(schema) => {
+                let schema = crate::tools::schema::sanitize_schema_for_llguidance(schema);
+                TopLevelGrammarExt::from_json_schema_ascii(schema)
+                    .map_err(|e| GrammarError::InvalidGrammar(e.to_string()))
+            }
+            GrammarInput::Lark(grammar) => {
+                let sanitized = sanitize_ascii_only(grammar);
+                Ok(TopLevelGrammar::from_lark(sanitized))
+            }
+            GrammarInput::StructuralTag(config) => {
+                let schema = crate::tools::schema::sanitize_schema_for_llguidance(&config.schema);
+                let tools = crate::tools::schema::schema_to_tools(&schema);
+                let start_ids = if guidance_tokens.tool_call_start_ids.is_empty() {
+                    None
+                } else {
+                    Some(&guidance_tokens.tool_call_start_ids)
+                };
+                let end_ids = if guidance_tokens.tool_call_end_ids.is_empty() {
+                    None
+                } else {
+                    Some(&guidance_tokens.tool_call_end_ids)
+                };
+                let tool_gram = ToolGrammarBuilder::new()
+                    .tools(&tools)
+                    .start_tag(&config.start_tag)
+                    .end_tag(&config.end_tag)
+                    .start_is_special(false)
+                    .end_is_special(false)
+                    .start_token_ids(start_ids.map(|s| s.iter().copied().collect()))
+                    .end_token_ids(end_ids.map(|s| s.iter().copied().collect()))
+                    .build_json();
+                Ok(tool_gram)
+            }
+            GrammarInput::ToolRequired | GrammarInput::ToolOptional => {
+                // For tool-only cases, return a text grammar that can be composed later
+                let lark = chat_text_expression(!guidance_tokens.eos_token_ids.is_empty());
+                Ok(TopLevelGrammar::from_lark_ascii(&lark))
+            }
+            GrammarInput::ToolForced(_name) => {
+                let lark = chat_text_expression(!guidance_tokens.eos_token_ids.is_empty());
+                Ok(TopLevelGrammar::from_lark_ascii(&lark))
+            }
+            GrammarInput::ConstraintThenTool { constraint, .. } => {
+                constraint.build_base_grammar(guidance_tokens)
+            }
+            GrammarInput::ToolThenConstraint { constraint, .. } => {
+                constraint.build_base_grammar(guidance_tokens)
+            }
+            GrammarInput::Reasoning { base, .. } => {
+                base.build_base_grammar(guidance_tokens)
+            }
         }
+    }
+
+    /// Compose this grammar input with tools and reasoning
+    /// Sequential composition: tool_start constraint_body eos (not alternation)
+    pub fn compose(
+        &self,
+        guidance_tokens: &GuidanceTokens,
+        tool_grammar: Option<TopLevelGrammar>,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> GrammarResult<TopLevelGrammar> {
+        // Build base grammar
+        let base_grammar = self.build_base_grammar(guidance_tokens)?;
+
+        // Compose with tool grammar if provided
+        let composed = if let Some(tool_gram) = tool_grammar {
+            Self::compose_tool(&base_grammar, &tool_gram)?
+        } else {
+            base_grammar
+        };
+
+        // Apply reasoning if specified
+        if let Some(effort) = reasoning_effort {
+            if effort != ReasoningEffort::None {
+                let reasoning_gram = Self::build_reasoning_grammar(&composed, effort, guidance_tokens)?;
+                return Self::compose_reasoning(&reasoning_gram, &composed);
+            }
+        }
+
+        Ok(composed)
+    }
+
+    /// Build reasoning grammar from effort level
+    fn build_reasoning_grammar(
+        _base: &TopLevelGrammar,
+        effort: ReasoningEffort,
+        guidance_tokens: &GuidanceTokens,
+    ) -> GrammarResult<TopLevelGrammar> {
+        let start_ids = &guidance_tokens.reasoning_start_ids;
+        let end_ids = &guidance_tokens.reasoning_end_ids;
+
+        if start_ids.is_empty() || end_ids.is_empty() {
+            return Err(GrammarError::InvalidGrammar(
+                "Reasoning tokens not configured".to_string(),
+            ));
+        }
+
+        let start_id = start_ids[0];
+        let end_id = end_ids[0];
+        let reasoning_lark = thinking_grammar_with_reasoning_block(start_id, end_id, Some(effort));
+        Ok(TopLevelGrammar::from_lark_ascii(&reasoning_lark))
+    }
+
+    /// Compose reasoning grammar with base grammar
+    /// Sequential composition: reasoning_block followed by base constraint
+    pub fn compose_reasoning(
+        reasoning: &TopLevelGrammar,
+        base: &TopLevelGrammar,
+    ) -> GrammarResult<TopLevelGrammar> {
+        let reasoning_lark = get_lark_from_top_level_grammar(reasoning);
+        let base_lark = get_lark_from_top_level_grammar(base);
+
+        // Extract reasoning start rule
+        let reasoning_start = if reasoning_lark.contains("grammars, none have lark_grammar") {
+            "reasoning_block".to_string()
+        } else {
+            extract_start_rule_rhs(&reasoning_lark)
+        };
+
+        // Extract base start rule
+        let base_start = if base_lark.contains("grammars, none have lark_grammar") {
+            "text".to_string()
+        } else {
+            extract_start_rule_rhs(&base_lark)
+        };
+
+        // Extract rules from both grammars
+        let reasoning_rules = if reasoning_lark.contains("grammars, none have lark_grammar") {
+            String::new()
+        } else {
+            extract_rules(&reasoning_lark)
+        };
+
+        let base_rules = if base_lark.contains("grammars, none have lark_grammar") {
+            Self::extract_text_rule_from_json_schema(base)
+        } else {
+            extract_rules(&base_lark)
+        };
+
+        // Merge rules with deduplication
+        let all_rules: Vec<String> = format!("{}\n{}", reasoning_rules, base_rules)
+            .lines()
+            .filter(|line| line.contains(':') && !line.trim().starts_with('#'))
+            .map(|s| s.trim().to_string())
+            .collect();
+
+        let unique_rules = combine_rules(all_rules);
+
+        // Sequential composition: reasoning_block followed by base constraint
+        let start_rule = format!("start: {} {}", reasoning_start, base_start);
+        let final_grammar = format!("{}\n{}", start_rule, unique_rules);
+
+        let mut grammar = TopLevelGrammar::from_lark_ascii(&final_grammar);
+        grammar.max_tokens = reasoning.max_tokens.or(base.max_tokens);
+        Ok(grammar)
+    }
+
+    /// Extract the text rule from a JSON schema constraint
+    /// Compiles the JSON schema to Lark and extracts the text rule definition
+    fn extract_text_rule_from_json_schema(gram: &TopLevelGrammar) -> String {
+        if gram.grammars.is_empty() {
+            return String::new();
+        }
+
+        // Get the JSON schema from the first grammar
+        if let Some(json_schema) = &gram.grammars[0].json_schema {
+            // The text rule is defined as: text: %json {schema}
+            let schema_str = serde_json::to_string(json_schema).unwrap_or_default();
+            format!("text: %json {}", schema_str)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Add BOS priming to a grammar, ensuring all grammars start with <[bos_token_id]>"assistant\n"
+    /// This function prepends the BOS token followed by the assistant role prefix to the start rule
+    /// NOTE: Function kept in place for future use - BOS wrapping is no longer applied to grammars
+    fn _add_bos_priming(grammar: &TopLevelGrammar, bos_token_ids: &[u32], role: &str) -> TopLevelGrammar {
+        if bos_token_ids.is_empty() {
+            return grammar.clone();
+        }
+
+        let lark = get_lark_from_top_level_grammar(grammar);
+        let lines: Vec<&str> = lark.lines().collect();
+
+        if lines.is_empty() {
+            return grammar.clone();
+        }
+
+        // Extract the current start RHS (everything after "start:")
+        let first_line = lines[0].trim();
+        let current_start_rhs = if let Some(rhs) = first_line.strip_prefix("start:") {
+            rhs.trim()
+        } else {
+            return grammar.clone();
+        };
+
+        // Build new start rule with BOS priming: start: <[bos_token_id]>"assistant\n" current_start_rhs
+        let bos_line = match bos_token_ids.len() {
+            // Llama
+            2 => format!(r#"bos: <[{}]> "{}" <[{}]> "\n" "#, bos_token_ids[0], role, bos_token_ids[0]),
+            // Qwen
+            1 => format!(r#"bos: <[{}]> "{}\n" "#, bos_token_ids[0], role),
+            // Fall-through
+            _ => {
+                let ids: Vec<String> = bos_token_ids
+                    .iter()
+                    .map(|id| format!("<[{}]>", id))
+                    .collect();
+                    let alternation = ids.join(" ? ");
+                format!(r#"bos: ( {} ) "{}\n" "#, alternation, role)
+            }
+        };
+
+        let new_start_line = format!(r#"start: bos {}"#, current_start_rhs);
+
+        // Get existing rules (everything after first line)
+        let other_rules = if lines.len() > 1 {
+            lines[1..].join("\n")
+        } else {
+            String::new()
+        };
+
+        let final_grammar = format!("{}\n{}\n{}", new_start_line, other_rules, bos_line);
+
+        TopLevelGrammar::from_lark_ascii(&final_grammar)
+    }
+
+    /// Extract the text: rule definition from a Lark grammar
+    fn extract_text_rule(lark: &str) -> Option<String> {
+        let lines: Vec<&str> = lark.lines().collect();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("text:") {
+                return Some(trimmed.to_string());
+            }
+        }
+        None
+    }
+
+    /// Extract tool_call related rules from a Lark grammar
+    fn extract_tool_rules(lark: &str) -> String {
+        let lines: Vec<&str> = lark.lines().collect();
+        let mut tool_rules = Vec::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with("tool_call:") ||
+                trimmed.starts_with("tool_") ||
+                trimmed.starts_with("param_") ||
+                trimmed.starts_with("value_") {
+                tool_rules.push(trimmed.to_string());
+            }
+        }
+        tool_rules.join("\n")
+    }
+
+    /// Compose tool grammar with constraint grammar
+    /// Alternation: start: ( text | tool_call )+
+    /// The text: rule is replaced with the constraint definition
+    pub fn compose_tool(constraint: &TopLevelGrammar, tool: &TopLevelGrammar) -> GrammarResult<TopLevelGrammar> {
+        let constraint_lark = get_lark_from_top_level_grammar(constraint);
+        let tool_lark = get_lark_from_top_level_grammar(tool);
+
+        // Extract the text: rule from constraint grammar (this will replace the default text rule)
+        let constraint_text_rule = if constraint_lark.contains("grammars, none have lark_grammar") {
+            // Default text rule for non-lark grammars
+            "text: /(?s:.+?)/".to_string()
+        } else {
+            // Extract the text: rule from constraint grammar
+            Self::extract_text_rule(&constraint_lark).unwrap_or("text: /(?s:.+?)/".to_string())
+        };
+
+        // Extract tool_call rules from tool grammar
+        let tool_rules = Self::extract_tool_rules(&tool_lark);
+
+        // Combine constraint text rule with tool rules
+        let all_rules = format!("{}\n{}", constraint_text_rule, tool_rules);
+        let combined_rules = combine_rules(all_rules.lines().map(|s| s.to_string()).collect());
+
+        // Keep start: ( text | tool_call )+ eos unchanged
+        // This allows alternation between text (constrained) and tool calls
+        let start_rule = "start: ( text | tool_call )+".to_string();
+        let final_grammar = format!("{}\n{}", start_rule, combined_rules);
+
+        Ok(TopLevelGrammar::from_lark_ascii(&final_grammar))
+    }
+
+    /// Create GrammarInput from StructuredOutputs
+    pub fn from_structured_outputs(
+        choice: Option<Vec<String>>,
+        regex: Option<String>,
+        json: Option<serde_json::Value>,
+        grammar: Option<String>,
+        structural_tag: Option<serde_json::Value>,
+    ) -> GrammarResult<Self> {
+        let constraint_count = [
+            choice.is_some(),
+            regex.is_some(),
+            json.is_some(),
+            grammar.is_some(),
+            structural_tag.is_some(),
+        ]
+        .iter()
+        .filter(|&&x| x)
+        .count();
+
+        if constraint_count > 1 {
+            return Err(GrammarError::TooManyConstraints);
+        }
+
+        if let Some(choice) = choice {
+            if !choice.is_empty() {
+                return Ok(GrammarInput::Choice(choice));
+            }
+            return Err(GrammarError::InvalidGrammar("choice must have at least one option".to_string()));
+        }
+
+        if let Some(regex) = regex {
+            return Ok(GrammarInput::Regex(regex));
+        }
+
+        if let Some(json) = json {
+            return Ok(GrammarInput::Json(json));
+        }
+
+        if let Some(grammar) = grammar {
+            return Ok(GrammarInput::Lark(grammar));
+        }
+
+        if let Some(tag) = structural_tag {
+            let (start, end, schema) = crate::tools::schema::parse_structural_tag(&tag)
+                .map_err(|e| GrammarError::InvalidGrammar(e))?;
+            let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
+            return Ok(GrammarInput::StructuralTag(StructuralTagConfig {
+                start_tag: start,
+                end_tag: end,
+                schema,
+            }));
+        }
+
+        Err(GrammarError::InvalidGrammar("No constraint specified".to_string()))
     }
 }
 
@@ -337,7 +498,7 @@ pub fn chat_text_expression(have_eos: bool) -> String {
     if have_eos {
         // Text pattern without EOS - just text rule
         r#"start: text
-text: /(?s:.*)/"#
+text: /(?s:.+?)/"#
             .to_string()
     } else {
         // Fallback to stop="" when no EOS tokens available
@@ -345,6 +506,38 @@ text: /(?s:.*)/"#
 text[stop=""]: /((?s).*?)/"#
             .to_string()
     }
+}
+
+/// Removes all zero-width and invisible control characters from a string
+/// 
+/// Filters out characters in these ranges:
+/// - U+0000 to U+001F (C0 control characters except tab, newline, carriage return)
+/// - U+007F (DEL)
+/// - U+200B to U+200F (Zero-width and directionality marks)
+/// - U+2028 to U+202F (Line/paragraph separators and special spaces)
+/// - U+2060 to U+206F (Invisible operators and word joiner)
+/// - U+FEFF (BOM)
+/// - U+FFF0 to U+FFFF (Non-characters)
+/// - U+0080 to U+009F (C1 control characters)
+fn strip_invisible_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let code = *c as u32;
+            // Allow standard whitespace: tab (9), newline (10), carriage return (13)
+            if code == 9 || code == 10 || code == 13 {
+                return true;
+            }
+            // Filter out all other control characters and invisible characters
+            !(code < 32 ||           // C0 controls (except allowed whitespace)
+              code == 127 ||         // DEL
+              (code >= 0x200B && code <= 0x200F) ||  // Zero-width marks
+              (code >= 0x2028 && code <= 0x202F) ||  // Line/para separators
+              (code >= 0x2060 && code <= 0x206F) ||  // Invisible operators
+              code == 0xFEFF ||      // BOM
+              (code >= 0xFFF0 && code <= 0xFFFF) ||  // Non-characters
+              (code >= 0x0080 && code <= 0x009F))   // C1 controls
+        })
+        .collect()
 }
 
 /// Build EOS pattern for text completion
@@ -364,120 +557,66 @@ pub fn eos_expression(eos_token_ids: &[u32]) -> String {
     }
 }
 
-/// Add eos? termination to a grammar, ensuring all paths can end with EOS
-/// This function modifies the start: rule to append optional EOS token alternation
-fn add_eos_termination(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLevelGrammar {
+/// Simplified EOS insertion function for use in compose()
+/// Appends 'eos' to the start rule and adds the EOS rule definition
+pub fn finalize_grammar(grammar: &TopLevelGrammar, eos_token_ids: &[u32]) -> TopLevelGrammar {
     if eos_token_ids.is_empty() {
         return grammar.clone();
     }
 
-    let is_simple_lark = grammar.grammars.len() == 1
-        && grammar
-            .grammars
-            .first()
-            .and_then(|g| g.lark_grammar.as_ref())
-            .is_some();
-
-    if !is_simple_lark {
-        let eos_line = if eos_token_ids.len() > 1 {
-            let ids: Vec<String> = eos_token_ids
-                .iter()
-                .map(|id| format!("<[{}]>", id))
-                .collect();
-            format!("eos: ( {} )", ids.join(" | "))
-        } else {
-            format!("eos: <[{}]>", eos_token_ids[0])
-        };
-        return wrap_with_subgrammars(
-            "@inner eos?",
-            Some(eos_line.as_str()),
-            &[("inner", grammar)],
-            grammar.max_tokens,
-        );
+    let lark = get_lark_from_top_level_grammar(grammar);
+    
+    // Check if eos is already in the start rule
+    let lines: Vec<&str> = lark.lines().collect();
+    if !lines.is_empty() {
+        let first_line = lines[0].trim();
+        if first_line.contains("eos") {
+            return grammar.clone();
+        }
     }
 
-    let lark = get_lark_from_top_level_grammar(grammar);
-
-    // Parse lines to find start: rule
-    let lines: Vec<&str> = lark.lines().collect();
-    if lines.is_empty() {
+    // Check if eos rule already exists
+    if lark.contains("eos:") {
         return grammar.clone();
     }
 
-    let first_line = if lines[0].trim().contains("eos?") {
-        lines[0].trim().replace("eos?", "")
-    } else {
-        lines[0].trim().to_string()
-    };
-
-    // Extract the current start RHS (everything after "start:")
+    // Extract current start RHS (everything after "start:")
+    let first_line = lines.first().map(|s| s.trim()).unwrap_or("");
     let current_start_rhs = if let Some(rhs) = first_line.strip_prefix("start:") {
         rhs.trim()
     } else {
         return grammar.clone();
     };
 
-    // Build new start rule with eos? termination
-    // For multiple EOS tokens, use ( <[id1]> | <[id2]> )? format
-    let new_start_line = format!(
-        r#"start: {current_start_rhs} eos?
-"#
-    );
-    let eos_line = if eos_token_ids.len() > 1 {
+    // Build new start rule with eos appended
+    let new_start_line = format!("start: {} eos", current_start_rhs.trim());
+
+    // Build eos rule definition
+    let eos_line = if eos_token_ids.len() == 1 {
+        format!("eos: <[{}]>", eos_token_ids[0])
+    } else {
         let ids: Vec<String> = eos_token_ids
             .iter()
             .map(|id| format!("<[{}]>", id))
             .collect();
         let alternation = ids.join(" | ");
-        format!("eos:  ( {} )", alternation)
-    } else {
-        format!("eos: <[{}]>", eos_token_ids[0])
+        format!("eos: ( {} )", alternation)
     };
 
     // Get existing rules (everything after first line)
     let other_rules = if lines.len() > 1 {
-        // Filter out any existing eos: rules to avoid duplication
-        let filtered: Vec<_> = lines[1..]
-            .iter()
-            .filter(|line| !line.trim().starts_with("eos:"))
-            .map(|s| *s)
-            .collect();
-        filtered.join("\n")
+        lines[1..].join("\n")
     } else {
         String::new()
     };
 
-    let final_grammar = format!("{}\n{}\n{}", new_start_line, other_rules, eos_line);
+    // Combine: new start rule, existing rules, eos rule
+    let terminated_lark = format!("{}\n{}\n{}", new_start_line, other_rules, eos_line);
+    let sanitized_lark = strip_invisible_chars(&terminated_lark);
 
-    TopLevelGrammar::from_lark_utf8(&final_grammar)
+    TopLevelGrammar::from_lark_ascii(&sanitized_lark)
 }
 
-fn wrap_with_subgrammars(
-    start_rhs: &str,
-    extra_rules: Option<&str>,
-    subgrammars: &[(&str, &TopLevelGrammar)],
-    max_tokens: Option<usize>,
-) -> TopLevelGrammar {
-    let mut wrapper_lark = format!("start: {}", start_rhs);
-    if let Some(extra_rules) = extra_rules {
-        let extra_rules = extra_rules.trim();
-        if !extra_rules.is_empty() {
-            wrapper_lark.push('\n');
-            wrapper_lark.push_str(extra_rules);
-        }
-    }
-
-    let mut wrapped = TopLevelGrammar::from_lark_utf8(&wrapper_lark);
-    wrapped.max_tokens = max_tokens;
-    for (name, grammar) in subgrammars {
-        let mut nested = (*grammar).clone();
-        if let Some(first) = nested.grammars.first_mut() {
-            first.name = Some((*name).to_string());
-        }
-        wrapped.grammars.extend(nested.grammars);
-    }
-    wrapped
-}
 
 /// Extension trait for TopLevelGrammar with built-in sanitization
 /// This ensures all grammar construction paths sanitize inputs consistently
@@ -485,27 +624,37 @@ pub trait TopLevelGrammarExt: Sized {
     /// Create TopLevelGrammar from regex with ASCII sanitization
     fn from_regex_ascii(regex: &str) -> Self;
 
-    /// Create TopLevelGrammar from Lark string with UTF-8 sanitization
-    fn from_lark_utf8(lark: &str) -> Self;
+    /// Create TopLevelGrammar from Lark string with ASCII sanitization
+    fn from_lark_ascii(lark: &str) -> Self;
 
-    /// Create TopLevelGrammar from JSON schema with UTF-8 sanitization
-    fn from_json_schema_utf8(schema: serde_json::Value) -> Result<Self, anyhow::Error>;
+    /// Create TopLevelGrammar from JSON schema with ASCII sanitization
+    fn from_json_schema_ascii(schema: serde_json::Value) -> Result<Self, anyhow::Error>;
+
+    /// Deprecated: use from_lark_ascii instead
+    fn from_lark_utf8(lark: &str) -> Self {
+        Self::from_lark_ascii(lark)
+    }
+
+    /// Deprecated: use from_json_schema_ascii instead
+    fn from_json_schema_utf8(schema: serde_json::Value) -> Result<Self, anyhow::Error> {
+        Self::from_json_schema_ascii(schema)
+    }
 }
 
 impl TopLevelGrammarExt for TopLevelGrammar {
     fn from_regex_ascii(regex: &str) -> Self {
-        let sanitized = sanitize_utf8_valid(regex);
+        let sanitized = sanitize_ascii_only(regex);
         Self::from_regex(&sanitized)
     }
 
-    fn from_lark_utf8(lark: &str) -> Self {
-        let sanitized = sanitize_utf8_valid(lark);
+    fn from_lark_ascii(lark: &str) -> Self {
+        let sanitized = sanitize_ascii_only(lark);
         Self::from_lark(sanitized)
     }
 
-    fn from_json_schema_utf8(schema: serde_json::Value) -> Result<Self, anyhow::Error> {
+    fn from_json_schema_ascii(schema: serde_json::Value) -> Result<Self, anyhow::Error> {
         let schema_str = serde_json::to_string(&schema)?;
-        let sanitized = sanitize_utf8_valid(&schema_str);
+        let sanitized = sanitize_ascii_only(&schema_str);
         let val = serde_json::from_str(&sanitized)?;
         Ok(Self::from_json_schema(val))
     }
@@ -520,14 +669,14 @@ pub fn sanitize_to_ascii(s: &str) -> String {
         .collect::<String>()
 }
 
-/// Sanitize a string by removing invalid UTF-8 sequences and control characters
-pub fn sanitize_utf8_valid(s: &str) -> String {
+/// Sanitize a string by removing invalid ASCII sequences
+/// Lark grammars must only contain ASCII characters for llguidance lexer
+pub fn sanitize_ascii_only(s: &str) -> String {
     let mut result = String::new();
     for ch in s.chars() {
-        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
-            continue;
+        if ch.is_ascii() {
+            result.push(ch);
         }
-        result.push(ch);
     }
     result
 }
@@ -560,6 +709,71 @@ fn parse_lark_grammar(lark: &str) -> (String, Vec<String>) {
     } else {
         // No start rule - treat entire grammar as the start rule
         (lark.to_string(), Vec::new())
+    }
+}
+
+/// Extract the start rule RHS from a Lark grammar string
+/// For "start: text\n...", returns "text"
+/// For "start: ( rule1 | rule2 )\n...", returns "( rule1 | rule2 )"
+/// For "start: rule1 rule2\n...", returns "rule1 rule2" (sequence preserved)
+/// For "start: reasoning_block?\n...", returns "reasoning_block?" (quantifiers preserved)
+/// BUT it preserves regex patterns like /^[a-z]+$/
+fn extract_start_rule_rhs(lark: &str) -> String {
+    let lines: Vec<&str> = lark.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    let first_line = lines[0].trim();
+    if let Some(rhs) = first_line.strip_prefix("start:") {
+        let rhs = rhs.trim();
+
+        // Extract the start rule content, handling:
+        // 1. Simple rule names like "text"
+        // 2. Alternations like "( rule1 | rule2 )"
+        // 3. Sequences like "rule1 rule2"
+        // 4. Regex patterns like "/^[a-z]+$/" (preserved as-is)
+
+        // First, identify and temporarily replace regex patterns
+        let mut temp_rhs = rhs.to_string();
+        let mut regex_patterns: Vec<String> = Vec::new();
+        let regex_pattern_regex = regex_pattern_regex();
+
+        for cap in regex_pattern_regex.find_iter(rhs) {
+            regex_patterns.push(cap.as_str().to_string());
+        }
+
+        for (i, regex_pat) in regex_patterns.iter().enumerate() {
+            temp_rhs = temp_rhs.replace(regex_pat, &format!("__REGEX_PATTERN_{}__", i));
+        }
+
+        // Return the processed start rule
+        let mut result = temp_rhs.trim().to_string();
+
+        // Restore regex patterns
+        for (i, regex_pat) in regex_patterns.iter().enumerate() {
+            result = result.replace(&format!("__REGEX_PATTERN_{}__", i), regex_pat);
+        }
+
+        result
+    } else {
+        first_line.trim().to_string()
+    }
+}
+
+/// Extract all rules from a Lark grammar except the start rule
+/// Returns the rules as a single string with newlines
+fn extract_rules(lark: &str) -> String {
+    let lines: Vec<&str> = lark.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // Skip the first line (start rule) and join remaining lines
+    if lines.len() > 1 {
+        lines[1..].join("\n")
+    } else {
+        String::new()
     }
 }
 
@@ -600,8 +814,23 @@ fn combine_rules(rules: Vec<String>) -> String {
         if bodies.len() == 1 {
             combined.push((name.clone(), format!("{}: {}", name, bodies[0])));
         } else {
-            // Multiple definitions for same rule - combine with alternation
-            combined.push((name.clone(), format!("{}: {}", name, bodies.join(" | "))));
+            // Multiple definitions for same rule - deduplicate bodies before combining with alternation
+            // Use a HashSet to remove duplicate rule bodies
+            let mut unique_bodies: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for body in bodies {
+                unique_bodies.insert(body);
+            }
+
+            // Convert back to Vec and sort for deterministic output
+            let mut unique_bodies_vec: Vec<String> = unique_bodies.into_iter().collect();
+            unique_bodies_vec.sort();
+
+            // Only combine with alternation if we have multiple unique bodies
+            if unique_bodies_vec.len() == 1 {
+                combined.push((name.clone(), format!("{}: {}", name, unique_bodies_vec[0])));
+            } else {
+                combined.push((name.clone(), format!("{}: {}", name, unique_bodies_vec.join(" | "))));
+            }
         }
     }
 
@@ -702,18 +931,28 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
     if gram.grammars.is_empty() {
         return "No grammars".to_string();
     }
-    let larks: Vec<String> = gram
+    let mut larks: Vec<String> = gram
         .grammars
         .iter()
         .filter_map(|g| g.lark_grammar.as_ref())
         .map(|s| s.clone())
         .collect();
+
+    for g in &gram.grammars {
+        if let Some(json_schema) = &g.json_schema {
+            // Convert JSON schema to Lark string with text: %json {...} rule
+            let schema_str = serde_json::to_string(json_schema).unwrap_or_default();
+            larks.push(format!("start: text\ntext: %json {}", schema_str));
+        }
+    }
+
     if larks.is_empty() {
         format!("{} grammars, none have lark_grammar", gram.grammars.len())
     } else {
         larks.join("\n---\n")
     }
 }
+
 
 /// Lark grammar TEXT pattern for common UTF-8 printable characters
 /// Excludes control characters (0x00-0x1F), DEL (0x7F), and C1 controls (0x80-0x9F)
@@ -724,7 +963,7 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
 ///
 /// ## Binary Token Matching with llguidance Matcher
 ///
-/// When working with Qwen-style tool tokens (e.g., ``), llguidance uses
+/// When working with Qwen-style tool tokens (e.g., `<\u200tool_call>`), llguidance uses
 /// a **byte-level lexer approach** with the following key concepts:
 ///
 /// ### 1. Token-Based, Not Byte-Based
@@ -762,8 +1001,31 @@ pub fn get_lark_from_top_level_grammar(gram: &TopLevelGrammar) -> String {
 /// - `mask.is_allowed(tok)` checks if token ID `tok` is in the allowed set
 /// - The logits are modified to give -inf to disallowed tokens
 /// - Sampling then only picks from allowed tokens
-fn lark_quote(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+/// Sanitize to ASCII only - remove any non-ASCII bytes
+pub fn lark_quote(value: &str) -> String {
+    let ascii_only: String = value.chars().filter(|c| c.is_ascii()).collect();
+    serde_json::to_string(&ascii_only).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Build special token syntax for Lark grammar using token IDs
+/// When token IDs are available, uses <[token_id]> syntax instead of string literals
+/// This ensures alignment with the outbound parser's token-based detection
+pub fn lark_special_token(token_ids: &HashSet<u32>) -> String {
+    if token_ids.is_empty() {
+        return String::new();
+    }
+    // Join multiple token IDs with | - ensure ASCII only
+    let ids: Vec<String> = token_ids.iter().map(|id| format!("[{}]", id)).collect();
+    format!("<{}>", ids.join(","))
+}
+
+pub fn _lark_literal(value: &str, is_special: bool) -> String {
+    if is_special && value.starts_with('<') && value.ends_with('>') {
+        let sanitized: String = value.chars().filter(|c| c.is_ascii()).collect();
+        sanitized
+    } else {
+        lark_quote(value)
+    }
 }
 
 /// Build special token syntax for Lark grammar using token IDs
@@ -799,24 +1061,164 @@ pub fn build_tool_call_end_tag(
     build_special_token_tag(end_token_ids, end_token_str)
 }
 
-/// Compose grammars based on request constraints and optional reasoning
+/// Build fallback tool envelope grammar when enable_tool_grammar is false
+/// This allows tool calls using text tags instead of token-based tags
+/// Grammar format: start: (text | tool_call)
+/// tool_call: start_tag tool_text end_tag
+/// tool_text: %json {"type":"string","description":"Full tool-call syntax..."}
+/// where start_tag/end_tag are string literals like "<‌tool_call>" and "<‌/tool_call>"
+pub fn build_fallback_tool_envelope_grammar(
+    tools: &[Tool],
+    start_tag: &str,
+    end_tag: &str,
+    start_token_ids: &HashSet<u32>,
+    end_token_ids: &HashSet<u32>,
+) -> TopLevelGrammar {
+    // Build the start tag using token IDs if available, otherwise use string literal
+    let start_tag = if !start_token_ids.is_empty() {
+        // Use token ID format: <[token_id]>
+        let ids: Vec<String> = start_token_ids
+            .iter()
+            .map(|id| format!("[{}]", id))
+            .collect();
+        format!("<{}>", ids.join(","))
+    } else {
+        // Fall back to string literal
+        lark_quote(start_tag)
+    };
+
+    // Build the end tag using token IDs if available, otherwise use string literal
+    let end_tag = if !end_token_ids.is_empty() {
+        // Use token ID format: <[token_id]>
+        let ids: Vec<String> = end_token_ids.iter().map(|id| format!("[{}]", id)).collect();
+        format!("<{}>", ids.join(","))
+    } else {
+        // Fall back to string literal
+        lark_quote(end_tag)
+    };
+
+    // Validate tool_names before constructing schema
+    let tool_names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+    if tool_names.is_empty() {
+        return TopLevelGrammar::from_lark_ascii(
+            r#"start: text
+ text: /(?s:.+?)/
+ "#,
+        );
+    }
+
+    // Permissive tool-call envelope without explicit "\n" anchors as used in XML
+    let lark = format!(
+        r#"start: tool_call
+tool_call: {} text {}
+text: /(?s:.+?)/
+"#,
+        start_tag, end_tag
+    );
+
+    TopLevelGrammar::from_lark_ascii(&lark)
+}
+
+/// Compose grammars based on constraint and tool settings
 /// Returns a single TopLevelGrammar with proper precedence
-/// This function takes the grammar that was built externally (with appropriate model-specific format)
-/// and handles the alternation/composition logic
+/// This function uses GrammarInput::compose() for sequential composition
+/// Compose grammars based on constraint and tool settings
+/// Returns a single TopLevelGrammar with proper precedence
+/// This function uses GrammarInput::compose() for sequential composition
 pub fn compose_grammars(
     constraint_grammars: Vec<TopLevelGrammar>,
+    tool_grammar: Option<TopLevelGrammar>,
+    tool_choice_required: bool,
+    forced_tool_name: Option<String>,
     max_tokens: Option<usize>,
     guidance_tokens: &GuidanceTokens,
     reasoning_effort: Option<ReasoningEffort>,
 ) -> TopLevelGrammar {
-    let builder = GrammarComposerBuilder::new()
-        .constraints(constraint_grammars)
-        .reasoning_effort(reasoning_effort);
+    let reasoning_enabled = reasoning_effort
+        .as_ref()
+        .is_some_and(|effort| *effort != ReasoningEffort::None);
 
-    let mut grammar = builder.build(guidance_tokens);
-    grammar.max_tokens = max_tokens;
+    // Handle tool-only case: return tool grammar directly (no constraint)
+    if tool_grammar.is_some() && constraint_grammars.is_empty() {
+        let mut grammar = tool_grammar.unwrap();
+        if let Some(max) = max_tokens {
+            grammar.max_tokens = Some(max);
+        }
+        // Add EOS termination to the tool-only grammar
+        return finalize_grammar(&grammar, &guidance_tokens.eos_token_ids);
+    }
+    
+    // Build GrammarInput from constraint grammar(s)
+    let grammar_input = if let Some(gram) = constraint_grammars.first().cloned() {
+        // Extract the Lark grammar string from TopLevelGrammar
+        let lark = get_lark_from_top_level_grammar(&gram);
+        GrammarInput::Lark(lark)
+    } else {
+        // No constraint - use text as default
+        let lark = chat_text_expression(!guidance_tokens.eos_token_ids.is_empty());
+        GrammarInput::Lark(lark)
+    };
+
+    // Use GrammarInput::compose() for the composition
+    let result = grammar_input.compose(guidance_tokens, tool_grammar, reasoning_effort);
+    
+    let mut grammar = match result {
+        Ok(mut grammar) => {
+            if let Some(max) = max_tokens {
+                grammar.max_tokens = Some(max);
+            }
+            grammar
+        }
+        Err(e) => {
+            crate::log_warn!("[llg] Grammar composition failed: {}", e);
+            // Fallback to text grammar
+            let lark = chat_text_expression(!guidance_tokens.eos_token_ids.is_empty());
+            TopLevelGrammar::from_lark_ascii(&lark)
+        }
+    };
+
+    // When tool_choice is required, modify the start rule to enforce tool_call first
+    if tool_choice_required {
+        let lark = get_lark_from_top_level_grammar(&grammar);
+        let modified_lark = enforce_tool_call_first(&lark, reasoning_enabled, forced_tool_name.as_deref());
+        grammar = TopLevelGrammar::from_lark_ascii(&modified_lark);
+    }
+    // Add EOS termination to the composed grammar (single point of entry)
+    grammar = finalize_grammar(&grammar, &guidance_tokens.eos_token_ids);
+    
     grammar
 }
+
+/// Modify the start rule to enforce tool_call first when tool_choice is required
+fn enforce_tool_call_first(lark: &str, reasoning_enabled: bool, forced_tool_name: Option<&str>) -> String {
+    let lines: Vec<&str> = lark.lines().collect();
+    if lines.is_empty() {
+        return lark.to_string();
+    }
+
+    // Extract current start rule RHS
+    let first_line = lines[0].trim();
+    if !first_line.strip_prefix("start:").is_some() {
+        return lark.to_string();
+    };
+
+    // Build new start rule based on configuration
+    // Use tool_call as the mandatory marker (matches existing grammar structure)
+    // Ignore forced_tool_name for now - just use tool_call
+    let new_start_rhs = if reasoning_enabled {
+        "reasoning_block tool_call".to_string()
+    } else {
+        "tool_call".to_string()
+    };
+
+    let new_start_line = format!("start: {}", new_start_rhs);
+    
+    // Join all lines back together
+    let remaining_lines = if lines.len() > 1 { lines[1..].join("\n") } else { String::new() };
+    
+    format!("{}\n{}", new_start_line, remaining_lines)
+}
+
 pub type ParserFactory = LlgParserFactory;
 
 pub fn build_llg_factory(
@@ -850,11 +1252,21 @@ pub fn load_toktrie_from_path(path: impl AsRef<std::path::Path>) -> Result<TokTr
 /// WS regex pattern for Lark grammars - matches whitespace including spaces, tabs, newlines, carriage returns
 pub fn lark_ws_regex() -> &'static str {
     "/[ \\\\t\\\
-\\\
-]+/"
+ \\\
+ ]+/"
+}
+
+/// Regex pattern to find Lark regex patterns like /^[a-z]+$/
+static REGEX_PATTERN_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"^/.*?/$"#).expect("regex pattern should be valid at compile time")
+});
+
+fn regex_pattern_regex() -> &'static Lazy<Regex> {
+    &REGEX_PATTERN_REGEX
 }
 
 /// Build Lark grammar string for tool calls
+/// This function is for XML-style tool call formats and uses ASCII-only special tokens
 pub fn build_tool_call_lark(
     tools: &[Tool],
     schema_map: &std::sync::Arc<std::collections::HashMap<String, serde_json::Value>>,
@@ -873,10 +1285,14 @@ pub fn build_tool_call_lark(
         ));
     }
 
+    // Sanitize start/end tags to ASCII only
+    let start_ascii: String = start.chars().filter(|c| c.is_ascii()).collect();
+    let end_ascii: String = end.chars().filter(|c| c.is_ascii()).collect();
+
     format!(
         "{} _WS? json_array _WS? {}\njson_array: \"[\" obj (\",\" obj)* \"]\"\nobj:\n_WS: {}\n{}",
-        start,
-        end,
+        start_ascii,
+        end_ascii,
         lark_ws_regex(),
         obj_rules.trim_end()
     )
@@ -924,6 +1340,8 @@ impl GuidanceState {
         factory: Arc<ParserFactory>,
         grammar: &TopLevelGrammar,
     ) -> Result<Self> {
+        let lark = get_lark_from_top_level_grammar(grammar);
+        crate::log_info!("[llg] Composed Grammar Constraint:\n{}\n", lark);
         let parser = factory.create_parser(grammar.clone())?;
         let matcher = Matcher::new(Ok(parser));
 
@@ -1165,4 +1583,513 @@ pub fn _early_exit_validate(
     }
 
     Ok(())
+}
+
+/// Parse grammar from ChatCompletionRequest
+/// Handles structured_outputs, response_format, constraint fields only.
+/// Tool grammars are handled exclusively by generate_grammar_from_request
+/// to avoid duplicate tool grammar construction.
+/// Returns None if no grammar is specified
+///
+/// ## Security Guards
+/// - `allow_constraint_api`: Must be true to accept client-submitted constraints
+pub fn parse_grammar_from_chat_request(
+    request: &ChatCompletionRequest,
+    allow_constraint_api: bool,
+) -> Result<Option<TopLevelGrammar>, String> {
+    // First check for structured_outputs
+    if let Some(ref so) = request.structured_outputs {
+        if so.choice.is_some()
+            || so.regex.is_some()
+            || so.json.is_some()
+            || so.grammar.is_some()
+            || so.structural_tag.is_some()
+        {
+            // Guard 2: Check allow_constraint_api for structured_outputs
+            if !allow_constraint_api {
+                crate::log_warn!(
+                    "[llg] structured_outputs constraint ignored: allow_constraint_api is false"
+                );
+                return Ok(None);
+            }
+            return build_grammar_from_structured_outputs(so);
+        }
+    }
+
+    // Guard 3: Check allow_constraint_api for response_format
+    if let Some(ref rf) = request.response_format {
+        if !allow_constraint_api {
+            crate::log_warn!(
+                "[llg] response_format constraint ignored: allow_constraint_api is false"
+            );
+        } else {
+            if let Some(grammar) = build_grammar_from_response_format(rf)? {
+                return Ok(Some(grammar));
+            }
+        }
+    }
+
+    // Guard 4: Check allow_constraint_api for legacy constraint field
+    if let Some(ref constraint) = request.constraint {
+        if !allow_constraint_api {
+            crate::log_warn!("[llg] constraint field ignored: allow_constraint_api is false");
+        } else {
+            let constraint_type = request.constraint_type.as_deref().unwrap_or("regex");
+            let grammar = match constraint_type {
+                "regex" => TopLevelGrammarExt::from_regex_ascii(constraint),
+                "lark" => TopLevelGrammar::from_lark_ascii(constraint),
+                "json_schema" | "json" => {
+                    let schema: serde_json::Value = serde_json::from_str(constraint)
+                        .map_err(|e| format!("Invalid JSON schema: {}", e))?;
+                    let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
+                    TopLevelGrammarExt::from_json_schema_ascii(schema)
+                        .map_err(|e| format!("Invalid JSON schema: {}", e))?
+                }
+                other => return Err(format!("Unknown constraint_type: {}", other)),
+            };
+            return Ok(Some(grammar));
+        }
+    }
+
+    // Tools are NOT handled here - they are handled exclusively by generate_grammar_from_request
+    // to avoid duplicate tool grammar construction
+    Ok(None)
+}
+
+/// Build grammar from StructuredOutputs
+fn build_grammar_from_structured_outputs(
+    so: &StructuredOutputs,
+) -> Result<Option<TopLevelGrammar>, String> {
+    // Use GrammarInput::from_structured_outputs() instead of ConstraintBuilder
+    let grammar_input = GrammarInput::from_structured_outputs(
+        so.choice.clone(),
+        so.regex.clone(),
+        so.json.clone(),
+        so.grammar.clone(),
+        so.structural_tag.clone(),
+    );
+    
+    match grammar_input {
+        Ok(grammar_input) => {
+            // Convert GrammarInput to TopLevelGrammar using build_base_grammar
+            let guidance_tokens = GuidanceTokens::default();
+            let grammar = grammar_input.build_base_grammar(&guidance_tokens)
+                .map_err(|e| e.to_string())?;
+            Ok(Some(grammar))
+        }
+        Err(GrammarError::TooManyConstraints) => {
+            Err("structured_outputs must set exactly one of choice, regex, json, grammar, or structural_tag".to_string())
+        }
+        Err(GrammarError::InvalidGrammar(msg)) => {
+            Err(msg)
+        }
+        Err(GrammarError::MissingJsonSchema) => {
+            Err("response_format.json_schema is required for type=json_schema".to_string())
+        }
+        Err(GrammarError::UnsupportedFormat(msg)) => {
+            Err(format!("unsupported response_format type: {}", msg))
+        }
+        Err(GrammarError::ToolGrammarError(msg)) => {
+            Err(format!("tool grammar construction failed: {}", msg))
+        }
+    }
+}
+
+/// Build grammar from ResponseFormat
+fn build_grammar_from_response_format(
+    response_format: &ResponseFormat,
+) -> Result<Option<TopLevelGrammar>, String> {
+    match response_format.format_type.as_str() {
+        "json_schema" => {
+            let Some(ref schema) = response_format.json_schema else {
+                return Err("json_schema is required for type=json_schema".to_string());
+            };
+            let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema.schema);
+            let grammar = TopLevelGrammarExt::from_json_schema_ascii(schema)
+                .map_err(|e| format!("Invalid JSON schema: {}", e))?;
+            Ok(Some(grammar))
+        }
+        "json_object" => {
+            let grammar =
+                TopLevelGrammarExt::from_json_schema_ascii(serde_json::json!({"type": "object"}))
+                    .map_err(|e| format!("Invalid JSON schema: {}", e))?;
+            Ok(Some(grammar))
+        }
+        other => Err(format!("Unsupported response_format type: {}", other)),
+    }
+}
+
+/// Build TopLevelGrammar from a GrammarRequest
+/// This function handles all grammar types (lark, regex, json_schema, choice)
+/// and returns a parsed TopLevelGrammar ready for use in guided decoding.
+pub fn build_grammar_from_request(
+    grammar_type: &str,
+    grammar_content: &str,
+) -> Result<TopLevelGrammar> {
+    match grammar_type {
+        "lark" => Ok(TopLevelGrammar::from_lark_ascii(grammar_content)),
+        "regex" => Ok(TopLevelGrammarExt::from_regex_ascii(grammar_content)),
+        "json_schema" => {
+            let schema: serde_json::Value = serde_json::from_str(grammar_content)
+                .map_err(|e| anyhow::Error::msg(format!("Invalid JSON schema: {}", e)))?;
+            let schema = crate::tools::schema::sanitize_schema_for_llguidance(&schema);
+            TopLevelGrammarExt::from_json_schema_ascii(schema)
+                .map_err(|e| anyhow::Error::msg(format!("Invalid JSON schema: {}", e)))
+        }
+        "choice" => {
+            // Parse choice grammar as JSON array
+            let choices: Vec<String> = serde_json::from_str(grammar_content)
+                .map_err(|e| anyhow::Error::msg(format!("Invalid choices array: {}", e)))?;
+            let lark = crate::tools::schema::build_choice_lark_grammar(&choices).map_err(|e| {
+                anyhow::Error::msg(format!("Failed to build choice grammar: {}", e))
+            })?;
+            Ok(lark)
+        }
+        other => Err(anyhow::Error::msg(format!(
+            "Unsupported grammar_type: {}",
+            other
+        ))),
+    }
+}
+
+/// Generate complete TopLevelGrammar from ChatCompletionRequest
+/// Single call-site function that handles all grammar permutations
+/// Returns fully composed grammar with proper <[token_id]> format for tool tags
+pub fn generate_grammar_from_request(
+    request: &ChatCompletionRequest,
+    guidance_tokens: &GuidanceTokens,
+    enable_tool_grammar: bool,
+    allow_constraint_api: bool,
+    model_type: &crate::utils::config::ModelType,
+    model_id: &str,
+    enforce_parser: Option<&str>,
+    tokenizer: &Tokenizer,
+    chat_template: Option<&ChatTemplate>,
+) -> Option<TopLevelGrammar> {
+    // Parse constraint grammar (handles structured_outputs, response_format, constraint)
+    let constraint_grammar = match parse_grammar_from_chat_request(
+        request,
+        allow_constraint_api,
+    ) {
+        Ok(grammar) => grammar,
+        Err(e) => {
+            crate::log_warn!("[llg] Failed to parse constraint grammar: {}", e);
+            return None;
+        }
+    };
+
+    // Build tool config for tool grammar generation
+    let tool_config = ToolConfig::from_tokenizer(tokenizer, model_type);
+
+    // Determine parser name from enforce_parser, request, or model-specific default
+    let parser_name = enforce_parser
+        .map(|s| s.to_string())
+        .or_else(|| {
+            request
+                .extra_body
+                .as_ref()
+                .and_then(|eb| eb.extra.get("enforce_parser"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .or_else(|| Some(StreamToolParser::parser_name_for_model(model_type, model_id).to_string()))
+        .unwrap_or_else(|| "json".to_string());
+
+    // Build tool grammar based on enable_tool_grammar and allow_constraint_api flags
+    // - enable_tool_grammar=true: Use full XML tool grammar with schema
+    // - enable_tool_grammar=false, allow_constraint_api=true: Use fallback text-based tool envelope
+    // - both false: No tool grammar (tools will be detected via text parsing)
+    let tool_grammar = if let Some(ref tools) = request.tools {
+        if enable_tool_grammar {
+            // Full tool grammar with proper schema
+            let start_ids = if !tool_config.start_token_ids.is_empty() {
+                Some(&tool_config.start_token_ids)
+            } else {
+                None
+            };
+            let end_ids = if !tool_config.end_token_ids.is_empty() {
+                Some(&tool_config.end_token_ids)
+            } else {
+                None
+            };
+
+            Some(build_tool_grammar_for_parser(
+                tools,
+                &tool_config.start_token_str,
+                &tool_config.end_token_str,
+                tool_config.start_is_special,
+                tool_config.end_is_special,
+                start_ids,
+                end_ids,
+                &parser_name,
+            ))
+        } else if allow_constraint_api {
+            // When enable_tool_grammar=false but allow_constraint_api=true,
+            // use fallback tool envelope grammar with text-based tags
+            Some(build_fallback_tool_envelope_grammar(
+                tools,
+                &tool_config.start_token_str,
+                &tool_config.end_token_str,
+                &tool_config.start_token_ids,
+                &tool_config.end_token_ids,
+            ))
+        } else {
+            // Both flags false - no tool grammar
+            None
+        }
+    } else {
+        None
+    };
+
+    // Build tool choice info
+    let tool_choice_required = request
+        .tool_choice
+        .as_ref()
+        .map(|tc| matches!(tc, ToolChoice::Mode(ToolChoiceMode::Required)))
+        .unwrap_or(false);
+
+    let forced_tool_name = request.tool_choice.as_ref().and_then(|tc| {
+        if let ToolChoice::Function { function, .. } = tc {
+            Some(function.name.clone())
+        } else {
+            None
+        }
+    });
+
+    // Build reasoning effort only when tool or constraint grammar is enabled
+    // This prevents grammar generation when CLI flags are disabled
+    let reasoning_effort = if enable_tool_grammar || allow_constraint_api {
+        request
+            .reasoning_effort
+            .as_ref()
+            .map(|s| ReasoningEffort::from_str(s.clone()))
+    } else {
+        None
+    };
+
+    // Check if reasoning tokens exist in chat template before enabling reasoning
+    // Normalize both template and token strings to ASCII-only for reliable comparison
+    let reasoning_tokens_in_template = if let Some((start_str, end_str)) =
+        get_reasoning_token_strings(guidance_tokens, tokenizer)
+    {
+        if let Some(template_str) = chat_template.and_then(|t| t.get_template_string()) {
+            // Ensure template is non-zero length for sanity check
+            if template_str.trim().is_empty() {
+                crate::log_warn!(
+                    "[llg] Chat template is empty; cannot verify reasoning token presence"
+                );
+                true  // Allow added_vocabulary reasoning if template is invalid/empty
+            } else {
+                // Normalize to ASCII-only for robust comparison (handles emoji, special chars)
+                let normalized_template: String = template_str.chars().filter(|c| c.is_ascii()).collect();
+                let normalized_start: String = start_str.chars().filter(|c| c.is_ascii()).collect();
+                let normalized_end: String = end_str.chars().filter(|c| c.is_ascii()).collect();
+
+                // Check if normalized template contains both normalized token strings
+                normalized_template.contains(&normalized_start) && normalized_template.contains(&normalized_end)
+            }
+        } else {
+            true  // No template available, allow added_vocabulary reasoning
+        }
+    } else {
+        true  // No reasoning tokens configured, allow added_vocabulary reasoning
+    };
+
+    // When no constraints and no tool grammar, bypass llguidance entirely
+    // This is checked before compose_grammars to avoid unnecessary processing
+    if constraint_grammar.is_none() && tool_grammar.is_none() {
+        let has_reasoning = reasoning_effort
+            .as_ref()
+            .is_some_and(|effort| *effort != ReasoningEffort::None);
+        if !has_reasoning {
+            return None;
+        }
+    }
+
+    // Compose final grammar
+    let final_grammar = compose_grammars(
+        constraint_grammar.into_iter().collect(),
+        tool_grammar,
+        tool_choice_required,
+        forced_tool_name,
+        request.max_tokens,
+        guidance_tokens,
+        reasoning_effort,
+    );
+
+    // Safeguard for models which cannot handle added_vocabulary tokens on which they were not trained
+    let provide_thinking_fallback =
+        std::env::var("VLLM_RS_PROVIDE_THINKING_FALLBACK")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false);
+
+    if provide_thinking_fallback && !reasoning_tokens_in_template {
+        // Models not trained on reasoning blocks have a negligible probability of emitting the end tag which makes
+        // subsequent grammar unreachable to include EOS, resulting in garbage tokens or repeat of last output forever
+        let lark_str = get_lark_from_top_level_grammar(&final_grammar);
+        let reason_start = format!("<[{}]>", guidance_tokens.reasoning_start_ids[0]);
+        let reason_end = format!("<[{}]>", guidance_tokens.reasoning_end_ids[0]);
+        let lark_str = lark_str
+            .replace(&reason_start, "\"<thinking>\"")
+            .replace(&reason_end, "\"</thinking>\"");
+        let corrected_grammar = TopLevelGrammar::from_lark(lark_str);
+        Some(corrected_grammar)
+    } else {
+        Some(final_grammar)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_text_expression_with_eos() {
+        // Test that chat_text_expression generates correct Lark grammar
+        let lark = chat_text_expression(true);
+        assert!(lark.contains("start: text"));
+        assert!(lark.contains("text: /"));
+    }
+
+    #[test]
+    fn test_chat_text_expression_without_eos() {
+        let lark = chat_text_expression(false);
+        assert!(lark.contains("start: text"));
+    }
+
+    #[test]
+    fn test_sanitize_ascii_only() {
+        // Test that sanitize_ascii_only removes non-ASCII characters
+        // Note: This function uses is_ascii() which only keeps ASCII characters
+        // Space (0x20) is ASCII, but the input "Hello 世界 🌍" contains non-ASCII
+        let input = "Hello 世界 🌍";
+        let output = sanitize_ascii_only(input);
+        // The function keeps only ASCII characters - space is ASCII
+        assert!(output.starts_with("Hello"));
+        assert!(!output.contains("世界"));
+        assert!(!output.contains("🌍"));
+    }
+
+    #[test]
+    fn test_sanitize_to_ascii() {
+        // Test that sanitize_to_ascii filters to ASCII only
+        let input = "Hello 世界 🌍";
+        let output = sanitize_to_ascii(input);
+        // The function keeps only ASCII bytes - space is ASCII
+        assert!(output.starts_with("Hello"));
+        assert!(!output.contains("世界"));
+        assert!(!output.contains("🌍"));
+    }
+
+    #[test]
+    fn test_extract_start_rule_rhs_preserves_quantifiers() {
+        // Test that quantifiers (?, *, +) are preserved in the start rule RHS
+        // This is critical for ReasoningEffort::Low which uses "reasoning_block?"
+
+        // Test case 1: Optional quantifier (?) - ReasoningEffort::Low
+        let lark1 = r#"start: reasoning_block?
+reasoning_block: <[123]> text <[456]> ("\\n")?
+text: /(?s:.+?)/
+"#;
+        let result1 = extract_start_rule_rhs(lark1);
+        assert_eq!(result1, "reasoning_block?", "Optional quantifier should be preserved");
+
+        // Test case 2: Star quantifier (*) - ReasoningEffort::High
+        let lark2 = r#"start: reasoning_block* analysis_block*
+reasoning_block: <[123]> text <[456]> ("\\n")?
+analysis_block: text+
+text: /(?s:.+?)/
+"#;
+        let result2 = extract_start_rule_rhs(lark2);
+        assert_eq!(result2, "reasoning_block* analysis_block*", "Star quantifier should be preserved");
+
+        // Test case 3: Plus quantifier (+) in alternation
+        let lark3 = r#"start: (text | tool_call)+
+text: /(?s:.+?)/
+tool_call: "<tool>" text "</tool>"
+"#;
+        let result3 = extract_start_rule_rhs(lark3);
+        assert_eq!(result3, "(text | tool_call)+", "Plus quantifier should be preserved");
+
+        // Test case 4: No quantifier (simple case)
+        let lark4 = r#"start: text
+text: /(?s:.+?)/
+"#;
+        let result4 = extract_start_rule_rhs(lark4);
+        assert_eq!(result4, "text", "No quantifier should remain as-is");
+    }
+
+    #[test]
+    fn test_grammar_input_choice() {
+        // Test GrammarInput::Choice variant
+        let input = GrammarInput::Choice(vec!["option1".to_string(), "option2".to_string()]);
+        assert!(matches!(input, GrammarInput::Choice(_)));
+    }
+
+    #[test]
+    fn test_grammar_input_regex() {
+        // Test GrammarInput::Regex variant
+        let input = GrammarInput::Regex(r"[a-z]+".to_string());
+        assert!(matches!(input, GrammarInput::Regex(_)));
+    }
+
+    #[test]
+    fn test_grammar_input_json() {
+        // Test GrammarInput::Json variant
+        let input = GrammarInput::Json(serde_json::json!({"type": "object"}));
+        assert!(matches!(input, GrammarInput::Json(_)));
+    }
+
+    #[test]
+    fn test_grammar_input_lark() {
+        // Test GrammarInput::Lark variant
+        let input = GrammarInput::Lark("start: text\ntext: /(?s:.+?)/".to_string());
+        assert!(matches!(input, GrammarInput::Lark(_)));
+    }
+
+    #[test]
+    fn test_grammar_input_structural_tag() {
+        // Test GrammarInput::StructuralTag variant
+        let config = StructuralTagConfig {
+            start_tag: "<tag>".to_string(),
+            end_tag: "</tag>".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let input = GrammarInput::StructuralTag(config);
+        assert!(matches!(input, GrammarInput::StructuralTag(_)));
+    }
+
+    #[test]
+    fn test_grammar_input_reasoning() {
+        // Test GrammarInput::Reasoning variant
+        let base = GrammarInput::Choice(vec!["a".to_string(), "b".to_string()]);
+        let input = GrammarInput::Reasoning {
+            effort: ReasoningEffort::Low,
+            base: Box::new(base),
+        };
+        assert!(matches!(input, GrammarInput::Reasoning { .. }));
+    }
+
+    #[test]
+    fn test_grammar_input_constraint_then_tool() {
+        // Test GrammarInput::ConstraintThenTool variant
+        let constraint = GrammarInput::Json(serde_json::json!({"type": "object"}));
+        let input = GrammarInput::ConstraintThenTool {
+            constraint: Box::new(constraint),
+            tool_name: None,
+        };
+        assert!(matches!(input, GrammarInput::ConstraintThenTool { .. }));
+    }
+
+    #[test]
+    fn test_grammar_input_tool_then_constraint() {
+        // Test GrammarInput::ToolThenConstraint variant
+        let constraint = GrammarInput::Json(serde_json::json!({"type": "object"}));
+        let input = GrammarInput::ToolThenConstraint {
+            tool_name: None,
+            constraint: Box::new(constraint),
+        };
+        assert!(matches!(input, GrammarInput::ToolThenConstraint { .. }));
+    }
 }

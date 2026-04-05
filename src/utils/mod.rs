@@ -958,6 +958,7 @@ pub fn init_config_tokenizer(
                 config.architectures = cfg.architectures.clone();
                 config.is_multi_model = Some(true);
                 merge_multimodal_top_level_config(&mut config, &raw_config_json)?;
+
                 config.extra_config_json =
                     Some(String::from_utf8(raw_config).map_err(candle_core::Error::wrap)?);
                 // Remap rope_theta in rope_scaling to config file
@@ -1057,6 +1058,31 @@ pub fn init_config_tokenizer(
         let tokenizer_file = model_pathes.get_tokenizer_filename();
 
         let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+
+        // For multimodal models, merge tokenizer's eos_token string to token IDs
+        // This ensures EOSTOKENIDS includes tokens from both tokenizer and config
+        if config.is_multi_model == Some(true) {
+            let tokenizer_eos_ids: Vec<u32> = config_tokenizer
+                .eos_token
+                .as_ref()
+                .and_then(|eos_str| tokenizer.get_vocab(true).get(eos_str).copied())
+                .map(|id| vec![id])
+                .unwrap_or_default();
+
+            if !tokenizer_eos_ids.is_empty() {
+                let tokenizer_eos = if tokenizer_eos_ids.len() == 1 {
+                    EosTokenId::Single(tokenizer_eos_ids[0])
+                } else {
+                    EosTokenId::Multiple(tokenizer_eos_ids)
+                };
+
+                if let Some(existing_eos) = config.eos_token_id.take() {
+                    config.eos_token_id = Some(existing_eos.merge_dedup(tokenizer_eos));
+                } else {
+                    config.eos_token_id = Some(tokenizer_eos);
+                }
+            }
+        }
 
         let generation_config_path = model_pathes.get_generation_config_filename();
         let generation_cfg = if generation_config_path.display().to_string() != ""

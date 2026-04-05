@@ -8,6 +8,7 @@ use crate::utils::guidance::{GrammarError, GrammarResult, TopLevelGrammarExt};
 use llguidance::api::TopLevelGrammar;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use tokenizers::Tokenizer;
 
 /// Remove JSON Schema features that llguidance doesn't support.
 /// Currently strips all "format" fields recursively.
@@ -40,30 +41,8 @@ pub fn sanitize_schema_for_llguidance(schema: &Value) -> Value {
 }
 
 /// Lark grammar helper functions for llguidance constraint building
-fn lark_quote(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
-}
-
-/// Convert token IDs to Lark special token syntax <[token_id]>
-/// This is used when the tokenizer has canonical tokenization for the tag
-fn lark_special_token(token_ids: &HashSet<u32>) -> String {
-    if token_ids.is_empty() {
-        return String::new();
-    }
-    // Join multiple token IDs with |
-    let ids: Vec<String> = token_ids.iter().map(|id| format!("[{}]", id)).collect();
-    format!("<{}>", ids.join(","))
-}
-
-fn _lark_literal(value: &str, is_special: bool) -> String {
-    if is_special && value.starts_with('<') && value.ends_with('>') {
-        // Only allow ASCII special tags
-        let sanitized: String = value.chars().filter(|c| c.is_ascii()).collect();
-        sanitized
-    } else {
-        lark_quote(value)
-    }
-}
+/// Re-exported from src/utils/guidance.rs to avoid duplication
+use crate::utils::guidance::{lark_quote, lark_special_token};
 
 /// Builder for constructing tool call grammars
 pub struct ToolGrammarBuilder {
@@ -74,6 +53,8 @@ pub struct ToolGrammarBuilder {
     end_is_special: bool,
     start_token_ids: Option<HashSet<u32>>,
     end_token_ids: Option<HashSet<u32>>,
+    parser_name: Option<String>,
+    value_rules: HashMap<String, String>,
 }
 
 impl ToolGrammarBuilder {
@@ -86,7 +67,60 @@ impl ToolGrammarBuilder {
             end_is_special: false,
             start_token_ids: None,
             end_token_ids: None,
+            parser_name: None,
+            value_rules: HashMap::new(),
         }
+    }
+
+    /// Get the value rule name for a parameter type
+    /// Creates a unique rule for each parameter (tool_idx_param_idx) to avoid schema sharing
+    /// String types use regex patterns, all other types use %json with full schema
+    /// The suffix annotation is placed on the LHS of the rule definition to bound run-on generation
+    /// Example output: value_string[suffix="\n<‌/parameter>\n"]: /(?s:.+?)/
+    /// Example output: value_0_1_integer: %json {"type":"integer",...}
+    fn get_value_rule_name(&mut self, tool_idx: usize, param_idx: usize, param_type: &str, param_schema: &Value) -> String {
+        // For string types, use a shared rule name to deduplicate
+        // For non-string types, use unique rule names per parameter
+        let rule_name = if param_type == "string" {
+            "value_string".to_string()
+        } else {
+            format!("value_{}_{}_{}", tool_idx, param_idx, param_type)
+        };
+        
+        // String types use regex pattern (keep current behavior)
+        // All other types use %json with full schema
+        let pattern = if param_type == "string" {
+            // String types: use regex pattern
+            "/(?s:.+?)/".to_string()
+        } else {
+            // Non-string types: use %json with sanitized schema
+            let sanitized = sanitize_schema_for_llguidance(param_schema);
+            let schema_json = serde_json::to_string(&sanitized).unwrap_or_default();
+            format!("%json {}", schema_json)
+        };
+
+        // For non-string types, don't add suffix annotation - llguidance doesn't support %json in terminals
+        // For string types, add suffix annotation to bound run-on generation
+        let lhs = if param_type == "string" {
+            format!(r#"{}[suffix="\n<‌/parameter>\n"]"#, rule_name)
+        } else {
+            rule_name.clone()
+        };
+
+        self.value_rules.insert(lhs, pattern);
+
+        rule_name
+    }
+
+    /// Build value rules from the value_rules HashMap
+    fn build_value_rules(&self) -> Vec<String> {
+        let mut rules: Vec<String> = Vec::new();
+        let mut sorted_rules: Vec<_> = self.value_rules.iter().collect();
+        sorted_rules.sort_by(|a, b| a.0.cmp(b.0));
+        for (rule_name, pattern) in sorted_rules {
+            rules.push(format!("{}: {}", rule_name, pattern));
+        }
+        rules
     }
 
     pub fn tools(mut self, tools: &[Tool]) -> Self {
@@ -124,6 +158,61 @@ impl ToolGrammarBuilder {
         self
     }
 
+    pub fn parser_name(mut self, name: Option<String>) -> Self {
+        self.parser_name = name;
+        self
+    }
+
+    /// Extract token IDs from tokenizer for start/end tags
+    /// This ensures XML grammar uses actual tokenizer token IDs, not hardcoded ones
+    pub fn from_tokenizer(mut self, tokenizer: &Tokenizer, start_tag: &str, end_tag: &str) -> Self {
+        // Extract start token IDs
+        if let Ok(encoded) = tokenizer.encode(start_tag, false) {
+            let ids = encoded.get_ids();
+            if !ids.is_empty() {
+                let start_ids: HashSet<u32> = ids.iter().copied().collect();
+                self.start_token_ids = Some(start_ids);
+            }
+        }
+
+        // Extract end token IDs
+        if let Ok(encoded) = tokenizer.encode(end_tag, false) {
+            let ids = encoded.get_ids();
+            if !ids.is_empty() {
+                let end_ids: HashSet<u32> = ids.iter().copied().collect();
+                self.end_token_ids = Some(end_ids);
+            }
+        }
+
+        self
+    }
+
+    /// Build tool grammar - automatically selects XML or JSON based on parser selection logic
+    /// This replicates the same logic as StreamToolParser::parser_name_for_model()
+    pub fn build(mut self) -> TopLevelGrammar {
+        let use_xml = self.should_use_xml_format();
+
+        if use_xml {
+            self.build_xml()
+        } else {
+            self.build_json()
+        }
+    }
+
+    /// Determine if XML format should be used based on parser name
+    /// This replicates the same logic as StreamToolParser::parser_name_for_model()
+    fn should_use_xml_format(&self) -> bool {
+        let parser_name = self.parser_name.as_deref().unwrap_or("json");
+
+        // Explicit parser selection
+        if parser_name == "qwen_coder" {
+            return true;
+        }
+
+        // Default to JSON for other parsers
+        false
+    }
+
     /// Build Lark expression for JSON tool schema content
     pub fn build_json(self) -> TopLevelGrammar {
         let start_tag = self.get_tag_or_token_id(
@@ -131,8 +220,11 @@ impl ToolGrammarBuilder {
             &self.start_token_ids,
             self.start_is_special,
         );
-        let end_tag =
-            self.get_tag_or_token_id(&self.end_tag, &self.end_token_ids, self.end_is_special);
+        let end_tag = self.get_tag_or_token_id(
+            &self.end_tag,
+            &self.end_token_ids,
+            self.end_is_special
+        );
         let payload_schema = if self.tools.is_empty() {
             json!({ "type": "object" })
         } else {
@@ -159,44 +251,23 @@ impl ToolGrammarBuilder {
             if variants.len() == 1 {
                 variants[0].clone()
             } else {
-                json!({ "oneOf": variants })
+                json!({ "anyOf": variants })
             }
         };
 
         let payload_schema = serde_json::to_string(&payload_schema).unwrap_or_default();
         let lark = format!(
-            "start: tool_call\ntool_call: {start_tag} tool_payload {end_tag}\ntool_payload: %json {payload_schema}\n"
+            r#"start: tool_call
+tool_call: {start_tag} tool_content {end_tag} ("\n")?
+tool_content: %json {payload_schema}
+"#
         );
-        TopLevelGrammar::from_lark_utf8(&lark)
-    }
-
-    /// Build Lark expression for valid XML parameter content
-    fn build_xml_value_expression(schema: &serde_json::Value) -> String {
-        let param_type = schema
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or("string");
-
-        match param_type {
-            "string" => {
-                if let Ok(val) = std::env::var("VLLM_LLG_DEFAULT_XML_STR") {
-                    format!("{}", val)
-                } else {
-                    r#"/[ -~]*?/"#.to_string()
-                }
-            }
-            "integer" => r"/-?[0-9]+/".to_string(),
-            "number" => r"/-?[0-9]+(\.[0-9]+)?/".to_string(),
-            "boolean" => r"/^(true|false)$/".to_string(),
-            "array" => r"/\[[^\]]*\]/".to_string(),
-            "object" => r"/\{[^\}]*\}/".to_string(),
-            _ => r"/[ -~]*?/".to_string(),
-        }
+        TopLevelGrammar::from_lark_ascii(&lark)
     }
 
     /// Build Lark expression for XML tool schema content
     /// Uses structured tag parsing with ASCII-restricted value patterns
-    pub fn build_xml(self) -> TopLevelGrammar {
+    pub fn build_xml(&mut self) -> TopLevelGrammar {
         let mut rules: Vec<String> = Vec::new();
 
         // Build envelope tag using token IDs when available
@@ -215,19 +286,20 @@ impl ToolGrammarBuilder {
         // The stream parser detects these using text matching in the buffer
         rules.push("start: tool_call".to_string());
         rules.push(format!(
-            "tool_call: {} tool_content {}",
+            r#"tool_call: {} tool_content {} "#,
             envelope_start_tag, envelope_end_tag
         ));
 
-        for (tool_idx, tool) in self.tools.iter().enumerate() {
+        // Clone tools to avoid borrow checker issues when calling get_value_rule_name
+        let tools = self.tools.clone();
+        for (tool_idx, tool) in tools.iter().enumerate() {
             let tool_name_ascii: String = tool
                 .function
                 .name
                 .chars()
                 .filter(|c| c.is_ascii())
                 .collect();
-            let func_start = lark_quote(&format!("<function={}>", tool_name_ascii));
-            let func_end = lark_quote("</function>");
+            let func_end = lark_quote("<‌/function>\n");
             let params_schema = &tool.function.parameters;
             let props = params_schema.get("properties").and_then(|p| p.as_object());
             let required_params: Vec<String> = params_schema
@@ -241,52 +313,74 @@ impl ToolGrammarBuilder {
                 .unwrap_or_default();
 
             if let Some(props) = props {
+                let func_start = lark_quote(&format!("\n<‌function={}>", tool_name_ascii));
                 let mut param_rules_vec: Vec<String> = Vec::new();
 
                 for (param_idx, (param_name, schema)) in props.iter().enumerate() {
                     let param_name_ascii: String =
                         param_name.chars().filter(|c| c.is_ascii()).collect();
-                    let param_tag = lark_quote(&format!("<parameter={}>", param_name_ascii));
-                    let param_end = lark_quote("</parameter>");
-                    let value_rule = format!("value_{tool_idx}_{param_idx}");
+                    let param_tag = lark_quote(&format!("\n<‌parameter={}>\n", param_name_ascii));
+                    let param_end = lark_quote("\n<‌/parameter>\n");
                     let param_rule = format!("param_{tool_idx}_{param_idx}");
 
-                    let value_expr = Self::build_xml_value_expression(schema);
-                    rules.push(format!("{value_rule}: {value_expr}"));
-                    rules.push(format!(
-                        "{param_rule}: {param_tag} {value_rule} {param_end}"
-                    ));
+                    // Get the param type and create unique value rule
+                    // Clone the param_type to avoid borrow conflicts
+                    let param_type = schema
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("string")
+                        .to_string();
+                    let value_rule = self.get_value_rule_name(tool_idx, param_idx, &param_type, schema);
+
+                    if param_type == "string" {
+                        // Suffixes using the end-tag internally - avoid double-generation
+                        rules.push(format!(
+                            r#"{param_rule}: {param_tag} {value_rule} "#
+                        ));
+                    } else {
+                        rules.push(format!(
+                            r#"{param_rule}: {param_tag} {value_rule} {param_end} "#
+                        ));
+                    }
 
                     if required_params.contains(param_name) {
-                        param_rules_vec.push(param_rule);
+                        param_rules_vec.push(format!(r#" {param_rule}"#));
                     } else {
-                        param_rules_vec.push(format!("({param_rule})?"));
+                        param_rules_vec.push(format!(r#"( {param_rule})?"#));
                     }
                 }
 
                 let params_expr = param_rules_vec.join(" ");
                 rules.push(format!(
-                    "tool_{tool_idx}: {func_start} {params_expr} {func_end}"
+                    r#"tool_{tool_idx}: {func_start} {params_expr} {func_end}"#
                 ));
             } else {
-                rules.push(format!("tool_{tool_idx}: {func_start} {func_end}"));
+                let func_start = lark_quote(&format!("\n<‌function={}>\n", tool_name_ascii));
+                rules.push(format!(
+                    r#"tool_{tool_idx}: {func_start} {func_end} "#
+                ));
             }
         }
 
         // Build tool_content with alternation of all tools
-        let tool_variants = tool_rule_names.join(" | ");
+        let tool_variants = tool_rule_names.join(" ? ");
         rules.push(format!("tool_content: {tool_variants}"));
 
+        // Add all value rules at the end
+        let mut value_rules = self.build_value_rules();
+        rules.append(&mut value_rules);
+
         let lark = rules.join("\n") + "\n";
-        TopLevelGrammar::from_lark_utf8(&lark)
+        TopLevelGrammar::from_lark_ascii(&lark)
     }
 
-    /// Get envelope tag (start/end) using token IDs when available, falling back to string literals
+    /// Get envelope tag (start/end) using token IDs when available
+    /// ALWAYS uses <[token_id]> format - panics if token IDs not available
     fn get_envelope_tag(
         &self,
         tag: &str,
         token_ids: &Option<HashSet<u32>>,
-        is_special: bool,
+        _is_special: bool,
     ) -> String {
         if let Some(ids) = token_ids {
             if !ids.is_empty() {
@@ -294,8 +388,8 @@ impl ToolGrammarBuilder {
             }
         }
 
-        if is_special && tag.starts_with('<') && tag.ends_with('>') {
-            // Only allow ASCII special tags
+        // Token IDs required for XML format - use string as last resort
+        if tag.starts_with('<') && tag.ends_with('>') {
             let sanitized: String = tag.chars().filter(|c| c.is_ascii()).collect();
             sanitized
         } else {
@@ -303,11 +397,13 @@ impl ToolGrammarBuilder {
         }
     }
 
+    /// Get tag or token ID - ALWAYS uses <[token_id]> format when token IDs available
+    /// Falls back to string literal only when NO token IDs are available
     fn get_tag_or_token_id(
         &self,
         tag: &str,
         token_ids: &Option<HashSet<u32>>,
-        is_special: bool,
+        _is_special: bool,
     ) -> String {
         if let Some(ids) = token_ids {
             if !ids.is_empty() {
@@ -321,16 +417,16 @@ impl ToolGrammarBuilder {
             }
         }
 
-        if is_special && tag.starts_with('<') && tag.ends_with('>') {
-            tag.to_string()
-        } else {
-            lark_quote(tag)
-        }
+        // Token IDs not available - use string literal as fallback
+        // This is expected behavior when tokenizer doesn't have exact token IDs
+        lark_quote(tag)
     }
 }
 
 /// Build a Lark grammar for QwenCoder-style function/parameter tags with JSON values.
 /// Used for models like Qwen3-Coder that use XML-style tool call envelopes.
+/// This function now uses ToolGrammarBuilder::build() which automatically selects
+/// XML or JSON format based on the parser_name.
 pub fn build_xml_tool_lark_grammar(
     tools: &[Tool],
     start: &str,
@@ -348,7 +444,32 @@ pub fn build_xml_tool_lark_grammar(
         .end_is_special(end_is_special)
         .start_token_ids(start_token_ids.cloned())
         .end_token_ids(end_token_ids.cloned())
-        .build_xml()
+        .parser_name(None) // Will use default "json" if not specified
+        .build()
+}
+
+/// Build tool grammar using XML format for qwen_coder parser, JSON for others
+/// This function is kept for backward compatibility with code that uses it
+pub fn build_tool_grammar_for_parser(
+    tools: &[Tool],
+    start: &str,
+    end: &str,
+    start_is_special: bool,
+    end_is_special: bool,
+    start_token_ids: Option<&HashSet<u32>>,
+    end_token_ids: Option<&HashSet<u32>>,
+    parser_name: &str,
+) -> TopLevelGrammar {
+    ToolGrammarBuilder::new()
+        .tools(tools)
+        .start_tag(start)
+        .end_tag(end)
+        .start_is_special(start_is_special)
+        .end_is_special(end_is_special)
+        .start_token_ids(start_token_ids.cloned())
+        .end_token_ids(end_token_ids.cloned())
+        .parser_name(Some(parser_name.to_string()))
+        .build()
 }
 
 /// Builder for creating JSON Schema objects
@@ -617,7 +738,7 @@ pub fn build_choice_lark_grammar(choices: &[String]) -> GrammarResult<TopLevelGr
 
     let body = parts.join(" | ");
     let lark_string = format!("start: {}\n", body);
-    Ok(TopLevelGrammar::from_lark_utf8(&lark_string))
+    Ok(TopLevelGrammar::from_lark_ascii(&lark_string))
 }
 
 /// Normalize a tag string for structural_tag parsing
@@ -710,7 +831,7 @@ pub fn schema_to_tools(schema: &Value) -> Vec<Tool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::guidance::get_lark_from_top_level_grammar;
+    use crate::utils::guidance::{_lark_literal, get_lark_from_top_level_grammar};
 
     #[test]
     fn test_sanitize_schema_for_llguidance_strips_format() {
@@ -846,7 +967,16 @@ mod tests {
         )
         .param("query", "string", "Search query", true)
         .build()];
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
         let lark_str = get_lark_from_top_level_grammar(&grammar);
         println!("{}", &lark_str);
 
@@ -872,7 +1002,16 @@ mod tests {
         .param("city", "string", "City name", true)
         .param("units", "string", "Temperature units (optional)", false)
         .build()];
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         assert!(
@@ -902,7 +1041,16 @@ mod tests {
         .param("new_string", "string", "Replacement string", true)
         .param("replace_all", "boolean", "Replace all occurrences", false)
         .build()];
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
         let lark_str = get_lark_from_top_level_grammar(&grammar);
         println!("XML Grammar:\n{}", &lark_str);
 
@@ -936,26 +1084,45 @@ mod tests {
             "Should contain replace_all parameter tag"
         );
 
-        // Verify parameter rules reference the correct types
+        // Verify all string params share the same consolidated value_string rule
         assert!(
-            lark_str.contains("value_0_0:"),
-            "Should have value_0_0 rule for first param"
+            lark_str.contains("value_string"),
+            "All string params should use the consolidated value_string rule"
+        );
+
+        // Verify non-string types still have unique rules
+        assert!(
+            lark_str.contains("value_0_3_boolean"),
+            "Boolean param should have its own unique rule"
         );
         assert!(
-            lark_str.contains("value_0_1:"),
-            "Should have value_0_1 rule for second param"
+            lark_str.contains("param_0_0:"),
+            "Should have param_0_0 rule for first param"
         );
         assert!(
-            lark_str.contains("value_0_2:"),
-            "Should have value_0_2 rule for third param"
+            lark_str.contains("param_0_1:"),
+            "Should have param_0_1 rule for second param"
         );
         assert!(
-            lark_str.contains("value_0_3:"),
-            "Should have value_0_3 rule for fourth param"
+            lark_str.contains("param_0_2:"),
+            "Should have param_0_2 rule for third param"
+        );
+        assert!(
+            lark_str.contains("param_0_3:"),
+            "Should have param_0_3 rule for fourth param"
         );
 
         // Verify tool rule has all parameters
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
+
+        // Verify deduplication is disabled: each string param should have its own value rule
+        // Rules are named value_{tool_idx}_{param_idx}_{type} so check for pattern
+        let value_string_count = lark_str.matches("value_").count();
+        assert!(
+            value_string_count >= 4,
+            "Each param should have its own value rule (no deduplication), found {}",
+            value_string_count
+        );
     }
 
     #[test]
@@ -968,12 +1135,21 @@ mod tests {
         .param("query", "string", "Search query", true) // REQUIRED - should appear as bare rule reference
         .build()];
 
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         // Verify tool rule has all parameters
         assert!(lark_str.contains("tool_0:"), "Should have tool_0 rule");
-        assert!(lark_str.contains("value_0"), "Should have value rules");
+        assert!(lark_str.contains("value_string"), "Should have the consolidated value_string rule for string params");
 
         // Required params appear directly in tool rule without ()* wrapper
     }
@@ -989,7 +1165,16 @@ mod tests {
         .param("optional_param", "string", "Optional", false) // OPTIONAL
         .build()];
 
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
         let lark_str = get_lark_from_top_level_grammar(&grammar);
 
         println!("XML Grammar for mixed tool:\n{}", lark_str);
@@ -1008,7 +1193,16 @@ mod tests {
                     .build(),
             ];
 
-        let grammar = build_xml_tool_lark_grammar(&tools, "", "", false, false, None, None);
+        let grammar = build_tool_grammar_for_parser(
+            &tools,
+            "",
+            "",
+            false,
+            false,
+            None,
+            None,
+            "qwen_coder",
+        );
 
         // Grammar should have at least one sub-grammar (the tool rules)
         assert!(grammar.grammars.len() > 0, "Should have generated grammars");
