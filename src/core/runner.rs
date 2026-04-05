@@ -1139,25 +1139,6 @@ impl ModelRunner {
             let cu_seqlens_q_host_u32: Vec<u32> =
                 cu_seqlens_q_vec.iter().map(|&x| x as u32).collect();
 
-            #[cfg(feature = "flashinfer")]
-            let prefill_plan_info = if let Some(params) = self.flashinfer_kv_params {
-                Some(attention_rs::flashinfer::prefill_plan(
-                    &self.device,
-                    &cu_seqlens_q_host_u32,
-                    &indptr_host,
-                    &kv_len_arr_host,
-                    *cu_seqlens_q_vec.last().unwrap() as u32,
-                    last_len_host.len(),
-                    params.num_qo_heads,
-                    params.num_kv_heads,
-                    params.head_dim,
-                    params.page_size,
-                    params.out_dtype,
-                    None,
-                )?)
-            } else {
-                None
-            };
             #[cfg(not(feature = "flashinfer"))]
             let prefill_plan_info = None;
 
