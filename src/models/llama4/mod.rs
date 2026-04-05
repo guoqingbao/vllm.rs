@@ -15,7 +15,7 @@ use crate::utils::progress::ProgressLike;
 use attention_rs::ops::NonZeroOp;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::Module;
+use candle_nn::{Activation, Module};
 use config::{Llama4Config, TextConfig};
 use parking_lot::RwLock;
 use std::iter::zip;
@@ -30,7 +30,9 @@ use vision::Llama4VisionModel;
 enum Llama4Experts {
     Dense {
         router: ReplicatedLinear,
-        experts: Vec<MLP>,
+        gate_up_w: Tensor,
+        down_w: Tensor,
+        w_size_n: usize,
         topk: usize,
     },
     Nvfp4(FusedMoeNvfp4),
@@ -91,24 +93,58 @@ impl Llama4TextMoe {
                 &None,
                 dtype,
             )?;
-            let mut experts = Vec::new();
-            for i in 0..text_cfg.num_local_experts {
-                experts.push(MLP::new(
-                    vb.pp(format!("experts.{}", i).as_str()),
-                    comm.clone(),
-                    config.hidden_size,
-                    text_cfg.intermediate_size,
-                    &config.hidden_act,
-                    &config.quantization_config,
-                    &config.quant,
-                    false,
-                    dtype,
-                    "",
-                )?);
-            }
+            let experts_vb = vb.pp("experts");
+            let n = text_cfg.num_local_experts;
+            let inter = text_cfg.intermediate_size;
+            let hidden = config.hidden_size;
+            let (gate_up_w, down_w) = match &experts_vb.0 {
+                either::Either::Left(svb) => {
+                    if svb.contains_tensor("gate_up_proj") {
+                        // gate_up_proj [E, hidden, 2*inter] -> transpose -> [E, 2*inter, hidden]
+                        let gate_up_w = svb
+                            .get((n, hidden, inter * 2), "gate_up_proj")?
+                            .t()?
+                            .contiguous()?;
+                        // down_proj [E, inter, hidden] -> transpose -> [E, hidden, inter]
+                        let down_w = svb
+                            .get((n, inter, hidden), "down_proj")?
+                            .t()?
+                            .contiguous()?;
+                        (gate_up_w, down_w)
+                    } else {
+                        let mut gate_v = Vec::new();
+                        let mut up_v = Vec::new();
+                        let mut down_v = Vec::new();
+                        for i in 0..n {
+                            let ev = svb.pp(i.to_string());
+                            gate_v.push(
+                                ev.pp("gate_proj")
+                                    .get((inter, hidden), "weight")?,
+                            );
+                            up_v.push(
+                                ev.pp("up_proj")
+                                    .get((inter, hidden), "weight")?,
+                            );
+                            down_v.push(
+                                ev.pp("down_proj")
+                                    .get((hidden, inter), "weight")?,
+                            );
+                        }
+                        let gate = Tensor::stack(&gate_v, 0)?;
+                        let up = Tensor::stack(&up_v, 0)?;
+                        let gate_up_w = Tensor::cat(&[&gate, &up], 1)?;
+                        let down_w = Tensor::stack(&down_v, 0)?;
+                        (gate_up_w, down_w)
+                    }
+                }
+                _ => candle_core::bail!("Llama4 Dense MoE requires safetensors VarBuilder"),
+            };
+            let w_size_n = gate_up_w.dim(1)? / 2;
             Llama4Experts::Dense {
                 router,
-                experts,
+                gate_up_w,
+                down_w,
+                w_size_n,
                 topk: text_cfg.num_experts_per_tok,
             }
         };
@@ -140,37 +176,56 @@ impl Llama4TextMoe {
             Llama4Experts::Nvfp4(fused_moe) => fused_moe.forward(&xs_flat, false)?,
             Llama4Experts::Dense {
                 router,
-                experts,
+                gate_up_w,
+                down_w,
+                w_size_n,
                 topk,
             } => {
-                let router_logits = router.forward(&xs_flat)?;
-                let router_f32: Vec<Vec<f32>> = router_logits.to_dtype(DType::F32)?.to_vec2()?;
-                let num_tokens = xs_flat.dim(0)?;
-                let mut routed = Tensor::zeros((num_tokens, hidden_dim), xs.dtype(), xs.device())?;
+                let router_logits = router.forward(&xs_flat)?.to_dtype(DType::F32)?;
 
-                for token_idx in 0..num_tokens {
-                    let logits = &router_f32[token_idx];
-                    let mut indexed: Vec<(usize, f32)> =
-                        logits.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-                    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let topk_ids = router_logits.arg_sort_last_dim(false)?.narrow(
+                    D::Minus1,
+                    0,
+                    *topk,
+                )?;
+                let sigmoid_weights =
+                    (router_logits.neg()?.exp()? + 1.0)?.recip()?;
+                let topk_weights = sigmoid_weights.gather(&topk_ids, D::Minus1)?;
+                let topk_ids = topk_ids.to_dtype(DType::U32)?;
 
-                    for k in 0..(*topk).min(indexed.len()) {
-                        let (expert_idx, logit_val) = indexed[k];
-                        let weight = 1.0 / (1.0 + (-logit_val).exp());
+                let (expert_ids, sorted_token_ids) =
+                    topk_ids.flatten_all()?.sort_last_dim(true)?;
 
-                        let token_indices =
-                            Tensor::from_vec(vec![token_idx as u32], 1, xs.device())?;
-                        let expert_input = xs_flat.index_select(&token_indices, 0)?;
-                        let expert_output = experts[expert_idx].forward(&expert_input)?;
-                        let weight_tensor = Tensor::new(&[weight], xs.device())?
-                            .to_dtype(xs.dtype())?
-                            .unsqueeze(0)?;
-                        let weighted = expert_output.broadcast_mul(&weight_tensor)?;
+                let gate_up = attention_rs::moe::moe_gemm(
+                    &xs_flat,
+                    gate_up_w,
+                    &None,
+                    &sorted_token_ids,
+                    &expert_ids,
+                    *topk,
+                    false,
+                )?;
+                let gate = gate_up
+                    .narrow(D::Minus1, 0, *w_size_n)?
+                    .contiguous()?;
+                let up = gate_up
+                    .narrow(D::Minus1, *w_size_n, *w_size_n)?
+                    .contiguous()?;
+                let down_inputs =
+                    (up * Activation::Silu.forward(&gate)?)?;
 
-                        routed = routed.index_add(&token_indices, &weighted, 0)?;
-                    }
-                }
-                routed
+                let topk_weights = topk_weights.to_dtype(xs.dtype())?;
+                attention_rs::moe::moe_gemm(
+                    &down_inputs,
+                    down_w,
+                    &Some(topk_weights),
+                    &sorted_token_ids,
+                    &expert_ids,
+                    *topk,
+                    false,
+                )?
+                .reshape((xs_flat.dim(0)?, *topk, hidden_dim))?
+                .sum(1)?
             }
         };
 

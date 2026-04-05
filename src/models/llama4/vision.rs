@@ -430,7 +430,7 @@ impl Llama4VisionPixelShuffleMLP {
             dtype,
         )?;
         let fc2 = ReplicatedLinear::load_no_bias(
-            cfg.projector_in_dim(),
+            cfg.projector_out_dim(),
             cfg.projector_out_dim(),
             vb.pp("fc2"),
             &None,

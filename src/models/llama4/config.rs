@@ -98,7 +98,7 @@ pub struct TextConfig {
 }
 
 fn default_interleave_step() -> usize {
-    4
+    1
 }
 fn default_experts_per_tok() -> usize {
     1
@@ -170,11 +170,11 @@ impl VisionConfig {
     }
 
     pub fn projector_in_dim(&self) -> usize {
-        self.projector_input_dim.unwrap_or(self.intermediate_size)
+        self.projector_input_dim.unwrap_or(4096)
     }
 
     pub fn projector_out_dim(&self) -> usize {
-        self.projector_output_dim.unwrap_or(self.vision_output_dim)
+        self.projector_output_dim.unwrap_or(4096)
     }
 }
 
