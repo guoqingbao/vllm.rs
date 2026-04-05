@@ -97,7 +97,7 @@ reasoning_block: <[{start_id}]> "\n\n" <[{end_id}]> "\n\n"
                 // Fast Thinking: Single paragraph constraint (max ~150 chars)
                 // Limits generation space to reduce hallucination risk
                 // Uses non-greedy matching to prevent runaway generation
-                // Renamed 'text' to 'text' with suffix annotation for termination
+                // Renamed 'text' to 'think_text' with suffix annotation for termination
                 format!(
                     r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" think_text "\n" (think_text+ "\n")? <[{end_id}]> "\n\n"
@@ -111,8 +111,8 @@ think_text[suffix="\n"]: /[ -~]+/
                 // Allows multiple steps but enforces sentence boundaries
                 format!(
                     r#"start: reasoning_block
-reasoning_block: <[{start_id}]> "\n" text "\n" <[{end_id}]> "\n\n"
-text: /(?s:.+?)/
+reasoning_block: <[{start_id}]> "\n" think_text "\n" <[{end_id}]> "\n\n"
+think_text: /(?s:.+?)/
 "#
                 )
             }
@@ -123,10 +123,13 @@ text: /(?s:.+?)/
                 format!(
                     r#"start: reasoning_block
 reasoning_block: <[{start_id}]> analysis_block critique_block structure_block "\n" <[{end_id}]> "\n\n"
-analysis_block: "\n<analysis>\n" text "\n</analysis>\n"
-critique_block: "\n<critique>\n" text "\n</critique>\n"
-structure_block: "\n<structure_response>\n" text "\n</structure_response>\n"
-text: /(?s:.+?)/
+analysis_block: "\n<analysis>\n" analysis_text 
+analysis_text[suffix="\n</analysis>\n"]: /(?s:.+?)/
+critique_block: "\n<critique>\n" critique_text
+critique_text[suffix="\n</critique>\n"]: /(?s:.+?)/
+structure_block: "\n<structure_response>\n" structure_text
+structure_text[suffix="\n</structure_response>\n"]: /(?s:.+?)/
+
 "#
                 )
             }
@@ -137,11 +140,15 @@ text: /(?s:.+?)/
                 format!(
                     r#"start: reasoning_block
 reasoning_block: <[{start_id}]> "\n" draft_block verification_block critique_block structure_block "\n" <[{end_id}]> "\n\n"
-draft_block: "\n<draft>\nCardinalities of concern, intended outcomes, and structures of consideration: " text "\n</draft>\n"
-verification_block: "\n<verify>\nQuestions, assumptions, and suppositions: " text "\nMechanics of proving/disproving assumptions and qualifying the facts: " text "\n</verify>\n" 
-critique_block: "\n<critique>\nAdversarial assessment of evaluation: " text "\n</critique>\n"
-structure_block: "\n<structure_response>\n" text "\n</structure_response>\n"
-text: /(?s:.+?)/
+draft_block: "\n<draft>\nCardinalities of concern, intended outcomes, and structures of consideration: " draft_text
+draft_text[suffix="\n</draft>\n"]: /(?s:.+?)/
+verification_block: "\n<verify>\nQuestions, assumptions, and suppositions: " think_text+ "\nMechanics of proving/disproving assumptions and qualifying the facts: " verification_text
+verification_text[suffix="\n</verify>\n"]: /(?s:.+?)/
+critique_block: "\n<critique>\nAdversarial assessment of evaluation: " critique_text
+critique_text[suffix="\n</critique>\n"]: /(?s:.+?)/
+structure_block: "\n<structure_response>\n" structure_text
+structure_text[suffix="\n</structure_response>\n"]: /(?s:.+?)/
+think_text[suffix="\n"]: /[ -~]+/
 "#
                 )
             }

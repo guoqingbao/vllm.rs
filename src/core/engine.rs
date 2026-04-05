@@ -1206,7 +1206,7 @@ impl LLMEngine {
                 if is_reasoning_grammar(&grammar) {
                     // Control entire reasoning block via guidance
                     if prompt.trim().ends_with(&start_str) || prompt.trim().ends_with(&end_str) {
-                        if let Some((prompt, trimmed)) = prompt.rsplit_once(&start_str) {
+                        if let Some((prompt, _trimmed)) = prompt.rsplit_once(&start_str) {
                             return (prompt.to_string(), image_idx)
                         }
                     }
@@ -1214,7 +1214,7 @@ impl LLMEngine {
                     // Ensure guided grammar which will not generate a think-stop token is not within reasoning envelope
                     // A completed inert <think>\n\n</think> block or even an injected think template are harmless
                     if prompt.trim().ends_with(&start_str) {
-                        if let Some((prompt, trimmed)) = prompt.rsplit_once(&start_str) {
+                        if let Some((prompt, _trimmed)) = prompt.rsplit_once(&start_str) {
                             return (prompt.to_string(), image_idx)
                         }
                     }

@@ -286,7 +286,7 @@ tool_content: %json {payload_schema}
         // The stream parser detects these using text matching in the buffer
         rules.push("start: tool_call".to_string());
         rules.push(format!(
-            r#"tool_call: {} "\n" tool_content {} "\n" "#,
+            r#"tool_call: {} tool_content {} "#,
             envelope_start_tag, envelope_end_tag
         ));
 
@@ -299,8 +299,7 @@ tool_content: %json {payload_schema}
                 .chars()
                 .filter(|c| c.is_ascii())
                 .collect();
-            let func_start = lark_quote(&format!("<‌function={}>", tool_name_ascii));
-            let func_end = lark_quote("<‌/function>");
+            let func_end = lark_quote("<‌/function>\n");
             let params_schema = &tool.function.parameters;
             let props = params_schema.get("properties").and_then(|p| p.as_object());
             let required_params: Vec<String> = params_schema
@@ -314,13 +313,14 @@ tool_content: %json {payload_schema}
                 .unwrap_or_default();
 
             if let Some(props) = props {
+                let func_start = lark_quote(&format!("\n<‌function={}>", tool_name_ascii));
                 let mut param_rules_vec: Vec<String> = Vec::new();
 
                 for (param_idx, (param_name, schema)) in props.iter().enumerate() {
                     let param_name_ascii: String =
                         param_name.chars().filter(|c| c.is_ascii()).collect();
-                    let param_tag = lark_quote(&format!("<‌parameter={}>", param_name_ascii));
-                    let param_end = lark_quote("<‌/parameter>");
+                    let param_tag = lark_quote(&format!("\n<‌parameter={}>\n", param_name_ascii));
+                    let param_end = lark_quote("\n<‌/parameter>\n");
                     let param_rule = format!("param_{tool_idx}_{param_idx}");
 
                     // Get the param type and create unique value rule
@@ -333,29 +333,31 @@ tool_content: %json {payload_schema}
                     let value_rule = self.get_value_rule_name(tool_idx, param_idx, &param_type, schema);
 
                     if param_type == "string" {
+                        // Suffixes using the end-tag internally - avoid double-generation
                         rules.push(format!(
-                            r#"{param_rule}: {param_tag} "\n" {value_rule} "#
+                            r#"{param_rule}: {param_tag} {value_rule} "#
                         ));
                     } else {
                         rules.push(format!(
-                            r#"{param_rule}: {param_tag} "\n" {value_rule} "\n" {param_end} "\n" "#
+                            r#"{param_rule}: {param_tag} {value_rule} {param_end} "#
                         ));
                     }
 
                     if required_params.contains(param_name) {
-                        param_rules_vec.push(format!(r#" "\n" {param_rule}"#));
+                        param_rules_vec.push(format!(r#" {param_rule}"#));
                     } else {
-                        param_rules_vec.push(format!(r#"( "\n" {param_rule})?"#));
+                        param_rules_vec.push(format!(r#"( {param_rule})?"#));
                     }
                 }
 
                 let params_expr = param_rules_vec.join(" ");
                 rules.push(format!(
-                    r#"tool_{tool_idx}: {func_start} {params_expr} {func_end} "\n" "#
+                    r#"tool_{tool_idx}: {func_start} {params_expr} {func_end}"#
                 ));
             } else {
+                let func_start = lark_quote(&format!("\n<‌function={}>\n", tool_name_ascii));
                 rules.push(format!(
-                    r#"tool_{tool_idx}: {func_start} "\n" {func_end} "\n" "#
+                    r#"tool_{tool_idx}: {func_start} {func_end} "#
                 ));
             }
         }
@@ -448,7 +450,7 @@ pub fn build_xml_tool_lark_grammar(
 
 /// Build tool grammar using XML format for qwen_coder parser, JSON for others
 /// This function is kept for backward compatibility with code that uses it
-pub fn build_xml_tool_grammar_for_parser(
+pub fn build_tool_grammar_for_parser(
     tools: &[Tool],
     start: &str,
     end: &str,
@@ -965,7 +967,7 @@ mod tests {
         )
         .param("query", "string", "Search query", true)
         .build()];
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",
@@ -1000,7 +1002,7 @@ mod tests {
         .param("city", "string", "City name", true)
         .param("units", "string", "Temperature units (optional)", false)
         .build()];
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",
@@ -1039,7 +1041,7 @@ mod tests {
         .param("new_string", "string", "Replacement string", true)
         .param("replace_all", "boolean", "Replace all occurrences", false)
         .build()];
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",
@@ -1133,7 +1135,7 @@ mod tests {
         .param("query", "string", "Search query", true) // REQUIRED - should appear as bare rule reference
         .build()];
 
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",
@@ -1163,7 +1165,7 @@ mod tests {
         .param("optional_param", "string", "Optional", false) // OPTIONAL
         .build()];
 
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",
@@ -1191,7 +1193,7 @@ mod tests {
                     .build(),
             ];
 
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             &tools,
             "",
             "",

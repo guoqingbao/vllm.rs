@@ -1853,9 +1853,8 @@ pub async fn grammar_completion(
     }
 
     // Parse grammar using guidance.rs
-    let guidance_tokens = data.engine.read().guidance_tokens.clone();
     let grammar =
-        match build_grammar_from_request(&request.grammar_type, &request.grammar, &guidance_tokens)
+        match build_grammar_from_request(&request.grammar_type, &request.grammar)
         {
             Ok(g) => g,
             Err(e) => return ChatResponder::ValidationError(e.to_string()),

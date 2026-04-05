@@ -11,7 +11,7 @@ use crate::core::engine::LLMEngine;
 use crate::server::parser::ToolConfig;
 use crate::server::streaming::Streamer;
 use crate::tools::schema::{
-    build_xml_tool_grammar_for_parser, schema_to_tools, ToolGrammarBuilder,
+    build_tool_grammar_for_parser, schema_to_tools, ToolGrammarBuilder,
 };
 use crate::tools::Tool;
 use crate::transfer::PdRole;
@@ -555,7 +555,7 @@ pub fn build_guided_decoding_grammar(
             Some(tool_config.end_token_ids.clone())
         };
 
-        let grammar = build_xml_tool_grammar_for_parser(
+        let grammar = build_tool_grammar_for_parser(
             tools,
             &tool_config.start_token_str,
             &tool_config.end_token_str,
@@ -2146,11 +2146,11 @@ mod tests {
             lark.contains("reasoning_block"),
             "should include reasoning_block: {lark}"
         );
-        // The inner grammar is a JSON schema which doesn't expose its content via lark_grammar
-        // but it's included in the grammar structure
+        // The inner grammar is a JSON schema which uses "text" as the constraint rule
+        // The JSON schema constraint is represented as: text: %json {...}
         assert!(
-            lark.contains("inner"),
-            "should include inner start rule: {lark}"
+            lark.contains("text"),
+            "should include text constraint rule: {lark}"
         );
     }
 
