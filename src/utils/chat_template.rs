@@ -284,6 +284,10 @@ impl ChatTemplate {
         self.enable_thinking = enable;
     }
 
+    pub fn enable_thinking(&self) -> bool {
+        self.enable_thinking
+    }
+
     pub fn set_escape_tokens(&mut self, mut tokens: Vec<String>) {
         tokens.retain(|token| !token.is_empty());
         tokens.sort_by_key(|token| std::cmp::Reverse(token.len()));
@@ -417,6 +421,11 @@ impl ChatTemplate {
             return None;
         }
         Some(suffix_text)
+    }
+    
+    /// Get the template string for external use (e.g., validation checks)
+    pub fn get_template_string(&self) -> Option<&str> {
+        self.chat_template.as_deref()
     }
 }
 

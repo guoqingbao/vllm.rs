@@ -212,6 +212,8 @@ async fn main() -> Result<()> {
         None, // pd_server_prefix_cache_ratio
         None, // pd_client_prefix_cache_ratio
         args.yarn_scaling_factor,
+        args.allow_constraint_api,
+        args.enable_tool_grammar,
     );
 
     let server_port = if args.server || args.ui_server || args.pd_server {

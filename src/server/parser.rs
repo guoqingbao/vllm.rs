@@ -207,6 +207,15 @@ impl ToolConfig {
         }
     }
 
+    /// Create tool config from tokenizer, dynamically extracting tool call token IDs.
+    /// This method first creates a config for the model type, then validates and overrides
+    /// the token IDs using the actual tokenizer.
+    pub fn from_tokenizer(tokenizer: &Tokenizer, model_type: &ModelType) -> Self {
+        let mut config = Self::for_model_type(model_type);
+        config.validate_with_tokenizer(tokenizer, model_type);
+        config
+    }
+
     /// Resolve tool call end token IDs using tokenizer and the validated config.
     pub fn tool_call_end_ids(&self, tokenizer: &Tokenizer) -> Vec<u32> {
         let mut tool_call_end_ids: Vec<u32> = Vec::new();
@@ -1266,7 +1275,8 @@ impl StreamToolParser {
                     "qwen"
                 }
             }
-            ModelType::Gemma | ModelType::Gemma3 | ModelType::Gemma4 => "json",
+            ModelType::Gemma | ModelType::Gemma3 => "json",
+            ModelType::Gemma4 => "gemma4",
             ModelType::LLaMa4 => "llama",
             ModelType::Phi | ModelType::Phi4 => "qwen",
             ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
