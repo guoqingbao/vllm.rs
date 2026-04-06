@@ -89,6 +89,9 @@ python = ["pyo3"]
 nvtx = ["dep:nvtx"]
 
 
+[patch."https://github.com/guoqingbao/attention.rs.git"]
+attention-rs = { path = "/root/attention.rs" }
+
 [[bin]]
 name = "runner"
 path = "src/runner/runner.rs"

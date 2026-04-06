@@ -601,7 +601,6 @@ impl Attention {
             is_qvar_builder,
             qk_l2_norm: false,
             v_norm_eps,
-            k_eq_v,
         })
     }
 
@@ -776,6 +775,10 @@ impl Attention {
                 .broadcast_mul(&scale.to_dtype(DType::F32)?)?
                 .to_dtype(q.dtype())?;
         }
+
+        let q = q.contiguous()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
 
         let y = self
             .attn

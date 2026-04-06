@@ -344,6 +344,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     first_k_dense_replace: None,
                     n_shared_experts: None,
                     routed_scaling_factor: None,
+                    n_group: None,
+                    topk_group: None,
+                    scoring_func: None,
+                    topk_method: None,
                 })
             } else {
                 None
@@ -541,7 +545,7 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
-    let gguf_sliding_window = md_get(format!("{arch}.attention.sliding_window").as_str())
+    let _gguf_sliding_window = md_get(format!("{arch}.attention.sliding_window").as_str())
         .and_then(|v| v.to_u32())
         .ok()
         .map(|v| v as usize);
@@ -1142,6 +1146,10 @@ pub fn init_config_tokenizer(
                                     first_k_dense_replace: None,
                                     n_shared_experts: None,
                                     routed_scaling_factor: None,
+                                    n_group: None,
+                                    topk_group: None,
+                                    scoring_func: None,
+                                    topk_method: None,
                                 });
                             }
                         }
@@ -1666,6 +1674,8 @@ pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
         "phi3",
         "phi4",
         "Gemma4ForConditionalGeneration",
+        "Gemma4ForCausalLM",
+        "gemma4",
     ];
 
     #[cfg(not(feature = "flashinfer"))]
