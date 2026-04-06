@@ -981,6 +981,46 @@ pub fn qwen3_hybrid_layer_types(config: &Config) -> Option<Vec<String>> {
     Some(resolve_qwen3_hybrid_config(config).layer_types)
 }
 
+/// For Gemma4 models with heterogeneous head dims (SWA=head_dim, full_attention=global_head_dim),
+/// returns per-layer (num_kv_heads, head_dim) for KV cache allocation.
+pub fn gemma4_per_layer_cache_config(config: &Config) -> Option<Vec<(usize, usize)>> {
+    let arch = config.architectures.as_ref()?.first()?;
+    if !arch.contains("Gemma4") {
+        return None;
+    }
+    let extra = config.extra_config_json.as_ref()?;
+    let v: serde_json::Value = serde_json::from_str(extra).ok()?;
+    let tc = v.get("text_config")?;
+
+    let layer_types: Vec<String> = tc
+        .get("layer_types")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
+    let swa_head_dim = tc.get("head_dim").and_then(|v| v.as_u64())? as usize;
+    let global_head_dim = tc.get("global_head_dim").and_then(|v| v.as_u64())? as usize;
+    let swa_kv_heads = tc.get("num_key_value_heads").and_then(|v| v.as_u64())? as usize;
+    let global_kv_heads = tc
+        .get("num_global_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(swa_kv_heads as u64) as usize;
+
+    if swa_head_dim == global_head_dim {
+        return None;
+    }
+
+    Some(
+        layer_types
+            .iter()
+            .map(|lt| {
+                if lt == "full_attention" {
+                    (global_kv_heads, global_head_dim)
+                } else {
+                    (swa_kv_heads, swa_head_dim)
+                }
+            })
+            .collect(),
+    )
+}
+
 fn require_model_penalty(arch: String) -> bool {
     matches!(
         arch.as_str(),
@@ -1073,8 +1113,12 @@ pub fn init_config_tokenizer(
                         config
                     }
                     "Gemma4ForConditionalGeneration" => {
-                        let mut config: Config = serde_json::from_value(config_value.clone())
-                            .map_err(candle_core::Error::wrap)?;
+                        let mut cv = config_value.clone();
+                        if let Some(obj) = cv.as_object_mut() {
+                            obj.remove("rope_parameters");
+                        }
+                        let mut config: Config =
+                            serde_json::from_value(cv).map_err(candle_core::Error::wrap)?;
                         let tc = &raw_config_json["text_config"];
                         if let Some(num_experts) = tc.get("num_experts").and_then(|v| v.as_u64()) {
                             if num_experts > 0 {
@@ -1115,6 +1159,9 @@ pub fn init_config_tokenizer(
                         }
                         if let Some(eos) = raw_config_json.get("eos_token_id") {
                             config.eos_token_id = serde_json::from_value(eos.clone()).ok();
+                        }
+                        if let Some(ghd) = tc.get("global_head_dim").and_then(|v| v.as_u64()) {
+                            config.head_dim = Some(ghd as usize);
                         }
                         config
                     }
@@ -1613,7 +1660,13 @@ pub fn spawn_runner(
 
 pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
     #[allow(unused_mut)]
-    let mut black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+    let mut black_list = vec![
+        "Phi3ForCausalLM",
+        "Phi4ForCausalLM",
+        "phi3",
+        "phi4",
+        "Gemma4ForConditionalGeneration",
+    ];
 
     #[cfg(not(feature = "flashinfer"))]
     {

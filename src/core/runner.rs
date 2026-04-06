@@ -447,9 +447,16 @@ impl ModelRunner {
             if let MessageType::UsableMemoryLeft(ecfg) = msg {
                 *econfig = ecfg.clone(); // Update Engine config
             }
-            KVCacheAllocator::new(econfig, config, dtype)
+            let mut a = KVCacheAllocator::new(econfig, config, dtype);
+            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(config) {
+                a.set_per_layer_cache_config(plc);
+            }
+            a
         } else {
-            let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            let mut allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(&config) {
+                allocator.set_per_layer_cache_config(plc);
+            }
             let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
             match allocator.plan(&device_ids, econfig) {
                 Ok(_) => {
@@ -1075,8 +1082,7 @@ impl ModelRunner {
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
 
-        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3 | ModelType::Gemma4)
-        {
+        let disable_flash_attn = if matches!(self.model_type, ModelType::Gemma3) {
             Some(true)
         } else {
             None
