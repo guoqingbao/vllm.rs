@@ -40,7 +40,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
-| **Qwen3.5-35B-A3B** | Q3_K_M | **35B (MoE)**| **106** tokens/s (**Hopper**)  |
+| **Qwen3.5-35B-A3B** | Q3_K_M/MXFP4 | **35B (MoE)**| **95-106** tokens/s (**Hopper**)  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -75,7 +75,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Qwen3-VL (Dense, Multimodal model)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
-Supports both **Safetensor** (including GPTQ, AWQ and FP8-blockwise formats) and **GGUF** formats.
+Supports both **Safetensor** (including GPTQ, AWQ, MXFP4, NVFP4, and FP8-blockwise formats) and **GGUF** formats.
 
 All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flashinfer` or `flashattn`).
 
@@ -95,6 +95,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
+- [Model Testing (AI-Assisted)](docs/test_model.md)
 - [Adding New Model Architectures to this project (AI-Assisted)](docs/add_model.md)
 
 ## 📘 Usage in Python
@@ -164,10 +165,22 @@ python3 -m vllm_rs.server --w /path/Qwen3.5-35B-A3B --isq q4k --d 0 --ui-server 
   </details>
 
   <details open>
-    <summary>FP8 Model</summary>
+    <summary>FP8/FP4 Model</summary>
 
+_FP8-Blockwise format:_
 ```bash
 python3 -m vllm_rs.server --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
+```
+
+_MXFP4 format:_
+
+```bash
+python3 -m vllm_rs.server --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
+```
+
+_NVFP4 format:_
+```bash
+python3 -m vllm_rs.server --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
 ```
 
   </details>
@@ -301,8 +314,9 @@ Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable
   </details>
 
   <details open>
-    <summary>FP8 Model</summary>
+    <summary>FP8/FP4 Model</summary>
 
+_FP8-Blockwise format:_
 ```bash
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
 vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
@@ -312,6 +326,15 @@ vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
 vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
 ```
 
+_MXFP4 format:_
+```bash
+vllm-rs --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
+```
+
+_NVFP4 format:_
+```bash
+vllm-rs --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+```
   </details>
 
   <details open>
@@ -559,14 +582,15 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
 * [x] Built-in ChatGPT-like Web Server
-* [x] **Embedding API**
-* [x] **Tokenize/Detokenize API**
-* [x] **MCP Integration & Tool Calling**
-* [x] **Prefix Caching**
-* [x] **Claude/Anthropic-compatible API Server**
-* [x] **Support CUDA 13**
+* [x] Embedding API
+* [x] Tokenize/Detokenize API
+* [x] MCP Integration & Tool Calling
+* [x] Prefix Caching
+* [x] Claude/Anthropic-compatible API Server
+* [x] Support CUDA 13
 * [x] **Support FlashInfer backend**
 * [x] **Support DeepGEMM backend (Hopper)**
+* [x] **MXFP4/NVFP4 Model Support**
 * [ ] TentorRT-LLM 
 ---
 
