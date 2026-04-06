@@ -41,6 +41,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 | **Qwen3.5-35B-A3B** | Q3_K_M/MXFP4 | **35B (MoE)**| **95-106** tokens/s (**Hopper**)  |
+| **GLM4.7 Flash** | NVFP4 (**No Hardware Accleration**) | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -70,6 +71,8 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)
 * ✅ GLM4 MoE (4.6/4.7)
+* ✅ GLM4.7 Flash
+* ✅ DeepSeek V3/R1/V3.2
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini, etc.)
 * ✅ Gemma3 (Multimodal model, No flash-attn support)
 * ✅ Qwen3-VL (Dense, Multimodal model)
