@@ -178,30 +178,57 @@ impl MiniMaxDecoderLayer {
         })
     }
 
+    /// Forward with optional residual blending for MiniMax style normalization.
+    /// Returns (output, residual) where residual is used by subsequent layers.
     pub fn forward(
         &self,
         xs: &Tensor,
+        residual: Option<&Tensor>,
         attention_mask: Option<&Vec<Tensor>>,
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
-    ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
-        let attn_output = self.self_attn.forward(
-            &xs,
-            &Some(rope),
-            attention_mask,
-            positions,
-            cache,
-            input_metadata,
-        )?;
-        let xs = (attn_output + residual)?;
-        let residual = &xs;
-        let xs = self.post_attention_layernorm.forward(&xs)?;
-        let mlp_output = self.moe.forward(&xs, input_metadata.is_prefill)?;
-        residual + mlp_output
+    ) -> Result<(Tensor, Tensor)> {
+        match residual {
+            None => {
+                // Prefill or first layer: no residual blending
+                let residual = xs;
+                let xs = self.input_layernorm.forward(xs)?;
+                let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+                let attn_output = self.self_attn.forward(
+                    &xs,
+                    &Some(rope),
+                    attention_mask,
+                    positions,
+                    cache,
+                    input_metadata,
+                )?;
+                let xs = (attn_output + residual)?;
+                let residual = &xs;
+                let xs = self.post_attention_layernorm.forward(&xs)?;
+                let mlp_output = self.moe.forward(&xs, input_metadata.is_prefill)?;
+                let output = (residual + mlp_output)?;
+                Ok((output, xs.clone()))
+            }
+            Some(res) => {
+                // Decode or subsequent layers: with residual blending
+                let (normed, blended_res) = self.input_layernorm.forward_blended(xs, res)?;
+                let rope: Arc<dyn ApplyRotaryEmbedding> = self.rotary_emb.clone();
+                let attn_output = self.self_attn.forward(
+                    &normed,
+                    &Some(rope),
+                    attention_mask,
+                    positions,
+                    cache,
+                    input_metadata,
+                )?;
+                let summed = (attn_output + res)?;
+                let (post_normed, final_res) = self.post_attention_layernorm.forward_blended(&summed, &blended_res)?;
+                let mlp_output = self.moe.forward(&post_normed, input_metadata.is_prefill)?;
+                let output = (mlp_output + &blended_res)?;
+                Ok((output, final_res))
+            }
+        }
     }
 }
 
@@ -368,16 +395,20 @@ impl MiniMaxForCausalLM {
         };
 
         if let Some(kv_caches) = kv_caches {
+            let mut residual: Option<Tensor> = None;
             for ((k_cache, v_cache), (_i, layer)) in
                 zip(kv_caches.iter(), self.layers.iter().enumerate())
             {
-                xs = layer.forward(
+                let (output, new_residual) = layer.forward(
                     &xs,
+                    residual.as_ref(),
                     attention_mask.as_ref(),
                     positions,
                     Some((k_cache, v_cache)),
                     input_metadata,
                 )?;
+                xs = output;
+                residual = Some(new_residual);
             }
         }
 
