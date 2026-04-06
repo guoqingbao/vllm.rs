@@ -96,6 +96,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
 - [Model Testing (AI-Assisted)](docs/test_model.md)
+- [Adding New Model Architectures to this project (AI-Assisted)](docs/add_model.md)
 
 ## 📘 Usage in Python
 
