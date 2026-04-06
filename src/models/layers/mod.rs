@@ -4,6 +4,7 @@ pub mod deltanet;
 pub mod distributed;
 pub mod linear;
 pub mod mask;
+pub mod mla_attention;
 pub mod mlp;
 pub mod moe;
 pub mod others;

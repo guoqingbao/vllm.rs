@@ -182,6 +182,12 @@ pub struct MoEConfig {
     pub routed_scaling_factor: Option<f64>,
     pub first_k_dense_replace: Option<usize>,
     pub n_shared_experts: Option<usize>,
+    pub n_group: Option<usize>,
+    pub topk_group: Option<usize>,
+    #[serde(default)]
+    pub scoring_func: Option<String>,
+    #[serde(default)]
+    pub topk_method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -659,6 +665,7 @@ pub enum ModelType {
     Mistral,
     GLM4,
     GLM4MoE,
+    GLM4MoeLite,
     Yi,
     StableLM,
     DeepSeek,

@@ -382,6 +382,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             first_k_dense_replace: leading_dense_block_count,
             n_shared_experts: expert_shared_count,
             routed_scaling_factor: expert_weights_scale,
+            n_group: None,
+            topk_group: None,
+            scoring_func: None,
+            topk_method: None,
         })
     } else {
         None
@@ -1026,6 +1030,10 @@ pub fn init_config_tokenizer(
                 "Qwen2MoeForCausalLM"
                     | "Qwen3MoeForCausalLM"
                     | "Glm4MoeForCausalLM"
+                    | "Glm4MoeLiteForCausalLM"
+                    | "DeepseekV3ForCausalLM"
+                    | "DeepseekV32ForCausalLM"
+                    | "DeepseekForCausalLM"
                     | "Qwen3_5MoeForCausalLM"
                     | "Qwen3_5MoeForConditionalGeneration"
                     | "Qwen3NextForCausalLM"
@@ -1041,6 +1049,17 @@ pub fn init_config_tokenizer(
             }
         }
         apply_qwen35_next_moe_norm_topk_default(&mut config);
+
+        if let Some(moe_cfg) = config.moe_cfg.as_mut() {
+            if moe_cfg.shared_expert_intermediate_size.is_none() {
+                if let Some(n_shared) = moe_cfg.n_shared_experts {
+                    if n_shared > 0 {
+                        moe_cfg.shared_expert_intermediate_size =
+                            Some(moe_cfg.moe_intermediate_size);
+                    }
+                }
+            }
+        }
 
         config.quant = econfig.isq.clone();
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
@@ -1430,7 +1449,11 @@ pub fn get_arch_rope(
         ("Qwen3ForConditionalGeneration", false),
         ("Qwen3VLForConditionalGeneration", false),
         ("Qwen3VLMoeForConditionalGeneration", false),
-        ("Glm4MoeForCausalLM", false),
+        ("Glm4MoeForCausalLM", true),
+        ("Glm4MoeLiteForCausalLM", true),
+        ("DeepseekV3ForCausalLM", false),
+        ("DeepseekV32ForCausalLM", false),
+        ("DeepseekForCausalLM", false),
         ("Phi3ForCausalLM", false),
         ("Phi4ForCausalLM", false),
         ("MistralForCausalLM", false),
@@ -1536,6 +1559,15 @@ pub fn get_arch_rope(
             ModelType::GLM4MoE,
             "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
         ),
+        "Glm4MoeLiteForCausalLM" | "glm4moelite" => (
+            ModelType::GLM4MoeLite,
+            "[gMASK]<sop><|user|>{}<|assistant|>".to_string(),
+        ),
+        "DeepseekV3ForCausalLM"
+        | "DeepseekV32ForCausalLM"
+        | "DeepseekForCausalLM"
+        | "deepseek3"
+        | "deepseek" => (ModelType::DeepSeek, "<|User|>{}<|Assistant|>".to_string()),
         "Phi3ForCausalLM" | "Phi4ForCausalLM" | "phi3" | "phi4" => {
             (ModelType::Phi4, "<|user|>\n{}<|assistant|>".to_string())
         }
