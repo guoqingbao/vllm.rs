@@ -1903,10 +1903,7 @@ impl FusedMoeNvfp4 {
             down_global_scales,
             w_size_n,
             act: candle_nn::Activation::Silu,
-            routing: MoeRouting::from_moe_cfg(
-                moe_cfg,
-                try_load_e_score_correction_bias(&vb, num_experts),
-            ),
+            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
