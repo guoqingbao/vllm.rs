@@ -1140,10 +1140,10 @@ impl ModelRunner {
                 cu_seqlens_q_vec.iter().map(|&x| x as u32).collect();
 
             #[cfg(not(feature = "flashinfer"))]
-            let prefill_plan_info = None;
+            let prefill_plan_info: Option<Vec<i64>> = None;
 
             #[cfg(feature = "flashinfer")]
-            let mla_prefill_plan_info = if self.is_mla_model() {
+            let mla_prefill_plan_info: Option<Vec<i64>> = if self.is_mla_model() {
                 if let Some(params) = self.flashinfer_kv_params {
                     Some(attention_rs::mla::mla_prefill_plan(
                         &self.device,
@@ -1162,10 +1162,10 @@ impl ModelRunner {
                 None
             };
             #[cfg(not(feature = "flashinfer"))]
-            let mla_prefill_plan_info = None;
+            let mla_prefill_plan_info: Option<Vec<i64>> = None;
 
             #[cfg(feature = "flashinfer")]
-            let prefill_plan_info = if !self.is_mla_model() {
+            let prefill_plan_info: Option<Vec<i64>> = if !self.is_mla_model() {
                 if let Some(params) = self.flashinfer_kv_params {
                     Some(attention_rs::flashinfer::prefill_plan(
                         &self.device,
@@ -1188,7 +1188,7 @@ impl ModelRunner {
                 None
             };
             #[cfg(not(feature = "flashinfer"))]
-            let prefill_plan_info = None;
+            let prefill_plan_info: Option<Vec<i64>> = None;
 
             Some(FlashInferMetadata {
                 indptr,
