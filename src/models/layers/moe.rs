@@ -1628,7 +1628,7 @@ impl FusedMoeNvfp4 {
             num_experts,
             gate_vb,
             Shard::default(),
-            &cfg.quantization_config,
+            &None,
             &None,
             dtype,
         )?;

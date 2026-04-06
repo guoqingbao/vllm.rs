@@ -169,7 +169,8 @@ impl Llama4TextMoe {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (bs, seq_len, hidden_dim) = xs.dims3()?;
+        let orig_shape = xs.shape().clone();
+        let hidden_dim = *orig_shape.dims().last().unwrap();
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
         let routed_output = match &self.experts {
@@ -229,7 +230,7 @@ impl Llama4TextMoe {
             }
         };
 
-        let routed_output = routed_output.reshape((bs, seq_len, hidden_dim))?;
+        let routed_output = routed_output.reshape(&orig_shape)?;
         let shared_output = self.shared_expert.forward(xs)?;
         shared_output + routed_output
     }
@@ -265,8 +266,8 @@ impl LLama4DecoderLayer {
         layer_idx: usize,
         dtype: DType,
     ) -> Result<Self> {
-        let use_rope = !((layer_idx + 1) % 4 == 0);
-        let use_chunked_attention = use_rope;
+        let use_rope = (layer_idx + 1) % 4 == 0;
+        let use_chunked_attention = !use_rope;
 
         let self_attn = Attention::new(
             vb.pp("self_attn"),
