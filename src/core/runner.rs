@@ -963,6 +963,7 @@ impl ModelRunner {
     }
 
     #[allow(non_snake_case)]
+    #[allow(unused_mut)]
     fn prepare_prefill(&self, seqs: &[&Sequence]) -> Result<(Tensor, Tensor, InputMetadata)> {
         let mut input_ids: Vec<u32> = Vec::new();
         let mut positions = Vec::new();
@@ -1139,13 +1140,13 @@ impl ModelRunner {
             let cu_seqlens_q_host_u32: Vec<u32> =
                 cu_seqlens_q_vec.iter().map(|&x| x as u32).collect();
 
-            #[cfg(not(feature = "flashinfer"))]
-            let prefill_plan_info: Option<Vec<i64>> = None;
+            let mut prefill_plan_info: Option<Vec<i64>> = None;
+            let mut mla_prefill_plan_info: Option<Vec<i64>> = None;
 
             #[cfg(feature = "flashinfer")]
-            let mla_prefill_plan_info: Option<Vec<i64>> = if self.is_mla_model() {
+            if self.is_mla_model() {
                 if let Some(params) = self.flashinfer_kv_params {
-                    Some(attention_rs::mla::mla_prefill_plan(
+                    mla_prefill_plan_info = Some(attention_rs::mla::mla_prefill_plan(
                         &self.device,
                         &cu_seqlens_q_host_u32,
                         &indptr_host,
@@ -1155,19 +1156,13 @@ impl ModelRunner {
                         params.head_dim,
                         true,
                     )?)
-                } else {
-                    None
                 }
-            } else {
-                None
             };
-            #[cfg(not(feature = "flashinfer"))]
-            let mla_prefill_plan_info: Option<Vec<i64>> = None;
 
             #[cfg(feature = "flashinfer")]
-            let prefill_plan_info: Option<Vec<i64>> = if !self.is_mla_model() {
+            if !self.is_mla_model() {
                 if let Some(params) = self.flashinfer_kv_params {
-                    Some(attention_rs::flashinfer::prefill_plan(
+                    prefill_plan_info = Some(attention_rs::flashinfer::prefill_plan(
                         &self.device,
                         &cu_seqlens_q_host_u32,
                         &indptr_host,
@@ -1181,14 +1176,8 @@ impl ModelRunner {
                         params.out_dtype,
                         None,
                     )?)
-                } else {
-                    None
                 }
-            } else {
-                None
             };
-            #[cfg(not(feature = "flashinfer"))]
-            let prefill_plan_info: Option<Vec<i64>> = None;
 
             Some(FlashInferMetadata {
                 indptr,
