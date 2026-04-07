@@ -57,6 +57,7 @@ impl MlaConfig {
     }
 }
 
+#[allow(unused)]
 pub struct MlaAttention {
     q_a_proj: Option<ReplicatedLinear>,
     q_a_layernorm: Option<NormX>,
