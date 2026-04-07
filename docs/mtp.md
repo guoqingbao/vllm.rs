@@ -37,14 +37,17 @@ blocks exist for `seq.len() + num_draft + 1` tokens.
 
 ### Multi-Rank / Process Mode
 
-MTP runs inside `ModelRunner::run_with_mtp()`, which is called from both:
-- **Thread mode** (single GPU): directly by the engine
-- **Process mode** (multi-GPU with NCCL): via the `RunDecodeMtp` IPC message
+MTP runs inside `ModelRunner::run()` transparently. The engine has no
+MTP-specific code paths — it calls `run()` and receives `Vec<Vec<u32>>`
+(one inner vec per sequence, containing 1..K+1 accepted tokens).
+
+- **Thread mode** (single GPU): `run()` returns directly
+- **Process mode** (multi-GPU with NCCL): the subprocess runner calls `run()`
+  and sends back `RunResponse(Vec<Vec<u32>>)` via IPC
 
 In multi-rank tensor-parallel inference, every rank runs the same MTP algorithm
 (draft + verify) in lockstep, synchronized by NCCL all-reduce collectives.
-The engine broadcasts `RunDecodeMtp` to all ranks and uses the first rank's
-accepted tokens for scheduling.
+The engine uses the first rank's accepted tokens for scheduling.
 
 ### FlashInfer / FlashAttention / MLA
 

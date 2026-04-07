@@ -444,14 +444,21 @@ impl Scheduler {
     }
 
     /// Postprocess output tokens and modify sequences by indexes
-    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[u32]) {
+    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[Vec<u32>]) {
         for (i, &idx) in ids.iter().enumerate() {
             // Sequence may swapped out
             if idx >= self.running.len() {
                 continue;
             }
+            let tokens = &output_ids[i];
+            if tokens.len() > 1 {
+                for &tok in tokens {
+                    self.postprocess_single(idx, tok);
+                }
+                continue;
+            }
             let seq_id = self.running[idx].id;
-            let token = output_ids[i];
+            let token = tokens[0];
 
             // Since all reqeusts in PD server are prefill request, we need to finish and transfer
             // the kvcache in the first postprocess for each request.

@@ -277,17 +277,6 @@ fn main() -> anyhow::Result<()> {
                     false,
                 )?;
             }
-            Ok(MessageType::RunDecodeMtp((sequences, num_draft))) => {
-                let outputs = runner.run_with_mtp(sequences.iter(), num_draft);
-                if outputs.is_err() {
-                    vllm_rs::log_error!("Runner MTP decode error: {:?}", outputs);
-                }
-                send_local(
-                    &mut vec![stream.try_clone()?],
-                    &MessageType::RunResponseMtp(outputs.unwrap_or(vec![])),
-                    false,
-                )?;
-            }
             Ok(MessageType::RunEmbed((sequences, strategy))) => {
                 use vllm_rs::core::sequence::Sequence;
                 let refs: Vec<&Sequence> = sequences.iter().collect();

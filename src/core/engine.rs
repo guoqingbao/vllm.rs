@@ -772,141 +772,63 @@ impl LLMEngine {
                 }
             }
 
-            // Check if MTP speculative decoding should be used for this decode step.
-            let use_mtp = !is_prefill && self.is_mtp_enabled();
-
-            // Pre-allocate KV cache blocks for speculative tokens before MTP runs.
-            // Must happen before get_sequences() to avoid borrow conflict.
-            if use_mtp {
-                let mtp_n = self.get_mtp_num_tokens();
+            // Pre-allocate extra KV cache blocks when MTP is enabled so
+            // the runner has room for speculative positions.
+            if !is_prefill && self.econfig.mtp_num_tokens > 0 {
                 self.scheduler
-                    .pre_allocate_mtp_blocks(&scheduled_ids, mtp_n + 1);
+                    .pre_allocate_mtp_blocks(&scheduled_ids, self.econfig.mtp_num_tokens + 1);
             }
 
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
             let output_ids = match &mut *self.runners.write() {
                 RunnerType::Thread(model_runner) => {
-                    if use_mtp {
-                        let mtp_n = model_runner.mtp_num_tokens();
-                        let mtp_results = model_runner.run_with_mtp(seqs.iter(), mtp_n)?;
-
-                        for (seq_idx_pos, &sched_idx) in scheduled_ids.iter().enumerate() {
-                            if seq_idx_pos >= mtp_results.len() {
-                                break;
-                            }
-                            let tokens = &mtp_results[seq_idx_pos];
-                            for token in tokens.iter() {
-                                self.scheduler.postprocess_single(sched_idx, *token);
-                            }
-                        }
-
-                        mtp_results
-                            .iter()
-                            .map(|toks| *toks.last().unwrap_or(&0))
-                            .collect::<Vec<u32>>()
-                    } else {
-                        model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
-                    }
+                    model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
                 }
                 RunnerType::Process(ref mut runner_streams) => {
-                    if use_mtp {
-                        let mtp_n = self.get_mtp_num_tokens();
+                    let request = if is_prefill {
+                        let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
+                        MessageType::RunPrefill((sequences, true))
+                    } else {
                         let sequences = seqs
                             .iter()
                             .map(|s| DecodeSequence::new(s))
                             .collect::<Vec<_>>();
-                        let request = MessageType::RunDecodeMtp((sequences, mtp_n));
+                        MessageType::RunDecode((sequences, false))
+                    };
 
-                        let cloned_streams: Vec<LocalStream> = runner_streams
-                            .iter_mut()
-                            .map(|s| s.try_clone().expect("clone failed"))
-                            .collect();
+                    let cloned_streams: Vec<LocalStream> = runner_streams
+                        .iter_mut()
+                        .map(|s| s.try_clone().expect("clone failed"))
+                        .collect();
 
-                        let all_outputs: Result<Vec<Vec<Vec<u32>>>> = cloned_streams
-                            .into_par_iter()
-                            .map(|mut stream| {
-                                let msg = request.clone();
-                                send_local(&mut vec![stream.try_clone()?], &msg, false)?;
-                                let response = receive_local(&mut stream, false)?;
-                                match response {
-                                    MessageType::RunResponseMtp(mtp_results) => Ok(mtp_results),
-                                    MessageType::RunResponse(output_ids) => {
-                                        Ok(output_ids.into_iter().map(|t| vec![t]).collect())
-                                    }
-                                    other => {
-                                        candle_core::bail!(
-                                            "Unexpected response type for MTP: {:?}",
-                                            other
-                                        )
+                    let all_outputs: Result<Vec<Vec<Vec<u32>>>> = cloned_streams
+                        .into_par_iter()
+                        .map(|mut stream| {
+                            let msg = request.clone();
+                            send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                            let response = receive_local(&mut stream, false)?;
+
+                            match response {
+                                MessageType::RunResponse(output_ids) => {
+                                    if output_ids.len() == 0 {
+                                        candle_core::bail!("Runner step error, no response!")
+                                    } else {
+                                        Ok(output_ids)
                                     }
                                 }
-                            })
-                            .collect();
-
-                        let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                        if let Some(mtp_results) = all_outputs.first() {
-                            for (seq_idx_pos, &sched_idx) in scheduled_ids.iter().enumerate() {
-                                if seq_idx_pos >= mtp_results.len() {
-                                    break;
-                                }
-                                let tokens = &mtp_results[seq_idx_pos];
-                                for token in tokens.iter() {
-                                    self.scheduler.postprocess_single(sched_idx, *token);
+                                other => {
+                                    candle_core::bail!("Unexpected response type: {:?}", other)
                                 }
                             }
-                            mtp_results
-                                .iter()
-                                .map(|toks| *toks.last().unwrap_or(&0))
-                                .collect::<Vec<u32>>()
-                        } else {
-                            candle_core::bail!("No output ids received from model runners");
-                        }
+                        })
+                        .collect();
+
+                    let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                    if let Some(output_ids) = all_outputs.first() {
+                        output_ids.clone()
                     } else {
-                        let request = if is_prefill {
-                            let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
-                            MessageType::RunPrefill((sequences, true))
-                        } else {
-                            let sequences = seqs
-                                .iter()
-                                .map(|s| DecodeSequence::new(s))
-                                .collect::<Vec<_>>();
-                            MessageType::RunDecode((sequences, false))
-                        };
-
-                        let cloned_streams: Vec<LocalStream> = runner_streams
-                            .iter_mut()
-                            .map(|s| s.try_clone().expect("clone failed"))
-                            .collect();
-
-                        let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
-                            .into_par_iter()
-                            .map(|mut stream| {
-                                let msg = request.clone();
-                                send_local(&mut vec![stream.try_clone()?], &msg, false)?;
-                                let response = receive_local(&mut stream, false)?;
-
-                                match response {
-                                    MessageType::RunResponse(output_ids) => {
-                                        if output_ids.len() == 0 {
-                                            candle_core::bail!("Runner step error, no response!")
-                                        } else {
-                                            Ok(output_ids)
-                                        }
-                                    }
-                                    other => {
-                                        candle_core::bail!("Unexpected response type: {:?}", other)
-                                    }
-                                }
-                            })
-                            .collect();
-
-                        let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                        if let Some(output_ids) = all_outputs.first() {
-                            output_ids.clone()
-                        } else {
-                            candle_core::bail!("No output ids received from model runners");
-                        }
+                        candle_core::bail!("No output ids received from model runners");
                     }
                 }
             };
@@ -917,12 +839,11 @@ impl LLMEngine {
                     self.check_canceled(None);
                     return Ok(0);
                 } else {
-                    let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
+                    let output_ids: Vec<Vec<u32>> =
+                        indices.iter().map(|&i| output_ids[i].clone()).collect();
                     self.scheduler.postprocess(&finished_indices, &output_ids);
                     DecodedIds(Either::Left(finished_indices))
                 }
-            } else if use_mtp {
-                DecodedIds(Either::Left(scheduled_ids))
             } else {
                 self.scheduler.postprocess(&scheduled_ids, &output_ids);
                 DecodedIds(Either::Left(scheduled_ids))
@@ -1049,7 +970,6 @@ impl LLMEngine {
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
                         } else if new_count > 1 {
-                            // MTP accepted multiple tokens this step
                             s.output_ids[cur_len - new_count..].to_vec()
                         } else {
                             vec![s.last_token]
@@ -1275,20 +1195,6 @@ impl LLMEngine {
 
     pub fn is_idle(&self) -> bool {
         self.active_requests.is_empty()
-    }
-
-    fn is_mtp_enabled(&self) -> bool {
-        match &*self.runners.read() {
-            RunnerType::Thread(r) => r.is_mtp_enabled(),
-            RunnerType::Process(_) => self.econfig.mtp_num_tokens > 0,
-        }
-    }
-
-    fn get_mtp_num_tokens(&self) -> usize {
-        match &*self.runners.read() {
-            RunnerType::Thread(r) => r.mtp_num_tokens(),
-            RunnerType::Process(_) => self.econfig.mtp_num_tokens,
-        }
     }
 
     pub fn is_pd_mode(&self) -> bool {
