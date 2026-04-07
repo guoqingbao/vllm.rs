@@ -357,11 +357,24 @@ pub struct Qwen3_5MultiTokenPredictor {
     norm: NormX,
     pre_fc_norm_hidden: NormX,
     pre_fc_norm_embedding: NormX,
+    lm_head: ReplicatedLinear,
     pub num_mtp_layers: usize,
+    dtype: DType,
+    is_quantized: bool,
 }
 
 impl Qwen3_5MultiTokenPredictor {
-    pub fn new(vb: VarBuilderX, comm: Rc<Comm>, config: &Config, dtype: DType) -> Result<Self> {
+    /// Load MTP predictor. `main_lm_head_vb` is used as fallback when the
+    /// predictor has no dedicated lm_head weights (tied with main model).
+    pub fn new(
+        vb: VarBuilderX,
+        main_lm_head_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        vocab_size: usize,
+        dtype: DType,
+        is_quantized: bool,
+    ) -> Result<Self> {
         let config_num_layers = config
             .num_nextn_predict_layers
             .or(config.mtp_num_hidden_layers);
@@ -451,6 +464,27 @@ impl Qwen3_5MultiTokenPredictor {
             false,
         )?;
 
+        let lm_head = if vb.has_key("lm_head.weight") {
+            ReplicatedLinear::load_no_bias(
+                config.hidden_size,
+                vocab_size,
+                vb.pp("lm_head"),
+                &None,
+                &None,
+                dtype,
+            )?
+        } else {
+            crate::log_info!("MTP using shared lm_head from main model");
+            ReplicatedLinear::load_no_bias(
+                config.hidden_size,
+                vocab_size,
+                main_lm_head_vb,
+                &None,
+                &None,
+                dtype,
+            )?
+        };
+
         Ok(Self {
             embed_tokens,
             fc,
@@ -458,16 +492,14 @@ impl Qwen3_5MultiTokenPredictor {
             norm,
             pre_fc_norm_hidden,
             pre_fc_norm_embedding,
+            lm_head,
             num_mtp_layers,
+            dtype,
+            is_quantized,
         })
     }
 
-    /// Run one MTP prediction step.
-    /// `input_ids`: the token(s) whose embedding is combined with `hidden_states`.
-    /// `hidden_states`: last hidden state from the main model (or previous MTP step).
-    /// `spec_step_idx`: which MTP layer to use (cycled modulo `num_mtp_layers`).
-    /// Returns the predicted hidden state (before lm_head projection).
-    pub fn forward(
+    fn forward_step(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
@@ -489,6 +521,49 @@ impl Qwen3_5MultiTokenPredictor {
 
         self.norm.forward(&hidden_states)
     }
+
+    pub fn propose(
+        &self,
+        last_token: u32,
+        last_hidden: &Tensor,
+        position: usize,
+        num_draft_tokens: usize,
+    ) -> Result<Vec<u32>> {
+        let device = last_hidden.device().clone();
+        let dummy_meta = no_cache_metadata(&device)?;
+        let mut draft_tokens = Vec::with_capacity(num_draft_tokens);
+        let mut current_hidden = last_hidden.clone();
+        let mut current_token = last_token;
+
+        for step in 0..num_draft_tokens {
+            let token_tensor = Tensor::from_vec(vec![current_token], (1,), &device)?;
+            let pos = (position + 1 + step) as i64;
+            let pos_tensor = Tensor::from_vec(vec![pos], (1,), &device)?;
+
+            let mtp_hidden = self.forward_step(
+                &token_tensor,
+                &pos_tensor,
+                &current_hidden,
+                &dummy_meta,
+                step,
+            )?;
+
+            let logits = if self.is_quantized {
+                self.lm_head.forward(&mtp_hidden)?
+            } else {
+                self.lm_head
+                    .forward(&mtp_hidden.to_dtype(self.dtype)?)?
+                    .to_dtype(DType::F32)?
+            };
+
+            let next_token = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
+            draft_tokens.push(next_token);
+            current_hidden = mtp_hidden;
+            current_token = next_token;
+        }
+
+        Ok(draft_tokens)
+    }
 }
 
 // ============================================================================
@@ -502,11 +577,22 @@ pub struct Qwen3_5MoEMultiTokenPredictor {
     norm: NormX,
     pre_fc_norm_hidden: NormX,
     pre_fc_norm_embedding: NormX,
+    lm_head: ReplicatedLinear,
     pub num_mtp_layers: usize,
+    dtype: DType,
+    is_quantized: bool,
 }
 
 impl Qwen3_5MoEMultiTokenPredictor {
-    pub fn new(vb: VarBuilderX, comm: Rc<Comm>, config: &Config, dtype: DType) -> Result<Self> {
+    pub fn new(
+        vb: VarBuilderX,
+        main_lm_head_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        vocab_size: usize,
+        dtype: DType,
+        is_quantized: bool,
+    ) -> Result<Self> {
         let config_num_layers = config
             .num_nextn_predict_layers
             .or(config.mtp_num_hidden_layers);
@@ -596,6 +682,27 @@ impl Qwen3_5MoEMultiTokenPredictor {
             false,
         )?;
 
+        let lm_head = if vb.has_key("lm_head.weight") {
+            ReplicatedLinear::load_no_bias(
+                config.hidden_size,
+                vocab_size,
+                vb.pp("lm_head"),
+                &None,
+                &None,
+                dtype,
+            )?
+        } else {
+            crate::log_info!("MTP MoE using shared lm_head from main model");
+            ReplicatedLinear::load_no_bias(
+                config.hidden_size,
+                vocab_size,
+                main_lm_head_vb,
+                &None,
+                &None,
+                dtype,
+            )?
+        };
+
         Ok(Self {
             embed_tokens,
             fc,
@@ -603,11 +710,14 @@ impl Qwen3_5MoEMultiTokenPredictor {
             norm,
             pre_fc_norm_hidden,
             pre_fc_norm_embedding,
+            lm_head,
             num_mtp_layers,
+            dtype,
+            is_quantized,
         })
     }
 
-    pub fn forward(
+    fn forward_step(
         &self,
         input_ids: &Tensor,
         positions: &Tensor,
@@ -629,10 +739,109 @@ impl Qwen3_5MoEMultiTokenPredictor {
 
         self.norm.forward(&hidden_states)
     }
+
+    pub fn propose(
+        &self,
+        last_token: u32,
+        last_hidden: &Tensor,
+        position: usize,
+        num_draft_tokens: usize,
+    ) -> Result<Vec<u32>> {
+        let device = last_hidden.device().clone();
+        let dummy_meta = no_cache_metadata(&device)?;
+        let mut draft_tokens = Vec::with_capacity(num_draft_tokens);
+        let mut current_hidden = last_hidden.clone();
+        let mut current_token = last_token;
+
+        for step in 0..num_draft_tokens {
+            let token_tensor = Tensor::from_vec(vec![current_token], (1,), &device)?;
+            let pos = (position + 1 + step) as i64;
+            let pos_tensor = Tensor::from_vec(vec![pos], (1,), &device)?;
+
+            let mtp_hidden = self.forward_step(
+                &token_tensor,
+                &pos_tensor,
+                &current_hidden,
+                &dummy_meta,
+                step,
+            )?;
+
+            let logits = if self.is_quantized {
+                self.lm_head.forward(&mtp_hidden)?
+            } else {
+                self.lm_head
+                    .forward(&mtp_hidden.to_dtype(self.dtype)?)?
+                    .to_dtype(DType::F32)?
+            };
+
+            let next_token = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
+            draft_tokens.push(next_token);
+            current_hidden = mtp_hidden;
+            current_token = next_token;
+        }
+
+        Ok(draft_tokens)
+    }
 }
 
 // ============================================================================
-// MTP Speculative Decoding Orchestrator
+// Shared Helpers
+// ============================================================================
+
+/// Dummy InputMetadata for MTP draft steps (no KV cache interaction).
+pub fn no_cache_metadata(device: &candle_core::Device) -> Result<InputMetadata> {
+    Ok(InputMetadata {
+        is_prefill: false,
+        is_mla: false,
+        sequence_ids: None,
+        mamba_slot_mapping: None,
+        slot_mapping: Tensor::zeros((1,), DType::I64, device)?,
+        block_tables: None,
+        context_lens: None,
+        cu_seqlens_q: None,
+        cu_seqlens_k: None,
+        max_seqlen_q: 0,
+        max_seqlen_k: 0,
+        max_context_len: 0,
+        disable_flash_attn: Some(true),
+        seqlens: None,
+        flashinfer_metadata: None,
+    })
+}
+
+// ============================================================================
+// MTP Drafter Trait
+// ============================================================================
+
+/// Trait for models that support Multi-Token Prediction.
+/// The runner queries this trait instead of matching on concrete model types,
+/// so adding MTP to a new architecture only requires implementing this trait.
+pub trait MtpDrafter {
+    /// Number of draft tokens this model is configured to produce (0 = disabled).
+    fn mtp_num_draft_tokens(&self) -> usize;
+
+    /// Run the main model forward and return (logits, last_hidden_state).
+    /// The hidden state seeds the MTP predictor for drafting.
+    fn forward_with_hidden(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+    ) -> Result<(Tensor, Tensor)>;
+
+    /// Generate draft tokens using the MTP predictor head.
+    fn propose(
+        &self,
+        last_token: u32,
+        last_hidden: &Tensor,
+        position: usize,
+        num_draft_tokens: usize,
+    ) -> Result<Vec<u32>>;
+}
+
+// ============================================================================
+// MTP Speculative Decoding Verification
 // ============================================================================
 
 /// Result of one MTP speculative decoding round for a single sequence.

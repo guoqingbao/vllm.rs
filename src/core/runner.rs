@@ -1,8 +1,8 @@
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
-// src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::linear::set_fp8_linear_is_prefill;
 use crate::models::layers::VarBuilderX;
+use crate::models::mtp::MtpDrafter;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -90,6 +90,16 @@ pub enum Model {
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
+}
+
+impl Model {
+    fn as_mtp_drafter(&self) -> Option<&dyn MtpDrafter> {
+        match self {
+            Model::Qwen3_5(m) => Some(m.as_ref()),
+            Model::Qwen3_5MoE(m) => Some(m.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 pub enum RunnerType {
@@ -860,49 +870,19 @@ impl ModelRunner {
 
         let _ = set_fp8_linear_is_prefill(is_prefill);
 
-        let mtp_active = !is_prefill && self.is_mtp_enabled() && self.mtp_num_tokens() > 0;
+        let drafter = if !is_prefill {
+            self.model
+                .as_mtp_drafter()
+                .filter(|d| d.mtp_num_draft_tokens() > 0)
+        } else {
+            None
+        };
 
-        let (logits, hidden_for_mtp) = if mtp_active {
+        let (logits, hidden_for_mtp) = if let Some(d) = drafter {
             let kv = self.get_kv_cache();
-            match &self.model {
-                Model::Qwen3_5(m) => {
-                    let (l, h) = m.forward_with_hidden(
-                        &input_ids,
-                        &positions,
-                        Some(&kv),
-                        &input_metadata,
-                        false,
-                    )?;
-                    (l, Some(h))
-                }
-                Model::Qwen3_5MoE(m) => {
-                    let (l, h) = m.forward_with_hidden(
-                        &input_ids,
-                        &positions,
-                        Some(&kv),
-                        &input_metadata,
-                        false,
-                    )?;
-                    (l, Some(h))
-                }
-                _ => {
-                    let l = crate::model_call!(
-                        &self.model,
-                        forward,
-                        (&input_ids, &positions, Some(&kv), &input_metadata),
-                        {
-                            Qwen3 => false, Qwen3MoE => false,
-                            Qwen3_5 => false, Qwen3_5MoE => false,
-                            LLaMa => false, LLaMa4 => images,
-                            Phi4 => false, GLM4 => false,
-                            GLM4MoE => false, GLM4MoeLite => false,
-                            DeepSeek => false, Mistral3VL => images,
-                            Gemma3 => images, Qwen3VL => images,
-                        }
-                    )?;
-                    (l, None)
-                }
-            }
+            let (l, h) =
+                d.forward_with_hidden(&input_ids, &positions, Some(&kv), &input_metadata)?;
+            (l, Some(h))
         } else {
             let logits = crate::model_call!(
                 &self.model,
@@ -921,7 +901,7 @@ impl ModelRunner {
             (logits, None)
         };
 
-        let mtp_seq_data: Vec<(usize, usize, Vec<u32>)> = if mtp_active {
+        let mtp_seq_data: Vec<(usize, usize, Vec<u32>)> = if hidden_for_mtp.is_some() {
             match &seqs {
                 Seqs::SeqRefs(s) => s
                     .iter()
@@ -938,60 +918,53 @@ impl ModelRunner {
 
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
 
-        if !mtp_active || hidden_for_mtp.is_none() {
+        if let Some(hidden) = hidden_for_mtp {
+            let drafter = self.model.as_mtp_drafter().unwrap();
+            let results = self.run_mtp_speculative(
+                drafter,
+                &output_ids,
+                &hidden,
+                &mtp_seq_data,
+                &input_metadata,
+            )?;
             #[cfg(feature = "nvtx")]
             nvtx::range_pop!();
-            return Ok(output_ids.into_iter().map(|t| vec![t]).collect());
+            Ok(results)
+        } else {
+            #[cfg(feature = "nvtx")]
+            nvtx::range_pop!();
+            Ok(output_ids.into_iter().map(|t| vec![t]).collect())
         }
+    }
 
-        let hidden = hidden_for_mtp.unwrap();
-        let num_draft = self.mtp_num_tokens();
+    /// Run MTP speculative decoding: draft tokens via the predictor, then
+    /// verify them in a single batched main-model forward pass.
+    fn run_mtp_speculative(
+        &self,
+        drafter: &dyn MtpDrafter,
+        base_tokens: &[u32],
+        hidden: &Tensor,
+        seq_data: &[(usize, usize, Vec<u32>)],
+        input_metadata: &InputMetadata,
+    ) -> Result<Vec<Vec<u32>>> {
+        let num_draft = drafter.mtp_num_draft_tokens();
+        let mut all_results: Vec<Vec<u32>> = Vec::with_capacity(seq_data.len());
 
-        let mut all_results: Vec<Vec<u32>> = Vec::with_capacity(mtp_seq_data.len());
-        for (seq_idx, (seq_id, seq_len, block_table)) in mtp_seq_data.iter().enumerate() {
-            let base_token = output_ids[seq_idx];
-            let seq_hidden = if mtp_seq_data.len() > 1 {
+        for (seq_idx, (seq_id, seq_len, block_table)) in seq_data.iter().enumerate() {
+            let base_token = base_tokens[seq_idx];
+            let seq_hidden = if seq_data.len() > 1 {
                 hidden.narrow(0, seq_idx, 1)?
             } else {
                 hidden.clone()
             };
-            let position = seq_len - 1;
 
-            let dummy_meta = InputMetadata {
-                is_prefill: false,
-                is_mla: false,
-                sequence_ids: None,
-                mamba_slot_mapping: None,
-                slot_mapping: Tensor::zeros((1,), DType::I64, &self.device)?,
-                block_tables: None,
-                context_lens: None,
-                cu_seqlens_q: None,
-                cu_seqlens_k: None,
-                max_seqlen_q: 0,
-                max_seqlen_k: 0,
-                max_context_len: 0,
-                disable_flash_attn: Some(true),
-                seqlens: None,
-                flashinfer_metadata: None,
-            };
-
-            let draft_tokens = match &self.model {
-                Model::Qwen3_5(m) => {
-                    m.mtp_propose(base_token, &seq_hidden, position, num_draft, &dummy_meta)?
-                }
-                Model::Qwen3_5MoE(m) => {
-                    m.mtp_propose(base_token, &seq_hidden, position, num_draft, &dummy_meta)?
-                }
-                _ => vec![],
-            };
+            let draft_tokens = drafter.propose(base_token, &seq_hidden, seq_len - 1, num_draft)?;
 
             if draft_tokens.is_empty() {
                 all_results.push(vec![base_token]);
                 continue;
             }
 
-            // Verify: run main model on [base_token, draft_0, ..., draft_{K-1}]
-            // This writes KV for positions [seq.len() .. seq.len()+K+1)
             let mut verify_ids = vec![base_token];
             verify_ids.extend_from_slice(&draft_tokens);
             let verify_len = verify_ids.len();
@@ -1041,27 +1014,7 @@ impl ModelRunner {
             all_results.push(accepted);
         }
 
-        #[cfg(feature = "nvtx")]
-        nvtx::range_pop!();
         Ok(all_results)
-    }
-
-    /// Check whether the loaded model supports MTP speculative decoding.
-    pub fn is_mtp_enabled(&self) -> bool {
-        match &self.model {
-            Model::Qwen3_5(m) => m.is_mtp_enabled(),
-            Model::Qwen3_5MoE(m) => m.is_mtp_enabled(),
-            _ => false,
-        }
-    }
-
-    /// Return the configured number of MTP draft tokens (0 if disabled).
-    pub fn mtp_num_tokens(&self) -> usize {
-        match &self.model {
-            Model::Qwen3_5(m) => m.get_mtp_num_tokens(),
-            Model::Qwen3_5MoE(m) => m.get_mtp_num_tokens(),
-            _ => 0,
-        }
     }
 
     /// Build FlashInfer-compatible prefill metadata for the MTP verification pass.
