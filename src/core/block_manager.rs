@@ -222,6 +222,14 @@ impl BlockManager {
         Ok(())
     }
 
+    /// Try to allocate a single free block, returning its ID.
+    /// Returns `None` if no free blocks are available.
+    pub fn alloc_free_block(&mut self) -> Option<usize> {
+        let block_id = self.free_block_ids.pop_front()?;
+        self.allocate_block(block_id);
+        Some(block_id)
+    }
+
     pub fn ensure_allocate(&mut self, seq: &mut Sequence) -> Result<()> {
         let mut new_blocks = Vec::new();
         for i in seq.block_table.len()..seq.num_blocks() {
@@ -951,5 +959,84 @@ impl BlockManager {
                 self.free_cpu_block_ids.push_back(cpu_bid);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_block_manager(num_blocks: usize, block_size: usize) -> BlockManager {
+        let runners = Arc::new(RwLock::new(RunnerType::Process(vec![])));
+        BlockManager::new(
+            runners,
+            num_blocks,
+            0,
+            block_size,
+            PrefixCacheConfig::default(),
+            false,
+        )
+    }
+
+    fn make_sequence(id: usize, token_ids: Vec<u32>, block_size: usize) -> Sequence {
+        let sampling_params = crate::utils::config::SamplingParams::default();
+        let mut seq = Sequence::new(token_ids, block_size, sampling_params, &None, -1);
+        seq.id = id;
+        seq
+    }
+
+    #[test]
+    fn test_alloc_free_block_basic() {
+        let mut bm = make_block_manager(10, 16);
+        let initial_free = bm.free_block_ids.len();
+        let block = bm.alloc_free_block();
+        assert!(block.is_some());
+        assert_eq!(bm.free_block_ids.len(), initial_free - 1);
+    }
+
+    #[test]
+    fn test_alloc_free_block_exhaustion() {
+        let mut bm = make_block_manager(2, 16);
+        let b1 = bm.alloc_free_block();
+        let b2 = bm.alloc_free_block();
+        let b3 = bm.alloc_free_block();
+        assert!(b1.is_some());
+        assert!(b2.is_some());
+        assert!(b3.is_none());
+    }
+
+    #[test]
+    fn test_alloc_free_block_unique_ids() {
+        let mut bm = make_block_manager(5, 16);
+        let mut ids = Vec::new();
+        for _ in 0..5 {
+            if let Some(id) = bm.alloc_free_block() {
+                ids.push(id);
+            }
+        }
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+    }
+
+    #[test]
+    fn test_may_append_allocates_at_boundary() {
+        let mut bm = make_block_manager(10, 4);
+        let mut seq = make_sequence(1, vec![1, 2, 3, 4], 4);
+        seq.block_table = vec![0];
+        seq.token_ids.push(5);
+        let result = bm.may_append(&mut seq);
+        assert!(result.is_ok());
+        assert_eq!(seq.block_table.len(), 2);
+    }
+
+    #[test]
+    fn test_can_allocate_checks_free_blocks() {
+        let mut bm = make_block_manager(3, 4);
+        let seq = make_sequence(1, vec![1, 2, 3, 4, 5, 6, 7, 8, 9], 4);
+        assert!(bm.can_allocate(&seq));
+
+        let _ = bm.alloc_free_block();
+        let _ = bm.alloc_free_block();
+        assert!(!bm.can_allocate(&seq));
     }
 }

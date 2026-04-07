@@ -904,17 +904,217 @@ impl ModelRunner {
         }
     }
 
+    /// Build FlashInfer-compatible prefill metadata for the MTP verification pass.
+    ///
+    /// The verification step runs a prefill-like forward over `verify_len` tokens
+    /// for a single sequence. This must produce the same FlashInfer plan structures
+    /// that `prepare_prefill` would, so that attention kernels can correctly read
+    /// existing KV and write new KV for the speculative positions.
+    #[allow(unused_variables)]
+    fn build_verify_flashinfer_metadata(
+        &self,
+        block_table: &[u32],
+        seq_committed_len: usize,
+        verify_len: usize,
+    ) -> Option<FlashInferMetadata> {
+        if !cfg!(feature = "flashinfer") {
+            return None;
+        }
+
+        let block_size = self.config.block_size;
+        let effective_len = seq_committed_len + verify_len;
+        let num_blocks_needed = if effective_len == 0 {
+            0
+        } else {
+            (effective_len + block_size - 1) / block_size
+        };
+        let num_blocks = std::cmp::min(num_blocks_needed, block_table.len());
+        let bt = &block_table[..num_blocks];
+
+        let indices: Vec<u32> = bt.iter().map(|&x| x as u32).collect();
+        let indptr_host = vec![0u32, indices.len() as u32];
+        let last_len = if effective_len == 0 {
+            0u32
+        } else {
+            ((effective_len - 1) % block_size + 1) as u32
+        };
+        let last_len_host = vec![last_len];
+
+        let kv_len = if indptr_host[1] == 0 {
+            0u32
+        } else {
+            (indptr_host[1] - 1) * block_size as u32 + last_len
+        };
+        let kv_len_arr_host = vec![kv_len];
+
+        let cu_seqlens_q_host = vec![0u32, verify_len as u32];
+        let batch_indices_vec: Vec<u32> = vec![0u32; verify_len];
+        let positions_vec: Vec<u32> =
+            (seq_committed_len as u32..(seq_committed_len + verify_len) as u32).collect();
+
+        #[allow(unused_mut)]
+        let mut prefill_plan_info: Option<Vec<i64>> = None;
+        #[allow(unused_mut)]
+        let mut mla_prefill_plan_info: Option<Vec<i64>> = None;
+
+        #[cfg(feature = "flashinfer")]
+        {
+            if self.is_mla_model() {
+                if let Some(params) = self.flashinfer_kv_params {
+                    mla_prefill_plan_info = attention_rs::mla::mla_prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        1,
+                        params.num_qo_heads,
+                        params.head_dim,
+                        true,
+                    )
+                    .ok();
+                }
+            } else {
+                if let Some(params) = self.flashinfer_kv_params {
+                    prefill_plan_info = attention_rs::flashinfer::prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        verify_len as u32,
+                        1,
+                        params.num_qo_heads,
+                        params.num_kv_heads,
+                        params.head_dim,
+                        params.page_size,
+                        params.out_dtype,
+                        None,
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        let indptr_len = indptr_host.len();
+        let indices_len = indices.len();
+        let last_len_vec_len = last_len_host.len();
+        let batch_len = batch_indices_vec.len();
+        let pos_len = positions_vec.len();
+
+        let indptr = Tensor::from_vec(indptr_host.clone(), (indptr_len,), &self.device).ok()?;
+        let indices_t = Tensor::from_vec(indices, (indices_len,), &self.device).ok()?;
+        let last_len_t =
+            Tensor::from_vec(last_len_host.clone(), (last_len_vec_len,), &self.device).ok()?;
+        let batch_indices = Tensor::from_vec(batch_indices_vec, (batch_len,), &self.device).ok()?;
+        let positions_t = Tensor::from_vec(positions_vec, (pos_len,), &self.device).ok()?;
+
+        Some(FlashInferMetadata {
+            indptr,
+            indptr_host,
+            indices: indices_t,
+            last_len: last_len_t,
+            last_len_host: Some(last_len_host),
+            kv_len_arr_host: Some(kv_len_arr_host),
+            total_num_rows: Some(verify_len as u32),
+            batch_indices: Some(batch_indices),
+            positions: Some(positions_t),
+            use_cuda_graph: false,
+            decode_plan_info: None,
+            prefill_plan_info,
+            mla_decode_plan_info: None,
+            mla_prefill_plan_info,
+        })
+    }
+
+    /// Build the verification `InputMetadata` for one sequence's MTP verify pass.
+    ///
+    /// The verify step is a prefill-like forward over `verify_len` tokens
+    /// (base_token + draft tokens). It writes KV into pre-allocated slots
+    /// and reads existing KV via block_tables/context_lens.
+    fn build_verify_metadata<S: ToDecodeInput>(
+        &self,
+        seq: &S,
+        verify_len: usize,
+        is_mla: bool,
+        sequence_ids: &Option<Vec<usize>>,
+        mamba_slot_mapping: &Option<Tensor>,
+    ) -> Result<InputMetadata> {
+        let block_table = seq.block_table();
+        let block_size = self.config.block_size;
+
+        let mut slot_mapping = Vec::with_capacity(verify_len);
+        for offset in 0..verify_len {
+            let token_pos = seq.len() + offset;
+            let block_idx = token_pos / block_size;
+            let block_offset = token_pos % block_size;
+            if block_idx < block_table.len() {
+                slot_mapping
+                    .push((block_table[block_idx] as usize * block_size + block_offset) as i64);
+            } else {
+                candle_core::bail!(
+                    "MTP verify: block_idx {} >= block_table.len() {} for seq {} at offset {}. \
+                     Blocks must be pre-allocated before MTP runs.",
+                    block_idx,
+                    block_table.len(),
+                    seq.id(),
+                    offset
+                );
+            }
+        }
+        let slot_mapping_t = Tensor::from_vec(slot_mapping, (verify_len,), &self.device)?;
+
+        let context_len = (seq.len() + verify_len) as u32;
+        let context_lens = Tensor::from_vec(vec![context_len], (1,), &self.device)?;
+        let block_tables = self.prepare_block_tables(std::iter::once(seq))?;
+
+        let cu_seqlens_q = Tensor::from_vec(vec![0u32, verify_len as u32], (2,), &self.device)?;
+        let cu_seqlens_k = Tensor::from_vec(vec![0u32, context_len], (2,), &self.device)?;
+
+        let flashinfer_metadata =
+            self.build_verify_flashinfer_metadata(block_table, seq.len(), verify_len);
+
+        Ok(InputMetadata {
+            is_prefill: true,
+            is_mla,
+            sequence_ids: sequence_ids.clone(),
+            mamba_slot_mapping: mamba_slot_mapping.clone(),
+            slot_mapping: slot_mapping_t,
+            block_tables: Some(block_tables),
+            context_lens: Some(context_lens),
+            cu_seqlens_q: Some(cu_seqlens_q),
+            cu_seqlens_k: Some(cu_seqlens_k),
+            max_seqlen_q: verify_len,
+            max_seqlen_k: context_len as usize,
+            max_context_len: context_len as usize,
+            disable_flash_attn: None,
+            seqlens: Some(vec![verify_len as u32]),
+            flashinfer_metadata,
+        })
+    }
+
     /// Run a single decode step with MTP speculative decoding.
     ///
+    /// This method is called from both thread mode (directly) and process mode
+    /// (via IPC `RunDecodeMtp` message). The entire draft-and-verify cycle runs
+    /// on the GPU runner, keeping the engine clean.
+    ///
     /// Flow:
-    ///   1. Normal decode forward → logits + hidden states
+    ///   1. Normal decode forward → logits + hidden states (writes KV for current token)
     ///   2. Sample the "base" token from logits
-    ///   3. MTP predictor drafts `num_draft` tokens autoregressively
-    ///   4. Verify drafts by running the main model on [base_token, draft_0, ..., draft_{k-1}]
+    ///   3. MTP predictor drafts `num_draft` tokens (no KV cache, lightweight heads)
+    ///   4. Verify drafts: run main model on [base, draft_0, ..., draft_{k-1}]
+    ///      as a prefill-like forward (writes KV for speculative positions)
     ///   5. Greedy-accept matching prefix, take bonus token at first mismatch
     ///
-    /// Returns a Vec of accepted token IDs per sequence (may be 1..=num_draft+1).
-    /// Only supports single-sequence decode batches for now (batch_size == 1).
+    /// KV cache safety:
+    ///   - Step 1 writes KV for the current decode position (committed)
+    ///   - Step 3 does NOT touch main model KV (MTP heads have no KV cache)
+    ///   - Step 4 writes KV for positions [seq.len .. seq.len + verify_len)
+    ///   - On rejection: stale KV at rejected positions is harmless because
+    ///     the scheduler never advances `seq.len()` past accepted tokens,
+    ///     so attention never reads those positions. They get overwritten
+    ///     on the next step when those positions become real targets.
+    ///
+    /// Returns per-sequence accepted token lists (1..=num_draft+1 tokens each).
     pub fn run_with_mtp<'a, I, S>(&self, seqs: I, num_draft: usize) -> Result<Vec<Vec<u32>>>
     where
         I: IntoIterator<Item = &'a S> + Clone,
@@ -927,9 +1127,50 @@ impl ModelRunner {
             return Ok(vec![]);
         }
 
-        let (input_ids, positions, input_metadata) =
+        // --- Step 1: Normal decode forward to get logits + hidden states ---
+        #[allow(unused_mut)]
+        let (input_ids, positions, mut input_metadata) =
             self.prepare_decode(seq_refs.iter().copied())?;
         let _ = set_fp8_linear_is_prefill(false);
+
+        // Fill FlashInfer decode plans if needed (same as run())
+        #[cfg(feature = "flashinfer")]
+        {
+            if let Some(fm) = input_metadata.flashinfer_metadata.as_mut() {
+                if input_metadata.is_mla {
+                    if fm.mla_decode_plan_info.is_none() {
+                        if let Some(params) = self.flashinfer_kv_params {
+                            fm.mla_decode_plan_info = Some(attention_rs::mla::mla_decode_plan(
+                                &self.device,
+                                params.kv_dtype,
+                                &fm.indptr_host,
+                                input_ids.dim(0)?,
+                                params.num_qo_heads,
+                                params.page_size,
+                                fm.use_cuda_graph,
+                            )?);
+                        }
+                    }
+                } else if fm.decode_plan_info.is_none() {
+                    if let Some(params) = self.flashinfer_kv_params {
+                        fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
+                            &self.device,
+                            params.kv_dtype,
+                            params.out_dtype,
+                            &fm.indptr_host,
+                            fm.last_len_host.as_deref(),
+                            fm.kv_len_arr_host.as_deref(),
+                            input_ids.dim(0)?,
+                            params.num_qo_heads,
+                            params.num_kv_heads,
+                            params.head_dim,
+                            params.page_size,
+                            fm.use_cuda_graph,
+                        )?);
+                    }
+                }
+            }
+        }
 
         let kv_cache = self.get_kv_cache();
 
@@ -953,6 +1194,7 @@ impl ModelRunner {
 
         drop(kv_cache);
 
+        // --- Step 2: Sample base token ---
         let base_tokens = self.sample(
             &logits,
             Seqs::DecodeVec(
@@ -985,6 +1227,7 @@ impl ModelRunner {
 
             let position = seq.len() - 1;
 
+            // --- Step 3: MTP draft (no KV cache) ---
             let draft_input_metadata = InputMetadata {
                 is_prefill: false,
                 is_mla: false,
@@ -1026,6 +1269,7 @@ impl ModelRunner {
                 continue;
             }
 
+            // --- Step 4: Verify drafts with main model (writes KV) ---
             let mut verify_ids = vec![base_token];
             verify_ids.extend_from_slice(&draft_tokens);
             let verify_len = verify_ids.len();
@@ -1037,47 +1281,13 @@ impl ModelRunner {
             let verify_positions: Vec<i64> = (base_pos..base_pos + verify_len as i64).collect();
             let verify_positions = Tensor::from_vec(verify_positions, (verify_len,), &self.device)?;
 
-            let block_table = seq.block_table();
-            let block_size = self.config.block_size;
-            let mut slot_mapping = Vec::with_capacity(verify_len);
-            for offset in 0..verify_len {
-                let token_pos = seq.len() + offset;
-                let block_idx = token_pos / block_size;
-                let block_offset = token_pos % block_size;
-                if block_idx < block_table.len() {
-                    slot_mapping
-                        .push((block_table[block_idx] as usize * block_size + block_offset) as i64);
-                } else {
-                    slot_mapping
-                        .push((*block_table.last().unwrap_or(&0) as usize * block_size) as i64);
-                }
-            }
-            let slot_mapping_t = Tensor::from_vec(slot_mapping, (verify_len,), &self.device)?;
-
-            let context_len = (seq.len() + verify_len) as u32;
-            let context_lens = Tensor::from_vec(vec![context_len], (1,), &self.device)?;
-            let block_tables = self.prepare_block_tables(std::iter::once(*seq))?;
-
-            let cu_seqlens_q = Tensor::from_vec(vec![0u32, verify_len as u32], (2,), &self.device)?;
-            let cu_seqlens_k = Tensor::from_vec(vec![0u32, context_len], (2,), &self.device)?;
-
-            let verify_metadata = InputMetadata {
-                is_prefill: true,
-                is_mla: input_metadata.is_mla,
-                sequence_ids: input_metadata.sequence_ids.clone(),
-                mamba_slot_mapping: input_metadata.mamba_slot_mapping.clone(),
-                slot_mapping: slot_mapping_t,
-                block_tables: Some(block_tables),
-                context_lens: Some(context_lens),
-                cu_seqlens_q: Some(cu_seqlens_q),
-                cu_seqlens_k: Some(cu_seqlens_k),
-                max_seqlen_q: verify_len,
-                max_seqlen_k: context_len as usize,
-                max_context_len: context_len as usize,
-                disable_flash_attn: None,
-                seqlens: Some(vec![verify_len as u32]),
-                flashinfer_metadata: None,
-            };
+            let verify_metadata = self.build_verify_metadata(
+                *seq,
+                verify_len,
+                input_metadata.is_mla,
+                &input_metadata.sequence_ids,
+                &input_metadata.mamba_slot_mapping,
+            )?;
 
             let kv_cache = self.get_kv_cache();
             let verify_logits = crate::model_call!(
@@ -1103,6 +1313,7 @@ impl ModelRunner {
             )?;
             drop(kv_cache);
 
+            // --- Step 5: Greedy accept ---
             let accept_result = verify_draft_tokens_greedy(&draft_tokens, &verify_logits)?;
 
             let mut accepted = Vec::with_capacity(accept_result.accepted_tokens.len() + 2);

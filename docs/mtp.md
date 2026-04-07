@@ -9,14 +9,52 @@ batched forward pass, accepting tokens greedily until the first mismatch.
 
 ```
 Decode step N:
-  1. Main model forward  → logits + hidden state
+  1. Main model forward  → logits + hidden state  (writes KV for current position)
   2. Sample base token from logits
   3. MTP predictor drafts K tokens autoregressively
      (each step: embed(token) ⊕ hidden → FC → decoder layer → norm → lm_head → argmax)
+     *** MTP draft does NOT touch main model KV cache ***
   4. Verify: run main model on [base, draft_0, ..., draft_{K-1}]
+     as a prefill-like forward (writes KV for speculative positions)
   5. Greedy-accept matching prefix; take bonus token at first mismatch
   → emit 1..K+1 tokens in one engine step
 ```
+
+### KV Cache Safety
+
+The MTP draft step (3) uses lightweight predictor heads that have no KV cache
+of their own — they run with `disable_flash_attn: true` and a dummy slot mapping.
+The verification step (4) runs the full main model as a prefill-like forward,
+which writes KV into pre-allocated block slots for the speculative positions.
+
+On rejection, stale KV at rejected positions is harmless:
+- The scheduler never advances `seq.len()` past accepted tokens
+- Attention kernels only read up to `context_lens`, which reflects committed length
+- Rejected slots get overwritten on the next decode step
+
+Block pre-allocation happens before MTP runs: the scheduler ensures enough
+blocks exist for `seq.len() + num_draft + 1` tokens.
+
+### Multi-Rank / Process Mode
+
+MTP runs inside `ModelRunner::run_with_mtp()`, which is called from both:
+- **Thread mode** (single GPU): directly by the engine
+- **Process mode** (multi-GPU with NCCL): via the `RunDecodeMtp` IPC message
+
+In multi-rank tensor-parallel inference, every rank runs the same MTP algorithm
+(draft + verify) in lockstep, synchronized by NCCL all-reduce collectives.
+The engine broadcasts `RunDecodeMtp` to all ranks and uses the first rank's
+accepted tokens for scheduling.
+
+### FlashInfer / FlashAttention / MLA
+
+The verification step builds proper attention metadata for all backends:
+- **FlashInfer**: builds `indptr`, `indices`, `last_len`, `kv_len_arr_host`,
+  and calls `prefill_plan` / `mla_prefill_plan` for the verify batch
+- **FlashAttention**: uses `cu_seqlens_q/k`, `block_tables`, `context_lens`
+- **MLA (DeepSeek-style)**: same `slot_mapping` drives both `ckv_cache` and
+  `kpe_cache` writes; MLA prefill plans are built when `is_mla` is set
+- **Paged Attention (default)**: standard `block_tables` + `context_lens`
 
 ### Key Components
 

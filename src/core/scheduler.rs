@@ -575,6 +575,29 @@ impl Scheduler {
         }
     }
 
+    /// Pre-allocate KV cache blocks for MTP speculative tokens.
+    ///
+    /// Before MTP runs, each sequence needs enough blocks to hold
+    /// `seq.len() + extra_tokens` tokens. Without this, the verification
+    /// forward would try to write KV into non-existent block slots.
+    pub fn pre_allocate_mtp_blocks(&mut self, ids: &[usize], extra_tokens: usize) {
+        for &idx in ids {
+            if idx >= self.running.len() {
+                continue;
+            }
+            let seq = &mut self.running[idx];
+            let needed_len = seq.len() + extra_tokens;
+            let needed_blocks = needed_len.div_ceil(self.cfg.block_size);
+            while seq.block_table.len() < needed_blocks {
+                if let Some(block_id) = self.block_manager.alloc_free_block() {
+                    seq.block_table.push(block_id as u32);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
     /// Process a single token for one sequence (used by MTP multi-token path).
     /// Handles EOS, stop sequences, max length, and block allocation like
     /// `postprocess` but for exactly one (idx, token) pair.

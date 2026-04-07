@@ -683,3 +683,164 @@ pub fn verify_draft_tokens_greedy(
         bonus_token,
     })
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{Device, Tensor};
+
+    fn make_logits(argmax_tokens: &[u32], vocab_size: usize) -> Tensor {
+        let device = Device::Cpu;
+        let num_positions = argmax_tokens.len();
+        let mut data = vec![0.0f32; num_positions * vocab_size];
+        for (i, &tok) in argmax_tokens.iter().enumerate() {
+            data[i * vocab_size + tok as usize] = 10.0;
+        }
+        Tensor::from_vec(data, (num_positions, vocab_size), &device).unwrap()
+    }
+
+    #[test]
+    fn test_verify_all_accepted() {
+        let draft = vec![10, 20, 30];
+        let logits = make_logits(&[10, 20, 30, 99], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![10, 20, 30]);
+        assert_eq!(result.bonus_token, 99);
+    }
+
+    #[test]
+    fn test_verify_none_accepted() {
+        let draft = vec![10, 20, 30];
+        let logits = make_logits(&[99, 20, 30, 50], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert!(result.accepted_tokens.is_empty());
+        assert_eq!(result.bonus_token, 99);
+    }
+
+    #[test]
+    fn test_verify_partial_accept() {
+        let draft = vec![10, 20, 30];
+        let logits = make_logits(&[10, 20, 77, 50], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![10, 20]);
+        assert_eq!(result.bonus_token, 77);
+    }
+
+    #[test]
+    fn test_verify_single_draft() {
+        let draft = vec![42];
+        let logits = make_logits(&[42, 55], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![42]);
+        assert_eq!(result.bonus_token, 55);
+    }
+
+    #[test]
+    fn test_verify_single_draft_rejected() {
+        let draft = vec![42];
+        let logits = make_logits(&[99, 55], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert!(result.accepted_tokens.is_empty());
+        assert_eq!(result.bonus_token, 99);
+    }
+
+    #[test]
+    fn test_verify_empty_draft() {
+        let draft: Vec<u32> = vec![];
+        let logits = make_logits(&[42], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert!(result.accepted_tokens.is_empty());
+        assert_eq!(result.bonus_token, 42);
+    }
+
+    #[test]
+    fn test_verify_more_drafts_than_logit_positions() {
+        let draft = vec![10, 20, 30, 40, 50];
+        let logits = make_logits(&[10, 20, 77], 100);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![10, 20]);
+        assert_eq!(result.bonus_token, 77);
+    }
+
+    #[test]
+    fn test_verify_large_vocab() {
+        let draft = vec![50000, 60000, 70000];
+        let logits = make_logits(&[50000, 60000, 70000, 80000], 100000);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![50000, 60000, 70000]);
+        assert_eq!(result.bonus_token, 80000);
+    }
+
+    #[test]
+    fn test_verify_reject_at_first_position() {
+        let draft = vec![1, 2, 3, 4, 5];
+        let logits = make_logits(&[0, 2, 3, 4, 5, 6], 10);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert!(result.accepted_tokens.is_empty());
+        assert_eq!(result.bonus_token, 0);
+    }
+
+    #[test]
+    fn test_verify_reject_at_last_position() {
+        let draft = vec![1, 2, 3];
+        let logits = make_logits(&[1, 2, 9, 7], 10);
+        let result = verify_draft_tokens_greedy(&draft, &logits).unwrap();
+        assert_eq!(result.accepted_tokens, vec![1, 2]);
+        assert_eq!(result.bonus_token, 9);
+    }
+
+    #[test]
+    fn test_discover_mtp_layers_basic() {
+        let keys = vec![
+            "mtp.layers.0.self_attn.q_proj.weight".to_string(),
+            "mtp.layers.0.self_attn.k_proj.weight".to_string(),
+            "mtp.layers.1.self_attn.q_proj.weight".to_string(),
+            "mtp.norm.weight".to_string(),
+        ];
+        let layers = discover_mtp_layers(&keys, "mtp");
+        assert_eq!(layers, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_discover_mtp_layers_empty() {
+        let keys: Vec<String> = vec![];
+        let layers = discover_mtp_layers(&keys, "mtp");
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn test_discover_mtp_layers_no_match() {
+        let keys = vec![
+            "model.layers.0.self_attn.q_proj.weight".to_string(),
+            "model.layers.1.self_attn.q_proj.weight".to_string(),
+        ];
+        let layers = discover_mtp_layers(&keys, "mtp");
+        assert!(layers.is_empty());
+    }
+
+    #[test]
+    fn test_discover_mtp_layers_with_prefix() {
+        let keys = vec![
+            "model.mtp.layers.0.mlp.gate.weight".to_string(),
+            "model.mtp.layers.0.mlp.experts.0.weight".to_string(),
+            "model.mtp.layers.2.self_attn.q_proj.weight".to_string(),
+        ];
+        let layers = discover_mtp_layers(&keys, "model.mtp");
+        assert_eq!(layers, vec![0, 2]);
+    }
+
+    #[test]
+    fn test_count_mtp_layers() {
+        let keys = vec![
+            "mtp.layers.0.self_attn.q_proj.weight".to_string(),
+            "mtp.layers.0.mlp.gate.weight".to_string(),
+            "mtp.layers.1.self_attn.q_proj.weight".to_string(),
+            "mtp.layers.2.self_attn.q_proj.weight".to_string(),
+        ];
+        assert_eq!(count_mtp_layers(&keys, "mtp"), 3);
+    }
+}
