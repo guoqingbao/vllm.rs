@@ -1540,6 +1540,7 @@ pub struct FusedMoeNvfp4 {
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
+    apply_router_weight_on_input: bool,
 }
 
 impl FusedMoeNvfp4 {
@@ -1907,11 +1908,16 @@ impl FusedMoeNvfp4 {
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
+            apply_router_weight_on_input: false,
         })
     }
 
     pub fn set_sigmoid_routing(&mut self) {
         self.routing.use_sigmoid_scoring = true;
+    }
+
+    pub fn set_apply_router_weight_on_input(&mut self, v: bool) {
+        self.apply_router_weight_on_input = v;
     }
 
     pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
@@ -1923,6 +1929,13 @@ impl FusedMoeNvfp4 {
             xs.to_dtype(self.dtype)?
         } else {
             xs.clone()
+        };
+
+        let xs = if self.apply_router_weight_on_input {
+            let w = topk_weights.to_dtype(xs.dtype())?;
+            xs.broadcast_mul(&w)?
+        } else {
+            xs
         };
 
         let gate_up = nvfp4_linear::nvfp4_moe_gemm(
@@ -1951,11 +1964,15 @@ impl FusedMoeNvfp4 {
             &topk_ids,
         )?;
 
-        let topk_weights = topk_weights.to_dtype(down.dtype())?;
-        let mut ys = down
-            .broadcast_mul(&topk_weights.unsqueeze(candle_core::D::Minus1)?)?
-            .reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
-            .sum(1)?;
+        let mut ys = if self.apply_router_weight_on_input {
+            down.reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
+                .sum(1)?
+        } else {
+            let topk_weights = topk_weights.to_dtype(down.dtype())?;
+            down.broadcast_mul(&topk_weights.unsqueeze(candle_core::D::Minus1)?)?
+                .reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
+                .sum(1)?
+        };
 
         if self.world_size > 1 {
             ys = self.all_reduce.apply(&ys)?;

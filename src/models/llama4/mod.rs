@@ -83,6 +83,7 @@ impl Llama4TextMoe {
                 dtype,
             )?;
             fused.set_sigmoid_routing();
+            fused.set_apply_router_weight_on_input(true);
             Llama4Experts::Nvfp4(fused)
         } else {
             let router = ReplicatedLinear::load_no_bias(
@@ -117,18 +118,9 @@ impl Llama4TextMoe {
                         let mut down_v = Vec::new();
                         for i in 0..n {
                             let ev = svb.pp(i.to_string());
-                            gate_v.push(
-                                ev.pp("gate_proj")
-                                    .get((inter, hidden), "weight")?,
-                            );
-                            up_v.push(
-                                ev.pp("up_proj")
-                                    .get((inter, hidden), "weight")?,
-                            );
-                            down_v.push(
-                                ev.pp("down_proj")
-                                    .get((hidden, inter), "weight")?,
-                            );
+                            gate_v.push(ev.pp("gate_proj").get((inter, hidden), "weight")?);
+                            up_v.push(ev.pp("up_proj").get((inter, hidden), "weight")?);
+                            down_v.push(ev.pp("down_proj").get((hidden, inter), "weight")?);
                         }
                         let gate = Tensor::stack(&gate_v, 0)?;
                         let up = Tensor::stack(&up_v, 0)?;
@@ -184,21 +176,21 @@ impl Llama4TextMoe {
             } => {
                 let router_logits = router.forward(&xs_flat)?.to_dtype(DType::F32)?;
 
-                let topk_ids = router_logits.arg_sort_last_dim(false)?.narrow(
-                    D::Minus1,
-                    0,
-                    *topk,
-                )?;
-                let sigmoid_weights =
-                    (router_logits.neg()?.exp()? + 1.0)?.recip()?;
+                let topk_ids =
+                    router_logits
+                        .arg_sort_last_dim(false)?
+                        .narrow(D::Minus1, 0, *topk)?;
+                let sigmoid_weights = (router_logits.neg()?.exp()? + 1.0)?.recip()?;
                 let topk_weights = sigmoid_weights.gather(&topk_ids, D::Minus1)?;
                 let topk_ids = topk_ids.to_dtype(DType::U32)?;
 
-                let (expert_ids, sorted_token_ids) =
-                    topk_ids.flatten_all()?.sort_last_dim(true)?;
+                let (expert_ids, sorted_token_ids) = topk_ids.flatten_all()?.sort_last_dim(true)?;
+
+                let topk_weights = topk_weights.to_dtype(xs.dtype())?;
+                let xs_weighted = xs_flat.broadcast_mul(&topk_weights)?;
 
                 let gate_up = attention_rs::moe::moe_gemm(
-                    &xs_flat,
+                    &xs_weighted,
                     gate_up_w,
                     &None,
                     &sorted_token_ids,
@@ -206,20 +198,16 @@ impl Llama4TextMoe {
                     *topk,
                     false,
                 )?;
-                let gate = gate_up
-                    .narrow(D::Minus1, 0, *w_size_n)?
-                    .contiguous()?;
+                let gate = gate_up.narrow(D::Minus1, 0, *w_size_n)?.contiguous()?;
                 let up = gate_up
                     .narrow(D::Minus1, *w_size_n, *w_size_n)?
                     .contiguous()?;
-                let down_inputs =
-                    (up * Activation::Silu.forward(&gate)?)?;
+                let down_inputs = (up * Activation::Silu.forward(&gate)?)?;
 
-                let topk_weights = topk_weights.to_dtype(xs.dtype())?;
                 attention_rs::moe::moe_gemm(
                     &down_inputs,
                     down_w,
-                    &Some(topk_weights),
+                    &None,
                     &sorted_token_ids,
                     &expert_ids,
                     *topk,
@@ -254,6 +242,9 @@ pub struct LLama4DecoderLayer {
     post_attention_layernorm: NormX,
     rotary_emb: Option<Arc<ScalingRotaryEmbedding>>,
     use_chunked_attention: bool,
+    floor_scale: Option<f32>,
+    attn_scale: Option<f32>,
+    attn_temperature_tuning: Option<f32>,
 }
 
 impl LLama4DecoderLayer {
@@ -266,17 +257,27 @@ impl LLama4DecoderLayer {
         layer_idx: usize,
         dtype: DType,
     ) -> Result<Self> {
-        let use_rope = (layer_idx + 1) % 4 == 0;
-        let use_chunked_attention = !use_rope;
+        let use_rope = (layer_idx + 1) % 4 != 0;
+        let use_chunked_attention = use_rope;
 
-        let self_attn = Attention::new(
+        let sliding_window = if use_chunked_attention && text_cfg.attention_chunk_size > 0 {
+            Some(text_cfg.attention_chunk_size)
+        } else {
+            None
+        };
+
+        let mut self_attn = Attention::new(
             vb.pp("self_attn"),
             comm.clone(),
             config,
             None,
-            config.sliding_window,
+            sliding_window,
             dtype,
         )?;
+
+        if text_cfg.use_qk_norm && use_rope {
+            self_attn.set_qk_l2_norm(true);
+        }
 
         let moe_layers = text_cfg.moe_layers();
         let is_moe_layer = moe_layers.contains(&layer_idx);
@@ -326,6 +327,9 @@ impl LLama4DecoderLayer {
             post_attention_layernorm,
             rotary_emb: if use_rope { Some(rotary_emb) } else { None },
             use_chunked_attention,
+            floor_scale: text_cfg.floor_scale,
+            attn_scale: text_cfg.attn_scale,
+            attn_temperature_tuning: text_cfg.attn_temperature_tuning,
         })
     }
 
@@ -352,9 +356,25 @@ impl LLama4DecoderLayer {
             .clone()
             .map(|r| r as Arc<dyn ApplyRotaryEmbedding>);
 
-        let attn_output =
-            self.self_attn
-                .forward(&xs, &rope, mask, positions, cache, input_metadata)?;
+        let q_scale = if self.attn_temperature_tuning.is_some() && self.rotary_emb.is_none() {
+            let floor_scale = self.floor_scale.unwrap_or(8192.0) as f64;
+            let attn_scale_val = self.attn_scale.unwrap_or(0.1) as f64;
+            let floor = ((positions.to_dtype(DType::F32)? + 1.0)? / floor_scale)?.floor()?;
+            let scale = (((floor + 1.0)?.log()? * attn_scale_val)? + 1.0)?;
+            Some(scale)
+        } else {
+            None
+        };
+
+        let attn_output = self.self_attn.forward_ext(
+            &xs,
+            &rope,
+            mask,
+            positions,
+            cache,
+            input_metadata,
+            q_scale.as_ref(),
+        )?;
 
         let xs = (attn_output + residual)?;
         let residual = &xs;

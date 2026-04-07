@@ -7,7 +7,7 @@ use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
 use attention_rs::{InputMetadata, PagedAttention};
-use candle_core::{DType, Result, Tensor};
+use candle_core::{DType, Result, Tensor, D};
 use either::Either;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -37,6 +37,7 @@ pub struct Attention {
     no_per_head_norm: bool,
     is_qwen35_or_next: bool,
     is_qvar_builder: bool,
+    qk_l2_norm: bool,
 }
 
 impl Attention {
@@ -562,7 +563,12 @@ impl Attention {
             no_per_head_norm: no_per_head_norm_models.contains(&arch),
             is_qwen35_or_next,
             is_qvar_builder,
+            qk_l2_norm: false,
         })
+    }
+
+    pub fn set_qk_l2_norm(&mut self, enable: bool) {
+        self.qk_l2_norm = enable;
     }
 
     pub fn forward(
@@ -573,6 +579,27 @@ impl Attention {
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
+    ) -> Result<Tensor> {
+        self.forward_ext(
+            xs,
+            rotary_emb,
+            attention_mask,
+            positions,
+            cache,
+            input_metadata,
+            None,
+        )
+    }
+
+    pub fn forward_ext(
+        &self,
+        xs: &Tensor,
+        rotary_emb: &Option<Arc<dyn ApplyRotaryEmbedding>>,
+        attention_mask: Option<&Vec<Tensor>>,
+        positions: &Tensor,
+        cache: Option<(&Tensor, &Tensor)>,
+        input_metadata: &InputMetadata,
+        q_scale: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (seq_len, _) = xs.dims2()?;
 
@@ -645,8 +672,20 @@ impl Attention {
         let (q, k) = if let Some(rotary_emb) = &rotary_emb {
             match rotary_emb.apply_rotary_emb_qkv(&q, &k, positions)? {
                 Some((q_new, k_new)) => (q_new, k_new),
-                None => (q, k), // In-place operation, keep originals
+                None => (q, k),
             }
+        } else {
+            (q, k)
+        };
+
+        let (q, k) = if self.qk_l2_norm {
+            let q_f32 = q.to_dtype(DType::F32)?;
+            let k_f32 = k.to_dtype(DType::F32)?;
+            let q_rms = (q_f32.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
+            let k_rms = (k_f32.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
+            let q = q_f32.broadcast_div(&q_rms)?.to_dtype(q.dtype())?;
+            let k = k_f32.broadcast_div(&k_rms)?.to_dtype(k.dtype())?;
+            (q, k)
         } else {
             (q, k)
         };
@@ -680,6 +719,14 @@ impl Attention {
                 let scale = scale.squeeze(0)?.squeeze(0)?.reshape((seq_len, 1, 1))?;
                 q = q.broadcast_mul(&scale)?;
             }
+        }
+
+        if let Some(scale) = q_scale {
+            let scale = scale.reshape((seq_len, 1, 1))?;
+            q = q
+                .to_dtype(DType::F32)?
+                .broadcast_mul(&scale.to_dtype(DType::F32)?)?
+                .to_dtype(q.dtype())?;
         }
 
         let y = self
