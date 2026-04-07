@@ -495,8 +495,8 @@ impl EngineConfig {
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
             mtp_num_tokens,
-         }
-     }
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

@@ -775,10 +775,41 @@ impl LLMEngine {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
+            // Check if MTP speculative decoding should be used for this decode step.
+            // MTP is only used during decode (not prefill), with in-thread runner,
+            // and when the model has MTP enabled.
+            let use_mtp = !is_prefill
+                && matches!(&*self.runners.read(), RunnerType::Thread(r) if r.is_mtp_enabled());
+
             let output_ids = match &mut *self.runners.write() {
                 RunnerType::Thread(model_runner) => {
-                    // Run model on the scheduled sequences in the main thread
-                    model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
+                    if use_mtp {
+                        let mtp_n = model_runner.mtp_num_tokens();
+                        let mtp_results = model_runner.run_with_mtp(seqs.iter(), mtp_n)?;
+
+                        // MTP returns multiple tokens per sequence. Feed them
+                        // into the scheduler one at a time so that block
+                        // allocation, EOS checks, and streaming all stay
+                        // consistent with the existing single-token path.
+                        for (seq_idx_pos, &sched_idx) in scheduled_ids.iter().enumerate() {
+                            if seq_idx_pos >= mtp_results.len() {
+                                break;
+                            }
+                            let tokens = &mtp_results[seq_idx_pos];
+                            for token in tokens.iter() {
+                                self.scheduler.postprocess_single(sched_idx, *token);
+                            }
+                        }
+
+                        // Return the *last* accepted token per sequence so the
+                        // streaming path below sees the right `last_token`.
+                        mtp_results
+                            .iter()
+                            .map(|toks| *toks.last().unwrap_or(&0))
+                            .collect::<Vec<u32>>()
+                    } else {
+                        model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
+                    }
                 }
                 RunnerType::Process(ref mut runner_streams) => {
                     let request = if is_prefill {
@@ -820,21 +851,17 @@ impl LLMEngine {
                         .collect();
 
                     let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                    // Only run postprocess once after all runners finish (use first result)
                     if let Some(output_ids) = all_outputs.first() {
                         output_ids.clone()
-                        // self.scheduler.postprocess(&scheduled_ids, output_ids);
                     } else {
                         candle_core::bail!("No output ids received from model runners");
                     }
                 }
             };
-            // Postprocess sequences by modifying them inside the scheduler
             if is_prefill {
                 let (indices, finished_indices) =
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
                 if indices.is_empty() {
-                    //chunked prefill, no finished
                     self.check_canceled(None);
                     return Ok(0);
                 } else {
@@ -842,6 +869,9 @@ impl LLMEngine {
                     self.scheduler.postprocess(&finished_indices, &output_ids);
                     DecodedIds(Either::Left(finished_indices))
                 }
+            } else if use_mtp {
+                // MTP path already called postprocess_single above.
+                DecodedIds(Either::Left(scheduled_ids))
             } else {
                 self.scheduler.postprocess(&scheduled_ids, &output_ids);
                 DecodedIds(Either::Left(scheduled_ids))
@@ -960,10 +990,16 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
+                    let prev_len = self.decode_length.get(&seq_id).copied().unwrap_or(0);
+                    let cur_len = s.output_len();
+                    let new_count = cur_len.saturating_sub(prev_len);
+
                     let mut token_ids =
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
-                            // Special case, the real first token is generated on PD server
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
+                        } else if new_count > 1 {
+                            // MTP accepted multiple tokens this step
+                            s.output_ids[cur_len - new_count..].to_vec()
                         } else {
                             vec![s.last_token]
                         };

@@ -17,7 +17,7 @@ use crate::utils::progress::ProgressLike;
 use crate::utils::resolve_qwen3_hybrid_config;
 use attention_rs::mamba_cache::MambaCache;
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::Module;
 use either::Either;
 use parking_lot::{RwLock, RwLockWriteGuard};
@@ -26,7 +26,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 // Import MTP predictor from common module
-use crate::models::mtp::{Qwen3_5MoEMultiTokenPredictor, discover_mtp_layers};
+use crate::models::mtp::{discover_mtp_layers, Qwen3_5MoEMultiTokenPredictor};
 
 // =============================================================================
 // MoE or MLP dispatch (reused from qwen3_moe pattern)
@@ -343,7 +343,7 @@ pub struct Qwen3_5MoEForCausalLM {
     vocab_size: usize,
     is_qvar_builder: bool,
     // MTP components (OPTIONAL - only active when CLI flag is passed)
-    mtp_num_tokens: usize,  // 0 = disabled, N = number of speculative tokens
+    mtp_num_tokens: usize, // 0 = disabled, N = number of speculative tokens
     mtp_predictor: Option<Qwen3_5MoEMultiTokenPredictor>,
     mtp_lm_head: Option<ReplicatedLinear>,
 }
@@ -599,118 +599,127 @@ impl Qwen3_5MoEForCausalLM {
             MambaCache::new(0, 1, 1, 2, 1, 1, 1, conv_cache_dtype, DType::F32, device)?
         };
 
-         // Load MTP predictor weights if MTP is enabled
-          let mtp_num_tokens = config.mtp_num_tokens;
-          let (mtp_predictor, mtp_lm_head) = if mtp_num_tokens > 0 {
-              // Dynamic discovery: get all tensor keys and check for MTP layers
-              let tensor_keys = vb.get_all_tensor_keys();
-              
-              // Determine MTP prefix for layer discovery
-              let mtp_prefix = if prefix.is_empty() || prefix == "model." {
-                  "mtp"
-              } else {
-                  prefix.trim_end_matches('.').trim_start_matches("model.")
-              };
-              let mtp_prefix = format!("{}mtp", if mtp_prefix.is_empty() || mtp_prefix == "mtp" { "" } else { "." });
-              
-              // Check if any MTP layers exist by scanning tensor keys
-              let has_mtp_module = tensor_keys.iter().any(|k| k.starts_with(&mtp_prefix));
+        // Load MTP predictor weights if MTP is enabled
+        let mtp_num_tokens = config.mtp_num_tokens;
+        let (mtp_predictor, mtp_lm_head) = if mtp_num_tokens > 0 {
+            // Dynamic discovery: get all tensor keys and check for MTP layers
+            let tensor_keys = vb.get_all_tensor_keys();
 
-             if !has_mtp_module {
-                 crate::log_warn!("MTP enabled but no MTP module weights found at '{}'. Disabling MTP.", mtp_prefix);
-                 (None, None)
-             } else {
-                 crate::log_info!("MTP module detected at '{}'", mtp_prefix);
-                 
-                 // Discover and log MTP layers
-                 let discovered_layers = discover_mtp_layers(&tensor_keys, &mtp_prefix);
-                 crate::log_info!("Discovered MTP layers: {:?}", discovered_layers);
-                 
-                 // Build the correct path for MTP weights based on the prefix used in detection
-                 let mtp_vb = if prefix.is_empty() || prefix == "model." {
-                     // Standard case: weights are at "mtp.*" relative to current vb
-                     vb.pp("mtp")
-                 } else {
-                     // Non-standard prefix: weights are at "{prefix}mtp.*"
-                     vb.pp(&format!("{}mtp", prefix.trim_end_matches('.')))
-                 };
-                 let predictor = Qwen3_5MoEMultiTokenPredictor::new(
-                     mtp_vb.clone(),
-                     comm.clone(),
-                     config,
-                     dtype,
-                 );
+            // Determine MTP prefix for layer discovery
+            let mtp_prefix = if prefix.is_empty() || prefix == "model." {
+                "mtp"
+            } else {
+                prefix.trim_end_matches('.').trim_start_matches("model.")
+            };
+            let mtp_prefix = format!(
+                "{}mtp",
+                if mtp_prefix.is_empty() || mtp_prefix == "mtp" {
+                    ""
+                } else {
+                    "."
+                }
+            );
 
-                 match predictor {
-                     Ok(predictor) => {
-                         // Load MTP lm_head - try separate weights first, fall back to tied
-                         // Check for lm_head at the same path as predictor
-                         let mtp_lm_head = if mtp_vb.has_key("lm_head.weight") {
-                             ReplicatedLinear::load_no_bias(
-                                 config.hidden_size,
-                                 vocab_size,
-                                 mtp_vb.pp("lm_head"),
-                                 &None,
-                                 &None,
-                                 dtype,
-                             )
-                         } else if mtp_vb.has_key("embed_tokens.weight") {
-                             // Tied with embed_tokens
-                             ReplicatedLinear::load_no_bias(
-                                 config.hidden_size,
-                                 vocab_size,
-                                 mtp_vb.pp("embed_tokens"),
-                                 &None,
-                                 &None,
-                                 dtype,
-                             )
-                         } else {
-                             // Fallback: use main model's lm_head for MTP predictions
-                             crate::log_info!("MTP using shared lm_head from main model");
-                             ReplicatedLinear::load_no_bias(
-                                 config.hidden_size,
-                                 vocab_size,
-                                 vb.pp("lm_head"),
-                                 &None,
-                                 &None,
-                                 dtype,
-                             )
-                         };
+            // Check if any MTP layers exist by scanning tensor keys
+            let has_mtp_module = tensor_keys.iter().any(|k| k.starts_with(&mtp_prefix));
 
-                         match mtp_lm_head {
-                             Ok(mtp_lm_head) => (Some(predictor), Some(mtp_lm_head)),
-                             Err(e) => {
-                                 crate::log_error!("Failed to load MTP lm_head: {:?}. Disabling MTP.", e);
-                                 (None, None)
-                             }
-                         }
-                     }
-                     Err(e) => {
-                         crate::log_error!("Failed to load MTP predictor: {:?}. Disabling MTP.", e);
-                         (None, None)
-                     }
-                 }
-             }
-         } else {
-             (None, None)
-         };
+            if !has_mtp_module {
+                crate::log_warn!(
+                    "MTP enabled but no MTP module weights found at '{}'. Disabling MTP.",
+                    mtp_prefix
+                );
+                (None, None)
+            } else {
+                crate::log_info!("MTP module detected at '{}'", mtp_prefix);
 
-         Ok(Self {
-             embed_tokens,
-             layers,
-             norm,
-             lm_head,
-             mamba_cache: RwLock::new(mamba_cache),
-             device: device.clone(),
-             config: config.clone(),
-             dtype,
-             vocab_size,
-             is_qvar_builder,
-             mtp_num_tokens,
-             mtp_predictor,
-             mtp_lm_head,
-         })
-     }
+                // Discover and log MTP layers
+                let discovered_layers = discover_mtp_layers(&tensor_keys, &mtp_prefix);
+                crate::log_info!("Discovered MTP layers: {:?}", discovered_layers);
+
+                // Build the correct path for MTP weights based on the prefix used in detection
+                let mtp_vb = if prefix.is_empty() || prefix == "model." {
+                    // Standard case: weights are at "mtp.*" relative to current vb
+                    vb.pp("mtp")
+                } else {
+                    // Non-standard prefix: weights are at "{prefix}mtp.*"
+                    vb.pp(&format!("{}mtp", prefix.trim_end_matches('.')))
+                };
+                let predictor =
+                    Qwen3_5MoEMultiTokenPredictor::new(mtp_vb.clone(), comm.clone(), config, dtype);
+
+                match predictor {
+                    Ok(predictor) => {
+                        // Load MTP lm_head - try separate weights first, fall back to tied
+                        // Check for lm_head at the same path as predictor
+                        let mtp_lm_head = if mtp_vb.has_key("lm_head.weight") {
+                            ReplicatedLinear::load_no_bias(
+                                config.hidden_size,
+                                vocab_size,
+                                mtp_vb.pp("lm_head"),
+                                &None,
+                                &None,
+                                dtype,
+                            )
+                        } else if mtp_vb.has_key("embed_tokens.weight") {
+                            // Tied with embed_tokens
+                            ReplicatedLinear::load_no_bias(
+                                config.hidden_size,
+                                vocab_size,
+                                mtp_vb.pp("embed_tokens"),
+                                &None,
+                                &None,
+                                dtype,
+                            )
+                        } else {
+                            // Fallback: use main model's lm_head for MTP predictions
+                            crate::log_info!("MTP using shared lm_head from main model");
+                            ReplicatedLinear::load_no_bias(
+                                config.hidden_size,
+                                vocab_size,
+                                vb.pp("lm_head"),
+                                &None,
+                                &None,
+                                dtype,
+                            )
+                        };
+
+                        match mtp_lm_head {
+                            Ok(mtp_lm_head) => (Some(predictor), Some(mtp_lm_head)),
+                            Err(e) => {
+                                crate::log_error!(
+                                    "Failed to load MTP lm_head: {:?}. Disabling MTP.",
+                                    e
+                                );
+                                (None, None)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        crate::log_error!("Failed to load MTP predictor: {:?}. Disabling MTP.", e);
+                        (None, None)
+                    }
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            embed_tokens,
+            layers,
+            norm,
+            lm_head,
+            mamba_cache: RwLock::new(mamba_cache),
+            device: device.clone(),
+            config: config.clone(),
+            dtype,
+            vocab_size,
+            is_qvar_builder,
+            mtp_num_tokens,
+            mtp_predictor,
+            mtp_lm_head,
+        })
+    }
 
     pub fn embed_forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs = self.embed_tokens.forward(xs)?;
@@ -922,36 +931,102 @@ impl Qwen3_5MoEForCausalLM {
     // MTP (Multi-Token Prediction) Methods
     // ============================================================================
 
-    /// Check if MTP is enabled (returns true if mtp_num_tokens > 0)
     pub fn is_mtp_enabled(&self) -> bool {
-        self.mtp_num_tokens > 0
+        self.mtp_num_tokens > 0 && self.mtp_predictor.is_some()
     }
 
-    /// Get the number of MTP speculative tokens
     pub fn get_mtp_num_tokens(&self) -> usize {
         self.mtp_num_tokens
     }
 
-    /// Get the MTP predictor if enabled
     pub fn get_mtp_predictor(&self) -> Option<&Qwen3_5MoEMultiTokenPredictor> {
         self.mtp_predictor.as_ref()
     }
 
-    /// Get the MTP lm_head if enabled
     pub fn get_mtp_lm_head(&self) -> Option<&ReplicatedLinear> {
         self.mtp_lm_head.as_ref()
     }
 
-    /// Enable MTP with the given predictor and lm_head
-    pub fn enable_mtp(
-        &mut self,
-        predictor: Qwen3_5MoEMultiTokenPredictor,
-        lm_head: ReplicatedLinear,
-        num_tokens: usize,
-    ) {
-        self.mtp_num_tokens = num_tokens;
-        self.mtp_predictor = Some(predictor);
-        self.mtp_lm_head = Some(lm_head);
+    pub fn mtp_propose(
+        &self,
+        last_token: u32,
+        last_hidden: &Tensor,
+        position: usize,
+        num_draft_tokens: usize,
+        input_metadata: &InputMetadata,
+    ) -> Result<Vec<u32>> {
+        let predictor = match &self.mtp_predictor {
+            Some(p) => p,
+            None => candle_core::bail!("MTP predictor not loaded"),
+        };
+        let lm_head = match &self.mtp_lm_head {
+            Some(h) => h,
+            None => candle_core::bail!("MTP lm_head not loaded"),
+        };
+
+        let device = last_hidden.device().clone();
+        let mut draft_tokens = Vec::with_capacity(num_draft_tokens);
+        let mut current_hidden = last_hidden.clone();
+        let mut current_token = last_token;
+
+        for step in 0..num_draft_tokens {
+            let token_tensor = Tensor::from_vec(vec![current_token], (1,), &device)?;
+            let pos = (position + 1 + step) as i64;
+            let pos_tensor = Tensor::from_vec(vec![pos], (1,), &device)?;
+
+            let mtp_hidden = predictor.forward(
+                &token_tensor,
+                &pos_tensor,
+                &current_hidden,
+                input_metadata,
+                step,
+            )?;
+
+            let logits = if self.is_qvar_builder {
+                lm_head.forward(&mtp_hidden)?
+            } else {
+                lm_head
+                    .forward(&mtp_hidden.to_dtype(self.dtype)?)?
+                    .to_dtype(DType::F32)?
+            };
+
+            let next_token = logits.argmax(D::Minus1)?.to_scalar::<u32>()?;
+            draft_tokens.push(next_token);
+            current_hidden = mtp_hidden;
+            current_token = next_token;
+        }
+
+        Ok(draft_tokens)
+    }
+
+    pub fn forward_with_hidden(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden = self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            embeded_inputs,
+            &None,
+            &None,
+            true,
+        )?;
+
+        let logits = if self.is_qvar_builder {
+            self.lm_head.forward(&hidden)?
+        } else {
+            self.lm_head
+                .forward(&hidden.to_dtype(self.dtype)?)?
+                .to_dtype(DType::F32)?
+        };
+
+        Ok((logits, hidden))
     }
 
     pub fn dtype(&self) -> DType {

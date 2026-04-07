@@ -452,12 +452,12 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         moe_cfg: mod_cfg,
         fp8_kvcache: None,
         quantization_config: None,
-         is_multi_model: None,
-         extra_config_json,
-         mtp_num_tokens: 0,  // 0 = disabled by default
-         mtp_num_hidden_layers: None,
-         num_nextn_predict_layers: None,
-     };
+        is_multi_model: None,
+        extra_config_json,
+        mtp_num_tokens: 0, // 0 = disabled by default
+        mtp_num_hidden_layers: None,
+        num_nextn_predict_layers: None,
+    };
 
     Ok(cfg)
 }

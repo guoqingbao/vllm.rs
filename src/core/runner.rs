@@ -886,6 +886,236 @@ impl ModelRunner {
         Ok(output_ids)
     }
 
+    /// Check whether the loaded model supports MTP speculative decoding.
+    pub fn is_mtp_enabled(&self) -> bool {
+        match &self.model {
+            Model::Qwen3_5(m) => m.is_mtp_enabled(),
+            Model::Qwen3_5MoE(m) => m.is_mtp_enabled(),
+            _ => false,
+        }
+    }
+
+    /// Return the configured number of MTP draft tokens (0 if disabled).
+    pub fn mtp_num_tokens(&self) -> usize {
+        match &self.model {
+            Model::Qwen3_5(m) => m.get_mtp_num_tokens(),
+            Model::Qwen3_5MoE(m) => m.get_mtp_num_tokens(),
+            _ => 0,
+        }
+    }
+
+    /// Run a single decode step with MTP speculative decoding.
+    ///
+    /// Flow:
+    ///   1. Normal decode forward → logits + hidden states
+    ///   2. Sample the "base" token from logits
+    ///   3. MTP predictor drafts `num_draft` tokens autoregressively
+    ///   4. Verify drafts by running the main model on [base_token, draft_0, ..., draft_{k-1}]
+    ///   5. Greedy-accept matching prefix, take bonus token at first mismatch
+    ///
+    /// Returns a Vec of accepted token IDs per sequence (may be 1..=num_draft+1).
+    /// Only supports single-sequence decode batches for now (batch_size == 1).
+    pub fn run_with_mtp<'a, I, S>(&self, seqs: I, num_draft: usize) -> Result<Vec<Vec<u32>>>
+    where
+        I: IntoIterator<Item = &'a S> + Clone,
+        S: ToDecodeInput + 'a,
+    {
+        use crate::models::mtp::verify_draft_tokens_greedy;
+
+        let seq_refs: Vec<&'a S> = seqs.clone().into_iter().collect();
+        if seq_refs.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let (input_ids, positions, input_metadata) =
+            self.prepare_decode(seq_refs.iter().copied())?;
+        let _ = set_fp8_linear_is_prefill(false);
+
+        let kv_cache = self.get_kv_cache();
+
+        let (logits, hidden) = match &self.model {
+            Model::Qwen3_5(m) => m.forward_with_hidden(
+                &input_ids,
+                &positions,
+                Some(&kv_cache),
+                &input_metadata,
+                false,
+            )?,
+            Model::Qwen3_5MoE(m) => m.forward_with_hidden(
+                &input_ids,
+                &positions,
+                Some(&kv_cache),
+                &input_metadata,
+                false,
+            )?,
+            _ => candle_core::bail!("MTP not supported for this model type"),
+        };
+
+        drop(kv_cache);
+
+        let base_tokens = self.sample(
+            &logits,
+            Seqs::DecodeVec(
+                &seq_refs
+                    .iter()
+                    .map(|s| DecodeSequence {
+                        id: s.id(),
+                        last_token: s.last_token(),
+                        len: s.len(),
+                        last_block_tokens: s.last_block_tokens(),
+                        block_table_last: s.block_table_last(),
+                        block_tables: s.block_table().clone(),
+                        sampling_params: crate::utils::config::SamplingParams::default(),
+                    })
+                    .collect(),
+            ),
+            false,
+        )?;
+
+        let mut all_results: Vec<Vec<u32>> = Vec::with_capacity(seq_refs.len());
+
+        for (seq_idx, seq) in seq_refs.iter().enumerate() {
+            let base_token = base_tokens[seq_idx];
+
+            let seq_hidden = if seq_refs.len() > 1 {
+                hidden.narrow(0, seq_idx, 1)?
+            } else {
+                hidden.clone()
+            };
+
+            let position = seq.len() - 1;
+
+            let draft_input_metadata = InputMetadata {
+                is_prefill: false,
+                is_mla: false,
+                sequence_ids: None,
+                mamba_slot_mapping: None,
+                slot_mapping: Tensor::zeros((1,), DType::I64, &self.device)?,
+                block_tables: None,
+                context_lens: None,
+                cu_seqlens_q: None,
+                cu_seqlens_k: None,
+                max_seqlen_q: 0,
+                max_seqlen_k: 0,
+                max_context_len: 0,
+                disable_flash_attn: Some(true),
+                seqlens: None,
+                flashinfer_metadata: None,
+            };
+
+            let draft_tokens = match &self.model {
+                Model::Qwen3_5(m) => m.mtp_propose(
+                    base_token,
+                    &seq_hidden,
+                    position,
+                    num_draft,
+                    &draft_input_metadata,
+                )?,
+                Model::Qwen3_5MoE(m) => m.mtp_propose(
+                    base_token,
+                    &seq_hidden,
+                    position,
+                    num_draft,
+                    &draft_input_metadata,
+                )?,
+                _ => vec![],
+            };
+
+            if draft_tokens.is_empty() {
+                all_results.push(vec![base_token]);
+                continue;
+            }
+
+            let mut verify_ids = vec![base_token];
+            verify_ids.extend_from_slice(&draft_tokens);
+            let verify_len = verify_ids.len();
+
+            let verify_input_ids =
+                Tensor::from_vec(verify_ids.clone(), (verify_len,), &self.device)?;
+
+            let base_pos = position as i64;
+            let verify_positions: Vec<i64> = (base_pos..base_pos + verify_len as i64).collect();
+            let verify_positions = Tensor::from_vec(verify_positions, (verify_len,), &self.device)?;
+
+            let block_table = seq.block_table();
+            let block_size = self.config.block_size;
+            let mut slot_mapping = Vec::with_capacity(verify_len);
+            for offset in 0..verify_len {
+                let token_pos = seq.len() + offset;
+                let block_idx = token_pos / block_size;
+                let block_offset = token_pos % block_size;
+                if block_idx < block_table.len() {
+                    slot_mapping
+                        .push((block_table[block_idx] as usize * block_size + block_offset) as i64);
+                } else {
+                    slot_mapping
+                        .push((*block_table.last().unwrap_or(&0) as usize * block_size) as i64);
+                }
+            }
+            let slot_mapping_t = Tensor::from_vec(slot_mapping, (verify_len,), &self.device)?;
+
+            let context_len = (seq.len() + verify_len) as u32;
+            let context_lens = Tensor::from_vec(vec![context_len], (1,), &self.device)?;
+            let block_tables = self.prepare_block_tables(std::iter::once(*seq))?;
+
+            let cu_seqlens_q = Tensor::from_vec(vec![0u32, verify_len as u32], (2,), &self.device)?;
+            let cu_seqlens_k = Tensor::from_vec(vec![0u32, context_len], (2,), &self.device)?;
+
+            let verify_metadata = InputMetadata {
+                is_prefill: true,
+                is_mla: input_metadata.is_mla,
+                sequence_ids: input_metadata.sequence_ids.clone(),
+                mamba_slot_mapping: input_metadata.mamba_slot_mapping.clone(),
+                slot_mapping: slot_mapping_t,
+                block_tables: Some(block_tables),
+                context_lens: Some(context_lens),
+                cu_seqlens_q: Some(cu_seqlens_q),
+                cu_seqlens_k: Some(cu_seqlens_k),
+                max_seqlen_q: verify_len,
+                max_seqlen_k: context_len as usize,
+                max_context_len: context_len as usize,
+                disable_flash_attn: None,
+                seqlens: Some(vec![verify_len as u32]),
+                flashinfer_metadata: None,
+            };
+
+            let kv_cache = self.get_kv_cache();
+            let verify_logits = crate::model_call!(
+                &self.model,
+                forward,
+                (&verify_input_ids, &verify_positions, Some(&kv_cache), &verify_metadata),
+                {
+                    Qwen3 => false,
+                    Qwen3MoE => false,
+                    Qwen3_5 => false,
+                    Qwen3_5MoE => false,
+                    LLaMa => false,
+                    LLaMa4 => None::<&crate::utils::image::ImageData>,
+                    Phi4 => false,
+                    GLM4 => false,
+                    GLM4MoE => false,
+                    GLM4MoeLite => false,
+                    DeepSeek => false,
+                    Mistral3VL => None::<&crate::utils::image::ImageData>,
+                    Gemma3 => None::<&crate::utils::image::ImageData>,
+                    Qwen3VL => None::<&crate::utils::image::ImageData>,
+                }
+            )?;
+            drop(kv_cache);
+
+            let accept_result = verify_draft_tokens_greedy(&draft_tokens, &verify_logits)?;
+
+            let mut accepted = Vec::with_capacity(accept_result.accepted_tokens.len() + 2);
+            accepted.push(base_token);
+            accepted.extend_from_slice(&accept_result.accepted_tokens);
+            accepted.push(accept_result.bonus_token);
+
+            all_results.push(accepted);
+        }
+
+        Ok(all_results)
+    }
+
     pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {
         let (input_ids, positions, input_metadata) = self.prepare_prefill(seqs)?;
 

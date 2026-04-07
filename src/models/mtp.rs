@@ -1,7 +1,10 @@
 // src/models/mtp.rs
-// Common MTP utility module for Qwen3.5 and Qwen3.5-MoE models
-// MTP (Multi-Token Prediction) is an optional speculative decoding path
-// that only activates when CLI flag is passed
+// Multi-Token Prediction (MTP) module for Qwen3.5 and Qwen3.5-MoE models.
+//
+// MTP uses lightweight predictor heads (shared embedding + FC + one decoder layer)
+// to draft speculative tokens during decode. The main model then verifies drafts
+// in a single batched forward pass, accepting tokens greedily until the first
+// mismatch. This amortises the per-token latency of autoregressive decoding.
 
 use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
@@ -21,15 +24,13 @@ use std::sync::Arc;
 // ============================================================================
 // MTP Layer Discovery Utilities
 // ============================================================================
-/// Extract MTP layer indices from a list of tensor keys
-/// This enables dynamic discovery of MTP layers without relying on config
+
 pub fn discover_mtp_layers(tensor_keys: &[String], prefix: &str) -> Vec<usize> {
     let mut layers = std::collections::HashSet::new();
     let layer_prefix = format!("{}.layers.", prefix.trim_end_matches('.'));
 
     for key in tensor_keys {
         if key.starts_with(&layer_prefix) {
-            // Extract layer index from key like "mtp.layers.0.self_attn.q_proj.weight"
             let rest = &key[layer_prefix.len()..];
             if let Some(dot_pos) = rest.find('.') {
                 if let Ok(layer_idx) = rest[..dot_pos].parse::<usize>() {
@@ -44,43 +45,20 @@ pub fn discover_mtp_layers(tensor_keys: &[String], prefix: &str) -> Vec<usize> {
     layers_vec
 }
 
-/// Count MTP layers by finding the highest layer index + 1
 pub fn count_mtp_layers(tensor_keys: &[String], prefix: &str) -> usize {
-    let layers = discover_mtp_layers(tensor_keys, prefix);
-    layers.len()
+    discover_mtp_layers(tensor_keys, prefix).len()
 }
 
-/// Get MTP layer indices with logging for debugging
 pub fn get_mtp_layer_info(tensor_keys: &[String], prefix: &str) -> Vec<usize> {
     let layers = discover_mtp_layers(tensor_keys, prefix);
-    
-    // Log discovered layers for debugging
     crate::log_info!("Discovered MTP layers from '{}': {:?}", prefix, layers);
-    
-    // Log additional details for each layer
-    for &layer_idx in &layers {
-        let layer_pattern = format!("{}.layers.{}.", prefix.trim_end_matches('.'), layer_idx);
-        let layer_tensors: Vec<&String> = tensor_keys
-            .iter()
-            .filter(|k| k.starts_with(&layer_pattern))
-            .collect();
-        
-        if !layer_tensors.is_empty() {
-            crate::log_info!("  Layer {}: found {} tensor(s)", layer_idx, layer_tensors.len());
-            for tensor in &layer_tensors {
-                crate::log_info!("    - {}", tensor);
-            }
-        }
-    }
-    
     layers
 }
 
 // ============================================================================
-// MTP Decoder Layer (full_attention only)
+// MTP Decoder Layer (dense, full_attention only — no KV cache)
 // ============================================================================
 
-/// MTP decoder layer for Qwen3.5 dense model
 pub struct Qwen3_5MTPDecoderLayer {
     self_attn: Attention,
     mlp: MLP,
@@ -174,10 +152,9 @@ impl Qwen3_5MTPDecoderLayer {
 }
 
 // ============================================================================
-// MTP Decoder Layer for MoE (full_attention only)
+// MTP Decoder Layer for MoE (full_attention only — no KV cache)
 // ============================================================================
 
-/// MoE or MLP dispatch for MTP decoder layer
 enum MoeOrMlp {
     FusedMoe(FusedMoe),
     FusedMoeGGUF(FusedMoeGGUF),
@@ -196,7 +173,6 @@ impl MoeOrMlp {
     }
 }
 
-/// MTP decoder layer for Qwen3.5 MoE model
 pub struct Qwen3_5MoEMTPDecoderLayer {
     self_attn: Attention,
     mlp: MoeOrMlp,
@@ -229,7 +205,6 @@ impl Qwen3_5MoEMTPDecoderLayer {
             .as_ref()
             .expect("MoE config required for MTP MoE decoder");
 
-        // Determine MoE variant based on builder type
         let mlp = if vb.is_qvar_builder() {
             MoeOrMlp::FusedMoeGGUF(FusedMoeGGUF::new(config, vb.clone(), comm.clone(), dtype)?)
         } else if let Some(quant_config) = &config.quantization_config {
@@ -260,46 +235,44 @@ impl Qwen3_5MoEMTPDecoderLayer {
             )?)
         };
 
-        // Shared experts (Qwen2 MoE style)
-        let (shared_gate, shared_expert) = if let Some(intermediate_size) =
-            moe_cfg.shared_expert_intermediate_size
-        {
-            if intermediate_size > 0 {
-                let ws = match &vb.0 {
-                    Either::Left(vb) => vb
-                        .pp("mlp.shared_expert_gate")
-                        .get((1, config.hidden_size), "weight")?,
-                    Either::Right(vb) => {
-                        let ws = vb
-                            .pp("ffn_gate_inp_shexp")
-                            .get((config.hidden_size,), "weight")?;
-                        ws.dequantize(&vb.device())?
-                            .reshape((1, config.hidden_size))?
+        let (shared_gate, shared_expert) =
+            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
+                if intermediate_size > 0 {
+                    let ws = match &vb.0 {
+                        Either::Left(vb) => vb
+                            .pp("mlp.shared_expert_gate")
+                            .get((1, config.hidden_size), "weight")?,
+                        Either::Right(vb) => {
+                            let ws = vb
+                                .pp("ffn_gate_inp_shexp")
+                                .get((config.hidden_size,), "weight")?;
+                            ws.dequantize(&vb.device())?
+                                .reshape((1, config.hidden_size))?
+                        }
                     }
+                    .to_dtype(dtype)?;
+
+                    let shared_gate = crate::models::layers::linear::LinearX::new(ws, None, &None)?;
+                    let mlp = MLP::new(
+                        vb.pp("mlp.shared_expert").clone(),
+                        comm.clone(),
+                        config.hidden_size,
+                        intermediate_size,
+                        &config.hidden_act,
+                        &config.quantization_config,
+                        &config.quant,
+                        false,
+                        dtype,
+                        "",
+                    )?;
+
+                    (Some(shared_gate), Some(mlp))
+                } else {
+                    (None, None)
                 }
-                .to_dtype(dtype)?;
-
-                let shared_gate = crate::models::layers::linear::LinearX::new(ws, None, &None)?;
-                let mlp = MLP::new(
-                    vb.pp("mlp.shared_expert").clone(),
-                    comm.clone(),
-                    config.hidden_size,
-                    intermediate_size,
-                    &config.hidden_act,
-                    &config.quantization_config,
-                    &config.quant,
-                    false,
-                    dtype,
-                    "",
-                )?;
-
-                (Some(shared_gate), Some(mlp))
             } else {
                 (None, None)
-            }
-        } else {
-            (None, None)
-        };
+            };
 
         let input_layernorm = rms_norm(
             config.hidden_size,
@@ -352,7 +325,6 @@ impl Qwen3_5MoEMTPDecoderLayer {
         let residual = &hidden_states;
         let hidden_states = self.post_attention_layernorm.forward(&hidden_states)?;
 
-        // Shared experts
         let shared_output = match (&self.shared_gate, &self.shared_expert) {
             (Some(shared_gate), Some(shared_expert)) => {
                 let gate = candle_nn::ops::sigmoid(&shared_gate.forward(&hidden_states)?)?;
@@ -362,7 +334,9 @@ impl Qwen3_5MoEMTPDecoderLayer {
             _ => None,
         };
 
-        let mlp_output = self.mlp.forward(&hidden_states, input_metadata.is_prefill)?;
+        let mlp_output = self
+            .mlp
+            .forward(&hidden_states, input_metadata.is_prefill)?;
         let hidden_states_val = match shared_output {
             Some(shared) => (mlp_output + shared)?,
             None => mlp_output,
@@ -373,10 +347,9 @@ impl Qwen3_5MoEMTPDecoderLayer {
 }
 
 // ============================================================================
-// MTP Predictor Base Structure
+// MTP Predictor — Dense variant
 // ============================================================================
 
-/// Common MTP predictor for Qwen3.5 dense model
 pub struct Qwen3_5MultiTokenPredictor {
     embed_tokens: candle_nn::Embedding,
     fc: ReplicatedLinear,
@@ -384,37 +357,25 @@ pub struct Qwen3_5MultiTokenPredictor {
     norm: NormX,
     pre_fc_norm_hidden: NormX,
     pre_fc_norm_embedding: NormX,
-    num_mtp_layers: usize,
+    pub num_mtp_layers: usize,
 }
 
 impl Qwen3_5MultiTokenPredictor {
-    pub fn new(
-        vb: VarBuilderX,
-        comm: Rc<Comm>,
-        config: &Config,
-        dtype: DType,
-    ) -> Result<Self> {
-        // Qwen3Next uses num_nextn_predict_layers, Qwen3.5 uses mtp_num_hidden_layers
-        let config_num_layers = config.num_nextn_predict_layers
+    pub fn new(vb: VarBuilderX, comm: Rc<Comm>, config: &Config, dtype: DType) -> Result<Self> {
+        let config_num_layers = config
+            .num_nextn_predict_layers
             .or(config.mtp_num_hidden_layers);
-        
-        // Get all tensor keys for dynamic discovery
+
         let tensor_keys = vb.get_all_tensor_keys();
-        
-        // Determine prefix for layer discovery
         let prefix = vb.module_path();
         let mtp_prefix = if prefix.is_empty() { "mtp" } else { &prefix };
-        
-        // Dynamic discovery: find actual MTP layers in the weight file
+
         let discovered_layers = get_mtp_layer_info(&tensor_keys, mtp_prefix);
         let dynamic_num_layers = discovered_layers.len().max(1);
-        
-        // Use config value if available, otherwise fall back to dynamic discovery
         let num_mtp_layers = config_num_layers.unwrap_or(dynamic_num_layers);
-        
-        // Log warning if config doesn't match discovered layers
+
         if let Some(config_val) = config_num_layers {
-            if config_val != dynamic_num_layers {
+            if config_val != dynamic_num_layers && !tensor_keys.is_empty() {
                 crate::log_warn!(
                     "MTP config specifies {} layers but {} were found in weight file",
                     config_val,
@@ -422,14 +383,14 @@ impl Qwen3_5MultiTokenPredictor {
                 );
             }
         }
-        
+
         crate::log_info!(
             "Initializing MTP predictor with {} layers (prefix: {}, config: {:?})",
             num_mtp_layers,
             mtp_prefix,
             config_num_layers
         );
-        
+
         let (embed_tokens, _vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -438,7 +399,7 @@ impl Qwen3_5MultiTokenPredictor {
         )?;
 
         let fc = ReplicatedLinear::load_no_bias(
-            config.hidden_size * 2, // [embed; hidden] concat
+            config.hidden_size * 2,
             config.hidden_size,
             vb.pp("fc").clone(),
             &None,
@@ -501,6 +462,11 @@ impl Qwen3_5MultiTokenPredictor {
         })
     }
 
+    /// Run one MTP prediction step.
+    /// `input_ids`: the token(s) whose embedding is combined with `hidden_states`.
+    /// `hidden_states`: last hidden state from the main model (or previous MTP step).
+    /// `spec_step_idx`: which MTP layer to use (cycled modulo `num_mtp_layers`).
+    /// Returns the predicted hidden state (before lm_head projection).
     pub fn forward(
         &self,
         input_ids: &Tensor,
@@ -509,36 +475,26 @@ impl Qwen3_5MultiTokenPredictor {
         input_metadata: &InputMetadata,
         spec_step_idx: usize,
     ) -> Result<Tensor> {
-        // 1. Embed input_ids
         let embedded = self.embed_tokens.forward(input_ids)?;
 
-        // 2. Normalize before FC
         let embedded = self.pre_fc_norm_embedding.forward(&embedded)?;
-        let hidden_states = self.pre_fc_norm_hidden.forward(&hidden_states)?;
+        let hidden_states = self.pre_fc_norm_hidden.forward(hidden_states)?;
 
-        // 3. Concatenate [embedded; hidden_states]
-        let hidden_states = Tensor::cat(&[embedded, hidden_states], D::Minus(1))?;
-
-        // 4. FC projection
+        let hidden_states = Tensor::cat(&[embedded, hidden_states], D::Minus1)?;
         let hidden_states = self.fc.forward(&hidden_states)?;
 
-        // 5. Cycle through MTP layers
         let layer_idx = spec_step_idx % self.num_mtp_layers;
-        let (hidden_states, _residual) = self.layers[layer_idx].forward(
-            positions,
-            &hidden_states,
-            None,
-            input_metadata,
-        )?;
+        let (hidden_states, _residual) =
+            self.layers[layer_idx].forward(positions, &hidden_states, None, input_metadata)?;
 
-        // 6. Final normalization - only hidden_states, residual is discarded
-        let hidden_states = self.norm.forward(&hidden_states)?;
-
-        Ok(hidden_states)
+        self.norm.forward(&hidden_states)
     }
 }
 
-/// Common MTP predictor for Qwen3.5 MoE model
+// ============================================================================
+// MTP Predictor — MoE variant
+// ============================================================================
+
 pub struct Qwen3_5MoEMultiTokenPredictor {
     embed_tokens: candle_nn::Embedding,
     fc: ReplicatedLinear,
@@ -546,37 +502,25 @@ pub struct Qwen3_5MoEMultiTokenPredictor {
     norm: NormX,
     pre_fc_norm_hidden: NormX,
     pre_fc_norm_embedding: NormX,
-    num_mtp_layers: usize,
+    pub num_mtp_layers: usize,
 }
 
 impl Qwen3_5MoEMultiTokenPredictor {
-    pub fn new(
-        vb: VarBuilderX,
-        comm: Rc<Comm>,
-        config: &Config,
-        dtype: DType,
-    ) -> Result<Self> {
-        // Qwen3Next uses num_nextn_predict_layers, Qwen3.5 uses mtp_num_hidden_layers
-        let config_num_layers = config.num_nextn_predict_layers
+    pub fn new(vb: VarBuilderX, comm: Rc<Comm>, config: &Config, dtype: DType) -> Result<Self> {
+        let config_num_layers = config
+            .num_nextn_predict_layers
             .or(config.mtp_num_hidden_layers);
-        
-        // Get all tensor keys for dynamic discovery
+
         let tensor_keys = vb.get_all_tensor_keys();
-        
-        // Determine prefix for layer discovery
         let prefix = vb.module_path();
         let mtp_prefix = if prefix.is_empty() { "mtp" } else { &prefix };
-        
-        // Dynamic discovery: find actual MTP layers in the weight file
+
         let discovered_layers = get_mtp_layer_info(&tensor_keys, mtp_prefix);
         let dynamic_num_layers = discovered_layers.len().max(1);
-        
-        // Use config value if available, otherwise fall back to dynamic discovery
         let num_mtp_layers = config_num_layers.unwrap_or(dynamic_num_layers);
-        
-        // Log warning if config doesn't match discovered layers
+
         if let Some(config_val) = config_num_layers {
-            if config_val != dynamic_num_layers {
+            if config_val != dynamic_num_layers && !tensor_keys.is_empty() {
                 crate::log_warn!(
                     "MTP config specifies {} layers but {} were found in weight file",
                     config_val,
@@ -584,14 +528,14 @@ impl Qwen3_5MoEMultiTokenPredictor {
                 );
             }
         }
-        
+
         crate::log_info!(
             "Initializing MTP MoE predictor with {} layers (prefix: {}, config: {:?})",
             num_mtp_layers,
             mtp_prefix,
             config_num_layers
         );
-        
+
         let (embed_tokens, _vocab_size) = embedding(
             config.vocab_size,
             config.hidden_size,
@@ -600,7 +544,7 @@ impl Qwen3_5MoEMultiTokenPredictor {
         )?;
 
         let fc = ReplicatedLinear::load_no_bias(
-            config.hidden_size * 2, // [embed; hidden] concat
+            config.hidden_size * 2,
             config.hidden_size,
             vb.pp("fc").clone(),
             &None,
@@ -671,31 +615,71 @@ impl Qwen3_5MoEMultiTokenPredictor {
         input_metadata: &InputMetadata,
         spec_step_idx: usize,
     ) -> Result<Tensor> {
-        // 1. Embed input_ids
         let embedded = self.embed_tokens.forward(input_ids)?;
 
-        // 2. Normalize before FC
         let embedded = self.pre_fc_norm_embedding.forward(&embedded)?;
-        let hidden_states = self.pre_fc_norm_hidden.forward(&hidden_states)?;
+        let hidden_states = self.pre_fc_norm_hidden.forward(hidden_states)?;
 
-        // 3. Concatenate [embedded; hidden_states]
-        let hidden_states = Tensor::cat(&[embedded, hidden_states], D::Minus(1))?;
-
-        // 4. FC projection
+        let hidden_states = Tensor::cat(&[embedded, hidden_states], D::Minus1)?;
         let hidden_states = self.fc.forward(&hidden_states)?;
 
-        // 5. Cycle through MTP layers
         let layer_idx = spec_step_idx % self.num_mtp_layers;
-        let (hidden_states, _residual) = self.layers[layer_idx].forward(
-            positions,
-            &hidden_states,
-            None,
-            input_metadata,
-        )?;
+        let (hidden_states, _residual) =
+            self.layers[layer_idx].forward(positions, &hidden_states, None, input_metadata)?;
 
-        // 6. Final normalization - only hidden_states, residual is discarded
-        let hidden_states = self.norm.forward(&hidden_states)?;
-
-        Ok(hidden_states)
+        self.norm.forward(&hidden_states)
     }
+}
+
+// ============================================================================
+// MTP Speculative Decoding Orchestrator
+// ============================================================================
+
+/// Result of one MTP speculative decoding round for a single sequence.
+#[derive(Debug, Clone)]
+pub struct MtpAcceptResult {
+    /// Accepted token IDs (may be empty if draft was rejected at step 0).
+    pub accepted_tokens: Vec<u32>,
+    /// The bonus token from the target model at the first rejection point.
+    pub bonus_token: u32,
+}
+
+/// Greedy verification: compare draft tokens against target model logits.
+/// Returns the number of accepted draft tokens and the corrected token at
+/// the first mismatch (or the next-token from target if all drafts accepted).
+pub fn verify_draft_tokens_greedy(
+    draft_tokens: &[u32],
+    target_logits: &Tensor,
+) -> Result<MtpAcceptResult> {
+    let target_logits_f32 = target_logits.to_dtype(DType::F32)?;
+    let num_positions = target_logits_f32.dim(0)?;
+
+    let mut accepted_tokens = Vec::new();
+
+    for i in 0..draft_tokens.len().min(num_positions.saturating_sub(1)) {
+        let row = target_logits_f32.get(i)?;
+        let target_token = row.argmax(D::Minus1)?.to_scalar::<u32>()?;
+
+        if target_token == draft_tokens[i] {
+            accepted_tokens.push(target_token);
+        } else {
+            return Ok(MtpAcceptResult {
+                accepted_tokens,
+                bonus_token: target_token,
+            });
+        }
+    }
+
+    let last_idx = draft_tokens.len().min(num_positions.saturating_sub(1));
+    let last_row = if last_idx < num_positions {
+        target_logits_f32.get(last_idx)?
+    } else {
+        target_logits_f32.get(num_positions - 1)?
+    };
+    let bonus_token = last_row.argmax(D::Minus1)?.to_scalar::<u32>()?;
+
+    Ok(MtpAcceptResult {
+        accepted_tokens,
+        bonus_token,
+    })
 }

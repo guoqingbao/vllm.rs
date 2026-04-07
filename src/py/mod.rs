@@ -304,7 +304,7 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
-        mtp_num_tokens: usize,  // 0 = disabled, N = number of speculative tokens
+        mtp_num_tokens: usize, // 0 = disabled, N = number of speculative tokens
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
