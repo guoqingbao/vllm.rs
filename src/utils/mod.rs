@@ -1434,7 +1434,12 @@ pub fn spawn_runner(
 }
 
 pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
-    let black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+    let mut black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
+
+    #[cfg(not(feature = "flashinfer"))]
+    {
+        black_list.extend(vec!["Glm4MoeLiteForCausalLM", "DeepseekV3ForCausalLM"]);
+    }
 
     black_list.contains(&architectures.as_str())
 }
