@@ -364,11 +364,12 @@ pub struct Qwen3_5MultiTokenPredictor {
 }
 
 impl Qwen3_5MultiTokenPredictor {
-    /// Load MTP predictor. `main_lm_head_vb` is used as fallback when the
-    /// predictor has no dedicated lm_head weights (tied with main model).
+    /// Load MTP predictor. `main_lm_head_vb` / `main_embed_vb` are used as
+    /// fallback when the predictor has no dedicated weights (tied with main model).
     pub fn new(
         vb: VarBuilderX,
         main_lm_head_vb: VarBuilderX,
+        main_embed_vb: VarBuilderX,
         comm: Rc<Comm>,
         config: &Config,
         vocab_size: usize,
@@ -404,12 +405,17 @@ impl Qwen3_5MultiTokenPredictor {
             config_num_layers
         );
 
-        let (embed_tokens, _vocab_size) = embedding(
-            config.vocab_size,
-            config.hidden_size,
-            vb.pp("embed_tokens").clone(),
-            dtype,
-        )?;
+        let (embed_tokens, _vocab_size) = if vb.has_key("embed_tokens.weight") {
+            embedding(
+                config.vocab_size,
+                config.hidden_size,
+                vb.pp("embed_tokens").clone(),
+                dtype,
+            )?
+        } else {
+            crate::log_info!("MTP using shared embed_tokens from main model");
+            embedding(config.vocab_size, config.hidden_size, main_embed_vb, dtype)?
+        };
 
         let fc = ReplicatedLinear::load_no_bias(
             config.hidden_size * 2,
@@ -587,6 +593,7 @@ impl Qwen3_5MoEMultiTokenPredictor {
     pub fn new(
         vb: VarBuilderX,
         main_lm_head_vb: VarBuilderX,
+        main_embed_vb: VarBuilderX,
         comm: Rc<Comm>,
         config: &Config,
         vocab_size: usize,
@@ -622,12 +629,17 @@ impl Qwen3_5MoEMultiTokenPredictor {
             config_num_layers
         );
 
-        let (embed_tokens, _vocab_size) = embedding(
-            config.vocab_size,
-            config.hidden_size,
-            vb.pp("embed_tokens").clone(),
-            dtype,
-        )?;
+        let (embed_tokens, _vocab_size) = if vb.has_key("embed_tokens.weight") {
+            embedding(
+                config.vocab_size,
+                config.hidden_size,
+                vb.pp("embed_tokens").clone(),
+                dtype,
+            )?
+        } else {
+            crate::log_info!("MTP MoE using shared embed_tokens from main model");
+            embedding(config.vocab_size, config.hidden_size, main_embed_vb, dtype)?
+        };
 
         let fc = ReplicatedLinear::load_no_bias(
             config.hidden_size * 2,

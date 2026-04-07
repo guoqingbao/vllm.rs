@@ -598,23 +598,38 @@ impl Qwen3_5MoEForCausalLM {
 
         let mtp_num_tokens = config.mtp_num_tokens;
         let mtp_predictor = if mtp_num_tokens > 0 {
+            crate::log_info!(
+                "MTP: loading MoE predictor (mtp_num_tokens={}, mtp_num_hidden_layers={:?})",
+                mtp_num_tokens,
+                config.mtp_num_hidden_layers
+            );
             let mtp_vb = vb.pp("mtp");
+            let main_embed_vb = if is_qvar_builder {
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
+            } else {
+                vb.pp(&format!("{}embed_tokens", prefix))
+            };
             match Qwen3_5MoEMultiTokenPredictor::new(
                 mtp_vb,
                 vb.pp("lm_head"),
+                main_embed_vb,
                 comm.clone(),
                 config,
                 vocab_size,
                 dtype,
                 is_qvar_builder || config.quant.is_some(),
             ) {
-                Ok(p) => Some(p),
+                Ok(p) => {
+                    crate::log_info!("MTP: MoE predictor loaded successfully");
+                    Some(p)
+                }
                 Err(e) => {
                     crate::log_warn!("MTP weights not found, disabling MTP: {:?}", e);
                     None
                 }
             }
         } else {
+            crate::log_info!("MTP: disabled (mtp_num_tokens=0)");
             None
         };
 
