@@ -62,7 +62,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 ## 🧠 Supported Architectures
 
-* ✅ LLaMa (LLaMa2, LLaMa3, IQuest-Coder)
+* ✅ LLaMa (LLaMa2, LLaMa3, LLaMa4, IQuest-Coder)
 * ✅ Qwen (Qwen2, Qwen3)
 * ✅ Qwen2/Qwen3 Moe
 * ✅ Qwen3 Next
@@ -580,7 +580,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
-* [ ] Additional model support (LLaMa 4, Kimi K2 Thinking, etc.)
+* [ ] Additional model support (MiniMax M2.5, Kimi K2, etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)

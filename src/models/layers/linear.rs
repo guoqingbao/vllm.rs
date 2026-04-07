@@ -491,6 +491,14 @@ impl LinearX {
     }
 }
 
+fn has_fp4_scale_tensors(vb: &VarBuilder) -> bool {
+    vb.contains_tensor("weight_scale")
+        || vb.contains_tensor("weight_scale_2")
+        || vb.contains_tensor("weight_global_scale")
+        || vb.contains_tensor("weight_packed")
+        || vb.contains_tensor("blocks")
+}
+
 pub fn linear_x(
     in_dim: usize,
     out_dim: usize,
@@ -534,12 +542,18 @@ pub fn linear_x(
                         let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
                         return Ok(LinearX::Linear(ln));
                     }
+                    if !has_fp4_scale_tensors(&vb) {
+                        let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
                     let ln = LnMxfp4::load(in_dim, out_dim, vb.clone(), shards, true)?;
                     return Ok(LinearX::LnMxfp4(ln));
                 }
 
                 if cfg.quant_method == "nvfp4" {
-                    if should_skip_quant_for_module(&module_path, cfg) {
+                    if should_skip_quant_for_module(&module_path, cfg)
+                        || !has_fp4_scale_tensors(&vb)
+                    {
                         let ln = linear(in_dim, out_dim, vb.clone(), shards, dtype)?;
                         return Ok(LinearX::Linear(ln));
                     }
@@ -626,7 +640,9 @@ pub fn linear_no_bias_x(
                 }
 
                 if cfg.quant_method == "mxfp4" {
-                    if should_skip_quant_for_module(&module_path, cfg) {
+                    if should_skip_quant_for_module(&module_path, cfg)
+                        || !has_fp4_scale_tensors(&vb)
+                    {
                         let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
                         return Ok(LinearX::Linear(ln));
                     }
@@ -636,6 +652,10 @@ pub fn linear_no_bias_x(
 
                 if cfg.quant_method == "nvfp4" {
                     if should_skip_quant_for_module(&module_path, cfg) {
+                        let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
+                        return Ok(LinearX::Linear(ln));
+                    }
+                    if !has_fp4_scale_tensors(&vb) {
                         let ln = linear_no_bias(in_dim, out_dim, vb.clone(), shards, dtype)?;
                         return Ok(LinearX::Linear(ln));
                     }

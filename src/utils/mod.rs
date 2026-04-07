@@ -1434,6 +1434,7 @@ pub fn spawn_runner(
 }
 
 pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
+    #[allow(unused_mut)]
     let mut black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
 
     #[cfg(not(feature = "flashinfer"))]
@@ -1477,6 +1478,8 @@ pub fn get_arch_rope(
         ("mistral3", false),
         ("Gemma3ForConditionalGeneration", false),
         ("Gemma3ForCausalLM", false),
+        ("Llama4ForConditionalGeneration", true),
+        ("llama4", true),
         ("Qwen3_5ForCausalLM", false),
         ("Qwen3_5ForConditionalGeneration", false),
         ("Qwen3_5MoeForCausalLM", false),
@@ -1578,6 +1581,10 @@ pub fn get_arch_rope(
         }
         "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" | "gemma3" => (
             ModelType::Gemma3,
+            "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
+        ),
+        "Llama4ForConditionalGeneration" | "llama4" => (
+            ModelType::LLaMa4,
             "<|start_header_id|>user<|end_header_id|>\n\n {} <|eot_id|>".to_string(),
         ),
         _ => candle_core::bail!("Unsupported architecture: {}", architectures),
