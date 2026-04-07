@@ -252,6 +252,14 @@ pub struct Config {
     pub quantization_config: Option<QuantConfig>,
     pub is_multi_model: Option<bool>,
     pub extra_config_json: Option<String>,
+    // MTP configuration
+    /// Number of MTP hidden layers (Qwen3.5)
+    pub mtp_num_hidden_layers: Option<usize>,
+    /// Number of MTP hidden layers (Qwen3Next)
+    pub num_nextn_predict_layers: Option<usize>,
+    /// MTP speculative decoding tokens (0 = disabled, N = number of speculative tokens)
+    #[serde(default)]
+    pub mtp_num_tokens: usize,
 }
 
 impl Config {
@@ -315,6 +323,8 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
     pub yarn_scaling_factor: Option<f64>,
+    /// MTP speculative decoding tokens (0 = disabled, N = number of speculative tokens)
+    pub mtp_num_tokens: usize,
 }
 
 #[cfg(feature = "python")]
@@ -394,6 +404,9 @@ pub struct EngineConfig {
     pub pd_client_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub yarn_scaling_factor: Option<f64>,
+    /// MTP speculative decoding tokens (0 = disabled, N = number of speculative tokens)
+    #[pyo3(get, set)]
+    pub mtp_num_tokens: usize,
 }
 
 #[cfg(not(feature = "python"))]
@@ -429,6 +442,7 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
+        mtp_num_tokens: usize,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -480,6 +494,7 @@ impl EngineConfig {
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
+            mtp_num_tokens,
         }
     }
 }

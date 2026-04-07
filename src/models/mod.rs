@@ -7,6 +7,7 @@ pub mod layers;
 pub mod llama;
 pub mod llama4;
 pub mod mistral3_vl;
+pub mod mtp;
 pub mod phi4;
 pub mod qwen3;
 pub mod qwen3_5;

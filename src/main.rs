@@ -212,6 +212,7 @@ async fn main() -> Result<()> {
         None, // pd_server_prefix_cache_ratio
         None, // pd_client_prefix_cache_ratio
         args.yarn_scaling_factor,
+        args.mtp_num_tokens, // 0 = disabled, N = number of speculative tokens
     );
 
     let server_port = if args.server || args.ui_server || args.pd_server {

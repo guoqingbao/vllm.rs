@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::models::mtp::{MtpDrafter, Qwen3_5MultiTokenPredictor};
+
 // =============================================================================
 // Hybrid decoder layer: either full attention or GatedDeltaNet
 // =============================================================================
@@ -190,7 +192,7 @@ impl Qwen3_5DecoderLayer {
     }
 }
 
-// =============================================================================
+// =============================================================================`
 // Qwen3.5 causal LM (dense variant)
 // =============================================================================
 
@@ -205,6 +207,8 @@ pub struct Qwen3_5ForCausalLM {
     dtype: DType,
     vocab_size: usize,
     is_qvar_builder: bool,
+    mtp_num_tokens: usize,
+    mtp_predictor: Option<Qwen3_5MultiTokenPredictor>,
 }
 
 impl Qwen3_5ForCausalLM {
@@ -461,6 +465,43 @@ impl Qwen3_5ForCausalLM {
             MambaCache::new(0, 1, 1, 2, 1, 1, 1, conv_cache_dtype, DType::F32, device)?
         };
 
+        let mtp_num_tokens = config.mtp_num_tokens;
+        let mtp_predictor = if mtp_num_tokens > 0 {
+            crate::log_info!(
+                "MTP: loading predictor (mtp_num_tokens={}, mtp_num_hidden_layers={:?})",
+                mtp_num_tokens,
+                config.mtp_num_hidden_layers
+            );
+            let mtp_vb = vb.pp("mtp");
+            let main_embed_vb = if is_qvar_builder {
+                vb.pp(&format!("{}{}", gguf_prefix, key_map["embed_tokens"]))
+            } else {
+                vb.pp(&format!("{}embed_tokens", prefix))
+            };
+            match Qwen3_5MultiTokenPredictor::new(
+                mtp_vb,
+                vb.pp("lm_head"),
+                main_embed_vb,
+                comm.clone(),
+                config,
+                vocab_size,
+                dtype,
+                is_qvar_builder || config.quant.is_some(),
+            ) {
+                Ok(p) => {
+                    crate::log_info!("MTP: predictor loaded successfully");
+                    Some(p)
+                }
+                Err(e) => {
+                    crate::log_warn!("MTP weights not found, disabling MTP: {:?}", e);
+                    None
+                }
+            }
+        } else {
+            crate::log_info!("MTP: disabled (mtp_num_tokens=0)");
+            None
+        };
+
         Ok(Self {
             embed_tokens,
             layers,
@@ -472,6 +513,8 @@ impl Qwen3_5ForCausalLM {
             dtype,
             vocab_size,
             is_qvar_builder,
+            mtp_num_tokens,
+            mtp_predictor,
         })
     }
 
@@ -685,5 +728,57 @@ impl Qwen3_5ForCausalLM {
 
     pub fn dtype(&self) -> DType {
         self.dtype
+    }
+}
+
+impl MtpDrafter for Qwen3_5ForCausalLM {
+    fn mtp_num_draft_tokens(&self) -> usize {
+        if self.mtp_predictor.is_some() {
+            self.mtp_num_tokens
+        } else {
+            0
+        }
+    }
+
+    fn forward_with_hidden(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+    ) -> Result<(Tensor, Tensor)> {
+        let hidden = self.forward_inner(
+            input_ids,
+            positions,
+            kv_caches,
+            input_metadata,
+            false,
+            &None,
+            &None,
+            true,
+        )?;
+
+        let logits = if self.is_qvar_builder {
+            self.lm_head.forward(&hidden)?
+        } else {
+            self.lm_head
+                .forward(&hidden.to_dtype(self.dtype)?)?
+                .to_dtype(DType::F32)?
+        };
+
+        Ok((logits, hidden))
+    }
+
+    fn propose(
+        &self,
+        last_token: u32,
+        last_hidden: &Tensor,
+        position: usize,
+        num_draft_tokens: usize,
+    ) -> Result<Vec<u32>> {
+        self.mtp_predictor
+            .as_ref()
+            .expect("propose called but MTP predictor not loaded")
+            .propose(last_token, last_hidden, position, num_draft_tokens)
     }
 }

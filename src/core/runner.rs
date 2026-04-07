@@ -1,8 +1,8 @@
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
-// src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::linear::set_fp8_linear_is_prefill;
 use crate::models::layers::VarBuilderX;
+use crate::models::mtp::MtpDrafter;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
 #[cfg(all(feature = "cuda", feature = "graph"))]
@@ -90,6 +90,16 @@ pub enum Model {
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
+}
+
+impl Model {
+    fn as_mtp_drafter(&self) -> Option<&dyn MtpDrafter> {
+        match self {
+            Model::Qwen3_5(m) => Some(m.as_ref()),
+            Model::Qwen3_5MoE(m) => Some(m.as_ref()),
+            _ => None,
+        }
+    }
 }
 
 pub enum RunnerType {
@@ -733,7 +743,7 @@ impl ModelRunner {
     }
 
     #[allow(unused)]
-    pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<u32>> {
+    pub fn run(&self, seqs: Seqs, is_prefill: bool) -> Result<Vec<Vec<u32>>> {
         #[cfg(feature = "nvtx")]
         nvtx::range_push!("{}", if is_prefill { "prefill" } else { "decoding" });
         let (input_ids, positions, mut input_metadata) = if is_prefill {
@@ -793,7 +803,7 @@ impl ModelRunner {
                         .replay(&input_ids, &positions, &input_metadata)?,
                 };
                 let output_ids = self.sample(&logits, seqs, is_prefill)?;
-                return Ok(output_ids);
+                return Ok(output_ids.into_iter().map(|t| vec![t]).collect());
             }
         }
 
@@ -859,31 +869,342 @@ impl ModelRunner {
         let images = images.as_ref();
 
         let _ = set_fp8_linear_is_prefill(is_prefill);
-        let logits = crate::model_call!(
-            &self.model,
-            forward,
-            (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
-            {
-                Qwen3 => false,
-                Qwen3MoE => false,
-                Qwen3_5 => false,
-                Qwen3_5MoE => false,
-                LLaMa => false,
-                LLaMa4 => images,
-                Phi4 => false,
-                GLM4 => false,
-                GLM4MoE => false,
-                GLM4MoeLite => false,
-                DeepSeek => false,
-                Mistral3VL => images,
-                Gemma3 => images,
-                Qwen3VL => images,
+
+        let drafter = if !is_prefill {
+            self.model
+                .as_mtp_drafter()
+                .filter(|d| d.mtp_num_draft_tokens() > 0)
+        } else {
+            None
+        };
+
+        let (logits, hidden_for_mtp) = if let Some(d) = drafter {
+            let kv = self.get_kv_cache();
+            let (l, h) =
+                d.forward_with_hidden(&input_ids, &positions, Some(&kv), &input_metadata)?;
+            (l, Some(h))
+        } else {
+            let logits = crate::model_call!(
+                &self.model,
+                forward,
+                (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
+                {
+                    Qwen3 => false, Qwen3MoE => false,
+                    Qwen3_5 => false, Qwen3_5MoE => false,
+                    LLaMa => false, LLaMa4 => images,
+                    Phi4 => false, GLM4 => false,
+                    GLM4MoE => false, GLM4MoeLite => false,
+                    DeepSeek => false, Mistral3VL => images,
+                    Gemma3 => images, Qwen3VL => images,
+                }
+            )?;
+            (logits, None)
+        };
+
+        let mtp_seq_data: Vec<(usize, usize, Vec<u32>)> = if hidden_for_mtp.is_some() {
+            match &seqs {
+                Seqs::SeqRefs(s) => s
+                    .iter()
+                    .map(|x| (x.id(), x.len(), x.block_table().clone()))
+                    .collect(),
+                Seqs::DecodeVec(d) => d
+                    .iter()
+                    .map(|x| (x.id(), x.len(), x.block_table().clone()))
+                    .collect(),
             }
-        )?;
+        } else {
+            vec![]
+        };
+
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
-        #[cfg(feature = "nvtx")]
-        nvtx::range_pop!();
-        Ok(output_ids)
+
+        if let Some(hidden) = hidden_for_mtp {
+            let drafter = self.model.as_mtp_drafter().unwrap();
+            let results = self.run_mtp_speculative(
+                drafter,
+                &output_ids,
+                &hidden,
+                &mtp_seq_data,
+                &input_metadata,
+            )?;
+            #[cfg(feature = "nvtx")]
+            nvtx::range_pop!();
+            Ok(results)
+        } else {
+            #[cfg(feature = "nvtx")]
+            nvtx::range_pop!();
+            Ok(output_ids.into_iter().map(|t| vec![t]).collect())
+        }
+    }
+
+    /// Run MTP speculative decoding: draft tokens via the predictor, then
+    /// verify them in a single batched main-model forward pass.
+    fn run_mtp_speculative(
+        &self,
+        drafter: &dyn MtpDrafter,
+        base_tokens: &[u32],
+        hidden: &Tensor,
+        seq_data: &[(usize, usize, Vec<u32>)],
+        input_metadata: &InputMetadata,
+    ) -> Result<Vec<Vec<u32>>> {
+        let num_draft = drafter.mtp_num_draft_tokens();
+        let mut all_results: Vec<Vec<u32>> = Vec::with_capacity(seq_data.len());
+
+        for (seq_idx, (seq_id, seq_len, block_table)) in seq_data.iter().enumerate() {
+            let base_token = base_tokens[seq_idx];
+            let seq_hidden = if seq_data.len() > 1 {
+                hidden.narrow(0, seq_idx, 1)?
+            } else {
+                hidden.clone()
+            };
+
+            let draft_tokens = drafter.propose(base_token, &seq_hidden, seq_len - 1, num_draft)?;
+
+            if draft_tokens.is_empty() {
+                all_results.push(vec![base_token]);
+                continue;
+            }
+
+            let mut verify_ids = vec![base_token];
+            verify_ids.extend_from_slice(&draft_tokens);
+            let verify_len = verify_ids.len();
+
+            let verify_input_ids = Tensor::from_vec(verify_ids, (verify_len,), &self.device)?;
+            let base_pos = *seq_len as i64;
+            let verify_positions: Vec<i64> = (base_pos..base_pos + verify_len as i64).collect();
+            let verify_positions = Tensor::from_vec(verify_positions, (verify_len,), &self.device)?;
+
+            let verify_metadata = self.build_verify_metadata_from_parts(
+                *seq_id,
+                *seq_len,
+                block_table,
+                verify_len,
+                input_metadata.is_mla,
+                &input_metadata.sequence_ids,
+                &input_metadata.mamba_slot_mapping,
+            )?;
+
+            let kv_cache = self.get_kv_cache();
+            let verify_logits = crate::model_call!(
+                &self.model,
+                forward,
+                (&verify_input_ids, &verify_positions, Some(&kv_cache), &verify_metadata),
+                {
+                    Qwen3 => false, Qwen3MoE => false,
+                    Qwen3_5 => false, Qwen3_5MoE => false,
+                    LLaMa => false,
+                    LLaMa4 => None::<&crate::utils::image::ImageData>,
+                    Phi4 => false, GLM4 => false,
+                    GLM4MoE => false, GLM4MoeLite => false,
+                    DeepSeek => false,
+                    Mistral3VL => None::<&crate::utils::image::ImageData>,
+                    Gemma3 => None::<&crate::utils::image::ImageData>,
+                    Qwen3VL => None::<&crate::utils::image::ImageData>,
+                }
+            )?;
+            drop(kv_cache);
+
+            let accept_result =
+                crate::models::mtp::verify_draft_tokens_greedy(&draft_tokens, &verify_logits)?;
+
+            let mut accepted = Vec::with_capacity(accept_result.accepted_tokens.len() + 2);
+            accepted.push(base_token);
+            accepted.extend_from_slice(&accept_result.accepted_tokens);
+            accepted.push(accept_result.bonus_token);
+            all_results.push(accepted);
+        }
+
+        Ok(all_results)
+    }
+
+    /// Build FlashInfer-compatible prefill metadata for the MTP verification pass.
+    ///
+    /// The verification step runs a prefill-like forward over `verify_len` tokens
+    /// for a single sequence. This must produce the same FlashInfer plan structures
+    /// that `prepare_prefill` would, so that attention kernels can correctly read
+    /// existing KV and write new KV for the speculative positions.
+    #[allow(unused_variables)]
+    fn build_verify_flashinfer_metadata(
+        &self,
+        block_table: &[u32],
+        seq_committed_len: usize,
+        verify_len: usize,
+    ) -> Option<FlashInferMetadata> {
+        if !cfg!(feature = "flashinfer") {
+            return None;
+        }
+
+        let block_size = self.config.block_size;
+        let effective_len = seq_committed_len + verify_len;
+        let num_blocks_needed = if effective_len == 0 {
+            0
+        } else {
+            (effective_len + block_size - 1) / block_size
+        };
+        let num_blocks = std::cmp::min(num_blocks_needed, block_table.len());
+        let bt = &block_table[..num_blocks];
+
+        let indices: Vec<u32> = bt.iter().map(|&x| x as u32).collect();
+        let indptr_host = vec![0u32, indices.len() as u32];
+        let last_len = if effective_len == 0 {
+            0u32
+        } else {
+            ((effective_len - 1) % block_size + 1) as u32
+        };
+        let last_len_host = vec![last_len];
+
+        let kv_len = if indptr_host[1] == 0 {
+            0u32
+        } else {
+            (indptr_host[1] - 1) * block_size as u32 + last_len
+        };
+        let kv_len_arr_host = vec![kv_len];
+
+        let cu_seqlens_q_host = vec![0u32, verify_len as u32];
+        let batch_indices_vec: Vec<u32> = vec![0u32; verify_len];
+        let positions_vec: Vec<u32> =
+            (seq_committed_len as u32..(seq_committed_len + verify_len) as u32).collect();
+
+        #[allow(unused_mut)]
+        let mut prefill_plan_info: Option<Vec<i64>> = None;
+        #[allow(unused_mut)]
+        let mut mla_prefill_plan_info: Option<Vec<i64>> = None;
+
+        #[cfg(feature = "flashinfer")]
+        {
+            if self.is_mla_model() {
+                if let Some(params) = self.flashinfer_kv_params {
+                    mla_prefill_plan_info = attention_rs::mla::mla_prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        1,
+                        params.num_qo_heads,
+                        params.head_dim,
+                        true,
+                    )
+                    .ok();
+                }
+            } else {
+                if let Some(params) = self.flashinfer_kv_params {
+                    prefill_plan_info = attention_rs::flashinfer::prefill_plan(
+                        &self.device,
+                        &cu_seqlens_q_host,
+                        &indptr_host,
+                        &kv_len_arr_host,
+                        verify_len as u32,
+                        1,
+                        params.num_qo_heads,
+                        params.num_kv_heads,
+                        params.head_dim,
+                        params.page_size,
+                        params.out_dtype,
+                        None,
+                    )
+                    .ok();
+                }
+            }
+        }
+
+        let indptr_len = indptr_host.len();
+        let indices_len = indices.len();
+        let last_len_vec_len = last_len_host.len();
+        let batch_len = batch_indices_vec.len();
+        let pos_len = positions_vec.len();
+
+        let indptr = Tensor::from_vec(indptr_host.clone(), (indptr_len,), &self.device).ok()?;
+        let indices_t = Tensor::from_vec(indices, (indices_len,), &self.device).ok()?;
+        let last_len_t =
+            Tensor::from_vec(last_len_host.clone(), (last_len_vec_len,), &self.device).ok()?;
+        let batch_indices = Tensor::from_vec(batch_indices_vec, (batch_len,), &self.device).ok()?;
+        let positions_t = Tensor::from_vec(positions_vec, (pos_len,), &self.device).ok()?;
+
+        Some(FlashInferMetadata {
+            indptr,
+            indptr_host,
+            indices: indices_t,
+            last_len: last_len_t,
+            last_len_host: Some(last_len_host),
+            kv_len_arr_host: Some(kv_len_arr_host),
+            total_num_rows: Some(verify_len as u32),
+            batch_indices: Some(batch_indices),
+            positions: Some(positions_t),
+            use_cuda_graph: false,
+            decode_plan_info: None,
+            prefill_plan_info,
+            mla_decode_plan_info: None,
+            mla_prefill_plan_info,
+        })
+    }
+
+    /// Build verification `InputMetadata` from raw sequence data.
+    fn build_verify_metadata_from_parts(
+        &self,
+        _seq_id: usize,
+        seq_len: usize,
+        block_table: &[u32],
+        verify_len: usize,
+        is_mla: bool,
+        sequence_ids: &Option<Vec<usize>>,
+        mamba_slot_mapping: &Option<Tensor>,
+    ) -> Result<InputMetadata> {
+        let block_size = self.config.block_size;
+
+        let mut slot_mapping = Vec::with_capacity(verify_len);
+        for offset in 0..verify_len {
+            let token_pos = seq_len + offset;
+            let block_idx = token_pos / block_size;
+            let block_offset = token_pos % block_size;
+            if block_idx < block_table.len() {
+                slot_mapping
+                    .push((block_table[block_idx] as usize * block_size + block_offset) as i64);
+            } else {
+                candle_core::bail!(
+                    "MTP verify: block_idx {} >= block_table.len() {} at offset {}. \
+                     Blocks must be pre-allocated before MTP runs.",
+                    block_idx,
+                    block_table.len(),
+                    offset
+                );
+            }
+        }
+        let slot_mapping_t = Tensor::from_vec(slot_mapping, (verify_len,), &self.device)?;
+
+        let context_len = (seq_len + verify_len) as u32;
+        let context_lens = Tensor::from_vec(vec![context_len], (1,), &self.device)?;
+
+        let num_blocks = (seq_len + verify_len + block_size - 1) / block_size;
+        let padded_len = num_blocks.max(1);
+        let mut bt_padded = vec![0u32; padded_len];
+        for (i, &b) in block_table.iter().take(padded_len).enumerate() {
+            bt_padded[i] = b;
+        }
+        let block_tables = Tensor::from_vec(bt_padded, (1, padded_len), &self.device)?;
+
+        let cu_seqlens_q = Tensor::from_vec(vec![0u32, verify_len as u32], (2,), &self.device)?;
+        let cu_seqlens_k = Tensor::from_vec(vec![0u32, context_len], (2,), &self.device)?;
+
+        let flashinfer_metadata =
+            self.build_verify_flashinfer_metadata(block_table, seq_len, verify_len);
+
+        Ok(InputMetadata {
+            is_prefill: true,
+            is_mla,
+            sequence_ids: sequence_ids.clone(),
+            mamba_slot_mapping: mamba_slot_mapping.clone(),
+            slot_mapping: slot_mapping_t,
+            block_tables: Some(block_tables),
+            context_lens: Some(context_lens),
+            cu_seqlens_q: Some(cu_seqlens_q),
+            cu_seqlens_k: Some(cu_seqlens_k),
+            max_seqlen_q: verify_len,
+            max_seqlen_k: context_len as usize,
+            max_context_len: context_len as usize,
+            disable_flash_attn: None,
+            seqlens: Some(vec![verify_len as u32]),
+            flashinfer_metadata,
+        })
     }
 
     pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {

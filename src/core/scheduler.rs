@@ -444,14 +444,21 @@ impl Scheduler {
     }
 
     /// Postprocess output tokens and modify sequences by indexes
-    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[u32]) {
+    pub fn postprocess(&mut self, ids: &[usize], output_ids: &[Vec<u32>]) {
         for (i, &idx) in ids.iter().enumerate() {
             // Sequence may swapped out
             if idx >= self.running.len() {
                 continue;
             }
+            let tokens = &output_ids[i];
+            if tokens.len() > 1 {
+                for &tok in tokens {
+                    self.postprocess_single(idx, tok);
+                }
+                continue;
+            }
             let seq_id = self.running[idx].id;
-            let token = output_ids[i];
+            let token = tokens[0];
 
             // Since all reqeusts in PD server are prefill request, we need to finish and transfer
             // the kvcache in the first postprocess for each request.
@@ -571,6 +578,95 @@ impl Scheduler {
                     self.block_manager
                         .capture_mamba_prefix_state(seq, seq.len());
                 }
+            }
+        }
+    }
+
+    /// Pre-allocate KV cache blocks for MTP speculative tokens.
+    ///
+    /// Before MTP runs, each sequence needs enough blocks to hold
+    /// `seq.len() + extra_tokens` tokens. Without this, the verification
+    /// forward would try to write KV into non-existent block slots.
+    pub fn pre_allocate_mtp_blocks(&mut self, ids: &[usize], extra_tokens: usize) {
+        for &idx in ids {
+            if idx >= self.running.len() {
+                continue;
+            }
+            let seq = &mut self.running[idx];
+            let needed_len = seq.len() + extra_tokens;
+            let needed_blocks = needed_len.div_ceil(self.cfg.block_size);
+            while seq.block_table.len() < needed_blocks {
+                if let Some(block_id) = self.block_manager.alloc_free_block() {
+                    seq.block_table.push(block_id as u32);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Process a single token for one sequence (used by MTP multi-token path).
+    /// Handles EOS, stop sequences, max length, and block allocation like
+    /// `postprocess` but for exactly one (idx, token) pair.
+    pub fn postprocess_single(&mut self, idx: usize, token: u32) {
+        if idx >= self.running.len() {
+            return;
+        }
+        let _seq_id = self.running[idx].id;
+
+        // Already finished from a previous token in this MTP batch
+        if self.running[idx].is_finished() {
+            return;
+        }
+
+        if self.running[idx].sampling_params.mcp_mode.is_some() {
+            let is_end = self.is_tool_call_end(token, idx);
+            if is_end {
+                let seq = &mut self.running[idx];
+                seq.append_token(token);
+                seq.is_tool_call_end = true;
+                seq.status = SequenceStatus::Finished;
+                self.block_manager
+                    .capture_mamba_prefix_state(seq, seq.len());
+                self.block_manager.cache_sequence(seq);
+                self.block_manager.deallocate(seq);
+                return;
+            }
+        }
+
+        let matched_stop_sequence_idx = self.stop_sequence_match_index(token, &self.running[idx]);
+        let hit_stop_sequence = matched_stop_sequence_idx.is_some();
+        let seq = &mut self.running[idx];
+
+        if hit_stop_sequence
+            || self.eos_token_id.contains(&token)
+            || seq.output_len() >= seq.sampling_params.max_tokens.unwrap_or(16384)
+            || seq.len() > self.cfg.max_num_batched_tokens
+        {
+            if hit_stop_sequence {
+                seq.hit_stop_sequence = true;
+                seq.stop_sequence = matched_stop_sequence_idx.and_then(|stop_idx| {
+                    seq.sampling_params
+                        .stop_sequences
+                        .as_ref()
+                        .and_then(|stops| stops.get(stop_idx))
+                        .cloned()
+                });
+            }
+            seq.status = SequenceStatus::Finished;
+            self.block_manager
+                .capture_mamba_prefix_state(seq, seq.len());
+            self.block_manager.cache_sequence(seq);
+            self.block_manager.deallocate(seq);
+        } else {
+            seq.append_token(token);
+            // Allocate a new block if needed
+            if seq.len() % self.cfg.block_size == 1 && seq.len() > 1 {
+                let _ = self.block_manager.may_append(seq);
+            }
+            if seq.len() % self.cfg.block_size == 0 {
+                self.block_manager
+                    .capture_mamba_prefix_state(seq, seq.len());
             }
         }
     }

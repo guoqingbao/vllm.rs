@@ -454,6 +454,9 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         quantization_config: None,
         is_multi_model: None,
         extra_config_json,
+        mtp_num_tokens: 0, // 0 = disabled by default
+        mtp_num_hidden_layers: None,
+        num_nextn_predict_layers: None,
     };
 
     Ok(cfg)
@@ -1062,6 +1065,22 @@ pub fn init_config_tokenizer(
         }
 
         config.quant = econfig.isq.clone();
+        config.mtp_num_tokens = if econfig.mtp_num_tokens > 0 {
+            econfig.mtp_num_tokens
+        } else if config.mtp_num_hidden_layers.unwrap_or(0) > 0
+            || config.num_nextn_predict_layers.unwrap_or(0) > 0
+        {
+            crate::log_info!(
+                "MTP auto-enabled: model has {} MTP hidden layers, defaulting to 8 draft token",
+                config
+                    .mtp_num_hidden_layers
+                    .or(config.num_nextn_predict_layers)
+                    .unwrap_or(0)
+            );
+            8
+        } else {
+            0
+        };
         let tokenizer_config_path = model_pathes.get_tokenizer_config_filename();
         let mut config_tokenizer: TokenizerConfig = {
             match std::fs::read(tokenizer_config_path).map_err(candle_core::Error::wrap) {
@@ -1204,6 +1223,20 @@ pub fn init_config_tokenizer(
                 }
             }
             apply_runtime_rope_overrides(&mut config, econfig.yarn_scaling_factor);
+            config.mtp_num_tokens =
+                if econfig.mtp_num_tokens > 0 {
+                    econfig.mtp_num_tokens
+                } else if config.mtp_num_hidden_layers.unwrap_or(0) > 0
+                    || config.num_nextn_predict_layers.unwrap_or(0) > 0
+                {
+                    crate::log_info!(
+                    "MTP auto-enabled: model has {} MTP hidden layers, defaulting to 8 draft token",
+                    config.mtp_num_hidden_layers.or(config.num_nextn_predict_layers).unwrap_or(0)
+                );
+                    8
+                } else {
+                    0
+                };
             config
         };
 

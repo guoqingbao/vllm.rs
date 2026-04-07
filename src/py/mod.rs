@@ -271,7 +271,8 @@ impl EngineConfig {
         fp8_kvcache=None, server_mode=None, cpu_mem_fold=None, kv_fraction=None, mamba_fraction=None, pd_config=None,
         mcp_command=None, mcp_config=None, mcp_args=None,
         tool_prompt_template=None,
-        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None, yarn_scaling_factor=None,))]
+        pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None, yarn_scaling_factor=None,
+        mtp_num_tokens=0,))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -303,6 +304,7 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
+        mtp_num_tokens: usize, // 0 = disabled, N = number of speculative tokens
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -347,6 +349,7 @@ impl EngineConfig {
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
+            mtp_num_tokens,
         }
     }
 }

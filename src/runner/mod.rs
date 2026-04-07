@@ -181,8 +181,9 @@ pub enum MessageType {
     /// Sent by main process to request inference on sequences.
     RunDecode((Vec<DecodeSequence>, bool)),
 
-    /// Sent by runner in response to `Run` with generated token IDs.
-    RunResponse(Vec<u32>),
+    /// Sent by runner in response to `Run` with per-sequence token lists.
+    /// Each inner Vec contains accepted tokens (length 1 normally, 1..K+1 with MTP).
+    RunResponse(Vec<Vec<u32>>),
 
     /// Sent by main process to request embedding on sequences.
     RunEmbed((Vec<Sequence>, EmbeddingStrategy)),

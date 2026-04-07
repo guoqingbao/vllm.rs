@@ -772,12 +772,17 @@ impl LLMEngine {
                 }
             }
 
-            // Get immutable references to scheduled sequences for model_runner
+            // Pre-allocate extra KV cache blocks when MTP is enabled so
+            // the runner has room for speculative positions.
+            if !is_prefill && self.econfig.mtp_num_tokens > 0 {
+                self.scheduler
+                    .pre_allocate_mtp_blocks(&scheduled_ids, self.econfig.mtp_num_tokens + 1);
+            }
+
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
             let output_ids = match &mut *self.runners.write() {
                 RunnerType::Thread(model_runner) => {
-                    // Run model on the scheduled sequences in the main thread
                     model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
                 }
                 RunnerType::Process(ref mut runner_streams) => {
@@ -797,7 +802,7 @@ impl LLMEngine {
                         .map(|s| s.try_clone().expect("clone failed"))
                         .collect();
 
-                    let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
+                    let all_outputs: Result<Vec<Vec<Vec<u32>>>> = cloned_streams
                         .into_par_iter()
                         .map(|mut stream| {
                             let msg = request.clone();
@@ -820,25 +825,22 @@ impl LLMEngine {
                         .collect();
 
                     let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                    // Only run postprocess once after all runners finish (use first result)
                     if let Some(output_ids) = all_outputs.first() {
                         output_ids.clone()
-                        // self.scheduler.postprocess(&scheduled_ids, output_ids);
                     } else {
                         candle_core::bail!("No output ids received from model runners");
                     }
                 }
             };
-            // Postprocess sequences by modifying them inside the scheduler
             if is_prefill {
                 let (indices, finished_indices) =
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
                 if indices.is_empty() {
-                    //chunked prefill, no finished
                     self.check_canceled(None);
                     return Ok(0);
                 } else {
-                    let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
+                    let output_ids: Vec<Vec<u32>> =
+                        indices.iter().map(|&i| output_ids[i].clone()).collect();
                     self.scheduler.postprocess(&finished_indices, &output_ids);
                     DecodedIds(Either::Left(finished_indices))
                 }
@@ -956,14 +958,19 @@ impl LLMEngine {
                         }
                     }
 
+                    let prev_len = self.decode_length.get(&seq_id).copied().unwrap_or(0);
+                    let cur_len = s.output_len();
+                    let new_count = cur_len.saturating_sub(prev_len);
+
                     if let Some(length) = self.decode_length.get_mut(&seq_id) {
-                        *length = s.output_len();
+                        *length = cur_len;
                     }
 
                     let mut token_ids =
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
-                            // Special case, the real first token is generated on PD server
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
+                        } else if new_count > 1 {
+                            s.output_ids[cur_len - new_count..].to_vec()
                         } else {
                             vec![s.last_token]
                         };

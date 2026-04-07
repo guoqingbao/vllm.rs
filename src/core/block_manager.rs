@@ -222,6 +222,14 @@ impl BlockManager {
         Ok(())
     }
 
+    /// Try to allocate a single free block, returning its ID.
+    /// Returns `None` if no free blocks are available.
+    pub fn alloc_free_block(&mut self) -> Option<usize> {
+        let block_id = self.free_block_ids.pop_front()?;
+        self.allocate_block(block_id);
+        Some(block_id)
+    }
+
     pub fn ensure_allocate(&mut self, seq: &mut Sequence) -> Result<()> {
         let mut new_blocks = Vec::new();
         for i in seq.block_table.len()..seq.num_blocks() {
