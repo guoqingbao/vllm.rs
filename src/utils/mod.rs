@@ -1434,6 +1434,7 @@ pub fn spawn_runner(
 }
 
 pub fn is_no_cuda_graph_supprt(architectures: String) -> bool {
+    #[allow(unused_mut)]
     let mut black_list = vec!["Phi3ForCausalLM", "Phi4ForCausalLM", "phi3", "phi4"];
 
     #[cfg(not(feature = "flashinfer"))]

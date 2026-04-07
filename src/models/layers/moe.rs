@@ -378,6 +378,17 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
     }
 
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+        Self::new_with_gate(cfg, vb.pp("gate"), vb.pp("experts"), &vb, comm, dtype)
+    }
+
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        bias_vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
@@ -388,14 +399,14 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         let gate = linear_no_bias(
             cfg.hidden_size,
             num_experts,
-            vb.pp("gate"),
+            gate_vb,
             Shard::default(),
             &None,
             &None,
             dtype,
         )?;
 
-        let (gate_w, up_w, down_w) = Self::load_packed(cfg, vb.pp("experts"), comm.clone())?;
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, experts_vb, comm.clone())?;
         let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
@@ -407,7 +418,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             act: candle_nn::Activation::Silu,
             routing: MoeRouting::from_moe_cfg(
                 moe_cfg,
-                try_load_e_score_correction_bias(&vb, num_experts),
+                try_load_e_score_correction_bias(bias_vb, num_experts),
             ),
             all_reduce: AllReduce::new(comm),
             world_size,
@@ -1029,6 +1040,26 @@ impl FusedMoeFp8 {
         dtype: DType,
         quant_cfg: &QuantConfig,
     ) -> Result<Self> {
+        Self::new_with_gate(
+            cfg,
+            vb.pp("gate"),
+            vb.pp("experts"),
+            &vb,
+            comm,
+            dtype,
+            quant_cfg,
+        )
+    }
+
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        bias_vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+        quant_cfg: &QuantConfig,
+    ) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
@@ -1045,14 +1076,12 @@ impl FusedMoeFp8 {
         let gate = linear_no_bias(
             cfg.hidden_size,
             num_experts,
-            vb.pp("gate"),
+            gate_vb,
             Shard::default(),
             &None,
             &None,
             dtype,
         )?;
-
-        let experts_vb = vb.pp("experts");
 
         let (
             gate_experts,
@@ -1253,7 +1282,7 @@ impl FusedMoeFp8 {
             act: candle_nn::Activation::Silu,
             routing: MoeRouting::from_moe_cfg(
                 moe_cfg,
-                try_load_e_score_correction_bias(&vb, num_experts),
+                try_load_e_score_correction_bias(bias_vb, num_experts),
             ),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
@@ -1360,20 +1389,29 @@ impl FusedMoeMxfp4 {
     }
 
     pub fn new(cfg: &Config, vb: VarBuilderX, comm: Rc<Comm>, dtype: DType) -> Result<Self> {
+        Self::new_with_gate(cfg, vb.pp("gate"), vb.pp("experts"), &vb, comm, dtype)
+    }
+
+    pub fn new_with_gate(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        bias_vb: &VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
         let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
         let num_experts = moe_cfg.num_experts.unwrap();
 
         let gate = linear_no_bias(
             cfg.hidden_size,
             num_experts,
-            vb.pp("gate"),
+            gate_vb,
             Shard::default(),
             &cfg.quantization_config,
             &None,
             dtype,
         )?;
-
-        let experts_vb = vb.pp("experts");
 
         let mut gate_blocks_vec = Vec::new();
         let mut gate_scales_vec = Vec::new();
@@ -1471,7 +1509,7 @@ impl FusedMoeMxfp4 {
             act: candle_nn::Activation::Silu,
             routing: MoeRouting::from_moe_cfg(
                 moe_cfg,
-                try_load_e_score_correction_bias(&vb, num_experts),
+                try_load_e_score_correction_bias(bias_vb, num_experts),
             ),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),

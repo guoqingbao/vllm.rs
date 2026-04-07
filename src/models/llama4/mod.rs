@@ -5,7 +5,9 @@ use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::FusedMoeNvfp4;
+use crate::models::layers::moe::{
+    FusedMoe, FusedMoeFp8, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4, FusedMoeNvfp4,
+};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, ScalingRotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -15,7 +17,7 @@ use crate::utils::progress::ProgressLike;
 use attention_rs::ops::NonZeroOp;
 use attention_rs::InputMetadata;
 use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::{Activation, Module};
+use candle_nn::Module;
 use config::{Llama4Config, TextConfig};
 use parking_lot::RwLock;
 use std::iter::zip;
@@ -27,19 +29,49 @@ use vision::Llama4VisionModel;
 // Llama4 MoE with shared expert and sigmoid routing
 // ---------------------------------------------------------------------------
 
-enum Llama4Experts {
-    Dense {
-        router: ReplicatedLinear,
-        gate_up_w: Tensor,
-        down_w: Tensor,
-        w_size_n: usize,
-        topk: usize,
-    },
-    Nvfp4(FusedMoeNvfp4),
+enum Llama4RoutedExperts {
+    FusedMoe(FusedMoe),
+    FusedMoeGGUF(FusedMoeGGUF),
+    FusedMoeISQ(FusedMoeISQ),
+    FusedMoeFp8(FusedMoeFp8),
+    FusedMoeMxfp4(FusedMoeMxfp4),
+    FusedMoeNvfp4(FusedMoeNvfp4),
+}
+
+impl Llama4RoutedExperts {
+    fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
+        match self {
+            Self::FusedMoe(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeFp8(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeMxfp4(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeNvfp4(m) => m.forward(xs, is_prefill),
+        }
+    }
+}
+
+fn llama4_moe_config(text_cfg: &TextConfig) -> MoEConfig {
+    MoEConfig {
+        moe_intermediate_size: text_cfg.intermediate_size,
+        shared_expert_intermediate_size: None,
+        num_experts: Some(text_cfg.num_local_experts),
+        mlp_only_layers: None,
+        decoder_sparse_step: None,
+        norm_topk_prob: false,
+        num_experts_per_tok: text_cfg.num_experts_per_tok,
+        first_k_dense_replace: None,
+        n_shared_experts: None,
+        routed_scaling_factor: None,
+        n_group: None,
+        topk_group: None,
+        scoring_func: Some("sigmoid".to_string()),
+        topk_method: None,
+    }
 }
 
 struct Llama4TextMoe {
-    experts: Llama4Experts,
+    experts: Llama4RoutedExperts,
     shared_expert: MLP,
 }
 
@@ -51,94 +83,73 @@ impl Llama4TextMoe {
         text_cfg: &TextConfig,
         dtype: DType,
     ) -> Result<Self> {
-        let is_nvfp4 = config
-            .quantization_config
-            .as_ref()
-            .map_or(false, |q| q.quant_method == "nvfp4");
+        let moe_cfg = llama4_moe_config(text_cfg);
+        let mut moe_config = config.clone();
+        moe_config.moe_cfg = Some(moe_cfg);
 
-        let experts = if is_nvfp4 {
-            let moe_cfg = MoEConfig {
-                moe_intermediate_size: text_cfg.intermediate_size,
-                shared_expert_intermediate_size: None,
-                num_experts: Some(text_cfg.num_local_experts),
-                mlp_only_layers: None,
-                decoder_sparse_step: None,
-                norm_topk_prob: false,
-                num_experts_per_tok: text_cfg.num_experts_per_tok,
-                first_k_dense_replace: None,
-                n_shared_experts: None,
-                routed_scaling_factor: None,
-                n_group: None,
-                topk_group: None,
-                scoring_func: None,
-                topk_method: None,
-            };
-            let mut nvfp4_cfg = config.clone();
-            nvfp4_cfg.moe_cfg = Some(moe_cfg);
-            let mut fused = FusedMoeNvfp4::new_with_gate(
-                &nvfp4_cfg,
-                vb.pp("router"),
-                vb.pp("experts"),
+        let is_qvar_builder = vb.is_qvar_builder();
+
+        let experts = if is_qvar_builder {
+            Llama4RoutedExperts::FusedMoeGGUF(FusedMoeGGUF::new(
+                &moe_config,
+                vb.clone(),
                 comm.clone(),
                 dtype,
-            )?;
-            fused.set_sigmoid_routing();
-            fused.set_apply_router_weight_on_input(true);
-            Llama4Experts::Nvfp4(fused)
-        } else {
-            let router = ReplicatedLinear::load_no_bias(
-                config.hidden_size,
-                text_cfg.num_local_experts,
-                vb.pp("router"),
-                &None,
-                &None,
-                dtype,
-            )?;
-            let experts_vb = vb.pp("experts");
-            let n = text_cfg.num_local_experts;
-            let inter = text_cfg.intermediate_size;
-            let hidden = config.hidden_size;
-            let (gate_up_w, down_w) = match &experts_vb.0 {
-                either::Either::Left(svb) => {
-                    if svb.contains_tensor("gate_up_proj") {
-                        // gate_up_proj [E, hidden, 2*inter] -> transpose -> [E, 2*inter, hidden]
-                        let gate_up_w = svb
-                            .get((n, hidden, inter * 2), "gate_up_proj")?
-                            .t()?
-                            .contiguous()?;
-                        // down_proj [E, inter, hidden] -> transpose -> [E, hidden, inter]
-                        let down_w = svb
-                            .get((n, inter, hidden), "down_proj")?
-                            .t()?
-                            .contiguous()?;
-                        (gate_up_w, down_w)
-                    } else {
-                        let mut gate_v = Vec::new();
-                        let mut up_v = Vec::new();
-                        let mut down_v = Vec::new();
-                        for i in 0..n {
-                            let ev = svb.pp(i.to_string());
-                            gate_v.push(ev.pp("gate_proj").get((inter, hidden), "weight")?);
-                            up_v.push(ev.pp("up_proj").get((inter, hidden), "weight")?);
-                            down_v.push(ev.pp("down_proj").get((hidden, inter), "weight")?);
-                        }
-                        let gate = Tensor::stack(&gate_v, 0)?;
-                        let up = Tensor::stack(&up_v, 0)?;
-                        let gate_up_w = Tensor::cat(&[&gate, &up], 1)?;
-                        let down_w = Tensor::stack(&down_v, 0)?;
-                        (gate_up_w, down_w)
-                    }
-                }
-                _ => candle_core::bail!("Llama4 Dense MoE requires safetensors VarBuilder"),
-            };
-            let w_size_n = gate_up_w.dim(1)? / 2;
-            Llama4Experts::Dense {
-                router,
-                gate_up_w,
-                down_w,
-                w_size_n,
-                topk: text_cfg.num_experts_per_tok,
+            )?)
+        } else if let Some(quant_config) = &config.quantization_config {
+            if quant_config.quant_method == "fp8" {
+                Llama4RoutedExperts::FusedMoeFp8(FusedMoeFp8::new_with_gate(
+                    &moe_config,
+                    vb.pp("router"),
+                    vb.pp("experts"),
+                    &vb,
+                    comm.clone(),
+                    dtype,
+                    quant_config,
+                )?)
+            } else if quant_config.quant_method == "mxfp4" {
+                Llama4RoutedExperts::FusedMoeMxfp4(FusedMoeMxfp4::new_with_gate(
+                    &moe_config,
+                    vb.pp("router"),
+                    vb.pp("experts"),
+                    &vb,
+                    comm.clone(),
+                    dtype,
+                )?)
+            } else if quant_config.quant_method == "nvfp4" {
+                let mut fused = FusedMoeNvfp4::new_with_gate(
+                    &moe_config,
+                    vb.pp("router"),
+                    vb.pp("experts"),
+                    comm.clone(),
+                    dtype,
+                )?;
+                fused.set_sigmoid_routing();
+                fused.set_apply_router_weight_on_input(true);
+                Llama4RoutedExperts::FusedMoeNvfp4(fused)
+            } else {
+                candle_core::bail!(
+                    "Unsupported quantization for Llama4 MoE: {} \
+                     (use unquantized, gguf, fp8, mxfp4, or nvfp4)",
+                    quant_config.quant_method
+                );
             }
+        } else if config.quant.is_some() {
+            Llama4RoutedExperts::FusedMoeISQ(FusedMoeISQ::new(
+                &moe_config,
+                vb.clone(),
+                comm.clone(),
+                dtype,
+            )?)
+        } else {
+            Llama4RoutedExperts::FusedMoe(FusedMoe::new_with_gate(
+                &moe_config,
+                vb.pp("router"),
+                vb.pp("experts"),
+                &vb,
+                comm.clone(),
+                dtype,
+            )?)
         };
 
         let shared_expert = MLP::new(
@@ -165,58 +176,7 @@ impl Llama4TextMoe {
         let hidden_dim = *orig_shape.dims().last().unwrap();
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
-        let routed_output = match &self.experts {
-            Llama4Experts::Nvfp4(fused_moe) => fused_moe.forward(&xs_flat, false)?,
-            Llama4Experts::Dense {
-                router,
-                gate_up_w,
-                down_w,
-                w_size_n,
-                topk,
-            } => {
-                let router_logits = router.forward(&xs_flat)?.to_dtype(DType::F32)?;
-
-                let topk_ids =
-                    router_logits
-                        .arg_sort_last_dim(false)?
-                        .narrow(D::Minus1, 0, *topk)?;
-                let sigmoid_weights = (router_logits.neg()?.exp()? + 1.0)?.recip()?;
-                let topk_weights = sigmoid_weights.gather(&topk_ids, D::Minus1)?;
-                let topk_ids = topk_ids.to_dtype(DType::U32)?;
-
-                let (expert_ids, sorted_token_ids) = topk_ids.flatten_all()?.sort_last_dim(true)?;
-
-                let topk_weights = topk_weights.to_dtype(xs.dtype())?;
-                let xs_weighted = xs_flat.broadcast_mul(&topk_weights)?;
-
-                let gate_up = attention_rs::moe::moe_gemm(
-                    &xs_weighted,
-                    gate_up_w,
-                    &None,
-                    &sorted_token_ids,
-                    &expert_ids,
-                    *topk,
-                    false,
-                )?;
-                let gate = gate_up.narrow(D::Minus1, 0, *w_size_n)?.contiguous()?;
-                let up = gate_up
-                    .narrow(D::Minus1, *w_size_n, *w_size_n)?
-                    .contiguous()?;
-                let down_inputs = (up * Activation::Silu.forward(&gate)?)?;
-
-                attention_rs::moe::moe_gemm(
-                    &down_inputs,
-                    down_w,
-                    &None,
-                    &sorted_token_ids,
-                    &expert_ids,
-                    *topk,
-                    false,
-                )?
-                .reshape((xs_flat.dim(0)?, *topk, hidden_dim))?
-                .sum(1)?
-            }
-        };
+        let routed_output = self.experts.forward(&xs_flat, false)?;
 
         let routed_output = routed_output.reshape(&orig_shape)?;
         let shared_output = self.shared_expert.forward(xs)?;

@@ -61,7 +61,7 @@
 
 ## 🧠 支持的模型架构
 
-* ✅ LLaMa 系列（LLaMa2、LLaMa3, IQuest-Coder）
+* ✅ LLaMa 系列（LLaMa2、LLaMa3, LLaMa4, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）
 * ✅ Qwen2/Qwen3 Moe 系列
 * ✅ Qwen3-Next 系列
@@ -513,7 +513,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
-* [ ] 支持更多模型类型（LLaMa 4, Kimi K2 Thinking等）
+* [ ] 支持更多模型类型（MiniMax M2.5, Kimi K2等）
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）
