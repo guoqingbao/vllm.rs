@@ -303,6 +303,7 @@ impl Gemma4DecoderLayer {
                     config,
                     vb.pp("router").pp("proj").clone(),
                     vb.pp("experts").clone(),
+                    &vb,
                     comm.clone(),
                     dtype,
                 )?)
@@ -311,6 +312,7 @@ impl Gemma4DecoderLayer {
                     config,
                     vb.pp("router").pp("proj").clone(),
                     vb.pp("experts").clone(),
+                    &vb,
                     comm.clone(),
                     dtype,
                 )?)

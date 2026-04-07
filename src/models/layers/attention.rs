@@ -601,6 +601,7 @@ impl Attention {
             is_qvar_builder,
             qk_l2_norm: false,
             v_norm_eps,
+            k_eq_v,
         })
     }
 

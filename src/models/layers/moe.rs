@@ -430,43 +430,6 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         })
     }
 
-    pub fn new_with_gate(
-        cfg: &Config,
-        gate_vb: VarBuilderX,
-        experts_vb: VarBuilderX,
-        comm: Rc<Comm>,
-        dtype: DType,
-    ) -> Result<Self> {
-        let moe_cfg = cfg.moe_cfg.as_ref().expect("MoE config is not available!");
-        let num_experts = moe_cfg.num_experts.unwrap();
-
-        let gate = linear_no_bias(
-            cfg.hidden_size,
-            num_experts,
-            gate_vb,
-            Shard::default(),
-            &None,
-            &None,
-            dtype,
-        )?;
-
-        let (gate_w, up_w, down_w) = Self::load_packed(cfg, experts_vb, comm.clone())?;
-        let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
-        let world_size = comm.world_size();
-        let w_size_n = gate_up_w.dim(1)? / 2;
-        Ok(Self {
-            gate,
-            gate_up_w,
-            down_w,
-            w_size_n,
-            act: candle_nn::Activation::Silu,
-            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
-            all_reduce: AllReduce::new(comm),
-            world_size,
-            dtype,
-        })
-    }
-
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
@@ -1072,6 +1035,7 @@ impl FusedMoeISQ {
         cfg: &Config,
         gate_vb: VarBuilderX,
         experts_vb: VarBuilderX,
+        bias_vb: &VarBuilderX,
         comm: Rc<Comm>,
         dtype: DType,
     ) -> Result<Self> {
@@ -1123,7 +1087,10 @@ impl FusedMoeISQ {
             up_experts,
             down_experts,
             act: candle_nn::Activation::Silu,
-            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
+            routing: MoeRouting::from_moe_cfg(
+                moe_cfg,
+                try_load_e_score_correction_bias(bias_vb, num_experts),
+            ),
             all_reduce: AllReduce::new(comm),
             world_size,
             dtype,
