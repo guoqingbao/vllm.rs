@@ -38,6 +38,7 @@ pub struct Attention {
     is_qwen35_or_next: bool,
     is_qvar_builder: bool,
     qk_l2_norm: bool,
+    v_norm_eps: Option<f64>,
 }
 
 impl Attention {
@@ -200,6 +201,7 @@ impl Attention {
         dtype: DType,
         quant_cfg: &Option<crate::utils::config::QuantConfig>,
         quant: &Option<String>,
+        k_eq_v: bool,
     ) -> Result<Option<QkvProjection>> {
         if vb.is_qvar_builder() || quant.is_some() {
             return Ok(None);
@@ -208,7 +210,11 @@ impl Attention {
         let q_shard = shard(0, comm.rank(), comm.world_size());
         let q_vb = vb.pp("q_proj");
         let k_vb = vb.pp("k_proj");
-        let v_vb = vb.pp("v_proj");
+        let v_vb = if k_eq_v {
+            vb.pp("k_proj")
+        } else {
+            vb.pp("v_proj")
+        };
 
         let is_fp8_quant = quant_cfg
             .as_ref()
@@ -352,6 +358,26 @@ impl Attention {
         sliding_window: Option<usize>,
         dtype: DType,
     ) -> Result<Self> {
+        Self::new_with_options(
+            vb,
+            comm,
+            config,
+            attention_scale,
+            sliding_window,
+            dtype,
+            false,
+        )
+    }
+
+    pub fn new_with_options(
+        vb: VarBuilderX,
+        comm: Rc<Comm>,
+        config: &Config,
+        attention_scale: Option<f32>,
+        sliding_window: Option<usize>,
+        dtype: DType,
+        k_eq_v: bool,
+    ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads;
@@ -393,6 +419,8 @@ impl Attention {
         let no_per_head_norm_models: Vec<String> = vec![
             "Gemma3ForConditionalGeneration",
             "Gemma3ForCausalLM",
+            "Gemma4ForConditionalGeneration",
+            "Gemma4ForCausalLM",
             "Qwen3VLForConditionalGeneration",
             "Qwen3VLMoeForConditionalGeneration",
             "Qwen3_5ForCausalLM",
@@ -425,6 +453,7 @@ impl Attention {
             dtype,
             &config.quantization_config,
             &config.quant,
+            k_eq_v,
         )? {
             packed
         } else {
@@ -456,16 +485,15 @@ impl Attention {
                 &config.quant,
                 dtype,
             )?;
-            // v_proj requires higher precision format
             let q8_0_qunat = Some("q8_0".to_string());
             let v_proj = TensorParallelColumnLinear::load_with_shard(
                 hidden_size,
                 num_kv_heads * head_dim,
                 attention_bias,
                 if is_qvar_builder {
-                    vb.pp(key_map["v_proj"])
+                    vb.pp(key_map[if k_eq_v { "k_proj" } else { "v_proj" }])
                 } else {
-                    vb.pp("v_proj")
+                    vb.pp(if k_eq_v { "k_proj" } else { "v_proj" })
                 },
                 kv_shard,
                 &config.quantization_config,
@@ -539,6 +567,13 @@ impl Attention {
             None
         };
 
+        let is_gemma4 = arch == "Gemma4ForConditionalGeneration" || arch == "Gemma4ForCausalLM";
+        let v_norm_eps = if is_gemma4 {
+            Some(config.rms_norm_eps)
+        } else {
+            None
+        };
+
         Ok(Self {
             qkv_proj,
             o_proj,
@@ -564,6 +599,7 @@ impl Attention {
             is_qwen35_or_next,
             is_qvar_builder,
             qk_l2_norm: false,
+            v_norm_eps,
         })
     }
 
@@ -700,6 +736,16 @@ impl Attention {
 
         let v = if v.dtype() != self.dtype {
             v.to_dtype(self.dtype)?
+        } else {
+            v
+        };
+
+        let v = if let Some(eps) = self.v_norm_eps {
+            let orig_dtype = v.dtype();
+            let v_f32 = v.to_dtype(DType::F32)?;
+            let mean_sq = v_f32.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+            let rms = (mean_sq + eps)?.sqrt()?;
+            v_f32.broadcast_div(&rms)?.to_dtype(orig_dtype)?
         } else {
             v
         };

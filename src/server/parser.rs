@@ -114,6 +114,18 @@ impl ToolConfig {
                     end_is_special: false,
                 }
             }
+            ModelType::Gemma4 => {
+                start_ids.insert(48); // <|tool_call>
+                end_ids.insert(49); // <tool_call|>
+                ToolConfig {
+                    start_token_ids: start_ids,
+                    end_token_ids: end_ids,
+                    start_token_str: "<|tool_call>".to_string(),
+                    end_token_str: "<tool_call|>".to_string(),
+                    start_is_special: true,
+                    end_is_special: true,
+                }
+            }
             // Phi, GLM, Yi, StableLM, DeepSeek - use Qwen format (text-only)
             ModelType::Phi
             | ModelType::Phi4
@@ -348,6 +360,7 @@ const REASONING_MARKERS: &[(&str, &str)] = &[
     ("<|think|>", "<|/think|>"),
     ("[THINK]", "[/THINK]"),
     ("<thought>", "</thought>"),
+    ("<|channel>", "<channel|>"),
 ];
 
 pub fn reasoning_markers() -> &'static [(&'static str, &'static str)] {
@@ -409,6 +422,7 @@ impl StreamToolParser {
     ) -> Self {
         let parse_strategy = match model_type {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
+            ModelType::Gemma4 => "gemma4",
             _ => "json",
         }
         .to_string();
@@ -1138,6 +1152,12 @@ impl StreamToolParser {
     }
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
+        if self.parse_strategy == "gemma4" {
+            if let Some(calls) = Self::parse_gemma4_tool_calls(text) {
+                return calls;
+            }
+        }
+
         let mut parsed_calls = match self.parser.parse_complete(text).await {
             Ok((_normal_text, calls)) => calls,
             Err(err) => {
@@ -1246,13 +1266,240 @@ impl StreamToolParser {
                     "qwen"
                 }
             }
-            ModelType::Gemma | ModelType::Gemma3 => "json",
+            ModelType::Gemma | ModelType::Gemma3 | ModelType::Gemma4 => "json",
             ModelType::LLaMa4 => "llama",
             ModelType::Phi | ModelType::Phi4 => "qwen",
             ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
         }
+    }
+
+    /// Parse Gemma4 tool calls: `<|tool_call>call:NAME{key:<|"|>value<|"|>,...}<tool_call|>`
+    /// Also handles stripped markers: `call:NAME{key:"value",...}`
+    fn parse_gemma4_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
+        const GEMMA4_STR_DELIM: &str = "<|\"|>";
+        const PREFIX: &str = "<|tool_call>call:";
+        const PREFIX_STRIPPED: &str = "call:";
+        const SUFFIX: &str = "<tool_call|>";
+
+        let text = text
+            .trim_end()
+            .strip_suffix("<|tool_response>")
+            .unwrap_or(text)
+            .strip_suffix("<tool_response|>")
+            .unwrap_or(text);
+
+        let has_full_prefix = text.contains(PREFIX);
+        let has_stripped_prefix = !has_full_prefix && text.contains(PREFIX_STRIPPED);
+        if !has_full_prefix && !has_stripped_prefix {
+            return None;
+        }
+        let active_prefix = if has_full_prefix {
+            PREFIX
+        } else {
+            PREFIX_STRIPPED
+        };
+
+        let mut calls = Vec::new();
+        let mut search_start = 0;
+
+        while let Some(rel_pos) = text[search_start..].find(active_prefix) {
+            let abs_start = search_start + rel_pos + active_prefix.len();
+            let Some(brace_rel) = text[abs_start..].find('{') else {
+                break;
+            };
+            let name = text[abs_start..abs_start + brace_rel].trim().to_string();
+            let brace_abs = abs_start + brace_rel;
+
+            let matched = Self::gemma4_extract_braces(text, brace_abs);
+            let Some((inner, after_brace)) = matched else {
+                break;
+            };
+
+            let with_braces = format!("{{{inner}}}");
+            let with_quotes = with_braces.replace(GEMMA4_STR_DELIM, "\"");
+            let json_str = Self::gemma4_quote_keys(&with_quotes);
+
+            let arguments: Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => Value::Object(Map::new()),
+            };
+
+            calls.push(ToolCall {
+                id: crate::tools::generate_tool_call_id(),
+                tool_type: "function".to_string(),
+                function: crate::tools::FunctionCall {
+                    name,
+                    arguments: Some(serde_json::to_string(&arguments).unwrap_or_default()),
+                },
+            });
+
+            let remaining = &text[after_brace..];
+            if let Some(suf_pos) = remaining.find(SUFFIX) {
+                search_start = after_brace + suf_pos + SUFFIX.len();
+            } else {
+                search_start = after_brace;
+            }
+        }
+
+        if calls.is_empty() {
+            None
+        } else {
+            Some(calls)
+        }
+    }
+
+    fn gemma4_extract_braces(s: &str, start: usize) -> Option<(&str, usize)> {
+        const DELIM: &str = "<|\"|>";
+        let bytes = s.as_bytes();
+        if bytes.get(start) != Some(&b'{') {
+            return None;
+        }
+        let mut depth: usize = 0;
+        let mut in_string = false;
+        let mut in_regular_string = false;
+        let mut i = start;
+        while i < s.len() {
+            if in_string {
+                if s[i..].starts_with(DELIM) {
+                    in_string = false;
+                    i += DELIM.len();
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+            if in_regular_string {
+                if bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+                    in_regular_string = false;
+                }
+                i += 1;
+                continue;
+            }
+            if s[i..].starts_with(DELIM) {
+                in_string = true;
+                i += DELIM.len();
+                continue;
+            }
+            match bytes[i] {
+                b'"' => {
+                    in_regular_string = true;
+                    i += 1;
+                    continue;
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&s[start + 1..i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Convert Gemma4 key-value format to valid JSON.
+    /// Handles both `<|"|>` delimited values and unquoted values (when special
+    /// tokens are stripped by the tokenizer).
+    fn gemma4_quote_keys(input: &str) -> String {
+        if let Ok(v) = serde_json::from_str::<Value>(input) {
+            return serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
+        }
+
+        let mut map = serde_json::Map::new();
+        let inner = input.trim().trim_start_matches('{').trim_end_matches('}');
+
+        let mut remaining = inner;
+        while !remaining.is_empty() {
+            remaining = remaining.trim_start_matches([',', ' ', '\n', '\t']);
+            if remaining.is_empty() {
+                break;
+            }
+
+            let colon_pos = match remaining.find(':') {
+                Some(p) => p,
+                None => break,
+            };
+            let key = remaining[..colon_pos].trim().trim_matches('"');
+            remaining = remaining[colon_pos + 1..].trim_start();
+
+            if remaining.starts_with('"') {
+                let end = remaining[1..]
+                    .find('"')
+                    .map(|p| p + 2)
+                    .unwrap_or(remaining.len());
+                let val = &remaining[1..end - 1];
+                map.insert(key.to_string(), Value::String(val.to_string()));
+                remaining = &remaining[end..];
+            } else if remaining.starts_with('{') {
+                let depth_end = Self::find_matching_brace(remaining);
+                let val_str = &remaining[..depth_end];
+                let nested = Self::gemma4_quote_keys(val_str);
+                if let Ok(v) = serde_json::from_str::<Value>(&nested) {
+                    map.insert(key.to_string(), v);
+                } else {
+                    map.insert(key.to_string(), Value::String(val_str.to_string()));
+                }
+                remaining = &remaining[depth_end..];
+            } else if remaining.starts_with('[') {
+                let bracket_end = remaining
+                    .find(']')
+                    .map(|p| p + 1)
+                    .unwrap_or(remaining.len());
+                let val_str = &remaining[..bracket_end];
+                if let Ok(v) = serde_json::from_str::<Value>(val_str) {
+                    map.insert(key.to_string(), v);
+                } else {
+                    map.insert(key.to_string(), Value::String(val_str.to_string()));
+                }
+                remaining = &remaining[bracket_end..];
+            } else {
+                let end = remaining
+                    .find(|c: char| c == ',' || c == '}')
+                    .unwrap_or(remaining.len());
+                let val = remaining[..end].trim();
+                if val == "true" {
+                    map.insert(key.to_string(), Value::Bool(true));
+                } else if val == "false" {
+                    map.insert(key.to_string(), Value::Bool(false));
+                } else if val == "null" {
+                    map.insert(key.to_string(), Value::Null);
+                } else if let Ok(n) = val.parse::<f64>() {
+                    map.insert(
+                        key.to_string(),
+                        serde_json::Number::from_f64(n)
+                            .map(Value::Number)
+                            .unwrap_or(Value::String(val.to_string())),
+                    );
+                } else {
+                    map.insert(key.to_string(), Value::String(val.to_string()));
+                }
+                remaining = &remaining[end..];
+            }
+        }
+
+        serde_json::to_string(&Value::Object(map)).unwrap_or_else(|_| input.to_string())
+    }
+
+    fn find_matching_brace(s: &str) -> usize {
+        let mut depth = 0;
+        for (i, c) in s.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        s.len()
     }
 
     fn strip_tool_tags(&self, text: &str) -> String {

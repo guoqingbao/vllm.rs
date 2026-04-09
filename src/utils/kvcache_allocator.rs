@@ -113,10 +113,12 @@ pub struct KVCacheAllocator {
     model_dtype_size: usize,
     hybrid_mamba_slot_bytes: Option<usize>,
     hybrid_num_gdn_layers: usize,
-    // MLA-specific: compressed KV cache uses (1, kv_lora_rank) for ckv + (1, qk_rope_head_dim) for kpe
     is_mla: bool,
     mla_kv_lora_rank: usize,
     mla_qk_rope_head_dim: usize,
+    /// Per-layer KV cache config: (num_kv_heads, head_dim) per KV layer.
+    /// When set, overrides uniform num_kv_heads/head_dim for cache allocation.
+    per_layer_cache_config: Option<Vec<(usize, usize)>>,
 }
 
 impl KVCacheAllocator {
@@ -273,7 +275,16 @@ impl KVCacheAllocator {
             is_mla,
             mla_kv_lora_rank,
             mla_qk_rope_head_dim,
+            per_layer_cache_config: None,
         }
+    }
+
+    /// Set per-layer KV cache configuration for models with heterogeneous head dims
+    /// (e.g., Gemma4 with SWA head_dim=256 and full-attention head_dim=512).
+    /// Each entry is (num_kv_heads, head_dim) for one KV layer.
+    pub fn set_per_layer_cache_config(&mut self, configs: Vec<(usize, usize)>) {
+        assert_eq!(configs.len(), self.num_kv_layers);
+        self.per_layer_cache_config = Some(configs);
     }
 
     pub fn plan(&self, device_ids: &[usize], econfig: &mut EngineConfig) -> Result<()> {
@@ -375,11 +386,21 @@ impl KVCacheAllocator {
     /// Calculate per-block memory size in bytes
     pub fn per_block_bytes(&self) -> usize {
         if self.is_mla {
-            // MLA: ckv_cache (1, kv_lora_rank) + kpe_cache (1, qk_rope_head_dim) per token
             self.block_size
                 * (self.mla_kv_lora_rank + self.mla_qk_rope_head_dim)
                 * self.dtype_size
                 * self.num_kv_layers
+        } else if let Some(ref configs) = self.per_layer_cache_config {
+            let mut total = 0usize;
+            for &(kv_heads, hd) in configs {
+                let heads_per_shard = if self.num_shards > 0 && kv_heads >= self.num_shards {
+                    kv_heads / self.num_shards
+                } else {
+                    1
+                };
+                total += self.block_size * heads_per_shard * hd * self.dtype_size * 2;
+            }
+            total
         } else {
             self.block_size
                 * self.kv_heads_per_shard()
@@ -755,37 +776,92 @@ impl KVCacheAllocator {
                 "fp8 kvcache is not compatible with flashinfer or flashattn feature!"
             );
 
-            let kv_shape = self.calculate_flash_key_value_block_shape();
+            let element_size = cache_dtype.size_in_bytes();
+            let x = 16 / element_size;
 
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_kv_layers {
-                let key_blocks = Tensor::empty(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                let value_blocks = Tensor::empty(
-                    (num_gpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                gpu_cache.push((key_blocks, value_blocks));
+            for layer_idx in 0..self.num_kv_layers {
+                let (kv_heads, hd) = if let Some(ref configs) = self.per_layer_cache_config {
+                    let (h, d) = configs[layer_idx];
+                    let h_shard = if self.num_shards > 0 && h >= self.num_shards {
+                        h / self.num_shards
+                    } else {
+                        1
+                    };
+                    (h_shard, d)
+                } else {
+                    let kv_shape = self.calculate_flash_key_value_block_shape();
+                    (kv_shape.1, kv_shape.2)
+                };
+                if hd > 256 {
+                    let key_blocks = Tensor::empty(
+                        (num_gpu_blocks, kv_heads, hd / x, self.block_size, x),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    let value_blocks = Tensor::empty(
+                        (num_gpu_blocks, kv_heads, hd, self.block_size),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    gpu_cache.push((key_blocks, value_blocks));
+                } else {
+                    let key_blocks = Tensor::empty(
+                        (num_gpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    let value_blocks = Tensor::empty(
+                        (num_gpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    gpu_cache.push((key_blocks, value_blocks));
+                }
             }
-            for _ in 0..self.num_kv_layers {
-                let key_blocks = Tensor::zeros(
-                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                let value_blocks = Tensor::zeros(
-                    (num_cpu_blocks, kv_shape.0, kv_shape.1, kv_shape.2),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                cpu_cache.push((key_blocks, value_blocks));
+            for layer_idx in 0..self.num_kv_layers {
+                let (kv_heads, hd) = if let Some(ref configs) = self.per_layer_cache_config {
+                    let (h, d) = configs[layer_idx];
+                    let h_shard = if self.num_shards > 0 && h >= self.num_shards {
+                        h / self.num_shards
+                    } else {
+                        1
+                    };
+                    (h_shard, d)
+                } else {
+                    let kv_shape = self.calculate_flash_key_value_block_shape();
+                    (kv_shape.1, kv_shape.2)
+                };
+                if hd > 256 {
+                    let key_blocks = Tensor::zeros(
+                        (num_cpu_blocks, kv_heads, hd / x, self.block_size, x),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    let value_blocks = Tensor::zeros(
+                        (num_cpu_blocks, kv_heads, hd, self.block_size),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    cpu_cache.push((key_blocks, value_blocks));
+                } else {
+                    let key_blocks = Tensor::zeros(
+                        (num_cpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    let value_blocks = Tensor::zeros(
+                        (num_cpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    cpu_cache.push((key_blocks, value_blocks));
+                }
             }
             Ok((gpu_cache, cpu_cache))
         } else {

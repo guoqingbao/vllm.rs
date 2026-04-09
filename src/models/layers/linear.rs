@@ -367,17 +367,35 @@ impl QLinear {
         };
         let weight = linear.weight();
         let qbias = linear.bias().cloned();
-        if weight.dim(candle_core::D::Minus1)? % ggml_dtype.block_size() != 0 {
-            crate::log_error!(
-                "Unable to quantize weight {:?} into gguf dtype {:?} \
-                because the last dim is not divisible to block size {}! \
-                \n\n\t***Tips: use '--isq q8_0' instead since it has smaller block size of 32!",
-                weight.shape(),
-                ggml_dtype,
-                ggml_dtype.block_size()
-            );
-        }
-        let qtensor = QTensor::quantize(weight, ggml_dtype)?;
+        let last_dim = weight.dim(candle_core::D::Minus1)?;
+        let actual_ggml_dtype = if last_dim % ggml_dtype.block_size() != 0 {
+            if last_dim % GgmlDType::Q8_0.block_size() == 0 {
+                crate::log_warn!(
+                    "ISQ: weight {:?} incompatible with {:?} (block_size {}), \
+                    falling back to Q8_0 (block_size {})",
+                    weight.shape(),
+                    ggml_dtype,
+                    ggml_dtype.block_size(),
+                    GgmlDType::Q8_0.block_size()
+                );
+                GgmlDType::Q8_0
+            } else {
+                crate::log_warn!(
+                    "ISQ: weight {:?} incompatible with any GGUF dtype, keeping unquantized",
+                    weight.shape()
+                );
+                let inner = QMatMul::Tensor(weight.clone());
+                return Ok(QLinear {
+                    inner: Some(inner),
+                    bias: qbias,
+                    wna16: None,
+                    dtype,
+                });
+            }
+        } else {
+            ggml_dtype
+        };
+        let qtensor = QTensor::quantize(weight, actual_ggml_dtype)?;
         QLinear::from_qparts_x(qtensor, qbias, dtype)
     }
 

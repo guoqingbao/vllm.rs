@@ -660,6 +660,7 @@ pub enum ModelType {
     LLaMa,
     Gemma,
     Gemma3,
+    Gemma4,
     Phi,
     Phi4,
     Mistral,

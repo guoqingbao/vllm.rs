@@ -10,6 +10,7 @@ const REASONING_START_TOKENS: &[&str] = &[
     "<|think|>",
     "[THINK]",
     "<thought>",
+    "<|channel>",
 ];
 
 const REASONING_END_TOKENS: &[&str] = &[
@@ -19,6 +20,7 @@ const REASONING_END_TOKENS: &[&str] = &[
     "<|/think|>",
     "[/THINK]",
     "</thought>",
+    "<channel|>",
 ];
 
 #[derive(Debug, Clone, Default)]

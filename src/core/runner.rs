@@ -1,4 +1,5 @@
 use crate::models::gemma3::Gemma3ForConditionalGeneration;
+use crate::models::gemma4::Gemma4ForCausalLM;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
 use crate::models::layers::linear::set_fp8_linear_is_prefill;
@@ -89,6 +90,7 @@ pub enum Model {
     DeepSeek(Arc<DeepSeekForCausalLM>),
     Mistral3VL(Arc<Mistral3ForConditionalGeneration>),
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
+    Gemma4(Arc<Gemma4ForCausalLM>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
 }
 
@@ -405,6 +407,7 @@ impl ModelRunner {
                 DeepSeek => DeepSeekForCausalLM,
                 Mistral3VL => Mistral3ForConditionalGeneration,
                 Gemma3 => Gemma3ForConditionalGeneration,
+                Gemma4 => Gemma4ForCausalLM,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
             }
         )?;
@@ -427,6 +430,7 @@ impl ModelRunner {
                 DeepSeek => EmbedInputs,
                 Mistral3VL => NoneArg,
                 Gemma3 => NoneArg,
+                Gemma4 => EmbedInputs,
                 Qwen3VL => NoneArg,
             }
         );
@@ -443,9 +447,16 @@ impl ModelRunner {
             if let MessageType::UsableMemoryLeft(ecfg) = msg {
                 *econfig = ecfg.clone(); // Update Engine config
             }
-            KVCacheAllocator::new(econfig, config, dtype)
+            let mut a = KVCacheAllocator::new(econfig, config, dtype);
+            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(config) {
+                a.set_per_layer_cache_config(plc);
+            }
+            a
         } else {
-            let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            let mut allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(&config) {
+                allocator.set_per_layer_cache_config(plc);
+            }
             let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
             match allocator.plan(&device_ids, econfig) {
                 Ok(_) => {
@@ -877,6 +888,7 @@ impl ModelRunner {
                 DeepSeek => false,
                 Mistral3VL => images,
                 Gemma3 => images,
+                Gemma4 => false,
                 Qwen3VL => images,
             }
         )?;
@@ -904,6 +916,7 @@ impl ModelRunner {
                 Phi4 => false,
                 GLM4 => false,
                 Gemma3 => None,
+                Gemma4 => false,
             },
             candle_core::bail!("Embedding is not supported for this model type")
         )?;
@@ -1416,7 +1429,34 @@ impl ModelRunner {
                 let frequency_penalty = user_params.frequency_penalty.or(gen_cfg_freq);
                 let presence_penalty = user_params.presence_penalty.or(gen_cfg_pres);
 
-                let sampling = if has_valid_sampling_cfg {
+                let user_has_temperature = user_params.temperature.is_some();
+                let user_wants_greedy = matches!(user_params.temperature, Some(t) if t == 0.0);
+                let has_user_config = user_has_temperature
+                    || matches!(user_params.top_k, Some(k) if k > 0)
+                    || matches!(user_params.top_p, Some(p) if p > 0.0 && p < 1.0);
+
+                let sampling = if user_wants_greedy {
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!("Using greedy decoding (temperature=0.0)");
+                    }
+                    Sampling::ArgMax
+                } else if has_user_config {
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                            user_params.temperature,
+                            user_params.top_k,
+                            user_params.top_p,
+                            frequency_penalty,
+                            presence_penalty
+                        );
+                    }
+                    LogitsProcessor::get_strategy(
+                        user_params.temperature,
+                        user_params.top_k,
+                        user_params.top_p,
+                    )
+                } else if has_valid_sampling_cfg {
                     let cfg = self.config.generation_cfg.as_ref().unwrap();
                     if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
                         crate::log_warn!(
@@ -1430,36 +1470,15 @@ impl ModelRunner {
                     }
                     LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
                 } else {
-                    let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
-                        && (matches!(user_params.top_k, Some(k) if k > 0)
-                            || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
-                    if has_user_config {
-                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
-                            crate::log_warn!(
-                                "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
-                                user_params.temperature,
-                                user_params.top_k,
-                                user_params.top_p,
-                                frequency_penalty,
-                                presence_penalty
-                            );
-                        }
-                        LogitsProcessor::get_strategy(
-                            user_params.temperature,
-                            user_params.top_k,
-                            user_params.top_p,
-                        )
-                    } else {
-                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
-                            crate::log_warn!(
-                                "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
-                            );
-                        }
-                        Sampling::TopKThenTopP {
-                            k: 32,
-                            p: 0.95,
-                            temperature: 0.7,
-                        }
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
+                        );
+                    }
+                    Sampling::TopKThenTopP {
+                        k: 32,
+                        p: 0.95,
+                        temperature: 0.7,
                     }
                 };
 
@@ -1581,6 +1600,7 @@ impl ModelRunner {
             Model::DeepSeek(model) => model.get_vocab_size(),
             Model::Mistral3VL(model) => model.get_vocab_size(),
             Model::Gemma3(model) => model.get_vocab_size(),
+            Model::Gemma4(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),
         }
     }

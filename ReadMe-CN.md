@@ -73,7 +73,7 @@
 * ✅ GLM4.7 Flash
 * ✅ DeepSeek V3/R1/V3.2
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini等)
-* ✅ Gemma3 (多模态，不支持Flash Attention)
+* ✅ Gemma3/**Gemma4** (多模态，不支持Flash Attention)
 * ✅ Qwen3-VL (Dense, 多模态)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 

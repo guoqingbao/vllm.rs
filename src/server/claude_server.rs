@@ -59,6 +59,7 @@ const CLAUDE_REASONING_MARKERS: &[(&str, &str)] = &[
     ("<|think|>", "<|/think|>"),
     ("[THINK]", "[/THINK]"),
     ("<thought>", "</thought>"),
+    ("<|channel>", "<channel|>"),
 ];
 const SYNTHETIC_THINKING_SIGNATURE_PREFIX: &str = "vllm-rs-thinking-v1:";
 

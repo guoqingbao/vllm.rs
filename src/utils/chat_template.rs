@@ -132,11 +132,12 @@ pub struct ChatTemplate {
     enable_thinking: bool,
 }
 
-const REASONING_BLOCK_PAIRS: [(&str, &str); 4] = [
+const REASONING_BLOCK_PAIRS: [(&str, &str); 5] = [
     ("<think>", "</think>"),
     ("<|think|>", "<|/think|>"),
     ("[THINK]", "[/THINK]"),
     ("<thought>", "</thought>"),
+    ("<|channel>", "<channel|>"),
 ];
 
 /// Extract reasoning content from assistant message content.
