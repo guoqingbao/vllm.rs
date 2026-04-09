@@ -114,14 +114,18 @@ impl ToolConfig {
                     end_is_special: false,
                 }
             }
-            ModelType::Gemma4 => ToolConfig {
-                start_token_ids: start_ids,
-                end_token_ids: end_ids,
-                start_token_str: "<|tool_call>".to_string(),
-                end_token_str: "<tool_call|>".to_string(),
-                start_is_special: false,
-                end_is_special: false,
-            },
+            ModelType::Gemma4 => {
+                start_ids.insert(48); // <|tool_call>
+                end_ids.insert(49); // <tool_call|>
+                ToolConfig {
+                    start_token_ids: start_ids,
+                    end_token_ids: end_ids,
+                    start_token_str: "<|tool_call>".to_string(),
+                    end_token_str: "<tool_call|>".to_string(),
+                    start_is_special: true,
+                    end_is_special: true,
+                }
+            }
             // Phi, GLM, Yi, StableLM, DeepSeek - use Qwen format (text-only)
             ModelType::Phi
             | ModelType::Phi4
@@ -1323,7 +1327,7 @@ impl StreamToolParser {
             };
 
             calls.push(ToolCall {
-                id: format!("call_{}", calls.len()),
+                id: crate::tools::generate_tool_call_id(),
                 tool_type: "function".to_string(),
                 function: crate::tools::FunctionCall {
                     name,
