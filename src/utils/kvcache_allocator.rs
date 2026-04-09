@@ -776,6 +776,9 @@ impl KVCacheAllocator {
                 "fp8 kvcache is not compatible with flashinfer or flashattn feature!"
             );
 
+            let element_size = cache_dtype.size_in_bytes();
+            let x = 16 / element_size;
+
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
             for layer_idx in 0..self.num_kv_layers {
@@ -791,19 +794,35 @@ impl KVCacheAllocator {
                     let kv_shape = self.calculate_flash_key_value_block_shape();
                     (kv_shape.1, kv_shape.2)
                 };
-                let key_blocks = Tensor::empty(
-                    (num_gpu_blocks, self.block_size, kv_heads, hd),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                let value_blocks = Tensor::empty(
-                    (num_gpu_blocks, self.block_size, kv_heads, hd),
-                    cache_dtype,
-                    device,
-                    Some(sync_alloc),
-                )?;
-                gpu_cache.push((key_blocks, value_blocks));
+                if hd > 256 {
+                    let key_blocks = Tensor::empty(
+                        (num_gpu_blocks, kv_heads, hd / x, self.block_size, x),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    let value_blocks = Tensor::empty(
+                        (num_gpu_blocks, kv_heads, hd, self.block_size),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    gpu_cache.push((key_blocks, value_blocks));
+                } else {
+                    let key_blocks = Tensor::empty(
+                        (num_gpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    let value_blocks = Tensor::empty(
+                        (num_gpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        device,
+                        Some(sync_alloc),
+                    )?;
+                    gpu_cache.push((key_blocks, value_blocks));
+                }
             }
             for layer_idx in 0..self.num_kv_layers {
                 let (kv_heads, hd) = if let Some(ref configs) = self.per_layer_cache_config {
@@ -818,17 +837,31 @@ impl KVCacheAllocator {
                     let kv_shape = self.calculate_flash_key_value_block_shape();
                     (kv_shape.1, kv_shape.2)
                 };
-                let key_blocks = Tensor::zeros(
-                    (num_cpu_blocks, self.block_size, kv_heads, hd),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                let value_blocks = Tensor::zeros(
-                    (num_cpu_blocks, self.block_size, kv_heads, hd),
-                    cache_dtype,
-                    &Device::Cpu,
-                )?;
-                cpu_cache.push((key_blocks, value_blocks));
+                if hd > 256 {
+                    let key_blocks = Tensor::zeros(
+                        (num_cpu_blocks, kv_heads, hd / x, self.block_size, x),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    let value_blocks = Tensor::zeros(
+                        (num_cpu_blocks, kv_heads, hd, self.block_size),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    cpu_cache.push((key_blocks, value_blocks));
+                } else {
+                    let key_blocks = Tensor::zeros(
+                        (num_cpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    let value_blocks = Tensor::zeros(
+                        (num_cpu_blocks, self.block_size, kv_heads, hd),
+                        cache_dtype,
+                        &Device::Cpu,
+                    )?;
+                    cpu_cache.push((key_blocks, value_blocks));
+                }
             }
             Ok((gpu_cache, cpu_cache))
         } else {

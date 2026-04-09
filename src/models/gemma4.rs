@@ -562,7 +562,7 @@ impl Gemma4DecoderLayer {
             xs = (&residual_ple + norm.forward(&projected)?)?;
         }
 
-        xs.broadcast_mul(&self.layer_scalar)
+        xs.broadcast_mul(&self.layer_scalar.to_dtype(xs.dtype())?)
     }
 }
 
@@ -1021,14 +1021,24 @@ impl Gemma4ForCausalLM {
 
         let seqlens = input_metadata.seqlens.clone().unwrap_or_default();
 
-        let full_mask = get_attention_causal_mask(
-            &self.device,
-            self.dtype,
-            positions,
-            seqlens.clone(),
-            None,
-            input_metadata.is_prefill,
-        );
+        let full_mask = if input_metadata.is_prefill && !seqlens.is_empty() {
+            let mut masks = Vec::new();
+            let mut start = 0u32;
+            for seq_offset in &seqlens {
+                let seq_len = (seq_offset - start) as usize;
+                if seq_len > 1 {
+                    let mask = Tensor::zeros((seq_len, seq_len), self.dtype, &self.device)?;
+                    attention_rs::mask::causal_mask(&mask, None)?;
+                    masks.push(mask.unsqueeze(0)?.unsqueeze(0)?);
+                } else {
+                    masks.push(Tensor::zeros((1, 1, 1, 1), self.dtype, &self.device)?);
+                }
+                start = *seq_offset;
+            }
+            Some(masks)
+        } else {
+            None
+        };
 
         let sliding_mask = get_attention_causal_mask(
             &self.device,

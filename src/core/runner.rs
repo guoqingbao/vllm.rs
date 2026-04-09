@@ -1429,7 +1429,34 @@ impl ModelRunner {
                 let frequency_penalty = user_params.frequency_penalty.or(gen_cfg_freq);
                 let presence_penalty = user_params.presence_penalty.or(gen_cfg_pres);
 
-                let sampling = if has_valid_sampling_cfg {
+                let user_has_temperature = user_params.temperature.is_some();
+                let user_wants_greedy = matches!(user_params.temperature, Some(t) if t == 0.0);
+                let has_user_config = user_has_temperature
+                    || matches!(user_params.top_k, Some(k) if k > 0)
+                    || matches!(user_params.top_p, Some(p) if p > 0.0 && p < 1.0);
+
+                let sampling = if user_wants_greedy {
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!("Using greedy decoding (temperature=0.0)");
+                    }
+                    Sampling::ArgMax
+                } else if has_user_config {
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
+                            user_params.temperature,
+                            user_params.top_k,
+                            user_params.top_p,
+                            frequency_penalty,
+                            presence_penalty
+                        );
+                    }
+                    LogitsProcessor::get_strategy(
+                        user_params.temperature,
+                        user_params.top_k,
+                        user_params.top_p,
+                    )
+                } else if has_valid_sampling_cfg {
                     let cfg = self.config.generation_cfg.as_ref().unwrap();
                     if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
                         crate::log_warn!(
@@ -1443,36 +1470,15 @@ impl ModelRunner {
                     }
                     LogitsProcessor::get_strategy(cfg.temperature, cfg.top_k, cfg.top_p)
                 } else {
-                    let has_user_config = matches!(user_params.temperature, Some(t) if t != 0.0 && t != 1.0)
-                        && (matches!(user_params.top_k, Some(k) if k > 0)
-                            || matches!(user_params.top_p, Some(p) if p != 0.0 && p != 1.0));
-                    if has_user_config {
-                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
-                            crate::log_warn!(
-                                "Using user's sampling params: temp={:?}, top_k={:?}, top_p={:?}, freq_penalty={:?}, pres_penalty={:?}",
-                                user_params.temperature,
-                                user_params.top_k,
-                                user_params.top_p,
-                                frequency_penalty,
-                                presence_penalty
-                            );
-                        }
-                        LogitsProcessor::get_strategy(
-                            user_params.temperature,
-                            user_params.top_k,
-                            user_params.top_p,
-                        )
-                    } else {
-                        if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
-                            crate::log_warn!(
-                                "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
-                            );
-                        }
-                        Sampling::TopKThenTopP {
-                            k: 32,
-                            p: 0.95,
-                            temperature: 0.7,
-                        }
+                    if self.is_first_rank && seqs[0].num_cached_tokens == 0 {
+                        crate::log_warn!(
+                            "No generation_config, using default sampling (temperature=0.7, top_k=32, top_p=0.95)"
+                        );
+                    }
+                    Sampling::TopKThenTopP {
+                        k: 32,
+                        p: 0.95,
+                        temperature: 0.7,
                     }
                 };
 
