@@ -1716,9 +1716,11 @@ pub struct FusedMoeNvfp4 {
     gate_up_blocks: Tensor,
     gate_up_scales: Tensor,
     gate_up_global_scales: Tensor,
+    gate_up_input_scales: Tensor,
     down_blocks: Tensor,
     down_scales: Tensor,
     down_global_scales: Tensor,
+    down_input_scales: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
     routing: MoeRouting,
@@ -1767,6 +1769,25 @@ impl FusedMoeNvfp4 {
             // modelopt format: weight_scale_2 is the direct multiplier
             vb.get_with_hints_dtype((1,), "weight_scale_2", no_shard, DType::F32)
                 .or_else(|_| vb.get_with_hints_dtype((), "weight_scale_2", no_shard, DType::F32))
+                .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                .unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    fn load_input_scale(vb: &candle_nn::var_builder::ShardedVarBuilder) -> f32 {
+        let no_shard = Shard::default();
+        if vb.contains_tensor("input_scale") {
+            vb.get_with_hints_dtype((1,), "input_scale", no_shard, DType::F32)
+                .or_else(|_| vb.get_with_hints_dtype((), "input_scale", no_shard, DType::F32))
+                .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                .unwrap_or(1.0)
+        } else if vb.contains_tensor("input_global_scale") {
+            vb.get_with_hints_dtype((1,), "input_global_scale", no_shard, DType::F32)
+                .or_else(|_| {
+                    vb.get_with_hints_dtype((), "input_global_scale", no_shard, DType::F32)
+                })
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                 .unwrap_or(1.0)
         } else {
@@ -1834,12 +1855,15 @@ impl FusedMoeNvfp4 {
         let mut gate_blocks_vec = Vec::new();
         let mut gate_scales_vec = Vec::new();
         let mut gate_gscales_vec: Vec<f32> = Vec::new();
+        let mut gate_iscales_vec: Vec<f32> = Vec::new();
         let mut up_blocks_vec = Vec::new();
         let mut up_scales_vec = Vec::new();
         let mut up_gscales_vec: Vec<f32> = Vec::new();
+        let mut up_iscales_vec: Vec<f32> = Vec::new();
         let mut down_blocks_vec = Vec::new();
         let mut down_scales_vec = Vec::new();
         let mut down_gscales_vec: Vec<f32> = Vec::new();
+        let mut down_iscales_vec: Vec<f32> = Vec::new();
 
         match &experts_vb.0 {
             Either::Left(vb) => {
@@ -1913,6 +1937,27 @@ impl FusedMoeNvfp4 {
                         1.0
                     };
 
+                    let gate_up_iscale = if vb.contains_tensor("gate_up_proj_input_scale") {
+                        vb.get_with_hints_dtype(
+                            (),
+                            "gate_up_proj_input_scale",
+                            no_shard,
+                            DType::F32,
+                        )
+                        .or_else(|_| {
+                            vb.get_with_hints_dtype(
+                                (1,),
+                                "gate_up_proj_input_scale",
+                                no_shard,
+                                DType::F32,
+                            )
+                        })
+                        .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                        .unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+
                     for i in 0..num_experts {
                         let gu = gu_raw.get(i)?.t()?.contiguous()?;
                         let gs = gu_sc_raw.get(i)?.t()?.contiguous()?;
@@ -1922,6 +1967,8 @@ impl FusedMoeNvfp4 {
                         up_scales_vec.push(gs.narrow(0, inter, inter)?.contiguous()?);
                         gate_gscales_vec.push(gate_up_gscale);
                         up_gscales_vec.push(gate_up_gscale);
+                        gate_iscales_vec.push(gate_up_iscale);
+                        up_iscales_vec.push(gate_up_iscale);
                     }
 
                     let d_raw = vb.get_with_hints_dtype(
@@ -1980,10 +2027,27 @@ impl FusedMoeNvfp4 {
                         1.0
                     };
 
+                    let down_iscale = if vb.contains_tensor("down_proj_input_scale") {
+                        vb.get_with_hints_dtype((), "down_proj_input_scale", no_shard, DType::F32)
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "down_proj_input_scale",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0)
+                    } else {
+                        1.0
+                    };
+
                     for i in 0..num_experts {
                         down_blocks_vec.push(d_raw.get(i)?.t()?.contiguous()?);
                         down_scales_vec.push(d_sc_raw.get(i)?.t()?.contiguous()?);
                         down_gscales_vec.push(down_gscale);
+                        down_iscales_vec.push(down_iscale);
                     }
                 } else {
                     // Per-expert: experts.{i}.gate_proj / up_proj / down_proj
@@ -2008,6 +2072,7 @@ impl FusedMoeNvfp4 {
                             DType::U8,
                         )?);
                         gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb));
+                        gate_iscales_vec.push(Self::load_input_scale(&gate_proj_vb));
 
                         let up_proj_vb = expert_vb.pp("up_proj");
                         let packed_name = Self::tensor_name_packed(&up_proj_vb);
@@ -2026,6 +2091,7 @@ impl FusedMoeNvfp4 {
                             DType::U8,
                         )?);
                         up_gscales_vec.push(Self::load_global_scale(&up_proj_vb));
+                        up_iscales_vec.push(Self::load_input_scale(&up_proj_vb));
 
                         let down_proj_vb = expert_vb.pp("down_proj");
                         let packed_name = Self::tensor_name_packed(&down_proj_vb);
@@ -2045,6 +2111,7 @@ impl FusedMoeNvfp4 {
                             DType::U8,
                         )?);
                         down_gscales_vec.push(Self::load_global_scale(&down_proj_vb));
+                        down_iscales_vec.push(Self::load_input_scale(&down_proj_vb));
                     }
                 }
             }
@@ -2075,18 +2142,35 @@ impl FusedMoeNvfp4 {
             .collect();
         let gate_up_global_scales = Tensor::from_vec(gate_up_gscales, (num_experts,), dev)?;
 
+        let gate_up_iscales: Vec<f32> = gate_iscales_vec
+            .iter()
+            .zip(up_iscales_vec.iter())
+            .map(|(g, u)| {
+                if (g - u).abs() > f32::EPSILON {
+                    crate::log_warn!(
+                        "NVFP4 MoE: gate/up input scales differ ({g} vs {u}), using gate scale"
+                    );
+                }
+                *g
+            })
+            .collect();
+        let gate_up_input_scales = Tensor::from_vec(gate_up_iscales, (num_experts,), dev)?;
+
         let down_blocks = Tensor::stack(&down_blocks_vec, 0)?;
         let down_scales = Tensor::stack(&down_scales_vec, 0)?;
         let down_global_scales = Tensor::from_vec(down_gscales_vec, (num_experts,), dev)?;
+        let down_input_scales = Tensor::from_vec(down_iscales_vec, (num_experts,), dev)?;
 
         Ok(Self {
             gate,
             gate_up_blocks,
             gate_up_scales,
             gate_up_global_scales,
+            gate_up_input_scales,
             down_blocks,
             down_scales,
             down_global_scales,
+            down_input_scales,
             w_size_n,
             act: candle_nn::Activation::Silu,
             routing: MoeRouting::from_moe_cfg(moe_cfg, None),
@@ -2105,10 +2189,21 @@ impl FusedMoeNvfp4 {
         self.apply_router_weight_on_input = v;
     }
 
-    pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
-        let (num_tokens, hidden_dim) = xs.dims2()?;
+    pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
+
+        self.forward_with_routing(xs, topk_weights, topk_ids, is_prefill)
+    }
+
+    pub fn forward_with_routing(
+        &self,
+        xs: &Tensor,
+        topk_weights: Tensor,
+        topk_ids: Tensor,
+        _is_prefill: bool,
+    ) -> Result<Tensor> {
+        let (num_tokens, hidden_dim) = xs.dims2()?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -2128,6 +2223,7 @@ impl FusedMoeNvfp4 {
             &self.gate_up_blocks,
             &self.gate_up_scales,
             &self.gate_up_global_scales,
+            Some(&self.gate_up_input_scales),
             None,
             &topk_ids,
         )?;
@@ -2145,6 +2241,7 @@ impl FusedMoeNvfp4 {
             &self.down_blocks,
             &self.down_scales,
             &self.down_global_scales,
+            Some(&self.down_input_scales),
             None,
             &topk_ids,
         )?;
