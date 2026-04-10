@@ -220,6 +220,8 @@ pub struct FusedMoe {
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
+    #[cfg(feature = "cuda")]
+    sm_version: usize,
 }
 
 impl FusedMoe {
@@ -414,6 +416,11 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
         let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
+
+        #[cfg(feature = "cuda")]
+        let sm_version = attention_rs::cuda_utils::sm_version(gate_up_w.device().as_cuda_device()?)
+            .unwrap_or(0) as usize;
+
         Ok(Self {
             gate,
             gate_up_w,
@@ -427,6 +434,8 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             all_reduce: AllReduce::new(comm),
             world_size,
             dtype,
+            #[cfg(feature = "cuda")]
+            sm_version,
         })
     }
 
@@ -446,6 +455,21 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
     ) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
 
+        #[cfg(all(feature = "cuda", feature = "trtllm"))]
+        if self.sm_version >= 100 {
+            let mut ys = moe::flashinfer_fused_moe(
+                xs,
+                &topk_ids,
+                &topk_weights,
+                &self.gate_up_w,
+                &self.down_w,
+            )?;
+            if self.world_size > 1 {
+                ys = self.all_reduce.apply(&ys)?;
+            }
+            return Ok(ys);
+        }
+
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
             {
@@ -458,7 +482,6 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             topk_ids.flatten_all()?.sort_last_dim(true)?
         };
 
-        //out (M, top_k, N)
         let topk = self.routing.num_experts_per_tok;
         let gate_up = moe::moe_gemm(
             &xs,
@@ -1164,6 +1187,7 @@ impl FusedMoeISQ {
     }
 }
 
+#[allow(dead_code)]
 pub struct FusedMoeFp8 {
     gate: Linear,
     gate_up_experts: Tensor,
@@ -1177,6 +1201,8 @@ pub struct FusedMoeFp8 {
     world_size: usize,
     dtype: DType,
     block_size: Vec<usize>,
+    #[cfg(feature = "cuda")]
+    sm_version: usize,
 }
 
 impl FusedMoeFp8 {
@@ -1419,6 +1445,12 @@ impl FusedMoeFp8 {
         let gate_up_experts = Tensor::cat(&[&gate_experts, &up_experts], 1)?;
         let gate_up_experts_scale = Tensor::cat(&[&gate_experts_scale, &up_experts_scale], 1)?;
         let w_size_n = gate_up_experts.dim(1)? / 2;
+
+        #[cfg(feature = "cuda")]
+        let sm_version =
+            attention_rs::cuda_utils::sm_version(gate_up_experts.device().as_cuda_device()?)
+                .unwrap_or(0) as usize;
+
         Ok(Self {
             gate,
             gate_up_experts,
@@ -1435,6 +1467,8 @@ impl FusedMoeFp8 {
             world_size: comm.world_size(),
             dtype,
             block_size: vec![by, bx],
+            #[cfg(feature = "cuda")]
+            sm_version,
         })
     }
 
@@ -1448,6 +1482,23 @@ impl FusedMoeFp8 {
         } else {
             xs.clone()
         };
+
+        #[cfg(all(feature = "cuda", feature = "trtllm"))]
+        if self.sm_version >= 100 {
+            let mut ys = moe::flashinfer_fused_moe_fp8(
+                &xs,
+                &topk_ids,
+                &topk_weights,
+                &self.gate_up_experts,
+                &self.gate_up_experts_scale,
+                &self.down_experts,
+                &self.down_experts_scale,
+            )?;
+            if self.world_size > 1 {
+                ys = self.all_reduce.apply(&ys)?;
+            }
+            return Ok(ys.to_dtype(self.dtype)?);
+        }
 
         let (expert_ids, sorted_token_ids) = if is_prefill {
             #[cfg(feature = "cuda")]
@@ -1504,6 +1555,7 @@ impl FusedMoeFp8 {
     }
 }
 
+#[allow(dead_code)]
 pub struct FusedMoeMxfp4 {
     gate: Linear,
     gate_up_blocks: Tensor,
@@ -1516,6 +1568,8 @@ pub struct FusedMoeMxfp4 {
     all_reduce: AllReduce,
     world_size: usize,
     dtype: DType,
+    #[cfg(feature = "cuda")]
+    sm_version: usize,
 }
 
 impl FusedMoeMxfp4 {
@@ -1646,6 +1700,11 @@ impl FusedMoeMxfp4 {
         let down_blocks = Tensor::stack(&down_blocks_vec, 0)?;
         let down_scales = Tensor::stack(&down_scales_vec, 0)?;
 
+        #[cfg(feature = "cuda")]
+        let sm_version =
+            attention_rs::cuda_utils::sm_version(gate_up_blocks.device().as_cuda_device()?)
+                .unwrap_or(0) as usize;
+
         Ok(Self {
             gate,
             gate_up_blocks,
@@ -1661,6 +1720,8 @@ impl FusedMoeMxfp4 {
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,
+            #[cfg(feature = "cuda")]
+            sm_version,
         })
     }
 
@@ -1674,6 +1735,29 @@ impl FusedMoeMxfp4 {
         } else {
             xs.clone()
         };
+
+        #[cfg(all(feature = "cuda", feature = "trtllm"))]
+        if self.sm_version >= 100 {
+            let num_experts = self.gate_up_blocks.dim(0)?;
+            let mut ys = mxfp4_linear::flashinfer_mxfp4_fused_moe(
+                &xs,
+                &topk_ids,
+                &topk_weights,
+                &self.gate_up_blocks,
+                &self.gate_up_scales,
+                &self.down_blocks,
+                &self.down_scales,
+                num_tokens,
+                hidden_dim,
+                self.w_size_n,
+                num_experts,
+                self.routing.num_experts_per_tok,
+            )?;
+            if self.world_size > 1 {
+                ys = self.all_reduce.apply(&ys)?;
+            }
+            return Ok(ys.to_dtype(self.dtype)?);
+        }
 
         let gate_up = mxfp4_linear::mxfp4_moe_gemm(
             &xs,
