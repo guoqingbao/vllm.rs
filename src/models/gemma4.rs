@@ -2,7 +2,9 @@ use crate::models::layers::attention::Attention;
 use crate::models::layers::distributed::{Comm, ReplicatedLinear};
 use crate::models::layers::mask::get_attention_causal_mask;
 use crate::models::layers::mlp::MLP;
-use crate::models::layers::moe::{FusedMoe, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4};
+use crate::models::layers::moe::{
+    FusedMoe, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4, FusedMoeNvfp4,
+};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, RotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -116,6 +118,7 @@ enum Gemma4MoE {
     FusedMoeGGUF(FusedMoeGGUF),
     FusedMoeISQ(FusedMoeISQ),
     FusedMoeMxfp4(FusedMoeMxfp4),
+    FusedMoeNvfp4(FusedMoeNvfp4),
 }
 
 impl Gemma4MoE {
@@ -125,6 +128,7 @@ impl Gemma4MoE {
             Self::FusedMoeGGUF(m) => m.forward(xs, is_prefill),
             Self::FusedMoeISQ(m) => m.forward(xs, is_prefill),
             Self::FusedMoeMxfp4(m) => m.forward(xs, is_prefill),
+            Self::FusedMoeNvfp4(m) => m.forward(xs, is_prefill),
         }
     }
 
@@ -137,6 +141,9 @@ impl Gemma4MoE {
     ) -> Result<Tensor> {
         match self {
             Self::FusedMoe(m) => m.forward_with_routing(xs, topk_weights, topk_ids, is_prefill),
+            Self::FusedMoeNvfp4(m) => {
+                m.forward_with_routing(xs, topk_weights, topk_ids, is_prefill)
+            }
             _ => self.forward(xs, is_prefill),
         }
     }
@@ -289,6 +296,14 @@ impl Gemma4DecoderLayer {
                     Gemma4MoE::FusedMoeMxfp4(FusedMoeMxfp4::new(
                         config,
                         vb.pp("mlp").clone(),
+                        comm.clone(),
+                        dtype,
+                    )?)
+                } else if quant_config.quant_method == "nvfp4" {
+                    Gemma4MoE::FusedMoeNvfp4(FusedMoeNvfp4::new_with_gate(
+                        config,
+                        vb.pp("router").pp("proj").clone(),
+                        vb.pp("experts").clone(),
                         comm.clone(),
                         dtype,
                     )?)
