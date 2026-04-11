@@ -338,11 +338,46 @@ cargo install --features metal
 
 ---
 
-## 🔌 LLGuidance 支持（结构化输出与约束）
+## 🔌 结构化输出与约束（Guided Decoding）
 
-vLLM.rs 现在支持通过 llguidance 库实现结构化输出和约束生成：
+vLLM.rs 现在支持通过 llguidance 库实现结构化输出和约束生成。
 
-- **自定义约束**：允许客户端通过 structured_outputs 或 response_format 提交 Lark/Regex/JSON Schema 约束
+### ⚠️ 安全说明
+
+**客户端提供的约束默认被阻止。**要启用它们，您必须显式设置 `--allow-constraint-api` 标志。
+
+#### 启用客户端约束
+```bash
+# 启用客户端提交的约束 via HTTP API
+vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache --allow-constraint-api
+```
+
+#### 客户端约束的安全风险
+客户端提供的约束可能导致严重的安全漏洞：
+
+1. **Lark 语法注入**：恶意客户端可以提交精心设计的 Lark 语法，这些语法：
+   - 可以访问超出用户角色边界的特殊令牌
+   - 注入可能导致 ReDoS 攻击的任意正则表达式模式
+   - 绕过聊天模板的角色分离
+
+2. **JSON Schema 转义**：客户端可以指定：
+   - 引用系统不打算让用户控制的内部特殊令牌
+   - 创建模糊的令牌边界，导致系统指令泄露
+   - 注入匹配系统角色的禁止正则表达式模式
+
+3. **角色边界 violation**：启用约束后，客户端可能：
+   - 逃逸聊天模板中的 `user:` 角色边界
+   - 注入 `system:` 或 `assistant:` 角色内容
+   - 操纵 tool_call 标记以注入伪造的工具响应
+   - 发明新的方法使设计不佳的系统超出预期范围运行
+
+#### 推荐用法
+- **生产环境**：仅与可信的访问系统/客户端一起设置 `--enable-tool-grammar` 和/或 `--allow-constraint-api`，或在 tokenizer-aware WAF 内联验证语法时过滤传入内容。
+
+```bash
+# 启用自动工具语法生成
+vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache --enable-tool-grammar
+```
 
 查看 [**结构化输出文档 →**](docs/llguidance-integration.md)
 
