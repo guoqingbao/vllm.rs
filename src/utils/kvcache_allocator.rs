@@ -771,10 +771,12 @@ impl KVCacheAllocator {
             }
             Ok((gpu_cache, cpu_cache))
         } else if cfg!(feature = "flashinfer") || cfg!(feature = "flashattn") {
-            assert!(
-                !self.fp8_kvcache,
-                "fp8 kvcache is not compatible with flashinfer or flashattn feature!"
-            );
+            if cfg!(feature = "flashattn") {
+                assert!(
+                    !self.fp8_kvcache,
+                    "fp8 kvcache is not compatible with flashattn feature!"
+                );
+            }
 
             let element_size = cache_dtype.size_in_bytes();
             let x = 16 / element_size;
