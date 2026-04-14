@@ -1868,12 +1868,18 @@ impl FusedMoeNvfp4 {
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                 .unwrap_or(1.0)
         } else if vb.contains_tensor("input_global_scale") {
-            vb.get_with_hints_dtype((1,), "input_global_scale", no_shard, DType::F32)
+            let raw = vb
+                .get_with_hints_dtype((1,), "input_global_scale", no_shard, DType::F32)
                 .or_else(|_| {
                     vb.get_with_hints_dtype((), "input_global_scale", no_shard, DType::F32)
                 })
                 .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
-                .unwrap_or(1.0)
+                .unwrap_or(1.0);
+            if raw != 0.0 {
+                1.0 / raw
+            } else {
+                1.0
+            }
         } else {
             1.0
         }
@@ -2038,6 +2044,29 @@ impl FusedMoeNvfp4 {
                         })
                         .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                         .unwrap_or(1.0)
+                    } else if vb.contains_tensor("gate_up_proj_input_global_scale") {
+                        let raw = vb
+                            .get_with_hints_dtype(
+                                (),
+                                "gate_up_proj_input_global_scale",
+                                no_shard,
+                                DType::F32,
+                            )
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "gate_up_proj_input_global_scale",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0);
+                        if raw != 0.0 {
+                            1.0 / raw
+                        } else {
+                            1.0
+                        }
                     } else {
                         1.0
                     };
@@ -2123,6 +2152,29 @@ impl FusedMoeNvfp4 {
                             })
                             .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
                             .unwrap_or(1.0)
+                    } else if vb.contains_tensor("down_proj_input_global_scale") {
+                        let raw = vb
+                            .get_with_hints_dtype(
+                                (),
+                                "down_proj_input_global_scale",
+                                no_shard,
+                                DType::F32,
+                            )
+                            .or_else(|_| {
+                                vb.get_with_hints_dtype(
+                                    (1,),
+                                    "down_proj_input_global_scale",
+                                    no_shard,
+                                    DType::F32,
+                                )
+                            })
+                            .and_then(|t| t.flatten_all()?.to_vec1::<f32>().map(|v| v[0]))
+                            .unwrap_or(1.0);
+                        if raw != 0.0 {
+                            1.0 / raw
+                        } else {
+                            1.0
+                        }
                     } else {
                         1.0
                     };

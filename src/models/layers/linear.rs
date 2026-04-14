@@ -1221,11 +1221,15 @@ impl Module for LnMxfp4 {
 /// NVFP4 linear layer: packed FP4 E2M1 weights with FP8 E4M3 block scales + F32 global scale.
 ///
 /// Scale factors:
-/// - `global_scale`: weight-side global scale (from `weight_scale_2` or `1/weight_global_scale`)
-/// - `input_scale`: activation-side global scale (from `input_scale` or `input_global_scale`).
-///   Only used by the hardware FP4 path (Blackwell SM100+) where activations are quantized to FP4.
-///   For the software path (Hopper and below), this is ignored since activations stay in FP16/BF16.
-///   When the checkpoint doesn't provide input_scale, defaults to 1.0.
+/// - `global_scale`: weight-side multiplier for the hardware FP4 path
+///   (from `weight_scale_2` or `1/weight_global_scale`)
+/// - `input_scale`: activation-side multiplier for the hardware FP4 path.
+///   ModelOpt checkpoints store this directly as `input_scale`.
+///   Compressed-tensors checkpoints store `input_global_scale` as a divisor, so
+///   we invert it here to keep the hardware FP4 contract consistent.
+///   For the software path (Hopper and below), this is ignored since activations
+///   stay in FP16/BF16. When the checkpoint doesn't provide an activation scale,
+///   defaults to 1.0.
 #[derive(Debug, Clone)]
 pub struct LnNvfp4 {
     pub blocks: Tensor,
@@ -1293,7 +1297,7 @@ impl LnNvfp4 {
             };
             t.flatten_all()?.to_vec1::<f32>()?[0]
         } else if vb.contains_tensor("input_global_scale") {
-            // compressed-tensors format: input_global_scale
+            // compressed-tensors format: input_global_scale is a divisor, invert it
             let t = match vb.get_with_hints_dtype((1,), "input_global_scale", no_shard, DType::F32)
             {
                 Ok(t) => t,
@@ -1301,7 +1305,12 @@ impl LnNvfp4 {
                     vb.get_with_hints_dtype((), "input_global_scale", no_shard, DType::F32)?
                 }
             };
-            t.flatten_all()?.to_vec1::<f32>()?[0]
+            let raw = t.flatten_all()?.to_vec1::<f32>()?[0];
+            if raw != 0.0 {
+                1.0 / raw
+            } else {
+                1.0
+            }
         } else {
             1.0f32
         };
