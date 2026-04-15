@@ -354,10 +354,7 @@ impl LLMEngine {
                     let ecfg = engine_config.get_or_init(|| {
                         let mut econfig = econfig.clone();
                         // Use new KVCacheAllocator for multi-rank negotiation
-                        let mut allocator = KVCacheAllocator::new(&econfig, &config, dtype);
-                        if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(&config) {
-                            allocator.set_per_layer_cache_config(plc);
-                        }
+                        let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
                         let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
                         match allocator.plan(&device_ids, &mut econfig) {
                             Ok(_) => {

@@ -16,7 +16,7 @@
 //! let (gpu_cache, cpu_cache) = allocator.init_kv_cache(&allocation, dtype, &device)?;
 //! ```
 
-use super::{qwen3_hybrid_layer_types, resolve_qwen3_hybrid_config};
+use super::{gemma4_per_layer_cache_config, qwen3_hybrid_layer_types, resolve_qwen3_hybrid_config};
 use crate::utils::config::{Config, EngineConfig};
 use candle_core::{DType, Device, Result, Tensor};
 use std::fmt;
@@ -122,19 +122,52 @@ pub struct KVCacheAllocator {
 }
 
 impl KVCacheAllocator {
-    fn kv_heads_per_shard(&self) -> usize {
+    fn kv_heads_per_shard_for(&self, num_kv_heads: usize) -> usize {
         if self.num_shards == 0 {
-            // Defensive fallback: constructor normalizes this to >=1.
             return 1;
         }
 
-        if self.num_kv_heads >= self.num_shards {
-            self.num_kv_heads / self.num_shards
+        if num_kv_heads >= self.num_shards {
+            num_kv_heads / self.num_shards
         } else {
-            // For MQA/GQA configs where TP shards exceed KV heads, each shard still stores
-            // one replicated KV head, matching runtime attention behavior.
             1
         }
+    }
+
+    fn kv_heads_per_shard(&self) -> usize {
+        self.kv_heads_per_shard_for(self.num_kv_heads)
+    }
+
+    fn layer_kv_config(&self, layer_idx: usize) -> (usize, usize) {
+        self.per_layer_cache_config
+            .as_ref()
+            .and_then(|configs| configs.get(layer_idx).copied())
+            .unwrap_or((self.num_kv_heads, self.head_dim))
+    }
+
+    fn layer_flash_key_value_block_shape(&self, layer_idx: usize) -> (usize, usize, usize) {
+        let (num_kv_heads, head_dim) = self.layer_kv_config(layer_idx);
+        (
+            self.block_size,
+            self.kv_heads_per_shard_for(num_kv_heads),
+            head_dim,
+        )
+    }
+
+    fn layer_key_block_shape(
+        &self,
+        layer_idx: usize,
+        cache_dtype: DType,
+    ) -> (usize, usize, usize, usize) {
+        let (_, kv_heads, head_dim) = self.layer_flash_key_value_block_shape(layer_idx);
+        let element_size = cache_dtype.size_in_bytes();
+        let x = 16 / element_size;
+        (kv_heads, head_dim / x, self.block_size, x)
+    }
+
+    fn layer_value_block_shape(&self, layer_idx: usize) -> (usize, usize, usize) {
+        let (_, kv_heads, head_dim) = self.layer_flash_key_value_block_shape(layer_idx);
+        (kv_heads, head_dim, self.block_size)
     }
 
     /// Create a new KVCacheAllocator from engine and model configs
@@ -247,6 +280,18 @@ impl KVCacheAllocator {
             }
         };
 
+        let per_layer_cache_config = match gemma4_per_layer_cache_config(config) {
+            Some(configs) if configs.len() == num_kv_layers => Some(configs),
+            Some(_) => {
+                crate::log_warn!(
+                    "Ignoring Gemma4 heterogeneous KV cache config because it does not match num_kv_layers={}.",
+                    num_kv_layers
+                );
+                None
+            }
+            None => None,
+        };
+
         Self {
             num_hidden_layers: config.num_hidden_layers,
             num_kv_layers,
@@ -275,7 +320,7 @@ impl KVCacheAllocator {
             is_mla,
             mla_kv_lora_rank,
             mla_qk_rope_head_dim,
-            per_layer_cache_config: None,
+            per_layer_cache_config,
         }
     }
 
@@ -393,11 +438,7 @@ impl KVCacheAllocator {
         } else if let Some(ref configs) = self.per_layer_cache_config {
             let mut total = 0usize;
             for &(kv_heads, hd) in configs {
-                let heads_per_shard = if self.num_shards > 0 && kv_heads >= self.num_shards {
-                    kv_heads / self.num_shards
-                } else {
-                    1
-                };
+                let heads_per_shard = self.kv_heads_per_shard_for(kv_heads);
                 total += self.block_size * heads_per_shard * hd * self.dtype_size * 2;
             }
             total
@@ -662,28 +703,6 @@ impl KVCacheAllocator {
     // Tensor Allocation Methods
     //==========================================================================
 
-    /// Calculate flashattn KV block shape: [num_blocks, block_size, num_kv_heads, head_size]
-    fn calculate_flash_key_value_block_shape(&self) -> (usize, usize, usize) {
-        (self.block_size, self.kv_heads_per_shard(), self.head_dim)
-    }
-
-    /// Calculate key block shape for paged attention
-    fn calculate_key_block_shape(&self, cache_dtype: DType) -> (usize, usize, usize, usize) {
-        let element_size = cache_dtype.size_in_bytes();
-        let x = 16 / element_size;
-        (
-            self.kv_heads_per_shard(),
-            self.head_dim / x,
-            self.block_size,
-            x,
-        )
-    }
-
-    /// Calculate value block shape for paged attention
-    fn calculate_value_block_shape(&self) -> (usize, usize, usize) {
-        (self.kv_heads_per_shard(), self.head_dim, self.block_size)
-    }
-
     /// Initialize KV cache tensors on GPU and CPU
     ///
     /// # Arguments
@@ -784,18 +803,7 @@ impl KVCacheAllocator {
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
             for layer_idx in 0..self.num_kv_layers {
-                let (kv_heads, hd) = if let Some(ref configs) = self.per_layer_cache_config {
-                    let (h, d) = configs[layer_idx];
-                    let h_shard = if self.num_shards > 0 && h >= self.num_shards {
-                        h / self.num_shards
-                    } else {
-                        1
-                    };
-                    (h_shard, d)
-                } else {
-                    let kv_shape = self.calculate_flash_key_value_block_shape();
-                    (kv_shape.1, kv_shape.2)
-                };
+                let (_, kv_heads, hd) = self.layer_flash_key_value_block_shape(layer_idx);
                 if hd > 256 {
                     let key_blocks = Tensor::empty(
                         (num_gpu_blocks, kv_heads, hd / x, self.block_size, x),
@@ -827,18 +835,7 @@ impl KVCacheAllocator {
                 }
             }
             for layer_idx in 0..self.num_kv_layers {
-                let (kv_heads, hd) = if let Some(ref configs) = self.per_layer_cache_config {
-                    let (h, d) = configs[layer_idx];
-                    let h_shard = if self.num_shards > 0 && h >= self.num_shards {
-                        h / self.num_shards
-                    } else {
-                        1
-                    };
-                    (h_shard, d)
-                } else {
-                    let kv_shape = self.calculate_flash_key_value_block_shape();
-                    (kv_shape.1, kv_shape.2)
-                };
+                let (_, kv_heads, hd) = self.layer_flash_key_value_block_shape(layer_idx);
                 if hd > 256 {
                     let key_blocks = Tensor::zeros(
                         (num_cpu_blocks, kv_heads, hd / x, self.block_size, x),
@@ -867,12 +864,11 @@ impl KVCacheAllocator {
             }
             Ok((gpu_cache, cpu_cache))
         } else {
-            let kshape = self.calculate_key_block_shape(cache_dtype);
-            let vshape = self.calculate_value_block_shape();
-
             let mut gpu_cache = Vec::new();
             let mut cpu_cache = Vec::new();
-            for _ in 0..self.num_kv_layers {
+            for layer_idx in 0..self.num_kv_layers {
+                let kshape = self.layer_key_block_shape(layer_idx, cache_dtype);
+                let vshape = self.layer_value_block_shape(layer_idx);
                 let key_blocks = Tensor::empty(
                     (num_gpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
@@ -887,7 +883,9 @@ impl KVCacheAllocator {
                 )?;
                 gpu_cache.push((key_blocks, value_blocks));
             }
-            for _ in 0..self.num_kv_layers {
+            for layer_idx in 0..self.num_kv_layers {
+                let kshape = self.layer_key_block_shape(layer_idx, cache_dtype);
+                let vshape = self.layer_value_block_shape(layer_idx);
                 let key_blocks = Tensor::zeros(
                     (num_cpu_blocks, kshape.0, kshape.1, kshape.2, kshape.3),
                     cache_dtype,
