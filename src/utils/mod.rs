@@ -1337,7 +1337,10 @@ pub fn init_config_tokenizer(
         };
         let tokenizer_file = model_pathes.get_tokenizer_filename();
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+        let mut tokenizer =
+            Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+        let _ = tokenizer.with_truncation(None);
+        let _ = tokenizer.with_padding(None);
 
         let generation_config_path = model_pathes.get_generation_config_filename();
         let generation_cfg = if generation_config_path.display().to_string() != ""

@@ -1095,7 +1095,9 @@ impl Gemma4ForCausalLM {
             let logits = if self.is_qvar_builder {
                 self.lm_head.forward(&xs)?
             } else {
-                self.lm_head.forward(&xs.to_dtype(self.dtype)?)?
+                self.lm_head
+                    .forward(&xs.to_dtype(self.dtype)?)?
+                    .to_dtype(DType::F32)?
             };
 
             let final_logit_softcapping = if let Some(extra) = &self.config.extra_config_json {

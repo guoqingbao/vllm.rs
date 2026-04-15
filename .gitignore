@@ -10,3 +10,4 @@ CLAUDE.md
 *.nsys-rep
 *.sqlite
 .cursor/skills/nobreak/SKILL.md
+/vllm_rs

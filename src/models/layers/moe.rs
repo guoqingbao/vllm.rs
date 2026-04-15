@@ -2352,6 +2352,17 @@ impl FusedMoeNvfp4 {
             xs
         };
 
+        let pre_sorted = if num_tokens > 32 {
+            use attention_rs::sort::ArgSortOp;
+            let flat = topk_ids.flatten_all()?.contiguous()?;
+            let (eids, tids) = flat.sort(true)?;
+            Some((tids, eids))
+        } else {
+            None
+        };
+
+        let pre_sorted_refs = pre_sorted.as_ref().map(|(a, b)| (a, b));
+
         let gate_up = moe::moe_gemm_nvfp4(
             &xs,
             &self.gate_up_blocks,
@@ -2360,6 +2371,7 @@ impl FusedMoeNvfp4 {
             Some(&self.gate_up_input_scales),
             None,
             &topk_ids,
+            pre_sorted_refs,
         )?;
 
         let gate = gate_up
@@ -2378,6 +2390,7 @@ impl FusedMoeNvfp4 {
             Some(&self.down_input_scales),
             None,
             &topk_ids,
+            pre_sorted_refs,
         )?;
 
         let mut ys = if self.apply_router_weight_on_input {
