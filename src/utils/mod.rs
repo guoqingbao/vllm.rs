@@ -987,6 +987,11 @@ pub fn qwen3_hybrid_layer_types(config: &Config) -> Option<Vec<String>> {
 
 /// For Gemma4 models with heterogeneous head dims (SWA=head_dim, full_attention=global_head_dim),
 /// returns per-layer (num_kv_heads, head_dim) for KV cache allocation.
+///
+/// Handles three config layouts:
+/// - HF multimodal (`Gemma4ForConditionalGeneration`): keys nested under `text_config`
+/// - HF text-only (`Gemma4ForCausalLM`): keys at top level of `extra_config_json`
+/// - GGUF: synthetic JSON with `swa_head_dim`/`global_head_dim` at top level
 pub fn gemma4_per_layer_cache_config(config: &Config) -> Option<Vec<(usize, usize)>> {
     let arch = config.architectures.as_ref()?.first()?;
     if !arch.contains("Gemma4") {
@@ -994,16 +999,22 @@ pub fn gemma4_per_layer_cache_config(config: &Config) -> Option<Vec<(usize, usiz
     }
     let extra = config.extra_config_json.as_ref()?;
     let v: serde_json::Value = serde_json::from_str(extra).ok()?;
-    let tc = v.get("text_config")?;
+    let tc = v.get("text_config");
 
-    let layer_types: Vec<String> = tc
-        .get("layer_types")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
-    let swa_head_dim = tc.get("head_dim").and_then(|v| v.as_u64())? as usize;
-    let global_head_dim = tc.get("global_head_dim").and_then(|v| v.as_u64())? as usize;
-    let swa_kv_heads = tc.get("num_key_value_heads").and_then(|v| v.as_u64())? as usize;
-    let global_kv_heads = tc
-        .get("num_global_key_value_heads")
+    let get = |key: &str| -> Option<&serde_json::Value> {
+        v.get(key).or_else(|| tc.and_then(|tc| tc.get(key)))
+    };
+
+    let layer_types: Vec<String> =
+        get("layer_types").and_then(|v| serde_json::from_value(v.clone()).ok())?;
+    let swa_head_dim = get("head_dim")
+        .or_else(|| get("swa_head_dim"))
+        .and_then(|v| v.as_u64())? as usize;
+    let global_head_dim = get("global_head_dim").and_then(|v| v.as_u64())? as usize;
+    let swa_kv_heads = get("num_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(config.num_key_value_heads as u64) as usize;
+    let global_kv_heads = get("num_global_key_value_heads")
         .and_then(|v| v.as_u64())
         .unwrap_or(swa_kv_heads as u64) as usize;
 
