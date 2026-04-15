@@ -6,8 +6,6 @@ use crate::utils::config::Config;
 use crate::utils::config::QuantConfig;
 use attention_rs::moe;
 use attention_rs::moe::moe_gemm_fp8;
-use attention_rs::mxfp4_linear;
-use attention_rs::nvfp4_linear;
 use candle_core::Module;
 use candle_core::{
     quantized::{GgmlDType, QTensor},
@@ -1739,7 +1737,7 @@ impl FusedMoeMxfp4 {
         #[cfg(all(feature = "cuda", feature = "trtllm"))]
         if self.sm_version >= 100 {
             let num_experts = self.gate_up_blocks.dim(0)?;
-            let mut ys = mxfp4_linear::flashinfer_mxfp4_fused_moe(
+            let mut ys = moe::flashinfer_mxfp4_fused_moe(
                 &xs,
                 &topk_ids,
                 &topk_weights,
@@ -1759,7 +1757,7 @@ impl FusedMoeMxfp4 {
             return Ok(ys.to_dtype(self.dtype)?);
         }
 
-        let gate_up = mxfp4_linear::mxfp4_moe_gemm(
+        let gate_up = moe::moe_gemm_mxfp4(
             &xs,
             &self.gate_up_blocks,
             &self.gate_up_scales,
@@ -1775,7 +1773,7 @@ impl FusedMoeMxfp4 {
             .contiguous()?;
         let down_inputs = (up * gate.apply(&self.act)?)?;
 
-        let down = mxfp4_linear::mxfp4_moe_gemm(
+        let down = moe::moe_gemm_mxfp4(
             &down_inputs,
             &self.down_blocks,
             &self.down_scales,
@@ -2354,7 +2352,7 @@ impl FusedMoeNvfp4 {
             xs
         };
 
-        let gate_up = nvfp4_linear::nvfp4_moe_gemm(
+        let gate_up = moe::moe_gemm_nvfp4(
             &xs,
             &self.gate_up_blocks,
             &self.gate_up_scales,
@@ -2372,7 +2370,7 @@ impl FusedMoeNvfp4 {
             .contiguous()?;
         let down_inputs = (up * gate.apply(&self.act)?)?;
 
-        let down = nvfp4_linear::nvfp4_moe_gemm(
+        let down = moe::moe_gemm_nvfp4(
             &down_inputs,
             &self.down_blocks,
             &self.down_scales,
