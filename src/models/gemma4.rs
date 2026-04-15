@@ -1105,7 +1105,7 @@ impl Gemma4ForCausalLM {
                 logits
             };
 
-            Ok(logits)
+            Ok(logits.to_dtype(DType::F32)?)
         }
     }
 
