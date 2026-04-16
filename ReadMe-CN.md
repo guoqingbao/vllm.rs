@@ -125,7 +125,7 @@ python3 -m pip install vllm_rs
 
 #### Hopper（SM90+）/ Blackwell（SM120+）
 
-从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/tag/v0.9.8) 下载 wheel，解压后安装 `.whl` 包。
+从 [Release Assets](https://github.com/guoqingbao/vllm.rs/releases/) 下载 wheel，解压后安装 `.whl` 包。
 
 
 ### 🌐✨ API Server + ChatGPT风格内置网页
