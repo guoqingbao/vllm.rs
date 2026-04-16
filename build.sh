@@ -91,34 +91,36 @@ fi
 RUNNER_BIN="$(bin_name runner)"
 VLLM_RS_BIN="$(bin_name vllm-rs)"
 
+HAS_PYTHON=false
+if [[ "$FEATURES" == *"python"* ]]; then
+  HAS_PYTHON=true
+fi
+
+IS_METAL=false
+if [[ "$FEATURES" == *"metal"* ]]; then
+  IS_METAL=true
+fi
+
 # Echo config
 echo "Building with profile: $PROFILE"
-echo "Cargo release flag: ${RELEASE:-<none>}"
 echo "Features: $FEATURES"
-echo "Publish: $PUBLISH"
 echo "Install: $INSTALL"
-echo "Dst: $DST"
 
 # -------------------------------------------------------------------
-# INSTALL FAST PATH: skip ALL python/maturin and vllm_rs staging
+# INSTALL PATH: build both binaries in one command, install to --dst
 # -------------------------------------------------------------------
 if [[ "$INSTALL" == true ]]; then
   echo "Binary-only install requested; skipping maturin and python package staging."
 
-  # Build vllm-rs
-  echo "Building vllm-rs binary..."
-  cargo build $RELEASE --bin vllm-rs --features "$FEATURES"
-
-  # Build runner unless metal
-  if [[ "$FEATURES" == *"metal"* ]]; then
-    echo "Metal feature detected. Skipping runner build."
+  if [[ "$IS_METAL" == true ]]; then
+    echo "Metal feature detected. Building vllm-rs only..."
+    cargo build $RELEASE --bin vllm-rs --features "$FEATURES"
   else
-    FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
-    echo "Building runner binary..."
-    cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
+    FEATURES_NO_PY=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
+    echo "Building vllm-rs and runner binaries..."
+    cargo build $RELEASE --bin vllm-rs --bin runner --features "$FEATURES_NO_PY"
   fi
 
-  # Install binaries
   echo "Installing binaries to: $DST"
   mkdir -p "$DST"
 
@@ -129,7 +131,7 @@ if [[ "$INSTALL" == true ]]; then
   fi
   install -m 755 "$VLLM_RS_PATH" "$DST/vllm-rs"
 
-  if [[ "$FEATURES" != *"metal"* ]]; then
+  if [[ "$IS_METAL" != true ]]; then
     RUNNER_PATH="target/$PROFILE/$RUNNER_BIN"
     if [[ ! -f "$RUNNER_PATH" ]]; then
       echo "Error: runner binary not found at $RUNNER_PATH"
@@ -138,18 +140,32 @@ if [[ "$INSTALL" == true ]]; then
     install -m 755 "$RUNNER_PATH" "$DST/runner"
   fi
 
-  echo "✅ Install complete."
+  echo "Build and install complete."
   exit 0
 fi
 
 # -------------------------------------------------------------------
-# NON-INSTALL PATH: python package staging + maturin build/publish
+# NO PYTHON: build both binaries in one cargo command, done
+# -------------------------------------------------------------------
+if [[ "$HAS_PYTHON" != true ]]; then
+  if [[ "$IS_METAL" == true ]]; then
+    echo "Metal feature detected. Building vllm-rs only..."
+    cargo build $RELEASE --bin vllm-rs --features "$FEATURES"
+  else
+    echo "Building vllm-rs and runner binaries..."
+    cargo build $RELEASE --bin vllm-rs --bin runner --features "$FEATURES"
+  fi
+  echo "Build complete."
+  exit 0
+fi
+
+# -------------------------------------------------------------------
+# PYTHON PATH: python package staging + maturin build/publish
 # -------------------------------------------------------------------
 DEST_DIR="vllm_rs"
 mkdir -p "$DEST_DIR"
 
-# If metal feature detected: skip runner build/copy
-if [[ "$FEATURES" == *"metal"* ]]; then
+if [[ "$IS_METAL" == true ]]; then
   echo "Metal feature detected. Skipping runner build and copy."
 else
   FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
@@ -166,7 +182,6 @@ else
   else
     echo "Warning: patchelf not found; runner may need LD_LIBRARY_PATH to find bundled libs."
   fi
-  echo "✅ Done. Runner binary copied to $DEST_DIR/"
 fi
 
 # Staging files for python package
@@ -188,21 +203,21 @@ chmod 755 "$DEST_DIR/completion.py"
 # Build or publish Python package with maturin
 echo "Building Python extension with maturin..."
 
-FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashattn\b//g' | xargs)
-FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashinfer\b//g' | xargs)
+FEATURES_MATURIN=$(echo "$FEATURES" | sed -E 's/\bflashattn\b//g' | xargs)
+FEATURES_MATURIN=$(echo "$FEATURES_MATURIN" | sed -E 's/\bflashinfer\b//g' | xargs)
 
-echo "Python extension features: $FEATURES"
+echo "Python extension features: $FEATURES_MATURIN"
 
 if [[ "$PUBLISH" == true ]]; then
   echo "Publishing package to PyPI..."
-  maturin publish --features "$FEATURES" --username __token__
+  maturin publish --features "$FEATURES_MATURIN" --username __token__
 else
-  maturin build $RELEASE --features "$FEATURES"
+  maturin build $RELEASE --features "$FEATURES_MATURIN"
 fi
 
 # Clean up staging directory
 echo "Cleaning up temporary files..."
-if [[ "$FEATURES" != *"metal"* ]]; then
+if [[ "$IS_METAL" != true ]]; then
   rm -f "$DEST_DIR/runner"
 fi
 rm -f "$DEST_DIR/__init__.py" \
@@ -214,4 +229,4 @@ rm -f "$DEST_DIR/__init__.py" \
       "$DEST_DIR/completion.py"
 rm -rf "$DEST_DIR"
 
-echo "✅ ${PUBLISH:+Publish }Build complete."
+echo "Build complete."

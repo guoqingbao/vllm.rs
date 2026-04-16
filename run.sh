@@ -33,16 +33,25 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
+IS_METAL=false
+if [[ "$FEATURES" == *"metal"* ]]; then
+  IS_METAL=true
+fi
+
 # Echo config
 echo "Building with profile: $PROFILE"
 echo "Features: $FEATURES"
 echo "Runtime arguments: ${RUN_ARGS[*]}"
 
-# Step 1: Build runner binary
+# Build both binaries in one cargo command
 FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
-echo "Building runner binary..."
-cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
+if [[ "$IS_METAL" == true ]]; then
+  echo "Building vllm-rs binary..."
+  cargo build $RELEASE --bin vllm-rs --features "$FEATURES_RUNNER"
+else
+  echo "Building vllm-rs and runner binaries..."
+  cargo build $RELEASE --bin vllm-rs --bin runner --features "$FEATURES_RUNNER"
+fi
 
-#FEATURES=$(echo "$FEATURES" | sed -E 's/\bflashattn\b//g' | xargs)
-# Step 2: Run the program with runtime args
-cargo run $RELEASE --features "$FEATURES" -- "${RUN_ARGS[@]}"
+# Run the program with runtime args
+cargo run $RELEASE --bin vllm-rs --features "$FEATURES" -- "${RUN_ARGS[@]}"
