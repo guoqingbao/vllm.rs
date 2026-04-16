@@ -24,8 +24,6 @@ RUN set -eux; \
     python3-pip; \
   rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir maturin patchelf cffi
-
 # Rust (stable) with optional China mirrors
 RUN set -eux; \
   if [ "${CHINA_MIRROR}" = "1" ]; then \
@@ -62,19 +60,37 @@ ARG WITH_FEATURES="cuda,nccl,graph,python,flashinfer,cutlass"
 WORKDIR /vllm.rs
 COPY . .
 
+# Conditional Build Logic
+# Logic: If 'python' is in features, run build.sh (assumed to handle python wheel generation).
+#        If 'python' is NOT in features, run cargo build directly for rust binaries only.
+# Note: BUILD_FEATURES takes precedence over WITH_FEATURES.
 RUN set -eux; \
   FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
-  ./build.sh --release --features "${FEATURES}"; \
-  cargo build --release --features "$(echo "${FEATURES}" | sed 's|,python||g')"
+  if echo "${FEATURES}" | grep -q '\bpython\b'; then \
+    echo "Python feature detected: executing build.sh"; \
+    pip3 install --no-cache-dir maturin patchelf cffi && \
+    ./build.sh --release --features "${FEATURES}"; \
+  else \
+    echo "Python feature absent: executing cargo build for rust artifacts only"; \
+    cargo build --release --features "${FEATURES}"; \
+  fi
 
+# Conditional Artifact Installation
+# Gated to ensure python-specific commands (pip, wheel installation) only run if python feature was selected.
+# Rust binaries (libvllm_rs.so, runner, vllm-rs) are installed in both paths assuming they are produced by cargo build.
 RUN set -eux; \
-  pip3 install --no-cache-dir target/wheels/*; \
+  FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
   install -Dm755 target/release/libvllm_rs.so /usr/lib64/libvllm_rs.so; \
   install -Dm755 target/release/runner /usr/local/bin/runner; \
   install -Dm755 target/release/vllm-rs /usr/local/bin/vllm-rs; \
-  printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
-  chmod +x /usr/local/bin/vllm-rs-server; \
-  cp -r target/wheels/ /opt/wheels; \
+  if echo "${FEATURES}" | grep -q '\bpython\b'; then \
+    pip3 install --no-cache-dir target/wheels/*; \
+    printf '%s\n' '#!/bin/sh' 'exec python3 -m vllm_rs.server "$@"' > /usr/local/bin/vllm-rs-server; \
+    chmod +x /usr/local/bin/vllm-rs-server; \
+    cp -r target/wheels/ /opt/wheels; \
+  else \
+    mkdir /opt/wheels; \
+  fi; \
   cargo clean
 
 RUN set -eux; \
