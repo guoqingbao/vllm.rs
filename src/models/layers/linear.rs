@@ -1219,11 +1219,23 @@ impl Module for LnMxfp4 {
 }
 
 /// NVFP4 linear layer: packed FP4 E2M1 weights with FP8 E4M3 block scales + F32 global scale.
+///
+/// Scale factors:
+/// - `global_scale`: weight-side multiplier for the hardware FP4 path
+///   (from `weight_scale_2` or `1/weight_global_scale`)
+/// - `input_scale`: activation-side multiplier for the hardware FP4 path.
+///   ModelOpt checkpoints store this directly as `input_scale`.
+///   Compressed-tensors checkpoints store `input_global_scale` as a divisor, so
+///   we invert it here to keep the hardware FP4 contract consistent.
+///   For the software path (Hopper and below), this is ignored since activations
+///   stay in FP16/BF16. When the checkpoint doesn't provide an activation scale,
+///   defaults to 1.0.
 #[derive(Debug, Clone)]
 pub struct LnNvfp4 {
     pub blocks: Tensor,
     pub scales: Tensor,
     pub global_scale: f32,
+    pub input_scale: f32,
     pub bias: Option<Tensor>,
 }
 
@@ -1277,6 +1289,32 @@ impl LnNvfp4 {
             1.0f32
         };
 
+        let input_scale = if vb.contains_tensor("input_scale") {
+            // modelopt format: input_scale is a per-tensor activation scale
+            let t = match vb.get_with_hints_dtype((1,), "input_scale", no_shard, DType::F32) {
+                Ok(t) => t,
+                Err(_) => vb.get_with_hints_dtype((), "input_scale", no_shard, DType::F32)?,
+            };
+            t.flatten_all()?.to_vec1::<f32>()?[0]
+        } else if vb.contains_tensor("input_global_scale") {
+            // compressed-tensors format: input_global_scale is a divisor, invert it
+            let t = match vb.get_with_hints_dtype((1,), "input_global_scale", no_shard, DType::F32)
+            {
+                Ok(t) => t,
+                Err(_) => {
+                    vb.get_with_hints_dtype((), "input_global_scale", no_shard, DType::F32)?
+                }
+            };
+            let raw = t.flatten_all()?.to_vec1::<f32>()?[0];
+            if raw != 0.0 {
+                1.0 / raw
+            } else {
+                1.0
+            }
+        } else {
+            1.0f32
+        };
+
         let bias = if load_bias && vb.contains_tensor("bias") {
             Some(vb.get((out_dim,), "bias")?)
         } else {
@@ -1286,6 +1324,7 @@ impl LnNvfp4 {
             blocks,
             scales,
             global_scale,
+            input_scale,
             bias,
         })
     }
@@ -1307,6 +1346,7 @@ impl Module for LnNvfp4 {
             &self.blocks,
             &self.scales,
             self.global_scale,
+            self.input_scale,
             self.bias.as_ref(),
         )?;
 

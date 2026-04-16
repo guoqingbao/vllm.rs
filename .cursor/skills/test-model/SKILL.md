@@ -152,6 +152,7 @@ Verify the build succeeds (exit code 0). The `Error: Must provide model_id or we
 
 If the build fails, check and fix compilation errors before proceeding.
 
+Important, if you build on CUDA with cargo build, make sure always build vllm-rs and runner binaries.
 ---
 
 ## Phase 3: Create the Test Script

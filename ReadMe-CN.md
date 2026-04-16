@@ -41,7 +41,9 @@
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 | **Qwen3.5-35B-A3B** | Q3_K_M/MXFP4 | **35B (MoE)**| **95-106** tokens/s (**Hopper**)  |
-| **GLM4.7 Flash** | NVFP4 (**无FP4硬件加速**) | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
+| **GLM4.7 Flash** | NVFP4 | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
+| **Gemma4-31B** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
+| **Gemma4-26B-A4B** | BF16 | **26B (MoE)**| **75** tokens/s (**Hopper**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -61,7 +63,7 @@
 
 ## 🧠 支持的模型架构
 
-* ✅ LLaMa 系列（LLaMa2、LLaMa3, LLaMa4, IQuest-Coder）
+* ✅ LLaMa 系列（LLaMa2、LLaMa3, **LLaMa4**, IQuest-Coder）
 * ✅ Qwen 系列（Qwen2、Qwen3）
 * ✅ Qwen2/Qwen3 Moe 系列
 * ✅ Qwen3-Next 系列
@@ -73,7 +75,7 @@
 * ✅ GLM4.7 Flash
 * ✅ DeepSeek V3/R1/V3.2
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini等)
-* ✅ Gemma3/**Gemma4** (多模态，不支持Flash Attention)
+* ✅ Gemma3/**Gemma4** (多模态)
 * ✅ Qwen3-VL (Dense, 多模态)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 

@@ -56,22 +56,11 @@ async fn main() -> Result<()> {
         "You selected both interactive and server mode, which is not valid!"
     );
 
-    // Align with Python interface
-    let default_max_model_len = if cfg!(target_os = "macos") {
-        32768
-    } else {
-        32768 * 2
-    };
-
-    let max_model_len = if args.max_model_len.is_none() && interactive {
-        let max_model_len = if args.interactive {
-            default_max_model_len
-        } else {
-            default_max_model_len / max_num_seqs
-        };
-        Some(max_model_len)
-    } else {
-        // if not set under server mode, the backend will auto decide
+    let max_model_len = {
+        // If not explicitly set, let the allocator auto-decide a fit based on
+        // post-load free memory. Interactive mode previously forced a large
+        // default here, which incorrectly turned planning into a hard
+        // "must fit this exact context length" requirement.
         assert!(
             args.max_model_len == None || args.kv_fraction == None,
             "You provided both max_model_len and kv_fraction!"

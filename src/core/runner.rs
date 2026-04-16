@@ -447,16 +447,9 @@ impl ModelRunner {
             if let MessageType::UsableMemoryLeft(ecfg) = msg {
                 *econfig = ecfg.clone(); // Update Engine config
             }
-            let mut a = KVCacheAllocator::new(econfig, config, dtype);
-            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(config) {
-                a.set_per_layer_cache_config(plc);
-            }
-            a
+            KVCacheAllocator::new(econfig, config, dtype)
         } else {
-            let mut allocator = KVCacheAllocator::new(&econfig, &config, dtype);
-            if let Some(plc) = crate::utils::gemma4_per_layer_cache_config(&config) {
-                allocator.set_per_layer_cache_config(plc);
-            }
+            let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
             let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
             match allocator.plan(&device_ids, econfig) {
                 Ok(_) => {
@@ -600,20 +593,23 @@ impl ModelRunner {
         };
         #[cfg(feature = "flashinfer")]
         let flashinfer_kv_params = {
-            if gpu_kv_cache.is_empty() {
-                None
-            } else {
-                let (k_cache, _) = &gpu_kv_cache[0];
+            let mut params = None;
+            for (k_cache, _) in &gpu_kv_cache {
+                if k_cache.rank() != 4 {
+                    continue;
+                }
                 let (_, page_size, num_kv_heads, head_dim) = k_cache.dims4()?;
-                Some(FlashInferKvParams {
+                params = Some(FlashInferKvParams {
                     kv_dtype: k_cache.dtype(),
                     out_dtype: dtype,
                     page_size,
                     num_kv_heads,
                     head_dim,
                     num_qo_heads: config.num_attention_heads / comm.world_size(),
-                })
+                });
+                break;
             }
+            params
         };
         #[cfg(feature = "flashinfer")]
         crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);

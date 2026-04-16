@@ -987,42 +987,64 @@ pub fn qwen3_hybrid_layer_types(config: &Config) -> Option<Vec<String>> {
 
 /// For Gemma4 models with heterogeneous head dims (SWA=head_dim, full_attention=global_head_dim),
 /// returns per-layer (num_kv_heads, head_dim) for KV cache allocation.
+///
+/// Handles three config layouts:
+/// - HF multimodal (`Gemma4ForConditionalGeneration`): keys nested under `text_config`
+/// - HF text-only (`Gemma4ForCausalLM`): keys at top level of `extra_config_json`
+/// - GGUF: synthetic JSON with `swa_head_dim`/`global_head_dim` at top level
 pub fn gemma4_per_layer_cache_config(config: &Config) -> Option<Vec<(usize, usize)>> {
     let arch = config.architectures.as_ref()?.first()?;
     if !arch.contains("Gemma4") {
         return None;
     }
     let extra = config.extra_config_json.as_ref()?;
-    let v: serde_json::Value = serde_json::from_str(extra).ok()?;
-    let tc = v.get("text_config")?;
+    let root: serde_json::Value = serde_json::from_str(extra).ok()?;
+    let cfg = root.get("text_config").unwrap_or(&root);
 
-    let layer_types: Vec<String> = tc
-        .get("layer_types")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())?;
-    let swa_head_dim = tc.get("head_dim").and_then(|v| v.as_u64())? as usize;
-    let global_head_dim = tc.get("global_head_dim").and_then(|v| v.as_u64())? as usize;
-    let swa_kv_heads = tc.get("num_key_value_heads").and_then(|v| v.as_u64())? as usize;
-    let global_kv_heads = tc
-        .get("num_global_key_value_heads")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(swa_kv_heads as u64) as usize;
+    let get = |key: &str| -> Option<&serde_json::Value> { cfg.get(key).or_else(|| root.get(key)) };
 
-    if swa_head_dim == global_head_dim {
+    let layer_types: Vec<String> =
+        get("layer_types").and_then(|value| serde_json::from_value(value.clone()).ok())?;
+    if layer_types.len() != config.num_hidden_layers {
+        crate::log_warn!(
+            "Gemma4 layer_types length {} != num_hidden_layers {}; ignoring heterogeneous KV cache config.",
+            layer_types.len(),
+            config.num_hidden_layers
+        );
         return None;
     }
 
-    Some(
-        layer_types
-            .iter()
-            .map(|lt| {
-                if lt == "full_attention" {
-                    (global_kv_heads, global_head_dim)
-                } else {
-                    (swa_kv_heads, swa_head_dim)
-                }
-            })
-            .collect(),
-    )
+    let swa_head_dim = get("swa_head_dim")
+        .or_else(|| cfg.get("head_dim"))
+        .or_else(|| root.get("head_dim"))
+        .and_then(|v| v.as_u64())? as usize;
+    let global_head_dim = get("global_head_dim").and_then(|v| v.as_u64())? as usize;
+    let swa_kv_heads = get("num_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(config.num_key_value_heads as u64) as usize;
+    let global_kv_heads = get("num_global_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(swa_kv_heads as u64) as usize;
+
+    let per_layer = layer_types
+        .iter()
+        .map(|lt| {
+            if lt == "full_attention" {
+                (global_kv_heads, global_head_dim)
+            } else {
+                (swa_kv_heads, swa_head_dim)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if per_layer
+        .iter()
+        .all(|&(kv_heads, head_dim)| kv_heads == swa_kv_heads && head_dim == swa_head_dim)
+    {
+        return None;
+    }
+
+    Some(per_layer)
 }
 
 fn require_model_penalty(arch: String) -> bool {
@@ -1315,7 +1337,10 @@ pub fn init_config_tokenizer(
         };
         let tokenizer_file = model_pathes.get_tokenizer_filename();
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+        let mut tokenizer =
+            Tokenizer::from_file(&tokenizer_file).map_err(candle_core::Error::wrap)?;
+        let _ = tokenizer.with_truncation(None);
+        let _ = tokenizer.with_padding(None);
 
         let generation_config_path = model_pathes.get_generation_config_filename();
         let generation_cfg = if generation_config_path.display().to_string() != ""
@@ -2111,7 +2136,9 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{get_arch_rope, ModelType};
+    use super::{gemma4_per_layer_cache_config, get_arch_rope, ModelType};
+    use crate::utils::config::Config;
+    use candle_nn::Activation;
     use tokenizers::{models::bpe::BPE, Tokenizer};
 
     fn empty_tokenizer() -> Tokenizer {
@@ -2141,6 +2168,91 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
+    }
+
+    fn gemma4_test_config(extra_config_json: serde_json::Value) -> Config {
+        Config {
+            architectures: Some(vec!["Gemma4ForConditionalGeneration".to_string()]),
+            head_dim: Some(512),
+            num_attention_heads: 16,
+            num_key_value_heads: 8,
+            max_position_embeddings: 8192,
+            hidden_size: 4096,
+            num_hidden_layers: 6,
+            max_model_len: None,
+            intermediate_size: 14336,
+            rms_norm_eps: 1e-6,
+            vocab_size: Some(256000),
+            rope_theta: None,
+            attention_bias: None,
+            qkv_bias: None,
+            attn_output_gate: None,
+            attn_logit_softcapping: None,
+            final_logit_softcapping: None,
+            tie_word_embeddings: None,
+            bos_token_id: None,
+            eos_token_id: None,
+            use_sliding_window: None,
+            sliding_window: Some(4096),
+            max_window_layers: None,
+            partial_rotary_factor: None,
+            hidden_act: Activation::GeluPytorchTanh,
+            rope_scaling: None,
+            quant: None,
+            moe_cfg: None,
+            fp8_kvcache: None,
+            quantization_config: None,
+            is_multi_model: Some(true),
+            extra_config_json: Some(extra_config_json.to_string()),
+        }
+    }
+
+    #[test]
+    fn gemma4_per_layer_cache_config_prefers_text_config_swa_head_dim() {
+        let config = gemma4_test_config(serde_json::json!({
+            "head_dim": 1024,
+            "text_config": {
+                "layer_types": [
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention"
+                ],
+                "head_dim": 256,
+                "global_head_dim": 512,
+                "num_key_value_heads": 4,
+                "num_global_key_value_heads": 8
+            }
+        }));
+
+        let per_layer = gemma4_per_layer_cache_config(&config).unwrap();
+        assert_eq!(per_layer.len(), 6);
+        assert_eq!(per_layer[0], (4, 256));
+        assert_eq!(per_layer[4], (4, 256));
+        assert_eq!(per_layer[5], (8, 512));
+    }
+
+    #[test]
+    fn gemma4_per_layer_cache_config_handles_gguf_extra_config() {
+        let config = gemma4_test_config(serde_json::json!({
+            "layer_types": [
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "sliding_attention",
+                "full_attention"
+            ],
+            "swa_head_dim": 256,
+            "global_head_dim": 512,
+            "num_global_key_value_heads": 8
+        }));
+
+        let per_layer = gemma4_per_layer_cache_config(&config).unwrap();
+        assert_eq!(per_layer[0], (8, 256));
+        assert_eq!(per_layer[5], (8, 512));
     }
 }
 
