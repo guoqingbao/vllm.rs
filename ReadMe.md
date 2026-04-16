@@ -41,8 +41,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
 | **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 | **Qwen3.5-35B-A3B** | Q3_K_M/MXFP4 | **35B (MoE)**| **95-106** tokens/s (**Hopper**)  |
-| **GLM4.7 Flash** | NVFP4 (**No Hardware Accleration**) | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
-| **Gemma4** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
+| **GLM4.7 Flash** | NVFP4 | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
+| **Gemma4-31B** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
 | **Gemma4-26B-A4B** | BF16 | **26B (MoE)**| **75** tokens/s (**Hopper**)  |
 
 > **Metal (Apple Silicon, M4)**
@@ -64,7 +64,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 ## 🧠 Supported Architectures
 
-* ✅ LLaMa (LLaMa2, LLaMa3, LLaMa4, IQuest-Coder)
+* ✅ LLaMa (LLaMa2, LLaMa3, **LLaMa4**, IQuest-Coder)
 * ✅ Qwen (Qwen2, Qwen3)
 * ✅ Qwen2/Qwen3 Moe
 * ✅ Qwen3 Next
@@ -76,7 +76,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ GLM4.7 Flash
 * ✅ DeepSeek V3/R1/V3.2
 * ✅ Phi3 / Phi4 (Phi-3, Phi-4, Phi-4-mini, etc.)
-* ✅ Gemma3/**Gemma4** (Multimodal model, No flash-attn support)
+* ✅ Gemma3/**Gemma4** (Multimodal model)
 * ✅ Qwen3-VL (Dense, Multimodal model)
 * ✅ MiroThinker-v1.5 (30B, 235B)
 
