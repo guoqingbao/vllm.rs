@@ -1723,7 +1723,7 @@ impl FusedMoeMxfp4 {
         })
     }
 
-    pub fn forward(&self, xs: &Tensor, _is_prefill: bool) -> Result<Tensor> {
+    pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
@@ -1763,6 +1763,7 @@ impl FusedMoeMxfp4 {
             &self.gate_up_scales,
             None,
             &topk_ids,
+            is_prefill,
         )?;
 
         let gate = gate_up
@@ -1779,6 +1780,7 @@ impl FusedMoeMxfp4 {
             &self.down_scales,
             None,
             &topk_ids,
+            is_prefill,
         )?;
 
         let topk_weights = topk_weights.to_dtype(down.dtype())?;
@@ -2335,7 +2337,7 @@ impl FusedMoeNvfp4 {
         xs: &Tensor,
         topk_weights: Tensor,
         topk_ids: Tensor,
-        _is_prefill: bool,
+        is_prefill: bool,
     ) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
 
@@ -2352,7 +2354,7 @@ impl FusedMoeNvfp4 {
             xs
         };
 
-        let pre_sorted = if num_tokens > 32 {
+        let pre_sorted = if is_prefill {
             use attention_rs::sort::ArgSortOp;
             let flat = topk_ids.flatten_all()?.contiguous()?;
             let (eids, tids) = flat.sort(true)?;
@@ -2372,6 +2374,7 @@ impl FusedMoeNvfp4 {
             None,
             &topk_ids,
             pre_sorted_refs,
+            is_prefill,
         )?;
 
         let gate = gate_up
@@ -2391,6 +2394,7 @@ impl FusedMoeNvfp4 {
             None,
             &topk_ids,
             pre_sorted_refs,
+            is_prefill,
         )?;
 
         let mut ys = if self.apply_router_weight_on_input {

@@ -18,31 +18,30 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 thread_local! {
-    static FP8_LINEAR_IS_PREFILL: Cell<bool> = const { Cell::new(false) };
+    static LINEAR_IS_PREFILL: Cell<bool> = const { Cell::new(false) };
 }
 
-pub struct Fp8LinearPrefillGuard {
+pub struct LinearPrefillGuard {
     prev: bool,
 }
 
-impl Drop for Fp8LinearPrefillGuard {
+impl Drop for LinearPrefillGuard {
     fn drop(&mut self) {
-        FP8_LINEAR_IS_PREFILL.with(|flag| flag.set(self.prev));
+        LINEAR_IS_PREFILL.with(|flag| flag.set(self.prev));
     }
 }
 
-pub fn set_fp8_linear_is_prefill(is_prefill: bool) -> Fp8LinearPrefillGuard {
-    let prev = FP8_LINEAR_IS_PREFILL.with(|flag| {
+pub fn set_linear_is_prefill(is_prefill: bool) -> LinearPrefillGuard {
+    let prev = LINEAR_IS_PREFILL.with(|flag| {
         let prev = flag.get();
         flag.set(is_prefill);
         prev
     });
-    Fp8LinearPrefillGuard { prev }
+    LinearPrefillGuard { prev }
 }
 
-#[cfg(feature = "flashinfer")]
-fn fp8_linear_is_prefill() -> bool {
-    FP8_LINEAR_IS_PREFILL.with(|flag| flag.get())
+pub fn linear_is_prefill() -> bool {
+    LINEAR_IS_PREFILL.with(|flag| flag.get())
 }
 
 pub fn shard(dim: usize, rank: usize, world_size: usize) -> candle_nn::var_builder::Shard {
@@ -1059,7 +1058,7 @@ impl Module for LnFp8 {
         let can_use_flashinfer_fp8 = (90..100).contains(&self.sm_version)
             && x_2d.dtype() == DType::BF16
             && self.weight_block_size.as_slice() == &[128, 128]
-            && !fp8_linear_is_prefill()
+            && !linear_is_prefill()
             && m <= 64;
 
         #[cfg(feature = "flashinfer")]
@@ -1206,6 +1205,7 @@ impl Module for LnMxfp4 {
             &self.blocks,
             &self.scales,
             self.bias.as_ref(),
+            linear_is_prefill(),
         )?;
 
         if orig_dims.len() > 2 {
@@ -1348,6 +1348,7 @@ impl Module for LnNvfp4 {
             self.global_scale,
             self.input_scale,
             self.bias.as_ref(),
+            linear_is_prefill(),
         )?;
 
         if orig_dims.len() > 2 {

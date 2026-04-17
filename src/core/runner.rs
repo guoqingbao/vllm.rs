@@ -2,7 +2,7 @@ use crate::models::gemma3::Gemma3ForConditionalGeneration;
 use crate::models::gemma4::Gemma4ForCausalLM;
 // src/core/runner.rs
 use crate::models::layers::distributed::Comm;
-use crate::models::layers::linear::set_fp8_linear_is_prefill;
+use crate::models::layers::linear::set_linear_is_prefill;
 use crate::models::layers::VarBuilderX;
 use crate::server::EmbeddingStrategy;
 use crate::transfer::Transfer;
@@ -865,7 +865,7 @@ impl ModelRunner {
         };
         let images = images.as_ref();
 
-        let _ = set_fp8_linear_is_prefill(is_prefill);
+        let _ = set_linear_is_prefill(is_prefill);
         let logits = crate::model_call!(
             &self.model,
             forward,
@@ -897,7 +897,7 @@ impl ModelRunner {
     pub fn embed(&self, seqs: &[&Sequence], strategy: &EmbeddingStrategy) -> Result<Vec<Vec<f32>>> {
         let (input_ids, positions, input_metadata) = self.prepare_prefill(seqs)?;
 
-        let _ = set_fp8_linear_is_prefill(true);
+        let _ = set_linear_is_prefill(true);
         let hidden = crate::model_call!(
             &self.model,
             forward_embedding,
