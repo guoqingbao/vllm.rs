@@ -606,5 +606,14 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * Python nano-vllm
 
 ---
+## Star History
+
+<a href="https://www.star-history.com/?repos=guoqingbao%2Fvllm.rs&type=date&legend=top-left">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=guoqingbao/vllm.rs&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=guoqingbao/vllm.rs&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=guoqingbao/vllm.rs&type=date&legend=top-left" />
+ </picture>
+</a>
 
 💡 **Like this project? Give it a ⭐ and contribute!**
