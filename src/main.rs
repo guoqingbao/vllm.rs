@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     };
 
     assert!(
-        !(interactive && args.server),
+        !(interactive && (args.server || args.ui_server || args.pd_server)),
         "You selected both interactive and server mode, which is not valid!"
     );
 
@@ -68,15 +68,15 @@ async fn main() -> Result<()> {
         args.max_model_len
     };
 
+    let server = args.server
+        || args.ui_server
+        || args.pd_server
+        || (!interactive && args.prompts.is_none() && args.batch.is_none());
+
     let prompts = match (&args.prompts, interactive) {
         (Some(prompts), false) => prompts.clone(),
         (None, false) => {
-            if args.server {
-                tracing::warn!("Enter server mode.");
-                vec![]
-            } else {
-                vec!["Please talk about China in more details.".to_string()]
-            }
+            vec![]
         }
         (Some(_), true) => {
             tracing::warn!("Interactive mode does not support predefined prompts, these prompts will be ignored.");
@@ -189,7 +189,7 @@ async fn main() -> Result<()> {
         Some(prefix_cache),
         args.prefix_cache_max_tokens,
         Some(args.fp8_kvcache),
-        Some(args.server || args.ui_server || !interactive),
+        Some(server || !interactive),
         args.cpu_mem_fold,
         args.kv_fraction,
         args.mamba_fraction,
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
         args.yarn_scaling_factor,
     );
 
-    let server_port = if args.server || args.ui_server || args.pd_server {
+    let server_port = if server {
         let port = args
             .port
             .unwrap_or(if args.pd_server { 7000 } else { 8000 });
@@ -219,11 +219,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if !interactive && args.prompts.is_none() {
+    if !interactive && prompts.is_empty() {
         eprintln!(
             "{}",
-            String::from("⛔️ No prompts provided for completion, using default prompt! Interactive (`--i`) and server mode (`--server`) are no specified!").red()
+            String::from("⛔️ No prompts provided for completion. Use --i for interactive mode or --server for server mode.").red()
         );
+        return Ok(());
     }
 
     let mut params = Vec::new();
@@ -239,20 +240,31 @@ async fn main() -> Result<()> {
             message_list.push(vec![msg]);
             params.push(param);
         }
-        if let Some(max_model_len) = args.max_model_len {
-            if args.max_tokens > max_model_len {
-                log_error!(
-                    "Requested max_tokens {} larger than max_model_len {}",
-                    args.max_tokens,
-                    max_model_len
-                );
-            }
-        }
     } else {
         params.push(SamplingParams::new_with_max_tokens(args.max_tokens));
     }
 
-    let total_available_tokens: i64 = max_num_seqs as i64 * max_model_len.unwrap_or(4096) as i64;
+    let (resolved_max_model_len, resolved_max_num_seqs) = {
+        let e = engine.read().unwrap();
+        let (_, _, mml) = e.get_model_info();
+        (mml.unwrap_or(32768), e.econfig.max_num_seqs)
+    };
+
+    if args.max_tokens > resolved_max_model_len {
+        log_error!(
+            "Requested max_tokens {} larger than max_model_len {}",
+            args.max_tokens,
+            resolved_max_model_len
+        );
+    }
+
+    tracing::info!(
+        "Resolved max_model_len: {}, max_num_seqs: {}",
+        resolved_max_model_len,
+        resolved_max_num_seqs
+    );
+
+    let total_available_tokens: i64 = resolved_max_num_seqs as i64 * resolved_max_model_len as i64;
     let mut chat_context_left = total_available_tokens;
     let mut line_editor = Reedline::create();
     let mut prompt = DefaultPrompt {

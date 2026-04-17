@@ -634,7 +634,7 @@ impl ModelRunner {
             capturer: GraphCapturer::new(
                 wrapper,
                 graph_capture_max_num_seqs,
-                econfig.max_model_len.unwrap_or(4096),
+                econfig.max_model_len.unwrap_or(32768),
                 econfig.block_size,
                 config.hidden_size,
                 #[cfg(feature = "flashinfer")]

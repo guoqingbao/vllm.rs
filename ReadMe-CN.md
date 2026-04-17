@@ -278,7 +278,7 @@ cargo install --features metal
 
 ### 运行方式
 
-使用 `--i` 启用交互模式 🤖，`--ui-server` 或 `--server` 启用服务模式 🌐，`--m`指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
+默认启动 **API 服务模式**（端口 8000）。使用 `--i` 启用交互模式 🤖，`--ui-server` 启用带 Web UI 的服务模式 🌐，`--m` 指定Huggingface模型，或`--w` 指定本地Safetensors模型路径 或`--f` 指定GGUF模型文件：
 
 > 单卡/多卡推理
   <details open>
@@ -462,7 +462,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--f`       | 当指定Model ID时为GGUF文件名，或未指定时为GGUF本地文件路径                 |
 | `--d`       | 设备 ID，例如 `--d 0`                       |
 | `--max-num-seqs`   | 同时处理的最大请求数（默认 `32`, macOS平台为`8`）   |
-| `--max-tokens`     | 单次最大输出 token 数（默认 `4096`，上限为模型支持的最大长度） |
+| `--max-tokens`     | 单次最大输出 token 数（默认 `16384`，上限为模型支持的最大长度） |
 | `--batch`     | 仅用于性能 (启用后会忽略 `max-num-seqs` 与 `prompts`) |
 | `--prompts` | 输入的 prompt，多个使用 \| 分隔 |
 | `--dtype`   | KV 缓存数据类型：`bf16`（默认）、`f16` 或 `f32`     |
@@ -472,7 +472,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--top-p`   | top-p 采样根据概率阈值选择动态数量的候选，范围是 [0,1]，常用在 0.8 ~ 0.95   |
 | `--presence-penalty` | 出现惩罚，控制模型是否避免再次提及`已经出现过的词`。<br> 数值范围 [-2, 2]，正值越大 → 越倾向引入新词汇；负值 → 越倾向重复已出现的词 |
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 |
-| `--server`       | 服务模式，适用于Rust CLI，Python使用 `python -m vllm.server`        |
+| `--server`       | 显式启动API服务（未指定 `--i`、`--prompts` 或 `--batch` 时，这是默认行为）        |
+| `--i`            | 交互式CLI对话模式                                        |
 | `--fp8-kvcache`       | 使用FP8 KV Cache (flashinfer/flashattn 没有启用时生效)                 |
 | `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.2，取值0.1 - 10.0)              |
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |
