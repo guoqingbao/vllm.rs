@@ -600,6 +600,17 @@ pub async fn chat_completion(
 
                 match item {
                     StreamItem::Token(token, token_id) => {
+                        // Check liveness BEFORE processing token to avoid wasted compute
+                        if *disconnect_rx.borrow() {
+                            crate::log_warn!(
+                                "[Seq {}] Client disconnected during decode, cancelling",
+                                current_seq_id
+                            );
+                            let mut e = engine_clone.write();
+                            e.cancel(current_seq_id);
+                            break;
+                        }
+
                         if decode_start_time == 0 {
                             decode_start_time = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
@@ -657,6 +668,16 @@ pub async fn chat_completion(
                                 }
                                 StreamResult::Buffering => {
                                     // Parser is buffering, don't send anything to client yet.
+                                    // Check liveness during buffering to avoid wasted compute
+                                    if *disconnect_rx.borrow() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Client disconnected during tool buffering, cancelling",
+                                            current_seq_id
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        break;
+                                    }
                                     if buffering_since.is_none() {
                                         buffering_since = Some(Instant::now());
                                         buffering_warned = false;
@@ -697,6 +718,16 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::FlushBuffer(text) => {
+                                    // Check liveness before flushing buffered content
+                                    if *disconnect_rx.borrow() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Client disconnected during flush, cancelling",
+                                            current_seq_id
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        break;
+                                    }
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -747,6 +778,16 @@ pub async fn chat_completion(
                                     }
                                 }
                                 StreamResult::ToolCalls(tools) => {
+                                    // Check liveness before processing tool calls
+                                    if *disconnect_rx.borrow() {
+                                        crate::log_warn!(
+                                            "[Seq {}] Client disconnected during tool call processing, cancelling",
+                                            current_seq_id
+                                        );
+                                        let mut e = engine_clone.write();
+                                        e.cancel(current_seq_id);
+                                        break;
+                                    }
                                     buffering_since = None;
                                     buffering_cancel_requested = false;
                                     buffering_warned = false;
@@ -755,6 +796,16 @@ pub async fn chat_completion(
                             }
                         } else {
                             // No tool parsing - stream directly
+                            // Check liveness before sending token
+                            if *disconnect_rx.borrow() {
+                                crate::log_warn!(
+                                    "[Seq {}] Client disconnected during decode, cancelling",
+                                    current_seq_id
+                                );
+                                let mut e = engine_clone.write();
+                                e.cancel(current_seq_id);
+                                break;
+                            }
                             if token.is_empty() {
                                 continue;
                             }
@@ -855,6 +906,16 @@ pub async fn chat_completion(
                                 }
                             }
                             if pending_tool_calls.is_empty() && !suppressed_tool_markup.is_empty() {
+                                // Check liveness before sending suppressed tool markup
+                                if *disconnect_rx.borrow() {
+                                    crate::log_warn!(
+                                        "[Seq {}] Client disconnected before sending suppressed tool markup, cancelling",
+                                        current_seq_id
+                                    );
+                                    let mut e = engine_clone.write();
+                                    e.cancel(current_seq_id);
+                                    break;
+                                }
                                 let safe_suppressed = tool_parser
                                     .sanitize_tool_markup_for_display(&suppressed_tool_markup);
                                 crate::log_warn!(
@@ -962,7 +1023,27 @@ pub async fn chat_completion(
                             };
                             let _ = response_tx.try_send(ChatResponse::Chunk(tool_chunk));
                         }
+                        // Check liveness before sending invalid feedback or final chunk
+                        if *disconnect_rx.borrow() {
+                            crate::log_warn!(
+                                "[Seq {}] Client disconnected before feedback/final chunk, cancelling",
+                                current_seq_id
+                            );
+                            let mut e = engine_clone.write();
+                            e.cancel(current_seq_id);
+                            break;
+                        }
                         if !has_any_tool_calls {
+                            // Check liveness before sending invalid feedback
+                            if *disconnect_rx.borrow() {
+                                crate::log_warn!(
+                                    "[Seq {}] Client disconnected before sending invalid feedback, cancelling",
+                                    current_seq_id
+                                );
+                                let mut e = engine_clone.write();
+                                e.cancel(current_seq_id);
+                                break;
+                            }
                             if let Some(feedback) = invalid_feedback {
                                 if let Some(ref l) = stream_logger {
                                     l.log_stream_token(&feedback);
@@ -983,6 +1064,16 @@ pub async fn chat_completion(
                                 "[Seq {}] Tool choice required but no tool calls were produced",
                                 current_seq_id
                             );
+                        }
+                        // Check liveness before sending final chunk
+                        if *disconnect_rx.borrow() {
+                            crate::log_warn!(
+                                "[Seq {}] Client disconnected before final chunk, cancelling",
+                                current_seq_id
+                            );
+                            let mut e = engine_clone.write();
+                            e.cancel(current_seq_id);
+                            break;
                         }
                         // Send final chunk
                         let final_chunk = ChatCompletionChunk {
@@ -1022,6 +1113,16 @@ pub async fn chat_completion(
                         }
                         if let Some(ref l) = stream_logger {
                             l.log_stream_end(&final_chunk);
+                        }
+                        // Check liveness before sending final chunk
+                        if *disconnect_rx.borrow() {
+                            crate::log_warn!(
+                                "[Seq {}] Client disconnected before final chunk, cancelling",
+                                current_seq_id
+                            );
+                            let mut e = engine_clone.write();
+                            e.cancel(current_seq_id);
+                            break;
                         }
                         let _ = response_tx.try_send(ChatResponse::Chunk(final_chunk));
 

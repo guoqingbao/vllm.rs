@@ -39,6 +39,18 @@ impl Drop for Streamer {
     }
 }
 
+impl Streamer {
+    /// Check if the client has disconnected by checking if the watch channel sender has no receivers
+    /// Returns true if client is disconnected (no receivers left on disconnect_tx)
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnect_tx.as_ref().map_or(true, |tx| {
+            // If the receiver count is 0, the client has disconnected
+            // Note: receiver_count() returns 0 when the receiver is dropped
+            tx.receiver_count() == 0
+        })
+    }
+}
+
 impl Stream for Streamer {
     type Item = Result<Event, axum::Error>;
 
