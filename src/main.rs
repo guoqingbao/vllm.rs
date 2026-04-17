@@ -245,9 +245,9 @@ async fn main() -> Result<()> {
     }
 
     let (resolved_max_model_len, resolved_max_num_seqs) = {
-        let e = engine.read().unwrap();
+        let e = engine.read();
         let (_, _, mml) = e.get_model_info();
-        (mml.unwrap_or(32768), e.econfig.max_num_seqs)
+        (mml.unwrap_or(32768usize), e.econfig.max_num_seqs)
     };
 
     if args.max_tokens > resolved_max_model_len {
