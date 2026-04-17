@@ -18,31 +18,30 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 thread_local! {
-    static FP8_LINEAR_IS_PREFILL: Cell<bool> = const { Cell::new(false) };
+    static LINEAR_IS_PREFILL: Cell<bool> = const { Cell::new(false) };
 }
 
-pub struct Fp8LinearPrefillGuard {
+pub struct LinearPrefillGuard {
     prev: bool,
 }
 
-impl Drop for Fp8LinearPrefillGuard {
+impl Drop for LinearPrefillGuard {
     fn drop(&mut self) {
-        FP8_LINEAR_IS_PREFILL.with(|flag| flag.set(self.prev));
+        LINEAR_IS_PREFILL.with(|flag| flag.set(self.prev));
     }
 }
 
-pub fn set_fp8_linear_is_prefill(is_prefill: bool) -> Fp8LinearPrefillGuard {
-    let prev = FP8_LINEAR_IS_PREFILL.with(|flag| {
+pub fn set_linear_is_prefill(is_prefill: bool) -> LinearPrefillGuard {
+    let prev = LINEAR_IS_PREFILL.with(|flag| {
         let prev = flag.get();
         flag.set(is_prefill);
         prev
     });
-    Fp8LinearPrefillGuard { prev }
+    LinearPrefillGuard { prev }
 }
 
-#[cfg(feature = "flashinfer")]
-fn fp8_linear_is_prefill() -> bool {
-    FP8_LINEAR_IS_PREFILL.with(|flag| flag.get())
+pub fn linear_is_prefill() -> bool {
+    LINEAR_IS_PREFILL.with(|flag| flag.get())
 }
 
 pub fn shard(dim: usize, rank: usize, world_size: usize) -> candle_nn::var_builder::Shard {
@@ -1010,8 +1009,12 @@ fn load_ln_fp8_with_hints(
 
     #[cfg(feature = "cutlass")]
     let weight_scale_cutlass = if sm_version >= 100 {
+        // SM100+: Column-major scale layout
         Some(weight_scale.t()?)
     } else if sm_version >= 90 {
+        // SM90: CUTLASS expects scales_b as [K/128, N/128] row-major contiguous
+        // Original weight_scale: [N/128, K/128] row-major
+        // Transpose + contiguous gives [K/128, N/128] row-major
         Some(weight_scale.t()?.contiguous()?)
     } else {
         None
@@ -1041,101 +1044,23 @@ fn load_ln_fp8_with_hints(
 
 impl Module for LnFp8 {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // x: [Batch, Seq, InDim] or [Batch, InDim]
-        // Flatten inputs to [M, K]
         let (b_sz, seq_len, in_dim) = match x.dims() {
             [b, s, d] => (*b, *s, *d),
             [b, d] => (*b, 1, *d),
             _ => candle_core::bail!("LnFp8: Input should be 2D or 3D"),
         };
 
-        let m = b_sz * seq_len;
-        let k = in_dim;
+        let x_2d = x.reshape((b_sz * seq_len, in_dim))?;
 
-        let x_2d = x.reshape((m, k))?;
-
-        // Call FP8 matmul
-        #[cfg(feature = "flashinfer")]
-        let can_use_flashinfer_fp8 = (90..100).contains(&self.sm_version)
-            && x_2d.dtype() == DType::BF16
-            && self.weight_block_size.as_slice() == &[128, 128]
-            && !fp8_linear_is_prefill()
-            && m <= 64;
-
-        #[cfg(feature = "flashinfer")]
-        let out = if can_use_flashinfer_fp8 {
-            attention_rs::fp8_linear::fp8_matmul_flashinfer(
-                &x_2d,
-                &self.weight,
-                &self.weight_scale,
-            )?
-        } else {
-            #[cfg(feature = "cutlass")]
-            {
-                let weight_scale_cutlass = self
-                    .weight_scale_cutlass
-                    .as_ref()
-                    .unwrap_or(&self.weight_scale);
-                if self.sm_version >= 90 {
-                    attention_rs::fp8_linear::fp8_matmul_cutlass(
-                        &x_2d,
-                        &self.weight.t()?,
-                        weight_scale_cutlass,
-                        &self.weight_block_size,
-                    )?
-                } else {
-                    attention_rs::fp8_linear::fp8_matmul(
-                        &x_2d,
-                        &self.weight,
-                        &self.weight_scale,
-                        &self.weight_block_size,
-                    )?
-                }
-            }
-
-            #[cfg(not(feature = "cutlass"))]
-            {
-                attention_rs::fp8_linear::fp8_matmul(
-                    &x_2d,
-                    &self.weight,
-                    &self.weight_scale,
-                    &self.weight_block_size,
-                )?
-            }
-        };
-
-        #[cfg(not(feature = "flashinfer"))]
-        #[cfg(feature = "cutlass")]
-        let out = if self.sm_version >= 90 {
-            let weight_scale_cutlass = self
-                .weight_scale_cutlass
-                .as_ref()
-                .unwrap_or(&self.weight_scale);
-            attention_rs::fp8_linear::fp8_matmul_cutlass(
-                &x_2d,
-                &self.weight.t()?,
-                weight_scale_cutlass,
-                &self.weight_block_size,
-            )?
-        } else {
-            // slower path
-            attention_rs::fp8_linear::fp8_matmul(
-                &x_2d,
-                &self.weight,
-                &self.weight_scale,
-                &self.weight_block_size,
-            )?
-        };
-
-        #[cfg(all(not(feature = "flashinfer"), not(feature = "cutlass")))]
         let out = attention_rs::fp8_linear::fp8_matmul(
             &x_2d,
             &self.weight,
             &self.weight_scale,
+            self.weight_scale_cutlass.as_ref(),
             &self.weight_block_size,
+            linear_is_prefill(),
         )?;
 
-        // Reshape output back
         let (_, out_dim) = out.dims2()?;
         let out = if seq_len > 1 {
             out.reshape((b_sz, seq_len, out_dim))?
@@ -1143,7 +1068,6 @@ impl Module for LnFp8 {
             out
         };
 
-        // Add bias
         match &self.bias {
             None => Ok(out),
             Some(bias) => out.broadcast_add(bias),
@@ -1206,6 +1130,7 @@ impl Module for LnMxfp4 {
             &self.blocks,
             &self.scales,
             self.bias.as_ref(),
+            linear_is_prefill(),
         )?;
 
         if orig_dims.len() > 2 {
@@ -1348,6 +1273,7 @@ impl Module for LnNvfp4 {
             self.global_scale,
             self.input_scale,
             self.bias.as_ref(),
+            linear_is_prefill(),
         )?;
 
         if orig_dims.len() > 2 {

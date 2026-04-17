@@ -284,7 +284,7 @@ cargo install --features metal
 ```
 
 ### Running
-Use `--i` to enable interactive mode 🤖, `--ui-server` or `--server` to enable service mode 🌐, `--m` to specify a Huggingface model, or `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
+By default, vllm-rs starts in **API server mode** on port 8000. Use `--i` for interactive CLI chat 🤖, `--ui-server` for API server with web UI 🌐, `--m` to specify a Huggingface model, `--w` for a local Safetensors model path, or `--f` for a GGUF model file:
 
 
 > API server + Web UI
@@ -528,7 +528,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--f`       | GGUF filename when model_id given or GGUF file path                 |
 | `--d`       | Device ID (e.g. `--d 0`)                                         |
 | `--max-num-seqs`   | Maximum number of concurrent requests (default: `32`, `8` on macOS)                            |
-| `--max-tokens`     | Max tokens per response (default: `4096`, up to `max_model_len`) |
+| `--max-tokens`     | Max tokens per response (default: `16384`, up to `max_model_len`) |
 | `--batch`     | Only used for benchmark (this will replace `max-num-seqs` and ignore `prompts`) |
 | `--prompts` | Prompts separated by \| |
 | `--dtype`   | KV cache dtype: `bf16` (default), `f16`, or `f32`                |
@@ -538,7 +538,8 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--top-p`   | Dynamically chooses the smallest set of tokens whose cumulative probability ≥ p. Range: 0.8 ~ 0.95   |
 | `--presence-penalty` | Presence penalty, controls whether the model avoids reusing `tokens that have already appeared`. <br> Range [-2, 2]. Higher positive values → more likely to introduce new tokens; negative values → more likely to repeat previously used tokens |
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition |
-| `--server`       | server mode used in Rust CLI, while Python use `python -m vllm.server`        |
+| `--server`       | Explicitly start API server (this is the default when no `--i`, `--prompts`, or `--batch` is given)        |
+| `--i`            | Interactive CLI chat mode                                        |
 | `--fp8-kvcache`       | Use FP8 KV Cache (when flashinfer and flashattn not enabled)                 |
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.2, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
