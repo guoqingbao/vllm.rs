@@ -38,6 +38,10 @@ FROM runtime
 
 # Server components
 COPY --from=base /usr/lib64/libvllm_rs.so /usr/lib64/libvllm_rs.so
+RUN if [ ! -s /usr/lib64/libvllm_rs.so ]; then \
+      rm -f /usr/lib64/libvllm_rs.so; \
+    fi
+
 COPY --from=base /usr/local/bin/runner /usr/local/bin/runner
 RUN chmod +x /usr/local/bin/runner
 
