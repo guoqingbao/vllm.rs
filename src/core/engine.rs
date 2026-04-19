@@ -706,11 +706,11 @@ impl LLMEngine {
             };
             let ids = encoding.get_ids().to_vec();
             if let Some(replay_ids) = Self::trim_prompt_replay_prefix(&ids, guidance_tokens) {
-                crate::log_info!(
-                    "Missing suffix detected {} -> {:?}",
-                    replay_suffix,
-                    replay_ids
-                );
+                // crate::log_info!(
+                //     "Missing suffix detected {} -> {:?}",
+                //     replay_suffix,
+                //     replay_ids
+                // );
                 candidates.push(replay_ids);
             }
         }

@@ -6,6 +6,7 @@ use crate::utils::config::Config;
 use crate::utils::config::QuantConfig;
 use attention_rs::moe;
 use attention_rs::moe::moe_gemm_fp8;
+use attention_rs::silu_and_mul::silu_and_mul;
 use candle_core::Module;
 use candle_core::{
     quantized::{GgmlDType, QTensor},
@@ -491,13 +492,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             is_prefill,
         )?;
 
-        let gate = gate_up
-            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-            .contiguous()?;
-        let up = gate_up
-            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-            .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = silu_and_mul(&gate_up, self.w_size_n)?;
 
         let mut ys = moe::moe_gemm(
             &down_inputs,
@@ -1523,13 +1518,7 @@ impl FusedMoeFp8 {
             is_prefill,
         )?;
 
-        let gate = gate_up
-            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-            .contiguous()?;
-        let up = gate_up
-            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-            .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = silu_and_mul(&gate_up, self.w_size_n)?;
 
         let mut ys = moe_gemm_fp8(
             &down_inputs,
@@ -1766,13 +1755,7 @@ impl FusedMoeMxfp4 {
             is_prefill,
         )?;
 
-        let gate = gate_up
-            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-            .contiguous()?;
-        let up = gate_up
-            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-            .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = silu_and_mul(&gate_up, self.w_size_n)?;
 
         let down = moe::moe_gemm_mxfp4(
             &down_inputs,
@@ -1795,6 +1778,7 @@ impl FusedMoeMxfp4 {
         Ok(ys.to_dtype(self.dtype)?)
     }
 }
+
 pub struct FusedMoeNvfp4 {
     gate: Linear,
     gate_up_blocks: Tensor,
@@ -1806,7 +1790,6 @@ pub struct FusedMoeNvfp4 {
     down_global_scales: Tensor,
     down_input_scales: Tensor,
     w_size_n: usize,
-    act: candle_nn::Activation,
     routing: MoeRouting,
     all_reduce: AllReduce,
     world_size: usize,
@@ -2308,7 +2291,6 @@ impl FusedMoeNvfp4 {
             down_global_scales,
             down_input_scales,
             w_size_n,
-            act: candle_nn::Activation::Silu,
             routing: MoeRouting::from_moe_cfg(moe_cfg, None),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
@@ -2377,13 +2359,7 @@ impl FusedMoeNvfp4 {
             is_prefill,
         )?;
 
-        let gate = gate_up
-            .narrow(candle_core::D::Minus1, 0, self.w_size_n)?
-            .contiguous()?;
-        let up = gate_up
-            .narrow(candle_core::D::Minus1, self.w_size_n, self.w_size_n)?
-            .contiguous()?;
-        let down_inputs = (up * gate.apply(&self.act)?)?;
+        let down_inputs = silu_and_mul(&gate_up, self.w_size_n)?;
 
         let down = moe::moe_gemm_nvfp4(
             &down_inputs,
