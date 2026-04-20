@@ -134,7 +134,8 @@ impl ToolConfig {
             | ModelType::GLM4MoeLite
             | ModelType::Yi
             | ModelType::StableLM
-            | ModelType::DeepSeek => ToolConfig {
+            | ModelType::DeepSeek
+            | ModelType::MiniMax => ToolConfig {
                 start_token_ids: HashSet::new(),
                 end_token_ids: HashSet::new(),
                 start_token_str: "<tool_call>".to_string(),
@@ -1272,6 +1273,7 @@ impl StreamToolParser {
             ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
+            ModelType::MiniMax => "qwen",
         }
     }
 

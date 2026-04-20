@@ -170,9 +170,10 @@ enum BincodeEosTokenId {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MoEConfig {
+    pub intermediate_size: Option<usize>,
     pub moe_intermediate_size: usize,
     pub shared_expert_intermediate_size: Option<usize>,
-    #[serde(alias = "n_routed_experts")]
+    #[serde(alias = "n_routed_experts", alias = "num_local_experts")]
     pub num_experts: Option<usize>,
     pub mlp_only_layers: Option<Vec<usize>>,
     pub decoder_sparse_step: Option<usize>,
@@ -673,6 +674,7 @@ pub enum ModelType {
     Mistral3VL,
     Qwen3VL,
     LLaMa4,
+    MiniMax,
 }
 
 #[cfg_attr(feature = "python", pyclass)]

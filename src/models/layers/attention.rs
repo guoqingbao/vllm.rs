@@ -2,7 +2,7 @@ use crate::models::layers::distributed::{
     kv_head_shard, shard, Comm, MergedParallelColumnLinear, ReplicatedLinear,
     TensorParallelColumnLinear, TensorParallelRowLinear,
 };
-use crate::models::layers::others::{rms_norm, NormX};
+use crate::models::layers::others::{rms_norm, rms_norm_sharded, NormX};
 use crate::models::layers::rotary_emb::ApplyRotaryEmbedding;
 use crate::models::layers::VarBuilderX;
 use crate::utils::config::Config;
@@ -35,6 +35,7 @@ pub struct Attention {
     softcapping: Option<f64>,
     dtype: DType,
     no_per_head_norm: bool,
+    full_dim_qk_norm: bool,
     is_qwen35_or_next: bool,
     is_qvar_builder: bool,
     qk_l2_norm: bool,
@@ -429,6 +430,7 @@ impl Attention {
             "Qwen3_5MoeForConditionalGeneration",
             "Qwen3NextForCausalLM",
             "Qwen3NextForConditionalGeneration",
+            "MiniMaxM2ForCausalLM",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -525,46 +527,63 @@ impl Attention {
             dtype,
         )?;
 
+        let norm_dtype =
+            if is_qvar_builder || config.quant.is_some() || config.quantization_config.is_some() {
+                DType::F32
+            } else {
+                dtype
+            };
+        let q_norm_vb = if is_qvar_builder {
+            vb.pp(key_map["q_norm"])
+        } else {
+            vb.pp("q_norm")
+        };
+        let k_norm_vb = if is_qvar_builder {
+            vb.pp(key_map["k_norm"])
+        } else {
+            vb.pp("k_norm")
+        };
+
         let q_norm = rms_norm(
             head_dim,
             config.rms_norm_eps,
-            if is_qvar_builder {
-                vb.pp(key_map["q_norm"])
-            } else {
-                vb.pp("q_norm")
-            },
-            if is_qvar_builder || config.quant.is_some() || config.quantization_config.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
+            q_norm_vb.clone(),
+            norm_dtype,
             qk_norm_add_one,
         );
-        let q_norm = if q_norm.is_ok() {
-            Some(q_norm.unwrap())
-        } else {
-            None
-        };
-
         let k_norm = rms_norm(
             head_dim,
             config.rms_norm_eps,
-            if is_qvar_builder {
-                vb.pp(key_map["k_norm"])
-            } else {
-                vb.pp("k_norm")
-            },
-            if is_qvar_builder || config.quant.is_some() || config.quantization_config.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
+            k_norm_vb.clone(),
+            norm_dtype,
             qk_norm_add_one,
         );
-        let k_norm = if k_norm.is_ok() {
-            Some(k_norm.unwrap())
+
+        let (q_norm, k_norm, full_dim_qk_norm) = if q_norm.is_ok() && k_norm.is_ok() {
+            (Some(q_norm.unwrap()), Some(k_norm.unwrap()), false)
         } else {
-            None
+            let q_shard = shard(0, comm.rank(), comm.world_size());
+            let q_full = rms_norm_sharded(
+                num_heads * head_dim,
+                config.rms_norm_eps,
+                q_norm_vb,
+                norm_dtype,
+                qk_norm_add_one,
+                q_shard,
+            );
+            let k_full = rms_norm_sharded(
+                num_kv_heads * head_dim,
+                config.rms_norm_eps,
+                k_norm_vb,
+                norm_dtype,
+                qk_norm_add_one,
+                kv_shard,
+            );
+            if q_full.is_ok() && k_full.is_ok() {
+                (Some(q_full.unwrap()), Some(k_full.unwrap()), true)
+            } else {
+                (None, None, false)
+            }
         };
 
         let is_gemma4 = arch == "Gemma4ForConditionalGeneration" || arch == "Gemma4ForCausalLM";
@@ -596,6 +615,7 @@ impl Attention {
             softcapping: config.attn_logit_softcapping,
             dtype,
             no_per_head_norm: no_per_head_norm_models.contains(&arch),
+            full_dim_qk_norm,
             is_qwen35_or_next,
             is_qvar_builder,
             qk_l2_norm: false,
@@ -687,7 +707,15 @@ impl Attention {
         let v = v.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
 
         let (q, k) = if self.q_norm.is_some() && self.k_norm.is_some() {
-            if self.no_per_head_norm {
+            if self.full_dim_qk_norm {
+                let q_2d = q.reshape((seq_len, self.num_heads * self.head_dim))?;
+                let k_2d = k.reshape((seq_len, self.num_kv_heads * self.head_dim))?;
+                let q_2d = self.q_norm.as_ref().unwrap().forward(&q_2d)?;
+                let k_2d = self.k_norm.as_ref().unwrap().forward(&k_2d)?;
+                let q = q_2d.reshape((seq_len, self.num_heads, self.head_dim))?;
+                let k = k_2d.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
+                (q, k)
+            } else if self.no_per_head_norm {
                 let q = self.q_norm.as_ref().unwrap().forward(&q)?;
                 let k = self.k_norm.as_ref().unwrap().forward(&k)?;
                 (q, k)

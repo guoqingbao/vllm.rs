@@ -120,7 +120,9 @@ impl MoeRouting {
     }
 }
 
-/// Try to load `e_score_correction_bias` from the gate var-builder.
+/// Try to load `e_score_correction_bias` from the MoE var-builder.
+/// First tries `gate.e_score_correction_bias` (Qwen style), then falls back
+/// to `e_score_correction_bias` directly (MiniMax style).
 fn try_load_e_score_correction_bias(vb: &VarBuilderX, num_experts: usize) -> Option<Tensor> {
     let vb_gate = vb.pp("gate");
     vb_gate
@@ -131,6 +133,15 @@ fn try_load_e_score_correction_bias(vb: &VarBuilderX, num_experts: usize) -> Opt
             DType::F32,
         )
         .ok()
+        .or_else(|| {
+            vb.get_with_hints_dtype(
+                num_experts,
+                "e_score_correction_bias",
+                shard(0, 0, 1),
+                DType::F32,
+            )
+            .ok()
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -147,6 +158,34 @@ enum PackedDownLayout {
     InterHidden,
     // [experts, hidden, intermediate] -> already in expected GEMM layout.
     HiddenInter,
+}
+
+/// Resolve per-expert projection sub-prefix. Falls back from standard
+/// `gate_proj`/`up_proj`/`down_proj` to MiniMax-style `w1`/`w3`/`w2`.
+fn resolve_expert_proj_prefix(
+    expert_vb: &candle_nn::var_builder::ShardedVarBuilder,
+) -> (&'static str, &'static str, &'static str) {
+    if expert_vb.contains_tensor("gate_proj.weight")
+        || expert_vb.contains_tensor("gate_proj.weight_packed")
+        || expert_vb.contains_tensor("gate_proj.blocks")
+    {
+        ("gate_proj", "up_proj", "down_proj")
+    } else {
+        ("w1", "w3", "w2")
+    }
+}
+
+fn resolve_expert_proj_prefix_x(
+    expert_vb: &VarBuilderX,
+) -> (&'static str, &'static str, &'static str) {
+    if expert_vb.has_key("gate_proj.weight")
+        || expert_vb.has_key("gate_proj.weight_packed")
+        || expert_vb.has_key("gate_proj.blocks")
+    {
+        ("gate_proj", "up_proj", "down_proj")
+    } else {
+        ("w1", "w3", "w2")
+    }
 }
 
 fn resolve_packed_gate_up_layout(cfg: &Config) -> Result<PackedGateUpLayout> {
@@ -350,18 +389,19 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
                 let experts_vb = experts_vb.pp(format!("{}", i).as_str());
                 match &experts_vb.0 {
                     Either::Left(vb) => {
+                        let (gate_name, up_name, down_name) = resolve_expert_proj_prefix(vb);
                         // n x k format
-                        let gate_expert = vb.pp("gate_proj").get_with_hints(
+                        let gate_expert = vb.pp(gate_name).get_with_hints(
                             (moe_cfg.moe_intermediate_size, cfg.hidden_size),
                             "weight",
                             shard(0, comm.rank(), comm.world_size()),
                         )?;
-                        let up_expert = vb.pp("up_proj").get_with_hints(
+                        let up_expert = vb.pp(up_name).get_with_hints(
                             (moe_cfg.moe_intermediate_size, cfg.hidden_size),
                             "weight",
                             shard(0, comm.rank(), comm.world_size()),
                         )?;
-                        let down_expert = vb.pp("down_proj").get_with_hints(
+                        let down_expert = vb.pp(down_name).get_with_hints(
                             (cfg.hidden_size, moe_cfg.moe_intermediate_size),
                             "weight",
                             shard(1, comm.rank(), comm.world_size()),
@@ -1349,7 +1389,8 @@ impl FusedMoeFp8 {
             let mut down_experts_scale = Vec::with_capacity(num_experts);
             for i in 0..num_experts {
                 let expert_vb = experts_vb.pp(format!("{}", i).as_str());
-                let gate_weight = expert_vb.pp("gate_proj").get_with_hints_dtype(
+                let (gate_name, up_name, down_name) = resolve_expert_proj_prefix_x(&expert_vb);
+                let gate_weight = expert_vb.pp(gate_name).get_with_hints_dtype(
                     (moe_cfg.moe_intermediate_size, cfg.hidden_size),
                     "weight",
                     shard(0, comm.rank(), comm.world_size()),
@@ -1357,14 +1398,14 @@ impl FusedMoeFp8 {
                 )?;
                 let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
                 let sk = (cfg.hidden_size + bx - 1) / bx;
-                let gate_s = match expert_vb.pp("gate_proj").get_with_hints_dtype(
+                let gate_s = match expert_vb.pp(gate_name).get_with_hints_dtype(
                     (sn, sk),
                     "weight_scale",
                     shard(0, comm.rank(), comm.world_size()),
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb.pp("gate_proj").get_with_hints_dtype(
+                    Err(_) => expert_vb.pp(gate_name).get_with_hints_dtype(
                         (sn, sk),
                         "weight_scale_inv",
                         shard(0, comm.rank(), comm.world_size()),
@@ -1372,7 +1413,7 @@ impl FusedMoeFp8 {
                     )?,
                 };
 
-                let up_weight = expert_vb.pp("up_proj").get_with_hints_dtype(
+                let up_weight = expert_vb.pp(up_name).get_with_hints_dtype(
                     (moe_cfg.moe_intermediate_size, cfg.hidden_size),
                     "weight",
                     shard(0, comm.rank(), comm.world_size()),
@@ -1380,14 +1421,14 @@ impl FusedMoeFp8 {
                 )?;
                 let sn = (moe_cfg.moe_intermediate_size + by - 1) / by;
                 let sk = (cfg.hidden_size + bx - 1) / bx;
-                let up_s = match expert_vb.pp("up_proj").get_with_hints_dtype(
+                let up_s = match expert_vb.pp(up_name).get_with_hints_dtype(
                     (sn, sk),
                     "weight_scale",
                     shard(0, comm.rank(), comm.world_size()),
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb.pp("up_proj").get_with_hints_dtype(
+                    Err(_) => expert_vb.pp(up_name).get_with_hints_dtype(
                         (sn, sk),
                         "weight_scale_inv",
                         shard(0, comm.rank(), comm.world_size()),
@@ -1395,7 +1436,7 @@ impl FusedMoeFp8 {
                     )?,
                 };
 
-                let down_weight = expert_vb.pp("down_proj").get_with_hints_dtype(
+                let down_weight = expert_vb.pp(down_name).get_with_hints_dtype(
                     (cfg.hidden_size, moe_cfg.moe_intermediate_size),
                     "weight",
                     shard(1, comm.rank(), comm.world_size()),
@@ -1403,14 +1444,14 @@ impl FusedMoeFp8 {
                 )?;
                 let sn = (cfg.hidden_size + by - 1) / by;
                 let sk = (moe_cfg.moe_intermediate_size + bx - 1) / bx;
-                let down_s = match expert_vb.pp("down_proj").get_with_hints_dtype(
+                let down_s = match expert_vb.pp(down_name).get_with_hints_dtype(
                     (sn, sk),
                     "weight_scale",
                     shard(1, comm.rank(), comm.world_size()),
                     DType::F32,
                 ) {
                     Ok(s) => s,
-                    Err(_) => expert_vb.pp("down_proj").get_with_hints_dtype(
+                    Err(_) => expert_vb.pp(down_name).get_with_hints_dtype(
                         (sn, sk),
                         "weight_scale_inv",
                         shard(1, comm.rank(), comm.world_size()),
@@ -1612,8 +1653,9 @@ impl FusedMoeMxfp4 {
             Either::Left(vb) => {
                 for i in 0..num_experts {
                     let expert_vb = vb.pp(i.to_string());
+                    let (gate_name, up_name, down_name) = resolve_expert_proj_prefix(&expert_vb);
 
-                    let gate_proj_vb = expert_vb.pp("gate_proj");
+                    let gate_proj_vb = expert_vb.pp(gate_name);
                     let packed_name = Self::mxfp4_tensor_name_packed(&gate_proj_vb);
                     let scale_name = Self::mxfp4_tensor_name_scale(&gate_proj_vb);
 
@@ -1630,7 +1672,7 @@ impl FusedMoeMxfp4 {
                         DType::U8,
                     )?;
 
-                    let up_proj_vb = expert_vb.pp("up_proj");
+                    let up_proj_vb = expert_vb.pp(up_name);
                     let packed_name = Self::mxfp4_tensor_name_packed(&up_proj_vb);
                     let scale_name = Self::mxfp4_tensor_name_scale(&up_proj_vb);
 
@@ -1647,7 +1689,7 @@ impl FusedMoeMxfp4 {
                         DType::U8,
                     )?;
 
-                    let down_proj_vb = expert_vb.pp("down_proj");
+                    let down_proj_vb = expert_vb.pp(down_name);
                     let packed_name = Self::mxfp4_tensor_name_packed(&down_proj_vb);
                     let scale_name = Self::mxfp4_tensor_name_scale(&down_proj_vb);
 
@@ -1890,6 +1932,7 @@ impl FusedMoeNvfp4 {
             vb.pp("experts"),
             comm,
             dtype,
+            None,
         )
     }
 
@@ -1897,6 +1940,17 @@ impl FusedMoeNvfp4 {
         cfg: &Config,
         gate_vb: VarBuilderX,
         experts_vb: VarBuilderX,
+        comm: Rc<Comm>,
+        dtype: DType,
+    ) -> Result<Self> {
+        Self::new_with_gate_and_bias(cfg, gate_vb, experts_vb, None, comm, dtype)
+    }
+
+    pub fn new_with_gate_and_bias(
+        cfg: &Config,
+        gate_vb: VarBuilderX,
+        experts_vb: VarBuilderX,
+        bias_vb: Option<&VarBuilderX>,
         comm: Rc<Comm>,
         dtype: DType,
     ) -> Result<Self> {
@@ -1913,7 +1967,17 @@ impl FusedMoeNvfp4 {
             dtype,
         )?;
 
-        Self::load_experts(cfg, moe_cfg, num_experts, gate, experts_vb, comm, dtype)
+        let bias = bias_vb.and_then(|bvb| try_load_e_score_correction_bias(bvb, num_experts));
+        Self::load_experts(
+            cfg,
+            moe_cfg,
+            num_experts,
+            gate,
+            experts_vb,
+            comm,
+            dtype,
+            bias,
+        )
     }
 
     fn load_experts(
@@ -1924,6 +1988,7 @@ impl FusedMoeNvfp4 {
         experts_vb: VarBuilderX,
         comm: Rc<Comm>,
         dtype: DType,
+        bias: Option<Tensor>,
     ) -> Result<Self> {
         let mut gate_blocks_vec = Vec::new();
         let mut gate_scales_vec = Vec::new();
@@ -2170,10 +2235,13 @@ impl FusedMoeNvfp4 {
                     }
                 } else {
                     // Per-expert: experts.{i}.gate_proj / up_proj / down_proj
+                    //            or w1 / w3 / w2 (MiniMax naming)
                     for i in 0..num_experts {
                         let expert_vb = vb.pp(i.to_string());
+                        let (gate_name, up_name, down_name) =
+                            resolve_expert_proj_prefix(&expert_vb);
 
-                        let gate_proj_vb = expert_vb.pp("gate_proj");
+                        let gate_proj_vb = expert_vb.pp(gate_name);
                         let packed_name = Self::tensor_name_packed(&gate_proj_vb);
                         let scale_name = Self::tensor_name_scale(&gate_proj_vb);
                         let sh0 = shard(0, comm.rank(), comm.world_size());
@@ -2193,7 +2261,7 @@ impl FusedMoeNvfp4 {
                         gate_gscales_vec.push(Self::load_global_scale(&gate_proj_vb));
                         gate_iscales_vec.push(Self::load_input_scale(&gate_proj_vb));
 
-                        let up_proj_vb = expert_vb.pp("up_proj");
+                        let up_proj_vb = expert_vb.pp(up_name);
                         let packed_name = Self::tensor_name_packed(&up_proj_vb);
                         let scale_name = Self::tensor_name_scale(&up_proj_vb);
 
@@ -2212,7 +2280,7 @@ impl FusedMoeNvfp4 {
                         up_gscales_vec.push(Self::load_global_scale(&up_proj_vb));
                         up_iscales_vec.push(Self::load_input_scale(&up_proj_vb));
 
-                        let down_proj_vb = expert_vb.pp("down_proj");
+                        let down_proj_vb = expert_vb.pp(down_name);
                         let packed_name = Self::tensor_name_packed(&down_proj_vb);
                         let scale_name = Self::tensor_name_scale(&down_proj_vb);
                         let sh1 = shard(1, comm.rank(), comm.world_size());
@@ -2291,7 +2359,7 @@ impl FusedMoeNvfp4 {
             down_global_scales,
             down_input_scales,
             w_size_n,
-            routing: MoeRouting::from_moe_cfg(moe_cfg, None),
+            routing: MoeRouting::from_moe_cfg(moe_cfg, bias),
             all_reduce: AllReduce::new(comm.clone()),
             world_size: comm.world_size(),
             dtype,

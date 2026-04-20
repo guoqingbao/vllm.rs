@@ -35,9 +35,20 @@ pub fn rms_norm(
     dtype: DType,
     is_gemma: bool,
 ) -> Result<NormX> {
+    rms_norm_sharded(size, eps, vb, dtype, is_gemma, Shard::default())
+}
+
+pub fn rms_norm_sharded(
+    size: usize,
+    eps: f64,
+    vb: VarBuilderX,
+    dtype: DType,
+    is_gemma: bool,
+    shard: Shard,
+) -> Result<NormX> {
     let (weight, dtype) = match &vb.0 {
         Either::Left(vb) => {
-            let ws = vb.get_with_hints(size, "weight", Shard::default())?;
+            let ws = vb.get_with_hints(size, "weight", shard)?;
             if ws.dtype() != dtype {
                 (ws.to_dtype(dtype)?, dtype)
             } else {

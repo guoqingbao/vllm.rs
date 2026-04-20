@@ -44,6 +44,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | **GLM4.7 Flash** | NVFP4 | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
 | **Gemma4-31B** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
 | **Gemma4-26B-A4B** | NVFP4 | **26B (MoE)**| **82** tokens/s (**Hopper**)  |
+| **MiniMax-M2.5** | NVFP4 | **229B (MoE)**| **62** tokens/s (**Hopper, TP=2**)  |
 
 > **Metal (Apple Silicon, M4)**
   <details>
@@ -583,7 +584,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
-* [ ] Additional model support (MiniMax M2.5, Kimi K2, etc.)
+* [ ] Additional model support (Kimi K2, GLM 5.1 etc.)
 * [x] CPU KV Cache Offloading
 * [x] Prefill-decode Disaggregation (CUDA)
 * [x] Prefill-decode Disaggregation (Metal)
