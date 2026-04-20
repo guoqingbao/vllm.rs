@@ -242,6 +242,7 @@ impl MlaAttention {
     }
 
     /// Project the fused kernel output through w_uv_t and reshape for o_proj.
+    #[allow(unused)]
     fn project_mla_output(
         &self,
         attn_out: &Tensor,
@@ -464,6 +465,7 @@ impl MlaAttention {
     }
 
     /// SDP prefill in absorbed compressed space (no paged cache, first prefill).
+    #[cfg(feature = "cuda")]
     fn mla_sdp_prefill(
         &self,
         q_absorbed: &Tensor,
