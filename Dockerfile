@@ -89,6 +89,7 @@ RUN set -eux; \
     cp -r target/wheels/ /opt/wheels; \
   else \
     mkdir /opt/wheels; \
+    if [ ! -d /usr/lib64/ ]; then mkdir /usr/lib64 ; fi ; \
     touch /usr/lib64/libvllm_rs.so; \
   fi; \
   cargo clean
