@@ -139,6 +139,8 @@ Download the wheel from the [Release Assets](https://github.com/guoqingbao/vllm.
 
 💡Prefix cache is automatic and does not require `session_id`.
 
+💡Use `--disable-reasoning` if you want requests that omit `thinking` / `enable_thinking` to default to non-reasoning mode.
+
   <details open>
     <summary>Single GPU + GGUF model</summary>
 

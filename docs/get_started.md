@@ -53,6 +53,8 @@ cargo build --release --features metal
 
 Common runtime knobs: `--max-model-len`, `--max-num-seqs`, `--kv-fraction` (CUDA KV share), `--cpu-mem-fold` (CPU swap ratio), `--port`, `--fp8-kvcache`, `--prefix-cache`, `--prefix-cache-max-tokens`, `--ui-server`, `--batch` (perf test).
 
+Reasoning defaults to enabled when a request omits `thinking` / `enable_thinking`. Use `--disable-reasoning` on the Rust CLI to make the default be disabled instead; explicit request values still override the server default.
+
 ## 4) Multi-rank (single node)
 - **NCCL multi-GPU**  
   ```bash

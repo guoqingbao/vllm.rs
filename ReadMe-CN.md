@@ -136,6 +136,8 @@ python3 -m pip install vllm_rs
 
    💡前缀缓存为自动匹配公共前缀，无需 `session_id`。
 
+   💡如希望未传 `thinking` / `enable_thinking` 的请求默认关闭推理，可在 Rust CLI 启动时增加 `--disable-reasoning`。
+
   <details open>
     <summary>单卡 + GGUF模型</summary>
 

@@ -45,7 +45,7 @@ ahash = "0.8.11"
 reedline = "0.40.0"
 pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py38"], optional = true }
 parking_lot = "0.12.4"
-attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.5.2", rev = "928e718" }
+attention-rs = { path = "../attention.rs", version="0.5.2" }
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
@@ -68,7 +68,7 @@ bytemuck = "1.24.0"
 regex = "1.12.2"
 local-ip-address = "0.6.5"
 url = "2.5.7"
-tool-parser = "1.1.1"
+tool-parser = "1.2.0"
 openai-protocol = "1.2.0"
 nvtx = { version = "1.3", optional = true }
 

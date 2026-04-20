@@ -2,6 +2,8 @@ use crate::tools::Tool;
 use minijinja::{context, Environment};
 #[cfg(feature = "python")]
 use pyo3::pyclass;
+use regex::Regex;
+use std::sync::OnceLock;
 use tokenizers::Tokenizer;
 
 #[cfg(feature = "python")]
@@ -117,6 +119,24 @@ fn should_escape_nested_xml_tool_markers(tool_markers: &[&str]) -> bool {
     tool_markers
         .iter()
         .any(|marker| marker.starts_with('<') && marker.contains("tool_call"))
+}
+
+fn normalize_template_source(source: &str) -> String {
+    static TOJSON_ENSURE_ASCII_RE: OnceLock<Regex> = OnceLock::new();
+    let regex = TOJSON_ENSURE_ASCII_RE.get_or_init(|| {
+        Regex::new(
+            r#"(?x)
+            \|
+            (?P<ws>\s*)
+            tojson
+            \(
+                \s*ensure_ascii\s*=\s*(?:false|true|False|True)\s*
+            \)
+        "#,
+        )
+        .expect("valid tojson ensure_ascii regex")
+    });
+    regex.replace_all(source, "|${ws}tojson").into_owned()
 }
 
 #[derive(Clone, Debug)]
@@ -363,7 +383,7 @@ impl ChatTemplate {
         env.set_lstrip_blocks(true);
         env.set_trim_blocks(true);
         env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
-        let template = self.chat_template.as_ref().unwrap();
+        let template = normalize_template_source(self.chat_template.as_ref().unwrap());
         let mut template = template.replace("[::-1]", "|reverse");
         if template.find("{{ meta }}").is_some() {
             template = template.replace("{%- set meta = message.get(\"metadata\", \"\") %}", "");
@@ -456,6 +476,56 @@ mod tests {
 {%- endif %}
 "#;
 
+    const MINIMAX_TEMPLATE: &str = r#"
+{%- set toolcall_begin_token   = '<minimax:tool_call>'         -%}
+{%- set toolcall_end_token     = '</minimax:tool_call>'        -%}
+{%- macro render_tool_namespace(namespace_name, tool_list) -%}
+{%- for tool in tool_list -%}
+<tool>{{ tool.function | tojson(ensure_ascii=False) }}</tool>
+{% endfor -%}
+{%- endmacro -%}
+{%- macro visible_text(content) -%}
+    {%- if content is string -%}
+        {{ content }}
+    {%- elif content is iterable and content is not mapping -%}
+        {%- for item in content -%}
+            {%- if item is mapping and item.type == 'text' -%}
+                {{- item.text }}
+            {%- elif item is string -%}
+                {{- item }}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- else -%}
+        {{- content }}
+    {%- endif -%}
+{%- endmacro -%}
+{{- ']~!b[' ~ ']~b]system' ~ '\n' }}
+You are MiniMax.
+{%- if tools -%}
+    {{- '\n\n' ~ '# Tools' ~ '\n' ~ 'You may call one or more tools to assist with the user query.\nHere are the tools available in JSONSchema format:' ~ '\n' }}
+    {{- '\n' ~ '<tools>' ~ '\n' }}
+    {{- render_tool_namespace("functions", tools) }}
+    {{- '</tools>' ~ '\n\n' }}
+{{- 'When making tool calls, use XML format to invoke tools and pass parameters:' ~ '\n' }}
+{{- '\n' ~ toolcall_begin_token }}
+<invoke name="tool-name-1">
+<parameter name="param-key-1">param-value-1</parameter>
+</invoke>
+{{- '\n' ~ toolcall_end_token }}
+{%- endif -%}
+{{- '[e~[\n' }}
+{%- for message in messages -%}
+    {%- if message.role == 'user' -%}
+        {{- ']~b]user' ~ '\n' }}
+        {{- visible_text(message.content) }}
+        {{- '[e~[' ~ '\n' }}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- ']~b]ai' ~ '\n' ~ '<think>' ~ '\n' }}
+{%- endif -%}
+"#;
+
     fn build_template(source: &str, enable_thinking: bool) -> ChatTemplate {
         ChatTemplate::new(
             None,
@@ -513,6 +583,89 @@ mod tests {
         assert_eq!(
             strip_generation_assistant_header(suffix),
             "<think>\nassistant\n"
+        );
+    }
+
+    #[test]
+    fn normalize_template_source_strips_unsupported_ensure_ascii_kwarg() {
+        let source = "{{ value | tojson(ensure_ascii=False) }}";
+
+        let mut raw_env = Environment::new();
+        raw_env.add_template("raw", source).unwrap();
+        let raw_template = raw_env.get_template("raw").unwrap();
+        let raw_err = raw_template
+            .render(context! { value => "hello" })
+            .unwrap_err();
+        assert!(
+            raw_err
+                .to_string()
+                .contains("unknown keyword argument 'ensure_ascii'"),
+            "unexpected raw error: {raw_err}"
+        );
+
+        let normalized = normalize_template_source(source);
+        assert_eq!(normalized, "{{ value | tojson }}");
+
+        let mut normalized_env = Environment::new();
+        normalized_env
+            .add_template("normalized", &normalized)
+            .unwrap();
+        let normalized_template = normalized_env.get_template("normalized").unwrap();
+        let rendered = normalized_template
+            .render(context! { value => "hello" })
+            .unwrap();
+        assert_eq!(rendered, "\"hello\"");
+    }
+
+    #[test]
+    fn minimax_template_renders_tools_block_and_xml_instruction() {
+        let tool = crate::tools::function_tool("search_web", "Search the web")
+            .parameters_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query_tag": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    },
+                    "query_list": {
+                        "type": "array",
+                        "items": {"type": "string"}
+                    }
+                },
+                "required": ["query_tag", "query_list"]
+            }))
+            .build();
+        let mut template = build_template(MINIMAX_TEMPLATE, true);
+        template.set_messages(&vec![Message {
+            role: "user".to_string(),
+            content: "Find the latest OpenAI release.".to_string(),
+            num_images: 0,
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+        }]);
+
+        let rendered = template.apply_chat_template(&vec![tool], false).unwrap();
+        assert!(
+            rendered.contains("<tools>"),
+            "rendered prompt: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("\"name\":\"search_web\"")
+                || rendered.contains("\"name\": \"search_web\""),
+            "rendered prompt: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("<minimax:tool_call>"),
+            "rendered prompt: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("<invoke name=\"tool-name-1\">"),
+            "rendered prompt: {}",
+            rendered
         );
     }
 

@@ -978,6 +978,11 @@ pub struct Args {
     /// YARN RoPE scaling factor (explicit override, no auto-calculation)
     #[arg(long, default_value = None)]
     pub yarn_scaling_factor: Option<f64>,
+
+    /// Disable reasoning/thinking by default when requests do not pass
+    /// `thinking` / `enable_thinking`.
+    #[arg(long, default_value_t = false)]
+    pub disable_reasoning: bool,
 }
 
 /// Result of executing tool calls via MCP

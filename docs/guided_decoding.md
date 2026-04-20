@@ -135,6 +135,12 @@ Keep these concerns separate:
 - `thinking`: prompt/template behavior
 - `reasoning_effort`: guided-decoding grammar behavior
 
+Server default:
+- when a request omits `thinking` / `enable_thinking`, the Rust CLI defaults to thinking enabled
+- start the Rust server with `--disable-reasoning` to change only that default fallback
+- explicit request values still win over the CLI default
+- `reasoning_effort` may still set `thinking=true` when guided decoding normalization is active
+
 That separation avoids changing prompt rendering for request types that do not support OpenAI-style reasoning controls.
 
 ## Use Cases
