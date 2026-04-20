@@ -71,6 +71,22 @@ pub fn should_skip_quant_for_module(module_path: &str, cfg: &QuantConfig) -> boo
     cfg.should_skip_module(module_path)
 }
 
+fn parse_fallback_moe_cfg(arch_name: &str, raw_cfg: &[u8]) -> Option<MoEConfig> {
+    if arch_name == "MiniMaxM2ForCausalLM" {
+        let mut raw_cfg_json: serde_json::Value = serde_json::from_slice(raw_cfg).ok()?;
+        let raw_cfg_obj = raw_cfg_json.as_object_mut()?;
+
+        if !raw_cfg_obj.contains_key("moe_intermediate_size") {
+            let intermediate_size = raw_cfg_obj.get("intermediate_size")?.clone();
+            raw_cfg_obj.insert("moe_intermediate_size".to_string(), intermediate_size);
+        }
+
+        serde_json::from_value(raw_cfg_json).ok()
+    } else {
+        serde_json::from_slice(raw_cfg).ok()
+    }
+}
+
 pub fn hub_load_local_safetensors(path: &String, json_file: &str) -> Result<Vec<PathBuf>> {
     crate::log_info!("{:}", Path::new(path).join(json_file).display());
     let jsfile = std::fs::File::open(Path::new(path).join(json_file))?;
@@ -348,7 +364,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     topk_group: None,
                     scoring_func: None,
                     topk_method: None,
-                    intermediate_size: None,
                 })
             } else {
                 None
@@ -425,7 +440,6 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
             topk_group: None,
             scoring_func: None,
             topk_method: None,
-            intermediate_size: None,
         })
     } else {
         None
@@ -1174,7 +1188,6 @@ pub fn init_config_tokenizer(
                                     topk_group: None,
                                     scoring_func: None,
                                     topk_method: None,
-                                    intermediate_size: None,
                                 });
                             }
                         }
@@ -1299,7 +1312,7 @@ pub fn init_config_tokenizer(
             )
         {
             if let Ok(raw_cfg) = std::fs::read(&config_path) {
-                if let Ok(moe_cfg) = serde_json::from_slice::<MoEConfig>(&raw_cfg) {
+                if let Some(moe_cfg) = parse_fallback_moe_cfg(&arch_name, &raw_cfg) {
                     if moe_cfg.num_experts.unwrap_or(0) > 0 {
                         config.moe_cfg = Some(moe_cfg);
                     }
@@ -2149,7 +2162,7 @@ pub fn log_throughput(outputs: &[GenerationOutput]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{gemma4_per_layer_cache_config, get_arch_rope, ModelType};
+    use super::{gemma4_per_layer_cache_config, get_arch_rope, parse_fallback_moe_cfg, ModelType};
     use crate::utils::config::Config;
     use candle_nn::Activation;
     use tokenizers::{models::bpe::BPE, Tokenizer};
@@ -2181,6 +2194,26 @@ mod tests {
         let (model_type, _, is_rope_i) = get_arch_rope(&tokenizer, "qwen3vl".to_string()).unwrap();
         assert!(matches!(model_type, ModelType::Qwen3VL));
         assert!(!is_rope_i);
+    }
+
+    #[test]
+    fn minimax_moe_fallback_uses_intermediate_size() {
+        let raw_cfg = serde_json::json!({
+            "architectures": ["MiniMaxM2ForCausalLM"],
+            "intermediate_size": 1536,
+            "num_experts_per_tok": 8,
+            "num_local_experts": 256,
+            "scoring_func": "sigmoid"
+        });
+
+        let moe_cfg =
+            parse_fallback_moe_cfg("MiniMaxM2ForCausalLM", raw_cfg.to_string().as_bytes())
+                .expect("MiniMax fallback MoE config should deserialize");
+
+        assert_eq!(moe_cfg.moe_intermediate_size, 1536);
+        assert_eq!(moe_cfg.num_experts, Some(256));
+        assert_eq!(moe_cfg.num_experts_per_tok, 8);
+        assert_eq!(moe_cfg.scoring_func.as_deref(), Some("sigmoid"));
     }
 
     fn gemma4_test_config(extra_config_json: serde_json::Value) -> Config {

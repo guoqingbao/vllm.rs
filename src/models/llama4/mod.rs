@@ -67,7 +67,6 @@ fn llama4_moe_config(text_cfg: &TextConfig) -> MoEConfig {
         topk_group: None,
         scoring_func: Some("sigmoid".to_string()),
         topk_method: None,
-        intermediate_size: None,
     }
 }
 

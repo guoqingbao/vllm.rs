@@ -170,7 +170,6 @@ enum BincodeEosTokenId {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MoEConfig {
-    pub intermediate_size: Option<usize>,
     pub moe_intermediate_size: usize,
     pub shared_expert_intermediate_size: Option<usize>,
     #[serde(alias = "n_routed_experts", alias = "num_local_experts")]
