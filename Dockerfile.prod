@@ -17,25 +17,44 @@ RUN <<HEREDOC
         ca-certificates \
         libssl-dev \
         curl \
-        pkg-config && \ 
-    apt-get install -y --no-install-recommends --allow-change-held-packages \
-        python3-pip && \
+        pkg-config
 
     rm -rf /var/lib/apt/lists/* && apt clean
 HEREDOC
 
-RUN pip3 install fastapi uvicorn cffi
+ARG BUILD_FEATURES
+ARG WITH_FEATURES="cuda,nccl,graph,python,flashinfer,cutlass"
+
+RUN set -eux; \
+  FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
+  if echo "${FEATURES}" | grep -q '\bpython\b'; then \
+    apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
+        python3-pip && \
+    rm -rf /var/lib/apt/lists/* && apt clean && \
+    pip3 install fastapi uvicorn cffi; \
+  fi
 
 FROM runtime
 
 # Server components
 COPY --from=base /usr/lib64/libvllm_rs.so /usr/lib64/libvllm_rs.so
+RUN if [ ! -s /usr/lib64/libvllm_rs.so ]; then \
+      rm -f /usr/lib64/libvllm_rs.so; \
+    fi
+
 COPY --from=base /usr/local/bin/runner /usr/local/bin/runner
 RUN chmod +x /usr/local/bin/runner
 
 COPY --from=base /opt/wheels wheels
-RUN pip3 install wheels/* && rm -rf wheels
-RUN echo -e '#!/bin/bash\npython3 -m vllm_rs.server  "$@"' > /usr/local/bin/vllm-rs-server && chmod +x /usr/local/bin/vllm-rs-server
+
+RUN set -eux; \
+  FEATURES="${BUILD_FEATURES:-$WITH_FEATURES}"; \
+  if echo "${FEATURES}" | grep -q '\bpython\b'; then \
+    pip3 install wheels/* && \
+    echo -e '#!/bin/bash\npython3 -m vllm_rs.server  "$@"' > /usr/local/bin/vllm-rs-server && chmod +x /usr/local/bin/vllm-rs-server ; \
+  fi
+
+RUN rm -rf wheels
 
 # CLI component
 COPY --from=base /usr/local/bin/vllm-rs /usr/local/bin/vllm-rs
