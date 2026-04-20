@@ -24,6 +24,7 @@ use crate::{
     models::glm4_moe_lite::GLM4MoeLiteForCausalLM,
     models::llama::LLaMaForCausalLM,
     models::llama4::LLama4ForConditionalGeneration,
+    models::minimax::MiniMaxForCausalLM,
     models::mistral3_vl::Mistral3ForConditionalGeneration,
     models::phi4::Phi4ForCausalLM,
     models::qwen3::Qwen3ForCausalLM,
@@ -92,6 +93,7 @@ pub enum Model {
     Gemma3(Arc<Gemma3ForConditionalGeneration>),
     Gemma4(Arc<Gemma4ForCausalLM>),
     Qwen3VL(Arc<Qwen3VLForConditionalGeneration>),
+    MiniMax(Arc<MiniMaxForCausalLM>),
 }
 
 pub enum RunnerType {
@@ -409,6 +411,7 @@ impl ModelRunner {
                 Gemma3 => Gemma3ForConditionalGeneration,
                 Gemma4 => Gemma4ForCausalLM,
                 Qwen3VL => Qwen3VLForConditionalGeneration,
+                MiniMax => MiniMaxForCausalLM,
             }
         )?;
 
@@ -432,6 +435,7 @@ impl ModelRunner {
                 Gemma3 => NoneArg,
                 Gemma4 => EmbedInputs,
                 Qwen3VL => NoneArg,
+                MiniMax => EmbedInputs,
             }
         );
 
@@ -886,6 +890,7 @@ impl ModelRunner {
                 Gemma3 => images,
                 Gemma4 => false,
                 Qwen3VL => images,
+                MiniMax => false,
             }
         )?;
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
@@ -913,6 +918,7 @@ impl ModelRunner {
                 GLM4 => false,
                 Gemma3 => None,
                 Gemma4 => false,
+                MiniMax => false,
             },
             candle_core::bail!("Embedding is not supported for this model type")
         )?;
@@ -1598,6 +1604,7 @@ impl ModelRunner {
             Model::Gemma3(model) => model.get_vocab_size(),
             Model::Gemma4(model) => model.get_vocab_size(),
             Model::Qwen3VL(model) => model.get_vocab_size(),
+            Model::MiniMax(model) => model.get_vocab_size(),
         }
     }
 

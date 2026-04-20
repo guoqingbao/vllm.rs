@@ -172,7 +172,7 @@ enum BincodeEosTokenId {
 pub struct MoEConfig {
     pub moe_intermediate_size: usize,
     pub shared_expert_intermediate_size: Option<usize>,
-    #[serde(alias = "n_routed_experts")]
+    #[serde(alias = "n_routed_experts", alias = "num_local_experts")]
     pub num_experts: Option<usize>,
     pub mlp_only_layers: Option<Vec<usize>>,
     pub decoder_sparse_step: Option<usize>,
@@ -315,6 +315,8 @@ pub struct EngineConfig {
     pub pd_server_prefix_cache_ratio: Option<f32>,
     pub pd_client_prefix_cache_ratio: Option<f32>,
     pub yarn_scaling_factor: Option<f64>,
+    #[serde(default)]
+    pub disable_reasoning: bool,
 }
 
 #[cfg(feature = "python")]
@@ -394,6 +396,8 @@ pub struct EngineConfig {
     pub pd_client_prefix_cache_ratio: Option<f32>,
     #[pyo3(get, set)]
     pub yarn_scaling_factor: Option<f64>,
+    #[pyo3(get, set)]
+    pub disable_reasoning: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -429,6 +433,7 @@ impl EngineConfig {
         pd_server_prefix_cache_ratio: Option<f32>,
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
+        disable_reasoning: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -480,6 +485,7 @@ impl EngineConfig {
             pd_server_prefix_cache_ratio,
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
+            disable_reasoning,
         }
     }
 }
@@ -673,6 +679,7 @@ pub enum ModelType {
     Mistral3VL,
     Qwen3VL,
     LLaMa4,
+    MiniMax,
 }
 
 #[cfg_attr(feature = "python", pyclass)]

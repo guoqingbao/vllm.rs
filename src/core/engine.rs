@@ -1151,7 +1151,8 @@ impl LLMEngine {
     ) -> (String, i32) {
         // let mut collected_images = Vec::new();
         let mut prompt_template = self.template.clone();
-        prompt_template.set_enable_thinking(params.thinking.unwrap_or(true));
+        prompt_template
+            .set_enable_thinking(params.thinking.unwrap_or(!self.econfig.disable_reasoning));
         prompt_template.set_messages(messages);
         let image_idx: i32 = 0;
         let prompt_processed = prompt_template

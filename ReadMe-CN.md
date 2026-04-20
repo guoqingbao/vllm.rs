@@ -44,6 +44,7 @@
 | **GLM4.7 Flash** | NVFP4 | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
 | **Gemma4-31B** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
 | **Gemma4-26B-A4B** | NVFP4 | **26B (MoE)**| **82** tokens/s (**Hopper**)  |
+| **MiniMax-M2.5** | NVFP4 | **229B (MoE)**| **62** tokens/s (**Hopper, TP=2**)  |
 
 > vLLM.rs 在 **Metal (Apple Silicon, M4)** 上的性能
 
@@ -134,6 +135,8 @@ python3 -m pip install vllm_rs
    💡如长文本请求导致当前生成过程卡顿，请使用 **Rust PD Server**方案 （见**PD分离**）
 
    💡前缀缓存为自动匹配公共前缀，无需 `session_id`。
+
+   💡如希望未传 `thinking` / `enable_thinking` 的请求默认关闭推理，可在 Rust CLI 启动时增加 `--disable-reasoning`。
 
   <details open>
     <summary>单卡 + GGUF模型</summary>
@@ -516,7 +519,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] FP8 KV Cache (Metal)
 * [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
 * [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
-* [ ] 支持更多模型类型（MiniMax M2.5, Kimi K2等）
+* [ ] 支持更多模型类型（Kimi K2, GLM 5.1等）
 * [x] CPU KV Cache 卸载
 * [x] PD（Prefill/Decode）分离（CUDA）
 * [x] PD（Prefill/Decode）分离（Metal）

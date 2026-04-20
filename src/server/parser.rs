@@ -142,6 +142,18 @@ impl ToolConfig {
                 start_is_special: false,
                 end_is_special: false,
             },
+            ModelType::MiniMax => ToolConfig {
+                // MiniMax tokenizer ships dedicated tool envelope tokens:
+                //   200052 => <minimax:tool_call>
+                //   200053 => </minimax:tool_call>
+                // Keep them here so streaming detection can prefer token IDs.
+                start_token_ids: HashSet::from([200052]),
+                end_token_ids: HashSet::from([200053]),
+                start_token_str: "<minimax:tool_call>".to_string(),
+                end_token_str: "</minimax:tool_call>".to_string(),
+                start_is_special: false,
+                end_is_special: false,
+            },
         }
     }
 
@@ -1078,6 +1090,24 @@ impl StreamToolParser {
         }
         let inner = self.buffer[inner_start..inner_end].trim();
 
+        // MiniMax XML style: <minimax:tool_call><invoke name="..."><parameter name="...">...</parameter></invoke></minimax:tool_call>
+        if block.contains("<invoke ") || block.contains("<parameter name=") {
+            let Some(invoke_start) = block.find("<invoke ") else {
+                return false;
+            };
+            let invoke_section = &block[invoke_start..];
+            let Some(invoke_end_rel) = invoke_section.rfind("</invoke>") else {
+                return false;
+            };
+            let invoke_end = invoke_start + invoke_end_rel + "</invoke>".len();
+            let invoke_block = &block[invoke_start..invoke_end];
+
+            if !Self::has_balanced_parameter_tags(invoke_block, "<parameter name=") {
+                return false;
+            }
+            return true;
+        }
+
         // Qwen-coder XML style: <tool_call><function=...><parameter=...>...</parameter></function></tool_call>
         if block.contains("<function=") || block.contains("<parameter=") {
             let Some(function_start) = block.find("<function=") else {
@@ -1097,7 +1127,7 @@ impl StreamToolParser {
             // This tolerates malformed tails like:
             //   </function>\n</parameter>\n</function>
             // which should not invalidate an otherwise complete function payload.
-            if !Self::has_balanced_parameter_tags(function_block) {
+            if !Self::has_balanced_parameter_tags(function_block, "<parameter=") {
                 return false;
             }
             return true;
@@ -1111,21 +1141,20 @@ impl StreamToolParser {
         serde_json::from_str::<Value>(inner).is_ok()
     }
 
-    fn has_balanced_parameter_tags(function_block: &str) -> bool {
+    fn has_balanced_parameter_tags(function_block: &str, open_tag: &str) -> bool {
         let mut idx = 0usize;
         let mut open_count = 0usize;
-        const OPEN: &str = "<parameter=";
         const CLOSE: &str = "</parameter>";
 
         while idx < function_block.len() {
-            let open_pos = function_block[idx..].find(OPEN).map(|p| idx + p);
+            let open_pos = function_block[idx..].find(open_tag).map(|p| idx + p);
             let close_pos = function_block[idx..].find(CLOSE).map(|p| idx + p);
 
             match (open_pos, close_pos) {
                 (None, None) => break,
                 (Some(op), None) => {
                     open_count += 1;
-                    idx = op + OPEN.len();
+                    idx = op + open_tag.len();
                 }
                 (None, Some(cp)) => {
                     // Ignore unmatched closing parameter tags.
@@ -1137,7 +1166,7 @@ impl StreamToolParser {
                 (Some(op), Some(cp)) => {
                     if op < cp {
                         open_count += 1;
-                        idx = op + OPEN.len();
+                        idx = op + open_tag.len();
                     } else {
                         if open_count > 0 {
                             open_count -= 1;
@@ -1165,6 +1194,15 @@ impl StreamToolParser {
                 Vec::new()
             }
         };
+
+        if parsed_calls.is_empty() && text.contains("<invoke name=") {
+            let factory = ParserFactory::new();
+            if let Some(xml_parser) = factory.registry().create_parser("minimax_m2") {
+                if let Ok((_normal_text, calls)) = xml_parser.parse_complete(text).await {
+                    parsed_calls = calls;
+                }
+            }
+        }
 
         if parsed_calls.is_empty() && text.contains("<function=") {
             let factory = ParserFactory::new();
@@ -1272,6 +1310,7 @@ impl StreamToolParser {
             ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
             ModelType::DeepSeek => "deepseek",
+            ModelType::MiniMax => "minimax_m2",
         }
     }
 
@@ -1617,8 +1656,19 @@ impl StreamToolParser {
                 markers.push(marker.to_string());
             }
         }
-        // XML-style nested tool markers commonly appear in qwen-coder payloads.
-        if self.config.start_token_str.contains("tool_call")
+        // XML-style nested tool markers commonly appear in model-specific tool payloads.
+        if self.uses_minimax_xml() {
+            markers.extend(
+                [
+                    "<invoke name=",
+                    "</invoke>",
+                    "<parameter name=",
+                    "</parameter>",
+                ]
+                .into_iter()
+                .map(|s| s.to_string()),
+            );
+        } else if self.config.start_token_str.contains("tool_call")
             && self.config.end_token_str.contains("tool_call")
         {
             markers.extend(
@@ -1631,16 +1681,23 @@ impl StreamToolParser {
     }
 
     fn recover_streaming_arguments_from_buffer(&mut self) {
-        if self.streaming_calls.is_empty() || !self.buffer.contains("<parameter=") {
+        let uses_minimax_xml = self.uses_minimax_xml();
+        if self.streaming_calls.is_empty()
+            || !self
+                .buffer
+                .contains(Self::xml_parameter_open_prefix(uses_minimax_xml))
+        {
             return;
         }
+        let buffer = self.buffer.clone();
 
         for state in &mut self.streaming_calls {
             let Some(name) = state.name.as_deref() else {
                 continue;
             };
 
-            let recovered = Self::extract_xml_parameters_for_function(&self.buffer, name);
+            let recovered =
+                Self::extract_xml_parameters_for_function(&buffer, name, uses_minimax_xml);
             if recovered.is_empty() {
                 continue;
             }
@@ -1652,8 +1709,8 @@ impl StreamToolParser {
 
             let mut merged_any = false;
             for (key, value) in recovered {
-                if !args_obj.contains_key(&key) && !value.is_empty() {
-                    args_obj.insert(key, Value::String(value));
+                if !args_obj.contains_key(&key) {
+                    args_obj.insert(key, value);
                     merged_any = true;
                 }
             }
@@ -1668,26 +1725,35 @@ impl StreamToolParser {
     fn extract_xml_parameters_for_function(
         buffer: &str,
         function_name: &str,
-    ) -> std::collections::HashMap<String, String> {
+        uses_minimax_xml: bool,
+    ) -> std::collections::HashMap<String, Value> {
         let mut recovered = std::collections::HashMap::new();
-        let function_tag = format!("<function={}>", function_name);
-        let alt_function_tag = format!("<function=\"{}\">", function_name);
+        let func_start = if uses_minimax_xml {
+            let function_tag = format!(r#"<invoke name="{function_name}">"#);
+            let alt_function_tag = format!(r#"<invoke name='{function_name}'>"#);
+            buffer
+                .rfind(&function_tag)
+                .or_else(|| buffer.rfind(&alt_function_tag))
+        } else {
+            let function_tag = format!("<function={}>", function_name);
+            let alt_function_tag = format!("<function=\"{}\">", function_name);
+            buffer
+                .rfind(&function_tag)
+                .or_else(|| buffer.rfind(&alt_function_tag))
+        };
 
-        let Some(func_start) = buffer
-            .rfind(&function_tag)
-            .or_else(|| buffer.rfind(&alt_function_tag))
-        else {
+        let Some(func_start) = func_start else {
             return recovered;
         };
 
         let section = &buffer[func_start..];
         let mut cursor = 0usize;
-        const PARAM_PREFIX: &str = "<parameter=";
         const PARAM_END: &str = "</parameter>";
+        let param_prefix = Self::xml_parameter_open_prefix(uses_minimax_xml);
 
-        while let Some(rel) = section[cursor..].find(PARAM_PREFIX) {
+        while let Some(rel) = section[cursor..].find(param_prefix) {
             let tag_start = cursor + rel;
-            let name_start = tag_start + PARAM_PREFIX.len();
+            let name_start = tag_start + param_prefix.len();
             let Some(name_end_rel) = section[name_start..].find('>') else {
                 break;
             };
@@ -1710,19 +1776,68 @@ impl StreamToolParser {
                 let value_end = value_start + value_end_rel;
                 let value = section[value_start..value_end]
                     .trim_matches(|c| c == '\n' || c == '\r')
+                    .trim()
                     .to_string();
-                recovered.insert(parameter_name, value);
+                recovered.insert(parameter_name, Self::parse_recovered_xml_value(&value));
                 cursor = value_end + PARAM_END.len();
             } else {
                 let value = section[value_start..]
                     .trim_matches(|c| c == '\n' || c == '\r')
+                    .trim()
                     .to_string();
-                recovered.insert(parameter_name, value);
+                recovered.insert(parameter_name, Self::parse_recovered_xml_value(&value));
                 break;
             }
         }
 
         recovered
+    }
+
+    fn uses_minimax_xml(&self) -> bool {
+        self.config.start_token_str == "<minimax:tool_call>"
+            && self.config.end_token_str == "</minimax:tool_call>"
+    }
+
+    fn xml_parameter_open_prefix(uses_minimax_xml: bool) -> &'static str {
+        if uses_minimax_xml {
+            "<parameter name="
+        } else {
+            "<parameter="
+        }
+    }
+
+    fn parse_recovered_xml_value(raw: &str) -> Value {
+        let decoded = raw
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'");
+
+        match decoded.as_str() {
+            "true" | "True" => return Value::Bool(true),
+            "false" | "False" => return Value::Bool(false),
+            "null" | "None" => return Value::Null,
+            _ => {}
+        }
+
+        if decoded.starts_with('{') || decoded.starts_with('[') {
+            if let Ok(value) = serde_json::from_str::<Value>(&decoded) {
+                return value;
+            }
+        }
+
+        if let Ok(num) = decoded.parse::<i64>() {
+            return Value::Number(num.into());
+        }
+
+        if let Ok(num) = decoded.parse::<f64>() {
+            if let Some(num) = serde_json::Number::from_f64(num) {
+                return Value::Number(num);
+            }
+        }
+
+        Value::String(decoded)
     }
 
     // --- Chunk creation helpers (for use by server.rs) ---
@@ -1877,6 +1992,55 @@ mod tests {
         let config = ToolConfig::for_model_type(&ModelType::Phi);
         assert!(!config.has_special_tokens());
         assert_eq!(config.start_token_str, "<tool_call>");
+    }
+
+    #[test]
+    fn test_tool_config_minimax() {
+        let config = ToolConfig::for_model_type(&ModelType::MiniMax);
+        assert!(config.has_special_tokens());
+        assert!(config.start_token_ids.contains(&200052));
+        assert!(config.end_token_ids.contains(&200053));
+        assert_eq!(config.start_token_str, "<minimax:tool_call>");
+        assert_eq!(config.end_token_str, "</minimax:tool_call>");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_parser_detects_start_and_end_by_token_id() {
+        let tools = vec![crate::tools::function_tool("search_web", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::MiniMax,
+            "MiniMax-M2.5".to_string(),
+            ToolConfig::for_model_type(&ModelType::MiniMax),
+            tools,
+            None,
+        );
+
+        match parser.process_token(200052, "<minimax:tool_call>").await {
+            StreamResult::Buffering => {}
+            other => panic!("expected buffering on MiniMax start token, got {:?}", other),
+        }
+
+        parser.buffer = r#"<minimax:tool_call>
+<invoke name="search_web">
+<parameter name="query_tag">["technology","events"]</parameter>
+<parameter name="query_list">["\"OpenAI\" \"latest\" \"release\""]</parameter>
+</invoke>"#
+            .to_string();
+        parser.streaming_calls.push(StreamingToolCallState {
+            name: Some("search_web".to_string()),
+            arguments: r#"{"query_tag":["technology","events"],"query_list":["\"OpenAI\" \"latest\" \"release\""]}"#.to_string(),
+        });
+
+        match parser.process_token(200053, "</minimax:tool_call>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "search_web");
+            }
+            other => panic!(
+                "expected parsed tool calls on MiniMax end token, got {:?}",
+                other
+            ),
+        }
     }
 
     #[tokio::test]
@@ -2316,6 +2480,27 @@ abc
     }
 
     #[test]
+    fn test_sanitize_tool_markup_for_display_escapes_minimax_xml_payload() {
+        let tools = vec![crate::tools::function_tool("search_web", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::MiniMax,
+            "MiniMax-M2.5".to_string(),
+            ToolConfig::for_model_type(&ModelType::MiniMax),
+            tools,
+            None,
+        );
+
+        let raw = r#"<minimax:tool_call><invoke name="search_web"><parameter name="query_list">["rust"]</parameter></invoke></minimax:tool_call>"#;
+        assert!(parser.contains_tool_markup(raw));
+
+        let safe = parser.sanitize_tool_markup_for_display(raw);
+        assert!(safe.contains("<\u{200C}minimax:tool_call>"));
+        assert!(safe.contains("<\u{200C}invoke name=\"search_web\">"));
+        assert!(safe.contains("<\u{200C}parameter name=\"query_list\">"));
+        assert!(!parser.contains_tool_markup(&safe));
+    }
+
+    #[test]
     fn test_contains_tool_markup_detects_partial_xml_marker() {
         let tools = vec![crate::tools::function_tool("write", "desc").build()];
         let parser = StreamToolParser::new_with_config(
@@ -2360,6 +2545,36 @@ abc
             StreamToolParser::parser_name_for_model(&ModelType::Qwen3_5MoE, "qwen3.5-moe"),
             "qwen_coder"
         );
+    }
+
+    #[test]
+    fn test_parser_defaults_to_minimax_parser() {
+        assert_eq!(
+            StreamToolParser::parser_name_for_model(&ModelType::MiniMax, "MiniMax-M2.5-NVFP4"),
+            "minimax_m2"
+        );
+    }
+
+    #[test]
+    fn test_minimax_envelope_accepts_complete_invoke_block() {
+        let tools = vec![crate::tools::function_tool("search_web", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::MiniMax,
+            "MiniMax-M2.5".to_string(),
+            ToolConfig::for_model_type(&ModelType::MiniMax),
+            tools,
+            None,
+        );
+
+        parser.buffer = r#"<minimax:tool_call>
+<invoke name="search_web">
+<parameter name="query_tag">["technology", "events"]</parameter>
+<parameter name="query_list">["\"OpenAI\" \"latest\" \"release\""]</parameter>
+</invoke>
+</minimax:tool_call>"#
+            .to_string();
+
+        assert!(parser.has_complete_tool_envelope());
     }
 
     // ---------------------------------------------------------------

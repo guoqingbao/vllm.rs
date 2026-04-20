@@ -7,6 +7,7 @@ pub mod glm4_moe_lite;
 pub mod layers;
 pub mod llama;
 pub mod llama4;
+pub mod minimax;
 pub mod mistral3_vl;
 pub mod phi4;
 pub mod qwen3;

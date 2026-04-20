@@ -1285,15 +1285,15 @@ impl Module for LnNvfp4 {
         };
 
         let result = attention_rs::nvfp4_linear::nvfp4_matmul(
-                &x_2d,
-                &self.blocks,
-                &self.scales,
-                self.global_scale,
-                self.input_scale,
-                self.bias.as_ref(),
-                linear_is_prefill(),
-                self.weight_scale_swizzled.as_ref(),
-            )?;
+            &x_2d,
+            &self.blocks,
+            &self.scales,
+            self.global_scale,
+            self.input_scale,
+            self.bias.as_ref(),
+            linear_is_prefill(),
+            self.weight_scale_swizzled.as_ref(),
+        )?;
 
         if orig_dims.len() > 2 {
             let mut new_dims = orig_dims[..orig_dims.len() - 1].to_vec();
