@@ -10,3 +10,4 @@ CLAUDE.md
 *.nsys-rep
 *.sqlite
 .cursor/skills/nobreak/SKILL.md
+test_model.py
