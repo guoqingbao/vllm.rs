@@ -45,7 +45,7 @@ ahash = "0.8.11"
 reedline = "0.40.0"
 pyo3 = { version = "0.25.1", features = ["extension-module", "abi3-py38"], optional = true }
 parking_lot = "0.12.4"
-attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version="0.5.2", rev = "79d2579" }
+attention-rs = { git = "https://github.com/guoqingbao/attention.rs.git", version = "0.5.2", rev = "d4058d4", default-features = false }
 once_cell = "1.21.3"
 tqdm = "0.8.0"
 futures = "0.3.31"
@@ -78,14 +78,14 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda", "attention-rs/candle-custom"]
 nccl = ["candle-core/nccl"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
 cutlass = ["attention-rs/cutlass"]
 flashattn = ["attention-rs/flashattn", "attention-rs/no-fp8-kvcache"]
 flashinfer = ["attention-rs/flashinfer"]
 trtllm = ["flashinfer", "attention-rs/trtllm"]
-metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal", "dep:metal"]
+metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal", "attention-rs/candle-custom", "dep:metal"]
 python = ["pyo3"]
 nvtx = ["dep:nvtx"]
 
