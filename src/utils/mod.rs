@@ -334,6 +334,21 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
         None
     };
 
+    let md_opt_usize = |key: &str| {
+        md_get(key)
+            .and_then(|v| v.to_u32())
+            .ok()
+            .map(|v| v as usize)
+    };
+    let md_opt_f64 = |key: &str| md_get(key).and_then(|v| v.to_f64()).ok();
+    let md_opt_bool = |key: &str| md_get(key).and_then(|v| v.to_bool()).ok();
+    let md_opt_string = |key: &str| {
+        md_get(key)
+            .and_then(|v| v.to_string())
+            .ok()
+            .map(|v| v.to_owned())
+    };
+
     let mod_cfg = if arch == "gemma4" {
         let expert_count = md_get(format!("{arch}.expert_count").as_str())
             .and_then(|v| v.to_u32())
@@ -355,15 +370,18 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                     num_experts: Some(ec),
                     mlp_only_layers: Some(Vec::new()),
                     decoder_sparse_step: Some(1),
-                    norm_topk_prob: true,
+                    norm_topk_prob: md_opt_bool(format!("{arch}.norm_topk_prob").as_str())
+                        .unwrap_or(true),
                     num_experts_per_tok: euc,
                     first_k_dense_replace: None,
                     n_shared_experts: None,
-                    routed_scaling_factor: None,
-                    n_group: None,
-                    topk_group: None,
-                    scoring_func: None,
-                    topk_method: None,
+                    routed_scaling_factor: md_opt_f64(
+                        format!("{arch}.routed_scaling_factor").as_str(),
+                    ),
+                    n_group: md_opt_usize(format!("{arch}.n_group").as_str()),
+                    topk_group: md_opt_usize(format!("{arch}.topk_group").as_str()),
+                    scoring_func: md_opt_string(format!("{arch}.scoring_func").as_str()),
+                    topk_method: md_opt_string(format!("{arch}.topk_method").as_str()),
                 })
             } else {
                 None
@@ -430,16 +448,19 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 Err(_) => Vec::new(),
             }),
             decoder_sparse_step: Some(1),
-            norm_topk_prob: expert_weights_norm.unwrap_or(true),
+            norm_topk_prob: expert_weights_norm
+                .or_else(|| md_opt_bool(format!("{arch}.norm_topk_prob").as_str()))
+                .unwrap_or(true),
             num_experts_per_tok: md_get(format!("{arch}.expert_used_count").as_str())?.to_u32()?
                 as usize,
             first_k_dense_replace: leading_dense_block_count,
             n_shared_experts: expert_shared_count,
-            routed_scaling_factor: expert_weights_scale,
-            n_group: None,
-            topk_group: None,
-            scoring_func: None,
-            topk_method: None,
+            routed_scaling_factor: expert_weights_scale
+                .or_else(|| md_opt_f64(format!("{arch}.routed_scaling_factor").as_str())),
+            n_group: md_opt_usize(format!("{arch}.n_group").as_str()),
+            topk_group: md_opt_usize(format!("{arch}.topk_group").as_str()),
+            scoring_func: md_opt_string(format!("{arch}.scoring_func").as_str()),
+            topk_method: md_opt_string(format!("{arch}.topk_method").as_str()),
         })
     } else {
         None
@@ -1162,6 +1183,12 @@ pub fn init_config_tokenizer(
                         let mut config: Config =
                             serde_json::from_value(cv).map_err(candle_core::Error::wrap)?;
                         let tc = &raw_config_json["text_config"];
+                        let tc_usize =
+                            |key: &str| tc.get(key).and_then(|v| v.as_u64()).map(|v| v as usize);
+                        let tc_f64 = |key: &str| tc.get(key).and_then(|v| v.as_f64());
+                        let tc_bool = |key: &str| tc.get(key).and_then(|v| v.as_bool());
+                        let tc_string =
+                            |key: &str| tc.get(key).and_then(|v| v.as_str()).map(str::to_owned);
                         if let Some(num_experts) = tc.get("num_experts").and_then(|v| v.as_u64()) {
                             if num_experts > 0 {
                                 let top_k =
@@ -1179,15 +1206,15 @@ pub fn init_config_tokenizer(
                                     num_experts: Some(num_experts as usize),
                                     mlp_only_layers: Some(Vec::new()),
                                     decoder_sparse_step: Some(1),
-                                    norm_topk_prob: true,
+                                    norm_topk_prob: tc_bool("norm_topk_prob").unwrap_or(true),
                                     num_experts_per_tok: top_k,
                                     first_k_dense_replace: None,
                                     n_shared_experts: None,
-                                    routed_scaling_factor: None,
-                                    n_group: None,
-                                    topk_group: None,
-                                    scoring_func: None,
-                                    topk_method: None,
+                                    routed_scaling_factor: tc_f64("routed_scaling_factor"),
+                                    n_group: tc_usize("n_group"),
+                                    topk_group: tc_usize("topk_group"),
+                                    scoring_func: tc_string("scoring_func"),
+                                    topk_method: tc_string("topk_method"),
                                 });
                             }
                         }

@@ -78,6 +78,7 @@ pub struct MlaAttention {
     sm_scale: f32,
     rope_scale: f32,
     rope_theta: f32,
+    promote_qk_to_f32: bool,
     dtype: DType,
 }
 
@@ -96,7 +97,12 @@ impl MlaAttention {
         let qk_rope_head_dim = mla_cfg.qk_rope_head_dim;
         let v_head_dim = mla_cfg.v_head_dim;
         let q_head_dim = qk_nope_head_dim + qk_rope_head_dim;
-
+        let is_qvar_builder = vb.is_qvar_builder();
+        let norm_dtype = if is_qvar_builder || config.higher_precision_required() {
+            DType::F32
+        } else {
+            dtype
+        };
         let (q_a_proj, q_a_layernorm, q_b_proj, q_proj) =
             if let Some(q_lora_rank) = mla_cfg.q_lora_rank {
                 let q_a = ReplicatedLinear::load_b(
@@ -112,7 +118,7 @@ impl MlaAttention {
                     q_lora_rank,
                     mla_cfg.rms_norm_eps,
                     vb.pp("q_a_layernorm"),
-                    dtype,
+                    norm_dtype,
                     false,
                 )?;
                 let q_b = ReplicatedLinear::load_b(
@@ -152,7 +158,7 @@ impl MlaAttention {
             kv_lora_rank,
             mla_cfg.rms_norm_eps,
             vb.pp("kv_a_layernorm"),
-            dtype,
+            norm_dtype,
             false,
         )?;
 
@@ -237,6 +243,7 @@ impl MlaAttention {
             sm_scale,
             rope_scale,
             rope_theta: config.rope_theta.unwrap_or(10000.0) as f32,
+            promote_qk_to_f32: is_qvar_builder || config.higher_precision_required(),
             dtype,
         })
     }
@@ -297,6 +304,15 @@ impl MlaAttention {
         // RoPE on q_pe and k_pe
         let k_pe = k_pe_raw.reshape((seq_len, 1, self.qk_rope_head_dim))?;
         let q_pe_for_rope = q_pe.contiguous()?;
+
+        let (q_pe_for_rope, k_pe) = if self.promote_qk_to_f32 {
+            (
+                q_pe_for_rope.to_dtype(DType::F32)?,
+                k_pe.to_dtype(DType::F32)?,
+            )
+        } else {
+            (q_pe_for_rope, k_pe)
+        };
         let (q_pe, k_pe) = if let Some(rotary_emb) = &rotary_emb {
             match rotary_emb.apply_rotary_emb_qkv(&q_pe_for_rope, &k_pe, positions)? {
                 Some((q_new, k_new)) => (q_new, k_new),

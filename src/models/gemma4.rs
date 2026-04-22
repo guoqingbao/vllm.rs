@@ -264,6 +264,7 @@ impl Gemma4DecoderLayer {
             sliding_window,
             dtype,
             k_eq_v,
+            false,
         )?;
 
         let mlp = MLP::new(
@@ -347,38 +348,32 @@ impl Gemma4DecoderLayer {
             (None, None)
         };
 
-        let norm_dtype = if is_qvar_builder || config.quant.is_some() {
-            DType::F32
-        } else {
-            dtype
-        };
-
         let input_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("input_layernorm"),
-            norm_dtype,
+            DType::F32,
             false,
         )?;
         let post_attention_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
-            norm_dtype,
+            DType::F32,
             false,
         )?;
         let pre_feedforward_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("pre_feedforward_layernorm"),
-            norm_dtype,
+            DType::F32,
             false,
         )?;
         let post_feedforward_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("post_feedforward_layernorm"),
-            norm_dtype,
+            DType::F32,
             false,
         )?;
 
@@ -392,21 +387,21 @@ impl Gemma4DecoderLayer {
                     config.hidden_size,
                     config.rms_norm_eps,
                     vb.pp("post_feedforward_layernorm_1"),
-                    norm_dtype,
+                    DType::F32,
                     false,
                 )?),
                 Some(rms_norm(
                     config.hidden_size,
                     config.rms_norm_eps,
                     vb.pp("post_feedforward_layernorm_2"),
-                    norm_dtype,
+                    DType::F32,
                     false,
                 )?),
                 Some(rms_norm(
                     config.hidden_size,
                     config.rms_norm_eps,
                     vb.pp("pre_feedforward_layernorm_2"),
-                    norm_dtype,
+                    DType::F32,
                     false,
                 )?),
             )
@@ -420,7 +415,7 @@ impl Gemma4DecoderLayer {
                     config.hidden_size,
                     config.rms_norm_eps,
                     vb.pp("post_per_layer_input_norm"),
-                    norm_dtype,
+                    DType::F32,
                     false,
                 )?;
                 let gate = ReplicatedLinear::load_no_bias(
@@ -802,7 +797,7 @@ impl Gemma4ForCausalLM {
                     pli_dim,
                     config.rms_norm_eps,
                     vb.pp(&format!("{}.per_layer_projection_norm", lm_prefix)),
-                    dtype,
+                    DType::F32,
                     false,
                 )?;
 
@@ -813,7 +808,7 @@ impl Gemma4ForCausalLM {
 
         let embed_scale = (config.hidden_size as f64).sqrt();
 
-        let rope_dtype = if is_qvar_builder || config.quant.is_some() {
+        let rope_dtype = if is_qvar_builder || config.higher_precision_required() {
             DType::F32
         } else {
             dtype
@@ -883,7 +878,7 @@ impl Gemma4ForCausalLM {
         local_config.partial_rotary_factor = None;
 
         let rotary_emb_local = Arc::new(RotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype
@@ -933,11 +928,7 @@ impl Gemma4ForCausalLM {
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp(&format!("{}.norm", lm_prefix)),
-            if is_qvar_builder || config.quant.is_some() {
-                DType::F32
-            } else {
-                dtype
-            },
+            DType::F32,
             false,
         )?;
 

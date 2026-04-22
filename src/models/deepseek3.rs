@@ -176,7 +176,7 @@ impl DeepSeekDecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -188,7 +188,7 @@ impl DeepSeekDecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -277,7 +277,7 @@ impl DeepSeekForCausalLM {
         )?;
 
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype
@@ -321,7 +321,7 @@ impl DeepSeekForCausalLM {
             } else {
                 vb.pp(&format!("{}norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
