@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.10.6"
+version = "0.10.7"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
@@ -69,7 +69,7 @@ regex = "1.12.2"
 local-ip-address = "0.6.5"
 url = "2.5.7"
 tool-parser = "1.2.0"
-openai-protocol = "1.2.0"
+openai-protocol = "1.6.0"
 nvtx = { version = "1.3", optional = true }
 
 [lib]
