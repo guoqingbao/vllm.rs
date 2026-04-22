@@ -217,7 +217,7 @@ impl Qwen3ForCausalLM {
             dtype,
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype

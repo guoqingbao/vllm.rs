@@ -271,6 +271,14 @@ impl Config {
             (Some(e), Some(other)) => Some(e.merge(other.clone())),
         };
     }
+
+    pub fn higher_precision_required(&self) -> bool {
+        self.quant.is_some()
+            || self
+                .quantization_config
+                .as_ref()
+                .is_some_and(|cfg| matches!(cfg.quant_method.as_str(), "mxfp4" | "nvfp4"))
+    }
 }
 #[cfg(not(feature = "python"))]
 #[derive(Serialize, Deserialize, Clone, Debug)]

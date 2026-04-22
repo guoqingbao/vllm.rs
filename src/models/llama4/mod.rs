@@ -226,18 +226,16 @@ impl LLama4DecoderLayer {
             None
         };
 
-        let mut self_attn = Attention::new(
+        let self_attn = Attention::new_with_options(
             vb.pp("self_attn"),
             comm.clone(),
             config,
             None,
             sliding_window,
             dtype,
+            false,
+            text_cfg.use_qk_norm && use_rope,
         )?;
-
-        if text_cfg.use_qk_norm && use_rope {
-            self_attn.set_qk_l2_norm(true);
-        }
 
         let moe_layers = text_cfg.moe_layers();
         let is_moe_layer = moe_layers.contains(&layer_idx);
@@ -269,14 +267,14 @@ impl LLama4DecoderLayer {
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("input_layernorm"),
-            dtype,
+            DType::F32,
             false,
         )?;
         let post_attention_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -433,7 +431,7 @@ impl LLama4ForConditionalGeneration {
         )?;
 
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype
@@ -463,7 +461,7 @@ impl LLama4ForConditionalGeneration {
             config.hidden_size,
             config.rms_norm_eps,
             vb.pp("language_model.model.norm"),
-            dtype,
+            DType::F32,
             false,
         )?;
 

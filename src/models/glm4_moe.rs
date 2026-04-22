@@ -159,7 +159,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -171,7 +171,7 @@ impl GLM4DecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -308,7 +308,7 @@ impl GLM4MoEForCausalLM {
             dtype,
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype
@@ -350,7 +350,7 @@ impl GLM4MoEForCausalLM {
             } else {
                 vb.pp(&format!("{}norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 

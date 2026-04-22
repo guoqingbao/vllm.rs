@@ -36,9 +36,9 @@ pub struct Attention {
     dtype: DType,
     no_per_head_norm: bool,
     full_dim_qk_norm: bool,
-    is_qwen35_or_next: bool,
     is_qvar_builder: bool,
     qk_l2_norm: bool,
+    promote_qk_to_f32: bool,
     v_norm_eps: Option<f64>,
 }
 
@@ -367,6 +367,7 @@ impl Attention {
             sliding_window,
             dtype,
             false,
+            false,
         )
     }
 
@@ -378,6 +379,7 @@ impl Attention {
         sliding_window: Option<usize>,
         dtype: DType,
         k_eq_v: bool,
+        qk_l2_norm: bool,
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_heads = config.num_attention_heads;
@@ -616,15 +618,11 @@ impl Attention {
             dtype,
             no_per_head_norm: no_per_head_norm_models.contains(&arch),
             full_dim_qk_norm,
-            is_qwen35_or_next,
             is_qvar_builder,
-            qk_l2_norm: false,
+            qk_l2_norm,
+            promote_qk_to_f32: is_qvar_builder || config.higher_precision_required() || qk_l2_norm,
             v_norm_eps,
         })
-    }
-
-    pub fn set_qk_l2_norm(&mut self, enable: bool) {
-        self.qk_l2_norm = enable;
     }
 
     pub fn forward(
@@ -706,6 +704,12 @@ impl Attention {
         let k = k.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
         let v = v.reshape((seq_len, self.num_kv_heads, self.head_dim))?;
 
+        let (q, k) = if self.promote_qk_to_f32 && q.dtype() != DType::F32 {
+            (q.to_dtype(DType::F32)?, k.to_dtype(DType::F32)?)
+        } else {
+            (q, k)
+        };
+
         let (q, k) = if self.q_norm.is_some() && self.k_norm.is_some() {
             if self.full_dim_qk_norm {
                 let q_2d = q.reshape((seq_len, self.num_heads * self.head_dim))?;
@@ -743,12 +747,10 @@ impl Attention {
         };
 
         let (q, k) = if self.qk_l2_norm {
-            let q_f32 = q.to_dtype(DType::F32)?;
-            let k_f32 = k.to_dtype(DType::F32)?;
-            let q_rms = (q_f32.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
-            let k_rms = (k_f32.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
-            let q = q_f32.broadcast_div(&q_rms)?.to_dtype(q.dtype())?;
-            let k = k_f32.broadcast_div(&k_rms)?.to_dtype(k.dtype())?;
+            let q_rms = (q.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
+            let k_rms = (k.sqr()?.mean_keepdim(D::Minus1)? + 1e-5)?.sqrt()?;
+            let q = q.broadcast_div(&q_rms)?;
+            let k = k.broadcast_div(&k_rms)?;
             (q, k)
         } else {
             (q, k)
@@ -828,7 +830,7 @@ impl Attention {
             y
         };
 
-        let y = if self.is_qvar_builder && self.is_qwen35_or_next {
+        let y = if self.is_qvar_builder {
             y
         } else {
             y.to_dtype(xs.dtype())?

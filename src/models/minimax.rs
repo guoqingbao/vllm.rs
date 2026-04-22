@@ -18,6 +18,16 @@ use std::iter::zip;
 use std::rc::Rc;
 use std::sync::Arc;
 
+fn resolve_input_seqlens(input_metadata: &InputMetadata) -> Result<Vec<u32>> {
+    if let Some(seqlens) = input_metadata.seqlens.as_ref() {
+        Ok(seqlens.clone())
+    } else if let Some(cu_seqlens) = input_metadata.cu_seqlens_q.as_ref() {
+        Ok(cu_seqlens.to_vec1::<u32>()?[1..].to_vec())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 enum MoeVariant {
     FusedMoe(FusedMoe),
     FusedMoeGGUF(FusedMoeGGUF),
@@ -143,7 +153,7 @@ impl MiniMaxDecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -155,7 +165,7 @@ impl MiniMaxDecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -243,7 +253,7 @@ impl MiniMaxForCausalLM {
             dtype,
         )?;
         let rotary_emb = Arc::new(ScalingRotaryEmbedding::new(
-            if is_qvar_builder || config.quant.is_some() {
+            if is_qvar_builder || config.higher_precision_required() {
                 DType::F32
             } else {
                 dtype
@@ -285,7 +295,7 @@ impl MiniMaxForCausalLM {
             } else {
                 vb.pp(&format!("{}norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -341,7 +351,7 @@ impl MiniMaxForCausalLM {
         embeded_inputs: bool,
         return_hidden: bool,
     ) -> Result<Tensor> {
-        let seqlens = input_metadata.seqlens.clone().unwrap_or_default();
+        let seqlens = resolve_input_seqlens(input_metadata)?;
 
         let attention_mask = get_attention_causal_mask(
             &self.device,

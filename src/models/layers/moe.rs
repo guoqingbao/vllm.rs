@@ -7,6 +7,7 @@ use crate::utils::config::QuantConfig;
 use attention_rs::moe;
 use attention_rs::moe::moe_gemm_fp8;
 use attention_rs::silu_and_mul::silu_and_mul;
+use attention_rs::sort::ArgSortOp;
 use candle_core::Module;
 use candle_core::{
     quantized::{GgmlDType, QTensor},
@@ -65,7 +66,7 @@ impl MoeRouting {
 
     /// Route tokens to experts, returning `(topk_weights, topk_ids)`.
     /// `router_logits` must be F32 with shape `[num_tokens, num_experts]`.
-    pub fn route(&self, router_logits: &Tensor) -> Result<(Tensor, Tensor)> {
+    pub fn route(&self, router_logits: &Tensor, is_prefill: bool) -> Result<(Tensor, Tensor)> {
         let (mut topk_weights, topk_ids) = if self.use_sigmoid_scoring {
             let scores = candle_nn::ops::sigmoid(router_logits)?;
 
@@ -78,20 +79,36 @@ impl MoeRouting {
             let topk_indices = if self.n_group > 1 {
                 let num_tokens = scores_for_choice.dim(0)?;
                 let num_experts = scores_for_choice.dim(1)?;
+                if num_experts % self.n_group != 0 {
+                    candle_core::bail!(
+                        "MoE routing requires num_experts ({num_experts}) divisible by n_group ({})",
+                        self.n_group
+                    );
+                }
+                if self.topk_group > self.n_group {
+                    candle_core::bail!(
+                        "MoE routing requires topk_group ({}) <= n_group ({})",
+                        self.topk_group,
+                        self.n_group
+                    );
+                }
                 let experts_per_group = num_experts / self.n_group;
+                if experts_per_group * self.topk_group < self.num_experts_per_tok {
+                    candle_core::bail!(
+                        "MoE routing selected-group capacity ({}) is smaller than num_experts_per_tok ({})",
+                        experts_per_group * self.topk_group,
+                        self.num_experts_per_tok
+                    );
+                }
                 // [num_tokens, n_group, experts_per_group]
                 let grouped =
                     scores_for_choice.reshape((num_tokens, self.n_group, experts_per_group))?;
                 // top-2 per group summed -> [num_tokens, n_group]
-                let sorted_idx = grouped.arg_sort_last_dim(false)?;
-                let top2_idx = sorted_idx.narrow(D::Minus1, 0, 2)?;
+                let top2_idx = select_topk_indices(&grouped, experts_per_group.min(2), is_prefill)?;
                 let top2_vals = grouped.gather(&top2_idx, D::Minus1)?;
                 let group_scores = top2_vals.sum(D::Minus1)?;
                 // top topk_group groups -> [num_tokens, topk_group]
-                let group_sorted = group_scores.arg_sort_last_dim(false)?;
-                let group_idx = group_sorted
-                    .narrow(D::Minus1, 0, self.topk_group)?
-                    .contiguous()?;
+                let group_idx = select_topk_indices(&group_scores, self.topk_group, is_prefill)?;
                 // build group mask [num_tokens, n_group]
                 let group_mask = group_scores.zeros_like()?.scatter_add(
                     &group_idx,
@@ -104,15 +121,9 @@ impl MoeRouting {
                     .broadcast_as((num_tokens, self.n_group, experts_per_group))?
                     .reshape((num_tokens, num_experts))?;
                 let masked = scores_for_choice.broadcast_mul(&score_mask)?;
-                masked
-                    .arg_sort_last_dim(false)?
-                    .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-                    .contiguous()?
+                select_topk_indices(&masked, self.num_experts_per_tok, is_prefill)?
             } else {
-                scores_for_choice
-                    .arg_sort_last_dim(false)?
-                    .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-                    .contiguous()?
+                select_topk_indices(&scores_for_choice, self.num_experts_per_tok, is_prefill)?
             };
 
             let topk_weights = scores.gather(&topk_indices, D::Minus1)?;
@@ -127,8 +138,8 @@ impl MoeRouting {
         };
 
         if self.norm_topk_prob {
-            let denom = (topk_weights.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weights = topk_weights.broadcast_div(&denom)?;
+            // let denom = (topk_weights.sum_keepdim(D::Minus1)? + 1e-20)?;
+            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
         if let Some(factor) = self.routed_scaling_factor {
             topk_weights = (topk_weights * factor)?;
@@ -136,6 +147,35 @@ impl MoeRouting {
 
         Ok((topk_weights, topk_ids))
     }
+}
+
+fn select_topk_indices(scores: &Tensor, topk: usize, is_prefill: bool) -> Result<Tensor> {
+    let sorted_idx = if is_prefill {
+        scores.contiguous()?.arg_sort(false)?
+    } else {
+        scores.arg_sort_last_dim(false)?
+    };
+    sorted_idx.narrow(D::Minus1, 0, topk)?.contiguous()
+}
+
+fn sort_expert_assignments(topk_ids: &Tensor, is_prefill: bool) -> Result<(Tensor, Tensor)> {
+    let flat = topk_ids.flatten_all()?;
+    if is_prefill {
+        flat.sort(true)
+    } else {
+        flat.sort_last_dim(true)
+    }
+}
+
+fn presorted_expert_assignments(
+    topk_ids: &Tensor,
+    is_prefill: bool,
+) -> Result<Option<(Tensor, Tensor)>> {
+    if !is_prefill {
+        return Ok(None);
+    }
+    let (expert_ids, sorted_token_ids) = sort_expert_assignments(topk_ids, true)?;
+    Ok(Some((sorted_token_ids, expert_ids)))
 }
 
 /// Try to load `e_score_correction_bias` from the MoE var-builder.
@@ -490,7 +530,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         self.forward_with_routing(xs, topk_weights, topk_ids, is_prefill)
     }
@@ -504,17 +544,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
     ) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
 
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            #[cfg(feature = "cuda")]
-            {
-                use attention_rs::sort::ArgSortOp;
-                topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        } else {
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let topk = self.routing.num_experts_per_tok;
         let gate_up = moe::moe_gemm(
@@ -784,18 +814,8 @@ impl FusedMoeGGUF {
         };
 
         let router_logits = self.gate.forward(&xs)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            #[cfg(feature = "cuda")]
-            {
-                use attention_rs::sort::ArgSortOp;
-                topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        } else {
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
+        let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let ys = {
             let gate = moe::moe_gemm_gguf(
@@ -1158,18 +1178,8 @@ impl FusedMoeISQ {
         };
 
         let router_logits = self.gate.forward(&xs)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            #[cfg(feature = "cuda")]
-            {
-                use attention_rs::sort::ArgSortOp;
-                topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        } else {
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
+        let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let ys = {
             let gate = moe::moe_gemm_gguf(
@@ -1495,7 +1505,7 @@ impl FusedMoeFp8 {
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let router_logits = self.gate.forward(&xs)?.to_dtype(DType::F32)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -1503,17 +1513,7 @@ impl FusedMoeFp8 {
             xs.clone()
         };
 
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            #[cfg(feature = "cuda")]
-            {
-                use attention_rs::sort::ArgSortOp;
-                topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        } else {
-            topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let gate_up = moe_gemm_fp8(
             &xs,
@@ -1717,7 +1717,7 @@ impl FusedMoeMxfp4 {
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
         let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         let xs = if xs.dtype() == DType::F32 {
             xs.to_dtype(self.dtype)?
@@ -2316,7 +2316,7 @@ impl FusedMoeNvfp4 {
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
-        let (topk_weights, topk_ids) = self.routing.route(&router_logits)?;
+        let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         self.forward_with_routing(xs, topk_weights, topk_ids, is_prefill)
     }
@@ -2343,14 +2343,7 @@ impl FusedMoeNvfp4 {
             xs
         };
 
-        let pre_sorted = if is_prefill {
-            use attention_rs::sort::ArgSortOp;
-            let flat = topk_ids.flatten_all()?.contiguous()?;
-            let (eids, tids) = flat.sort(true)?;
-            Some((tids, eids))
-        } else {
-            None
-        };
+        let pre_sorted = presorted_expert_assignments(&topk_ids, is_prefill)?;
 
         let pre_sorted_refs = pre_sorted.as_ref().map(|(a, b)| (a, b));
 

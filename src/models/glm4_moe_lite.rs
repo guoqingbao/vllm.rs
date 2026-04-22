@@ -187,7 +187,7 @@ impl GLM4MoeLiteDecoderLayer {
             } else {
                 vb.pp("input_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -199,7 +199,7 @@ impl GLM4MoeLiteDecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm").clone()
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
@@ -294,7 +294,7 @@ impl GLM4MoeLiteForCausalLM {
             mla_config.head_dim = Some(mla_cfg.qk_rope_head_dim);
             mla_config.partial_rotary_factor = None;
             Arc::new(ScalingRotaryEmbedding::new(
-                if is_qvar_builder || config.quant.is_some() {
+                if is_qvar_builder || config.higher_precision_required() {
                     DType::F32
                 } else {
                     dtype
@@ -339,7 +339,7 @@ impl GLM4MoeLiteForCausalLM {
             } else {
                 vb.pp(&format!("{}norm", prefix))
             },
-            dtype,
+            DType::F32,
             false,
         )?;
 
