@@ -1,4 +1,5 @@
 pub mod block_manager;
+pub mod dflash_drafter;
 pub mod engine;
 pub mod prefix_cache;
 pub mod runner;

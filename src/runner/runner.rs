@@ -277,6 +277,29 @@ fn main() -> anyhow::Result<()> {
                     false,
                 )?;
             }
+            Ok(MessageType::RunSpecDecode(_sequences)) => {
+                vllm_rs::log_error!(
+                    "RunSpecDecode via process runner is deprecated; use RunDraftAndVerify"
+                );
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::RunSpecDecodeResponse(vec![]),
+                    false,
+                )?;
+            }
+            Ok(MessageType::RunDraftAndVerify((sequences, first_token_ids))) => {
+                use vllm_rs::core::sequence::Sequence;
+                let refs: Vec<&Sequence> = sequences.iter().collect();
+                let outputs = runner.run_draft_and_verify(&refs, &first_token_ids);
+                if outputs.is_err() {
+                    vllm_rs::log_error!("Runner draft+verify error: {:?}", outputs);
+                }
+                send_local(
+                    &mut vec![stream.try_clone()?],
+                    &MessageType::RunSpecDecodeResponse(outputs.unwrap_or(vec![])),
+                    false,
+                )?;
+            }
             Ok(MessageType::RunEmbed((sequences, strategy))) => {
                 use vllm_rs::core::sequence::Sequence;
                 let refs: Vec<&Sequence> = sequences.iter().collect();

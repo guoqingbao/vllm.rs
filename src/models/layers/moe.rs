@@ -1606,7 +1606,7 @@ impl FusedMoeMxfp4 {
             Shard::default(),
             &cfg.quantization_config,
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let mut gate_blocks_vec = Vec::new();
@@ -1716,7 +1716,7 @@ impl FusedMoeMxfp4 {
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
+        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         let xs = if xs.dtype() == DType::F32 {
@@ -1859,7 +1859,7 @@ impl FusedMoeNvfp4 {
             Shard::default(),
             &cfg.quantization_config,
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         Self::load_experts(
@@ -1902,7 +1902,7 @@ impl FusedMoeNvfp4 {
             Shard::default(),
             &None,
             &None,
-            dtype,
+            DType::F32,
         )?;
 
         let bias = bias_vb.and_then(|bvb| try_load_e_score_correction_bias(bvb, num_experts));
@@ -2315,7 +2315,7 @@ impl FusedMoeNvfp4 {
     }
 
     pub fn forward(&self, xs: &Tensor, is_prefill: bool) -> Result<Tensor> {
-        let router_logits = self.gate.forward(xs)?.to_dtype(DType::F32)?;
+        let router_logits = self.gate.forward(&xs.to_dtype(DType::F32)?)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
 
         self.forward_with_routing(xs, topk_weights, topk_ids, is_prefill)

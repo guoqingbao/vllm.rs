@@ -458,6 +458,69 @@ impl Qwen3VLForConditionalGeneration {
         }
     }
 
+    pub fn forward_with_hidden_states(
+        &self,
+        input_ids: &Tensor,
+        positions: &Tensor,
+        kv_caches: Option<&Vec<(Tensor, Tensor)>>,
+        input_metadata: &InputMetadata,
+        embeded_inputs: bool,
+        target_layer_ids: &[usize],
+    ) -> Result<(Tensor, Vec<Tensor>)> {
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.forward_with_hidden_states(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+                embeded_inputs,
+                target_layer_ids,
+            ),
+            Qwen3TextModel::MoE(m) => m.forward_with_hidden_states(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+                embeded_inputs,
+                target_layer_ids,
+            ),
+            Qwen3TextModel::Dense35(m) => m.forward_with_hidden_states(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+                embeded_inputs,
+                target_layer_ids,
+            ),
+            Qwen3TextModel::MoE35(m) => m.forward_with_hidden_states(
+                input_ids,
+                positions,
+                kv_caches,
+                input_metadata,
+                embeded_inputs,
+                target_layer_ids,
+            ),
+        }
+    }
+
+    pub fn embed_forward_text(&self, xs: &Tensor) -> Result<Tensor> {
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.embed_forward(xs),
+            Qwen3TextModel::MoE(m) => m.embed_forward(xs),
+            Qwen3TextModel::Dense35(m) => m.embed_forward(xs),
+            Qwen3TextModel::MoE35(m) => m.embed_forward(xs),
+        }
+    }
+
+    pub fn lm_head_forward(&self, hidden: &Tensor) -> Result<Tensor> {
+        match &self.text_model {
+            Qwen3TextModel::Dense(m) => m.lm_head_forward(hidden),
+            Qwen3TextModel::MoE(m) => m.lm_head_forward(hidden),
+            Qwen3TextModel::Dense35(m) => m.lm_head_forward(hidden),
+            Qwen3TextModel::MoE35(m) => m.lm_head_forward(hidden),
+        }
+    }
+
     pub fn get_vocab_size(&self) -> usize {
         match &self.text_model {
             Qwen3TextModel::Dense(m) => m.get_vocab_size(),
@@ -563,6 +626,31 @@ impl Qwen3VLForConditionalGeneration {
         match &self.text_model {
             Qwen3TextModel::Dense35(m) => m.reset_mamba_cache(),
             Qwen3TextModel::MoE35(m) => m.reset_mamba_cache(),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn save_mamba_slot_state(&self, seq_id: usize) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => m.save_mamba_slot_state(seq_id),
+            Qwen3TextModel::MoE35(m) => m.save_mamba_slot_state(seq_id),
+            _ => Ok((vec![], vec![])),
+        }
+    }
+
+    pub fn restore_mamba_slot_state(
+        &self,
+        seq_id: usize,
+        conv_states: &[Tensor],
+        recurrent_states: &[Tensor],
+    ) -> Result<()> {
+        match &self.text_model {
+            Qwen3TextModel::Dense35(m) => {
+                m.restore_mamba_slot_state(seq_id, conv_states, recurrent_states)
+            }
+            Qwen3TextModel::MoE35(m) => {
+                m.restore_mamba_slot_state(seq_id, conv_states, recurrent_states)
+            }
             _ => Ok(()),
         }
     }

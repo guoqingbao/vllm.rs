@@ -38,7 +38,7 @@ use crate::{
 use attention_rs::cache;
 use attention_rs::FlashInferMetadata;
 use attention_rs::InputMetadata;
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use interprocess::local_socket::Stream as LocalStream;
 use parking_lot::RwLock;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
@@ -112,7 +112,6 @@ pub struct ModelRunner {
     #[cfg(feature = "flashinfer")]
     flashinfer_kv_params: Option<FlashInferKvParams>,
     logit_processor: LogitsProcessor,
-    /// Cached sampling strategy computed once during prefill, reused during decode
     cached_sampling: RwLock<Option<CachedSamplingParams>>,
     seq_tokens: RwLock<HashMap<usize, Vec<u32>>>,
     restored_prefix_sequences: RwLock<HashSet<usize>>,
@@ -121,9 +120,9 @@ pub struct ModelRunner {
     guidance_mismatch: RwLock<HashSet<usize>>,
     llg_factory: Option<Arc<ParserFactory>>,
     transfer: Option<Arc<Transfer>>,
-    /// Whether this runner is on the first rank (for logging)
     is_first_rank: bool,
     model_type: ModelType,
+    pub dflash_drafter: Option<crate::core::dflash_drafter::DFlashDrafter>,
 }
 
 impl ModelRunner {
@@ -628,6 +627,8 @@ impl ModelRunner {
             );
         }
 
+        let dflash_drafter = Self::init_dflash_drafter(econfig, comm.clone(), &device)?;
+
         Ok(Self {
             model,
             gpu_kv_cache: Arc::new(Mutex::new(gpu_kv_cache)),
@@ -658,7 +659,274 @@ impl ModelRunner {
             transfer,
             is_first_rank: comm.rank() == 0,
             model_type,
+            dflash_drafter,
         })
+    }
+
+    fn init_dflash_drafter(
+        econfig: &EngineConfig,
+        comm: Rc<Comm>,
+        device: &Device,
+    ) -> Result<Option<crate::core::dflash_drafter::DFlashDrafter>> {
+        let has_draft = econfig.draft_model_id.is_some() || econfig.draft_model_path.is_some();
+        if !has_draft {
+            return Ok(None);
+        }
+
+        crate::log_info!("Loading DFlash draft model...");
+
+        let loader = crate::utils::downloader::Downloader::new(
+            econfig.draft_model_id.clone(),
+            econfig.draft_model_path.clone(),
+            None,
+        );
+        let (draft_paths, _is_gguf) = loader
+            .prepare_draft_model_weights(econfig.hf_token.clone(), econfig.hf_token_path.clone())?;
+
+        let config_path = draft_paths.get_config_filename();
+        let config_data = std::fs::read(&config_path)
+            .map_err(|e| candle_core::Error::Msg(format!("Failed to read draft config: {}", e)))?;
+        let draft_config: crate::models::dflash::DFlashModelConfig =
+            serde_json::from_slice(&config_data).map_err(|e| {
+                candle_core::Error::Msg(format!("Failed to parse draft config: {}", e))
+            })?;
+
+        let weight_files = draft_paths.get_weight_filenames();
+        crate::log_info!(
+            "Draft model config: hidden_size={}, num_layers={}, block_size={}, target_layers={:?}",
+            draft_config.hidden_size,
+            draft_config.num_hidden_layers,
+            draft_config.block_size,
+            draft_config.target_layer_ids(),
+        );
+
+        let drafter = crate::core::dflash_drafter::DFlashDrafter::new(
+            &draft_config,
+            &weight_files,
+            comm,
+            DType::BF16,
+            device,
+            econfig.num_speculative_tokens,
+        )?;
+
+        crate::log_info!("DFlash draft model loaded successfully!");
+        Ok(Some(drafter))
+    }
+
+    pub fn has_dflash_drafter(&self) -> bool {
+        self.dflash_drafter.is_some()
+    }
+
+    /// Draft and verify: given sequences that have already completed a normal decode step,
+    /// use the cached decode hidden states to draft tokens and verify them.
+    /// Returns extra accepted tokens per sequence (NOT including the first_token from decode).
+    /// Called AFTER normal decode, BEFORE postprocess, so seq.len() does NOT include first_token yet.
+    pub fn run_draft_and_verify(
+        &self,
+        seqs: &[&Sequence],
+        first_token_ids: &[u32],
+    ) -> Result<Vec<Vec<u32>>> {
+        let drafter = self.dflash_drafter.as_ref().unwrap();
+        let target_layer_ids = drafter.target_layer_ids();
+        let batch_size = seqs.len();
+        let mut all_extras: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+
+        for seq_idx in 0..batch_size {
+            let seq = seqs[seq_idx];
+            let first_token_id = first_token_ids[seq_idx];
+            let seq_len = seq.len();
+            let block_size_val = self.config.block_size;
+            let max_verify_pos = seq.block_table.len() * block_size_val;
+            let available = if max_verify_pos > seq_len + 1 {
+                max_verify_pos - seq_len - 1
+            } else {
+                0
+            };
+
+            if available == 0 {
+                all_extras.push(vec![]);
+                continue;
+            }
+
+            let seq_hidden = drafter.build_draft_context(seq.id())?;
+            if seq_hidden.is_none() {
+                all_extras.push(vec![]);
+                continue;
+            }
+            let seq_hidden = seq_hidden.unwrap();
+
+            let embed_fn = |ids: &Tensor| -> Result<Tensor> {
+                match &self.model {
+                    Model::Qwen3(m) => m.embed_forward(ids),
+                    Model::Qwen3MoE(m) => m.embed_forward(ids),
+                    Model::Qwen3_5(m) => m.embed_forward(ids),
+                    Model::Qwen3_5MoE(m) => m.embed_forward(ids),
+                    Model::Qwen3VL(m) => m.embed_forward_text(ids),
+                    _ => candle_core::bail!("Unsupported model"),
+                }
+            };
+            let lm_head_fn = |h: &Tensor| -> Result<Tensor> {
+                match &self.model {
+                    Model::Qwen3(m) => m.lm_head_forward(h),
+                    Model::Qwen3MoE(m) => m.lm_head_forward(h),
+                    Model::Qwen3_5(m) => m.lm_head_forward(h),
+                    Model::Qwen3_5MoE(m) => m.lm_head_forward(h),
+                    Model::Qwen3VL(m) => m.lm_head_forward(h),
+                    _ => candle_core::bail!("lm_head not accessible"),
+                }
+            };
+
+            let draft_tokens =
+                drafter.draft_tokens(&seq_hidden, &embed_fn, &lm_head_fn, &[first_token_id])?;
+            let n_draft = std::cmp::min(draft_tokens.len(), available);
+            if n_draft == 0 {
+                all_extras.push(vec![]);
+                continue;
+            }
+            let draft_tokens = &draft_tokens[..n_draft];
+
+            crate::log_warn!(
+                "Spec decode: first={}, n_draft={}, draft={:?}, seq_len={}, avail={}",
+                first_token_id,
+                n_draft,
+                &draft_tokens[..std::cmp::min(5, n_draft)],
+                seq_len,
+                available
+            );
+
+            // Correctness-first verifier: run the target model through the normal decode path
+            // for the known first token and each accepted draft token. This matches baseline
+            // decode numerics and never advances KV/Mamba state with rejected draft tokens.
+            let mut verify_seq = seq.clone();
+            let mut input_token = first_token_id;
+            let mut accepted = Vec::new();
+
+            for verify_step in 0..=n_draft {
+                verify_seq.token_ids.push(input_token);
+                verify_seq.last_token = input_token;
+                let verify_seq_ref: &Sequence = &verify_seq;
+                let (vtensor, vpos_t, mut vmeta) =
+                    self.prepare_decode(std::iter::once(&verify_seq_ref))?;
+
+                #[cfg(feature = "flashinfer")]
+                if let Some(fm) = vmeta.flashinfer_metadata.as_mut() {
+                    if vmeta.is_mla {
+                        if fm.mla_decode_plan_info.is_none() {
+                            if let Some(params) = self.flashinfer_kv_params {
+                                fm.mla_decode_plan_info = Some(attention_rs::mla::mla_decode_plan(
+                                    &self.device,
+                                    params.kv_dtype,
+                                    &fm.indptr_host,
+                                    vtensor.dim(0)?,
+                                    params.num_qo_heads,
+                                    params.page_size,
+                                    fm.use_cuda_graph,
+                                )?);
+                            }
+                        }
+                    } else if fm.decode_plan_info.is_none() {
+                        if let Some(params) = self.flashinfer_kv_params {
+                            fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
+                                &self.device,
+                                params.kv_dtype,
+                                params.out_dtype,
+                                &fm.indptr_host,
+                                fm.last_len_host.as_deref(),
+                                fm.kv_len_arr_host.as_deref(),
+                                vtensor.dim(0)?,
+                                params.num_qo_heads,
+                                params.num_kv_heads,
+                                params.head_dim,
+                                params.page_size,
+                                fm.use_cuda_graph,
+                            )?);
+                        }
+                    }
+                }
+
+                let _pg = set_linear_is_prefill(false);
+                let (vlogits, vhs) = match &self.model {
+                    Model::Qwen3(m) => m.forward_with_hidden_states(
+                        &vtensor,
+                        &vpos_t,
+                        Some(&self.get_kv_cache()),
+                        &vmeta,
+                        false,
+                        target_layer_ids,
+                    )?,
+                    Model::Qwen3MoE(m) => m.forward_with_hidden_states(
+                        &vtensor,
+                        &vpos_t,
+                        Some(&self.get_kv_cache()),
+                        &vmeta,
+                        false,
+                        target_layer_ids,
+                    )?,
+                    Model::Qwen3_5(m) => m.forward_with_hidden_states(
+                        &vtensor,
+                        &vpos_t,
+                        Some(&self.get_kv_cache()),
+                        &vmeta,
+                        false,
+                        target_layer_ids,
+                    )?,
+                    Model::Qwen3_5MoE(m) => m.forward_with_hidden_states(
+                        &vtensor,
+                        &vpos_t,
+                        Some(&self.get_kv_cache()),
+                        &vmeta,
+                        false,
+                        target_layer_ids,
+                    )?,
+                    Model::Qwen3VL(m) => m.forward_with_hidden_states(
+                        &vtensor,
+                        &vpos_t,
+                        Some(&self.get_kv_cache()),
+                        &vmeta,
+                        false,
+                        target_layer_ids,
+                    )?,
+                    _ => candle_core::bail!("DFlash not supported"),
+                };
+                drop(_pg);
+
+                if !vhs.is_empty() {
+                    let th = drafter.extract_and_concat_hidden(&vhs)?;
+                    drafter.store_decode_hidden(&th, seq.id())?;
+                }
+
+                let argmax_res = vlogits.i(0)?.argmax(D::Minus1)?;
+                let target_token = if argmax_res.rank() > 0 {
+                    argmax_res.flatten_all()?.i(0)?.to_vec0::<u32>()?
+                } else {
+                    argmax_res.to_vec0::<u32>()?
+                };
+
+                if verify_step < n_draft {
+                    let draft_token = draft_tokens[verify_step];
+                    if target_token == draft_token {
+                        accepted.push(draft_token);
+                        input_token = draft_token;
+                    } else {
+                        accepted.push(target_token);
+                        break;
+                    }
+                } else {
+                    accepted.push(target_token);
+                    break;
+                }
+            }
+
+            crate::log_warn!(
+                "Spec verify(serial): emitted={}, tokens={:?}",
+                accepted.len(),
+                &accepted[..std::cmp::min(5, accepted.len())]
+            );
+
+            all_extras.push(accepted);
+        }
+
+        Ok(all_extras)
     }
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
@@ -778,7 +1046,7 @@ impl ModelRunner {
             } else {
                 self.capturer.is_captured(input_batch)
             };
-            if !is_prefill && can_replay {
+            if !is_prefill && can_replay && self.dflash_drafter.is_none() {
                 let logits = match &self.model {
                     Model::Qwen3_5(model) => {
                         let _guard = model.lock_mamba_cache_for_graph();
@@ -870,29 +1138,127 @@ impl ModelRunner {
         let images = images.as_ref();
 
         let _prefill_guard = set_linear_is_prefill(is_prefill);
-        let logits = crate::model_call!(
-            &self.model,
-            forward,
-            (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
-            {
-                Qwen3 => false,
-                Qwen3MoE => false,
-                Qwen3_5 => false,
-                Qwen3_5MoE => false,
-                LLaMa => false,
-                LLaMa4 => images,
-                Phi4 => false,
-                GLM4 => false,
-                GLM4MoE => false,
-                GLM4MoeLite => false,
-                DeepSeek => false,
-                Mistral3VL => images,
-                Gemma3 => images,
-                Gemma4 => false,
-                Qwen3VL => images,
-                MiniMax => false,
+
+        // When DFlash drafter is present, capture hidden states during both prefill and decode
+        let capture_hidden = self.dflash_drafter.is_some();
+        let logits = if capture_hidden {
+            let drafter = self.dflash_drafter.as_ref().unwrap();
+            let target_layer_ids = drafter.target_layer_ids();
+            let (logits, hidden_states) = match &self.model {
+                Model::Qwen3(m) => m.forward_with_hidden_states(
+                    &input_ids,
+                    &positions,
+                    Some(&self.get_kv_cache()),
+                    &input_metadata,
+                    false,
+                    target_layer_ids,
+                )?,
+                Model::Qwen3MoE(m) => m.forward_with_hidden_states(
+                    &input_ids,
+                    &positions,
+                    Some(&self.get_kv_cache()),
+                    &input_metadata,
+                    false,
+                    target_layer_ids,
+                )?,
+                Model::Qwen3_5(m) => m.forward_with_hidden_states(
+                    &input_ids,
+                    &positions,
+                    Some(&self.get_kv_cache()),
+                    &input_metadata,
+                    false,
+                    target_layer_ids,
+                )?,
+                Model::Qwen3_5MoE(m) => m.forward_with_hidden_states(
+                    &input_ids,
+                    &positions,
+                    Some(&self.get_kv_cache()),
+                    &input_metadata,
+                    false,
+                    target_layer_ids,
+                )?,
+                Model::Qwen3VL(m) => m.forward_with_hidden_states(
+                    &input_ids,
+                    &positions,
+                    Some(&self.get_kv_cache()),
+                    &input_metadata,
+                    false,
+                    target_layer_ids,
+                )?,
+                _ => {
+                    let logits = crate::model_call!(
+                        &self.model, forward,
+                        (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
+                        { Qwen3 => false, Qwen3MoE => false, Qwen3_5 => false, Qwen3_5MoE => false,
+                          LLaMa => false, LLaMa4 => images, Phi4 => false, GLM4 => false,
+                          GLM4MoE => false, GLM4MoeLite => false, DeepSeek => false,
+                          Mistral3VL => images, Gemma3 => images, Gemma4 => false,
+                          Qwen3VL => images, MiniMax => false, }
+                    )?;
+                    (logits, vec![])
+                }
+            };
+            if !hidden_states.is_empty() {
+                let projected = drafter.extract_and_concat_hidden(&hidden_states)?;
+                let seq_ids: Vec<usize> = match &seqs {
+                    Seqs::SeqRefs(refs) => refs.iter().map(|s| s.id()).collect(),
+                    Seqs::DecodeVec(dvec) => dvec.iter().map(|d| d.id).collect(),
+                };
+                let num_seqs = seq_ids.len();
+                if is_prefill {
+                    let cu_seqlens = input_metadata.seqlens.clone().unwrap_or_default();
+                    if num_seqs > 1 && !cu_seqlens.is_empty() {
+                        let mut start = 0usize;
+                        for (idx, seq_id) in seq_ids.iter().enumerate() {
+                            let end = cu_seqlens[idx] as usize;
+                            if end > start {
+                                let seq_hidden = projected.narrow(0, start, end - start)?;
+                                drafter.store_decode_hidden(&seq_hidden, *seq_id)?;
+                            }
+                            start = end;
+                        }
+                    } else {
+                        for seq_id in seq_ids.iter() {
+                            drafter.store_decode_hidden(&projected, *seq_id)?;
+                        }
+                    }
+                } else {
+                    for (idx, seq_id) in seq_ids.iter().enumerate() {
+                        let seq_hidden = if projected.rank() >= 2 && num_seqs > 1 {
+                            projected.i(idx)?.unsqueeze(0)?
+                        } else {
+                            projected.clone()
+                        };
+                        drafter.store_decode_hidden(&seq_hidden, *seq_id)?;
+                    }
+                }
             }
-        )?;
+            logits
+        } else {
+            crate::model_call!(
+                &self.model,
+                forward,
+                (&input_ids, &positions, Some(&self.get_kv_cache()), &input_metadata),
+                {
+                    Qwen3 => false,
+                    Qwen3MoE => false,
+                    Qwen3_5 => false,
+                    Qwen3_5MoE => false,
+                    LLaMa => false,
+                    LLaMa4 => images,
+                    Phi4 => false,
+                    GLM4 => false,
+                    GLM4MoE => false,
+                    GLM4MoeLite => false,
+                    DeepSeek => false,
+                    Mistral3VL => images,
+                    Gemma3 => images,
+                    Gemma4 => false,
+                    Qwen3VL => images,
+                    MiniMax => false,
+                }
+            )?
+        };
         let output_ids = self.sample(&logits, seqs, is_prefill)?;
         #[cfg(feature = "nvtx")]
         nvtx::range_pop!();
@@ -1234,6 +1600,7 @@ impl ModelRunner {
             disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
             flashinfer_metadata,
+            num_accepted_tokens: None,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -1381,6 +1748,7 @@ impl ModelRunner {
             disable_flash_attn: None,
             seqlens: None,
             flashinfer_metadata,
+            num_accepted_tokens: None,
         };
 
         Ok((input_ids, positions, input_metadata))

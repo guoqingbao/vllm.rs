@@ -160,6 +160,9 @@ impl EngineBuilder {
             self.pd_client_prefix_cache_ratio,
             self.yarn_scaling_factor,
             false,
+            None,
+            None,
+            None,
         );
 
         let dtype = self.dtype.clone().map(dtype_to_str);

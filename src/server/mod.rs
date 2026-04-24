@@ -983,6 +983,18 @@ pub struct Args {
     /// `thinking` / `enable_thinking`.
     #[arg(long, default_value_t = false)]
     pub disable_reasoning: bool,
+
+    /// DFlash draft model HuggingFace ID (e.g. z-lab/Qwen3.5-35B-A3B-DFlash)
+    #[arg(long, default_value = None)]
+    pub draft_model_id: Option<String>,
+
+    /// Local path to DFlash draft model weights
+    #[arg(long, default_value = None)]
+    pub draft_model_path: Option<String>,
+
+    /// Number of speculative tokens the draft model produces per step (default 15)
+    #[arg(long, default_value = None)]
+    pub num_speculative_tokens: Option<usize>,
 }
 
 /// Result of executing tool calls via MCP

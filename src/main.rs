@@ -202,6 +202,9 @@ async fn main() -> Result<()> {
         None, // pd_client_prefix_cache_ratio
         args.yarn_scaling_factor,
         args.disable_reasoning,
+        args.draft_model_id.clone(),
+        args.draft_model_path.clone(),
+        args.num_speculative_tokens,
     );
 
     let server_port = if server {

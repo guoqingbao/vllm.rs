@@ -775,9 +775,13 @@ impl LLMEngine {
             // Get immutable references to scheduled sequences for model_runner
             let seqs = self.scheduler.get_sequences(&scheduled_ids);
 
+            let use_spec_decode = !is_prefill
+                && (self.econfig.draft_model_id.is_some()
+                    || self.econfig.draft_model_path.is_some());
+
+            // Step 1: Normal forward (decode or prefill) — always via run()
             let output_ids = match &mut *self.runners.write() {
                 RunnerType::Thread(model_runner) => {
-                    // Run model on the scheduled sequences in the main thread
                     model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
                 }
                 RunnerType::Process(ref mut runner_streams) => {
@@ -820,16 +824,54 @@ impl LLMEngine {
                         .collect();
 
                     let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                    // Only run postprocess once after all runners finish (use first result)
                     if let Some(output_ids) = all_outputs.first() {
                         output_ids.clone()
-                        // self.scheduler.postprocess(&scheduled_ids, output_ids);
                     } else {
                         candle_core::bail!("No output ids received from model runners");
                     }
                 }
             };
-            // Postprocess sequences by modifying them inside the scheduler
+
+            // Step 2: If spec decode is enabled and this is a decode step,
+            // run draft+verify BEFORE postprocess (seq lengths haven't changed yet)
+            let speculative_extra = if use_spec_decode {
+                match &mut *self.runners.write() {
+                    RunnerType::Thread(model_runner) => {
+                        let extras = model_runner.run_draft_and_verify(&seqs, &output_ids)?;
+                        Some(extras)
+                    }
+                    RunnerType::Process(ref mut runner_streams) => {
+                        let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
+                        let request =
+                            MessageType::RunDraftAndVerify((sequences, output_ids.clone()));
+
+                        let cloned_streams: Vec<LocalStream> = runner_streams
+                            .iter_mut()
+                            .map(|s| s.try_clone().expect("clone failed"))
+                            .collect();
+
+                        let all_outputs: Result<Vec<Vec<Vec<u32>>>> = cloned_streams
+                            .into_par_iter()
+                            .map(|mut stream| {
+                                let msg = request.clone();
+                                send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                                let response = receive_local(&mut stream, false)?;
+                                match response {
+                                    MessageType::RunSpecDecodeResponse(extras) => Ok(extras),
+                                    other => candle_core::bail!("Unexpected response: {:?}", other),
+                                }
+                            })
+                            .collect();
+
+                        let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                        all_outputs.into_iter().next()
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Step 3: Postprocess
             if is_prefill {
                 let (indices, finished_indices) =
                     self.scheduler.filter_prefill_finished(&scheduled_ids);
@@ -844,6 +886,10 @@ impl LLMEngine {
                 }
             } else {
                 self.scheduler.postprocess(&scheduled_ids, &output_ids);
+                if let Some(extras) = speculative_extra {
+                    self.scheduler
+                        .postprocess_speculative_extra(&scheduled_ids, &extras);
+                }
                 DecodedIds(Either::Left(scheduled_ids))
             }
         } else {
@@ -960,10 +1006,13 @@ impl LLMEngine {
                         *length = s.output_len();
                     }
 
+                    let prev_len = self.decode_length.get(&seq_id).copied().unwrap_or(0);
+                    let cur_out_len = s.output_len();
                     let mut token_ids =
                         if self.is_pd_mode() && s.pd_first_token.is_some() && s.output_len() == 2 {
-                            // Special case, the real first token is generated on PD server
                             vec![s.pd_first_token.unwrap_or(s.last_token), s.last_token]
+                        } else if cur_out_len > prev_len && cur_out_len - prev_len > 1 {
+                            s.output_ids[prev_len..cur_out_len].to_vec()
                         } else {
                             vec![s.last_token]
                         };

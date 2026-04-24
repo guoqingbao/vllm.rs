@@ -325,6 +325,12 @@ pub struct EngineConfig {
     pub yarn_scaling_factor: Option<f64>,
     #[serde(default)]
     pub disable_reasoning: bool,
+    #[serde(default)]
+    pub draft_model_id: Option<String>,
+    #[serde(default)]
+    pub draft_model_path: Option<String>,
+    #[serde(default)]
+    pub num_speculative_tokens: Option<usize>,
 }
 
 #[cfg(feature = "python")]
@@ -406,6 +412,15 @@ pub struct EngineConfig {
     pub yarn_scaling_factor: Option<f64>,
     #[pyo3(get, set)]
     pub disable_reasoning: bool,
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub draft_model_id: Option<String>,
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub draft_model_path: Option<String>,
+    #[pyo3(get, set)]
+    #[serde(default)]
+    pub num_speculative_tokens: Option<usize>,
 }
 
 #[cfg(not(feature = "python"))]
@@ -442,6 +457,9 @@ impl EngineConfig {
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
         disable_reasoning: bool,
+        draft_model_id: Option<String>,
+        draft_model_path: Option<String>,
+        num_speculative_tokens: Option<usize>,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -494,6 +512,9 @@ impl EngineConfig {
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
             disable_reasoning,
+            draft_model_id,
+            draft_model_path,
+            num_speculative_tokens,
         }
     }
 }
