@@ -1251,12 +1251,19 @@ impl LnNvfp4 {
         let weight_scale_swizzled = {
             let sm = attention_rs::cuda_utils::sm_version(vb.device().as_cuda_device()?)
                 .unwrap_or(0) as usize;
+            // Both hardware FP4 (SM100+) and software FP4 (SM70 and below) require
+            // swizzled scales for proper CUDA kernel alignment
             if sm >= 100 {
                 Some(attention_rs::nvfp4_linear::swizzle_nvfp4_weight_scales(
                     &scales, out_dim, in_dim,
                 )?)
             } else {
-                None
+                // Software FP4 path on SM70 and below also requires swizzled scales
+                // The attention.rs software FP4 kernels use swizzled scales for
+                // proper CUDA memory alignment
+                Some(attention_rs::nvfp4_linear::swizzle_nvfp4_weight_scales(
+                    &scales, out_dim, in_dim,
+                )?)
             }
         };
         #[cfg(not(feature = "cuda"))]

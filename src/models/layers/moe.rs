@@ -6,6 +6,7 @@ use crate::utils::config::Config;
 use crate::utils::config::QuantConfig;
 use attention_rs::moe;
 use attention_rs::moe::moe_gemm_fp8;
+use attention_rs::nvfp4_linear::swizzle_nvfp4_weight_scales;
 use attention_rs::silu_and_mul::silu_and_mul;
 use attention_rs::sort::ArgSortOp;
 use candle_core::Module;
@@ -1557,8 +1558,10 @@ pub struct FusedMoeMxfp4 {
     gate: Linear,
     gate_up_blocks: Tensor,
     gate_up_scales: Tensor,
+    gate_up_scales_swizzled: Tensor,
     down_blocks: Tensor,
     down_scales: Tensor,
+    down_scales_swizzled: Tensor,
     w_size_n: usize,
     act: candle_nn::Activation,
     routing: MoeRouting,
@@ -1696,12 +1699,26 @@ impl FusedMoeMxfp4 {
         let down_blocks = Tensor::stack(&down_blocks_vec, 0)?;
         let down_scales = Tensor::stack(&down_scales_vec, 0)?;
 
+        // Swizzle weight scales at model load time
+        let gate_up_scales_swizzled = swizzle_nvfp4_weight_scales(
+            &gate_up_scales,
+            gate_up_scales.dim(0)?,
+            moe_cfg.moe_intermediate_size * 2,
+        )?;
+        let down_scales_swizzled = swizzle_nvfp4_weight_scales(
+            &down_scales,
+            down_scales.dim(0)?,
+            cfg.hidden_size,
+        )?;
+
         Ok(Self {
             gate,
             gate_up_blocks,
             gate_up_scales,
+            gate_up_scales_swizzled,
             down_blocks,
             down_scales,
+            down_scales_swizzled,
             w_size_n,
             act: cfg.hidden_act,
             routing: MoeRouting::from_moe_cfg(
@@ -1732,6 +1749,7 @@ impl FusedMoeMxfp4 {
             None,
             &topk_ids,
             is_prefill,
+            Some(&self.gate_up_scales_swizzled),
         )?;
 
         let down_inputs = gated_activation(&gate_up, self.w_size_n, &self.act)?;
@@ -1743,6 +1761,7 @@ impl FusedMoeMxfp4 {
             None,
             &topk_ids,
             is_prefill,
+            Some(&self.down_scales_swizzled),
         )?;
 
         let topk_weights = topk_weights.to_dtype(down.dtype())?;
@@ -1762,10 +1781,12 @@ pub struct FusedMoeNvfp4 {
     gate: Linear,
     gate_up_blocks: Tensor,
     gate_up_scales: Tensor,
+    gate_up_scales_swizzled: Tensor,
     gate_up_global_scales: Tensor,
     gate_up_input_scales: Tensor,
     down_blocks: Tensor,
     down_scales: Tensor,
+    down_scales_swizzled: Tensor,
     down_global_scales: Tensor,
     down_input_scales: Tensor,
     w_size_n: usize,
@@ -2286,14 +2307,28 @@ impl FusedMoeNvfp4 {
         let down_global_scales = Tensor::from_vec(down_gscales_vec, (num_experts,), dev)?;
         let down_input_scales = Tensor::from_vec(down_iscales_vec, (num_experts,), dev)?;
 
+        // Swizzle weight scales at model load time
+        let gate_up_scales_swizzled = swizzle_nvfp4_weight_scales(
+            &gate_up_scales,
+            gate_up_scales.dim(0)?,
+            moe_cfg.moe_intermediate_size * 2,
+        )?;
+        let down_scales_swizzled = swizzle_nvfp4_weight_scales(
+            &down_scales,
+            down_scales.dim(0)?,
+            cfg.hidden_size,
+        )?;
+
         Ok(Self {
             gate,
             gate_up_blocks,
             gate_up_scales,
+            gate_up_scales_swizzled,
             gate_up_global_scales,
             gate_up_input_scales,
             down_blocks,
             down_scales,
+            down_scales_swizzled,
             down_global_scales,
             down_input_scales,
             w_size_n,
@@ -2357,6 +2392,7 @@ impl FusedMoeNvfp4 {
             &topk_ids,
             pre_sorted_refs,
             is_prefill,
+            Some(&self.gate_up_scales_swizzled),
         )?;
 
         let down_inputs = gated_activation(&gate_up, self.w_size_n, &self.act)?;
@@ -2371,6 +2407,7 @@ impl FusedMoeNvfp4 {
             &topk_ids,
             pre_sorted_refs,
             is_prefill,
+            Some(&self.down_scales_swizzled),
         )?;
 
         let mut ys = if self.apply_router_weight_on_input {
