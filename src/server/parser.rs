@@ -429,48 +429,83 @@ impl ToolConfig {
     }
 
     /// Validate special token IDs against the tokenizer, falling back to text-only matching if needed.
+    /// Also auto-populates token IDs from the tokenizer when the config starts with empty sets.
     pub fn validate_with_tokenizer(&mut self, tokenizer: &Tokenizer, model_type: &ModelType) {
-        if self.has_start_tokens()
-            && !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
-        {
+        if self.has_start_tokens() {
+            if !Self::matches_single_token(
+                tokenizer,
+                &self.start_token_str,
+                &self.start_token_ids,
+            ) {
+                if Self::try_rebind_single_token_id(
+                    tokenizer,
+                    &self.start_token_str,
+                    &mut self.start_token_ids,
+                ) {
+                    crate::log_warn!(
+                        "Tool start token IDs corrected from tokenizer for model {:?}: {:?}",
+                        model_type,
+                        self.start_token_ids
+                    );
+                } else {
+                    crate::log_warn!(
+                        "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                        model_type
+                    );
+                    self.start_token_ids.clear();
+                }
+            }
+        } else if !self.start_token_str.is_empty() {
             if Self::try_rebind_single_token_id(
                 tokenizer,
                 &self.start_token_str,
                 &mut self.start_token_ids,
             ) {
-                crate::log_warn!(
-                    "Tool start token IDs corrected from tokenizer for model {:?}: {:?}",
+                self.start_is_special = true;
+                crate::log_info!(
+                    "Tool start token IDs auto-populated from tokenizer for model {:?}: {:?}",
                     model_type,
                     self.start_token_ids
                 );
-            } else {
-                crate::log_warn!(
-                    "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                    model_type
-                );
-                self.start_token_ids.clear();
             }
         }
 
-        if self.has_end_tokens()
-            && !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids)
-        {
+        if self.has_end_tokens() {
+            if !Self::matches_single_token(
+                tokenizer,
+                &self.end_token_str,
+                &self.end_token_ids,
+            ) {
+                if Self::try_rebind_single_token_id(
+                    tokenizer,
+                    &self.end_token_str,
+                    &mut self.end_token_ids,
+                ) {
+                    crate::log_warn!(
+                        "Tool end token IDs corrected from tokenizer for model {:?}: {:?}",
+                        model_type,
+                        self.end_token_ids
+                    );
+                } else {
+                    crate::log_warn!(
+                        "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                        model_type
+                    );
+                    self.end_token_ids.clear();
+                }
+            }
+        } else if !self.end_token_str.is_empty() {
             if Self::try_rebind_single_token_id(
                 tokenizer,
                 &self.end_token_str,
                 &mut self.end_token_ids,
             ) {
-                crate::log_warn!(
-                    "Tool end token IDs corrected from tokenizer for model {:?}: {:?}",
+                self.end_is_special = true;
+                crate::log_info!(
+                    "Tool end token IDs auto-populated from tokenizer for model {:?}: {:?}",
                     model_type,
                     self.end_token_ids
                 );
-            } else {
-                crate::log_warn!(
-                    "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                    model_type
-                );
-                self.end_token_ids.clear();
             }
         }
     }
@@ -1428,6 +1463,13 @@ impl StreamToolParser {
             return true;
         }
 
+        // GLM4.7 XML style: <tool_call>func_name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+        if block.contains("<arg_key>") || block.contains("<arg_value>") {
+            return block.contains("</arg_value>")
+                && Self::has_balanced_xml_tags(block, "<arg_key>", "</arg_key>")
+                && Self::has_balanced_xml_tags(block, "<arg_value>", "</arg_value>");
+        }
+
         // Qwen JSON style: <tool_call>{"name":"...","arguments":{...}}</tool_call>
         // Accept only if the inner payload is complete JSON at this point.
         if inner.is_empty() {
@@ -1452,7 +1494,6 @@ impl StreamToolParser {
                     idx = op + open_tag.len();
                 }
                 (None, Some(cp)) => {
-                    // Ignore unmatched closing parameter tags.
                     if open_count > 0 {
                         open_count -= 1;
                     }
@@ -1473,6 +1514,12 @@ impl StreamToolParser {
         }
 
         open_count == 0
+    }
+
+    fn has_balanced_xml_tags(block: &str, open: &str, close: &str) -> bool {
+        let open_count = block.matches(open).count();
+        let close_count = block.matches(close).count();
+        open_count > 0 && open_count == close_count
     }
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
@@ -2154,11 +2201,25 @@ impl StreamToolParser {
         } else if self.config.start_token_str.contains("tool_call")
             && self.config.end_token_str.contains("tool_call")
         {
-            markers.extend(
-                ["<function=", "</function>", "<parameter=", "</parameter>"]
+            let is_glm = self.uses_glm_xml();
+            if is_glm {
+                markers.extend(
+                    [
+                        "<arg_key>",
+                        "</arg_key>",
+                        "<arg_value>",
+                        "</arg_value>",
+                    ]
                     .into_iter()
                     .map(|s| s.to_string()),
-            );
+                );
+            } else {
+                markers.extend(
+                    ["<function=", "</function>", "<parameter=", "</parameter>"]
+                        .into_iter()
+                        .map(|s| s.to_string()),
+                );
+            }
         }
         markers
     }
@@ -2279,6 +2340,13 @@ impl StreamToolParser {
     fn uses_minimax_xml(&self) -> bool {
         self.config.start_token_str == "<minimax:tool_call>"
             && self.config.end_token_str == "</minimax:tool_call>"
+    }
+
+    fn uses_glm_xml(&self) -> bool {
+        let id = self.model_id.to_ascii_lowercase();
+        id.contains("glm") && !self.uses_minimax_xml()
+            && self.config.start_token_str == "<tool_call>"
+            && self.config.end_token_str == "</tool_call>"
     }
 
     fn xml_parameter_open_prefix(uses_minimax_xml: bool) -> &'static str {
@@ -2844,6 +2912,53 @@ abc
             .to_string();
 
         assert!(!parser.has_complete_tool_envelope());
+    }
+
+    #[test]
+    fn test_envelope_glm47_xml_format() {
+        let tools = vec![crate::tools::function_tool("read", "Read a file").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::GLM4MoeLite,
+            "glm-4.7-flash".to_string(),
+            ToolConfig::for_model_type(&ModelType::GLM4MoeLite),
+            tools,
+            None,
+        );
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value></tool_call>"
+                .to_string();
+        assert!(parser.has_complete_tool_envelope());
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value>"
+                .to_string();
+        assert!(!parser.has_complete_tool_envelope());
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value></tool_call>"
+                .to_string();
+        assert!(parser.has_complete_tool_envelope());
+    }
+
+    #[test]
+    fn test_glm47_display_escape_markers() {
+        let tools = vec![crate::tools::function_tool("read", "Read a file").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::GLM4MoeLite,
+            "glm-4.7-flash".to_string(),
+            ToolConfig::for_model_type(&ModelType::GLM4MoeLite),
+            tools,
+            None,
+        );
+
+        let markers = parser.display_escape_markers();
+        assert!(markers.iter().any(|m| m == "<arg_key>"));
+        assert!(markers.iter().any(|m| m == "</arg_key>"));
+        assert!(markers.iter().any(|m| m == "<arg_value>"));
+        assert!(markers.iter().any(|m| m == "</arg_value>"));
+        assert!(markers.iter().any(|m| m == "<tool_call>"));
+        assert!(markers.iter().any(|m| m == "</tool_call>"));
     }
 
     #[tokio::test]
