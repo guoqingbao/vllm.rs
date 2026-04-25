@@ -364,7 +364,18 @@ impl ChatTemplate {
         // We always strip reasoning markers from content to avoid the
         // "double-think" bug and to prevent escape_text from mangling
         // them (ZWNJ insertion would make them invisible to the template).
+        //
+        // For thinking models: when an assistant message has tool_calls but
+        // no reasoning_content (e.g. because the client didn't send it back),
+        // inject a placeholder so the template renders non-empty <think> blocks.
+        // Empty <think></think> blocks across multiple turns degrade model
+        // quality and cause premature stop in multi-turn tool call sessions.
         let need_escape = !self.escape_tokens.is_empty();
+        let is_thinking_model = self.enable_thinking
+            && self
+                .escape_tokens
+                .iter()
+                .any(|t| t.contains("think") || t.contains("Think"));
         self.messages
             .iter()
             .map(|message| {
@@ -379,6 +390,12 @@ impl ChatTemplate {
                                 escaped.reasoning_content = Some(reasoning);
                             }
                             escaped.content = remaining;
+                        }
+                        if is_thinking_model
+                            && escaped.reasoning_content.is_none()
+                            && escaped.tool_calls.is_some()
+                        {
+                            escaped.reasoning_content = Some("...".to_string());
                         }
                         if need_escape {
                             escaped.content = self.escape_text(&escaped.content);
