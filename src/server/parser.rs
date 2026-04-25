@@ -1320,8 +1320,19 @@ impl StreamToolParser {
 
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
         if self.parse_strategy == "gemma4" {
-            if let Some(calls) = Self::parse_gemma4_tool_calls(text) {
-                return calls;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::parse_gemma4_tool_calls(text)
+            })) {
+                Ok(Some(calls)) => return calls,
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| e.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown");
+                    crate::log_warn!("Gemma4 tool call parse panicked: {}", msg);
+                }
             }
         }
 
@@ -1459,17 +1470,19 @@ impl StreamToolParser {
 
     /// Parse Gemma4 tool calls: `<|tool_call>call:NAME{key:<|"|>value<|"|>,...}<tool_call|>`
     /// Also handles stripped markers: `call:NAME{key:"value",...}`
+    ///
+    /// Follows vLLM's tiered approach: regex extraction first, then
+    /// custom brace-matching as fallback. All string operations are
+    /// UTF-8 safe.
     fn parse_gemma4_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
-        const GEMMA4_STR_DELIM: &str = "<|\"|>";
         const PREFIX: &str = "<|tool_call>call:";
         const PREFIX_STRIPPED: &str = "call:";
         const SUFFIX: &str = "<tool_call|>";
 
+        let text = text.trim_end();
         let text = text
-            .trim_end()
             .strip_suffix("<|tool_response>")
-            .unwrap_or(text)
-            .strip_suffix("<tool_response|>")
+            .or_else(|| text.strip_suffix("<tool_response|>"))
             .unwrap_or(text);
 
         let has_full_prefix = text.contains(PREFIX);
@@ -1499,21 +1512,16 @@ impl StreamToolParser {
                 break;
             };
 
-            let with_braces = format!("{{{inner}}}");
-            let with_quotes = with_braces.replace(GEMMA4_STR_DELIM, "\"");
-            let json_str = Self::gemma4_quote_keys(&with_quotes);
-
-            let arguments: Value = match serde_json::from_str(&json_str) {
-                Ok(v) => v,
-                Err(_) => Value::Object(Map::new()),
-            };
+            let arguments = Self::gemma4_parse_args(inner);
 
             calls.push(ToolCall {
                 id: crate::tools::generate_tool_call_id(),
                 tool_type: "function".to_string(),
                 function: crate::tools::FunctionCall {
                     name,
-                    arguments: Some(serde_json::to_string(&arguments).unwrap_or_default()),
+                    arguments: Some(
+                        serde_json::to_string(&arguments).unwrap_or_default(),
+                    ),
                 },
             });
 
@@ -1534,154 +1542,311 @@ impl StreamToolParser {
 
     fn gemma4_extract_braces(s: &str, start: usize) -> Option<(&str, usize)> {
         const DELIM: &str = "<|\"|>";
-        let bytes = s.as_bytes();
-        if bytes.get(start) != Some(&b'{') {
+
+        if !s.is_char_boundary(start) || s.as_bytes().get(start) != Some(&b'{') {
             return None;
         }
+
         let mut depth: usize = 0;
-        let mut in_string = false;
+        let mut in_delim_string = false;
         let mut in_regular_string = false;
-        let mut i = start;
-        while i < s.len() {
-            if in_string {
-                if s[i..].starts_with(DELIM) {
-                    in_string = false;
-                    i += DELIM.len();
-                    continue;
+        let tail = &s[start..];
+        let mut iter = tail.char_indices();
+
+        while let Some((offset, ch)) = iter.next() {
+            let abs = start + offset;
+
+            if in_delim_string {
+                if tail[offset..].starts_with(DELIM) {
+                    in_delim_string = false;
+                    for _ in 0..DELIM.len().saturating_sub(ch.len_utf8()) {
+                        iter.next();
                 }
-                i += 1;
+                }
                 continue;
             }
+
             if in_regular_string {
-                if bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
+                if ch == '"' && (offset == 0 || tail.as_bytes()[offset - 1] != b'\\') {
                     in_regular_string = false;
                 }
-                i += 1;
                 continue;
             }
-            if s[i..].starts_with(DELIM) {
-                in_string = true;
-                i += DELIM.len();
+
+            if tail[offset..].starts_with(DELIM) {
+                in_delim_string = true;
+                for _ in 0..DELIM.len().saturating_sub(ch.len_utf8()) {
+                    iter.next();
+                }
                 continue;
             }
-            match bytes[i] {
-                b'"' => {
+
+            match ch {
+                '"' => {
                     in_regular_string = true;
-                    i += 1;
-                    continue;
                 }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((&s[start + 1..i], i + 1));
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
-
-    /// Convert Gemma4 key-value format to valid JSON.
-    /// Handles both `<|"|>` delimited values and unquoted values (when special
-    /// tokens are stripped by the tokenizer).
-    fn gemma4_quote_keys(input: &str) -> String {
-        if let Ok(v) = serde_json::from_str::<Value>(input) {
-            return serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
-        }
-
-        let mut map = serde_json::Map::new();
-        let inner = input.trim().trim_start_matches('{').trim_end_matches('}');
-
-        let mut remaining = inner;
-        while !remaining.is_empty() {
-            remaining = remaining.trim_start_matches([',', ' ', '\n', '\t']);
-            if remaining.is_empty() {
-                break;
-            }
-
-            let colon_pos = match remaining.find(':') {
-                Some(p) => p,
-                None => break,
-            };
-            let key = remaining[..colon_pos].trim().trim_matches('"');
-            remaining = remaining[colon_pos + 1..].trim_start();
-
-            if remaining.starts_with('"') {
-                let end = remaining[1..]
-                    .find('"')
-                    .map(|p| p + 2)
-                    .unwrap_or(remaining.len());
-                let val = &remaining[1..end - 1];
-                map.insert(key.to_string(), Value::String(val.to_string()));
-                remaining = &remaining[end..];
-            } else if remaining.starts_with('{') {
-                let depth_end = Self::find_matching_brace(remaining);
-                let val_str = &remaining[..depth_end];
-                let nested = Self::gemma4_quote_keys(val_str);
-                if let Ok(v) = serde_json::from_str::<Value>(&nested) {
-                    map.insert(key.to_string(), v);
-                } else {
-                    map.insert(key.to_string(), Value::String(val_str.to_string()));
-                }
-                remaining = &remaining[depth_end..];
-            } else if remaining.starts_with('[') {
-                let bracket_end = remaining
-                    .find(']')
-                    .map(|p| p + 1)
-                    .unwrap_or(remaining.len());
-                let val_str = &remaining[..bracket_end];
-                if let Ok(v) = serde_json::from_str::<Value>(val_str) {
-                    map.insert(key.to_string(), v);
-                } else {
-                    map.insert(key.to_string(), Value::String(val_str.to_string()));
-                }
-                remaining = &remaining[bracket_end..];
-            } else {
-                let end = remaining
-                    .find(|c: char| c == ',' || c == '}')
-                    .unwrap_or(remaining.len());
-                let val = remaining[..end].trim();
-                if val == "true" {
-                    map.insert(key.to_string(), Value::Bool(true));
-                } else if val == "false" {
-                    map.insert(key.to_string(), Value::Bool(false));
-                } else if val == "null" {
-                    map.insert(key.to_string(), Value::Null);
-                } else if let Ok(n) = val.parse::<f64>() {
-                    map.insert(
-                        key.to_string(),
-                        serde_json::Number::from_f64(n)
-                            .map(Value::Number)
-                            .unwrap_or(Value::String(val.to_string())),
-                    );
-                } else {
-                    map.insert(key.to_string(), Value::String(val.to_string()));
-                }
-                remaining = &remaining[end..];
-            }
-        }
-
-        serde_json::to_string(&Value::Object(map)).unwrap_or_else(|_| input.to_string())
-    }
-
-    fn find_matching_brace(s: &str) -> usize {
-        let mut depth = 0;
-        for (i, c) in s.char_indices() {
-            match c {
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        return i + 1;
+                        let inner_start = start + '{'.len_utf8();
+                        return Some((&s[inner_start..abs], abs + '}'.len_utf8()));
                     }
                 }
                 _ => {}
             }
         }
-        s.len()
+        None
+    }
+
+    /// Parse Gemma4 key-value format into a JSON Value.
+    ///
+    /// Follows vLLM's `_parse_gemma4_args` approach: iterates through the
+    /// string character-by-character using `char_indices` (UTF-8 safe) and
+    /// handles `<|"|>` delimited strings, nested objects, arrays, and bare
+    /// values (numbers, booleans, null).
+    fn gemma4_parse_args(args_str: &str) -> Value {
+        if args_str.trim().is_empty() {
+            return Value::Object(Map::new());
+        }
+
+        let cleaned = args_str.replace("<|\"|>", "\"");
+        if let Ok(v) = serde_json::from_str::<Value>(&format!("{{{cleaned}}}")) {
+            return v;
+        }
+
+        let mut map = Map::new();
+        let chars: Vec<(usize, char)> = args_str.char_indices().collect();
+        let n = chars.len();
+        let mut ci = 0;
+
+        while ci < n {
+            while ci < n && matches!(chars[ci].1, ' ' | ',' | '\n' | '\t') {
+                ci += 1;
+            }
+            if ci >= n {
+                break;
+            }
+
+            let key_start_byte = chars[ci].0;
+            while ci < n && chars[ci].1 != ':' {
+                ci += 1;
+            }
+            if ci >= n {
+                break;
+            }
+            let key = args_str[key_start_byte..chars[ci].0].trim().trim_matches('"');
+            ci += 1; // skip ':'
+
+            while ci < n && matches!(chars[ci].1, ' ' | '\n' | '\t') {
+                ci += 1;
+            }
+            if ci >= n {
+                map.insert(key.to_string(), Value::String(String::new()));
+                break;
+            }
+
+            const DELIM: &str = "<|\"|>";
+            let byte_pos = chars[ci].0;
+
+            if args_str[byte_pos..].starts_with(DELIM) {
+                let delim_char_len = DELIM.chars().count();
+                ci += delim_char_len;
+                let val_start = if ci < n { chars[ci].0 } else { args_str.len() };
+                let end_byte = args_str[val_start..].find(DELIM);
+                match end_byte {
+                    Some(rel) => {
+                        let val = &args_str[val_start..val_start + rel];
+                map.insert(key.to_string(), Value::String(val.to_string()));
+                        let after = val_start + rel + DELIM.len();
+                        ci = chars.iter().position(|&(b, _)| b >= after).unwrap_or(n);
+                    }
+                    None => {
+                        let val = &args_str[val_start..];
+                        map.insert(key.to_string(), Value::String(val.to_string()));
+                        break;
+                    }
+                }
+            } else if chars[ci].1 == '"' {
+                ci += 1;
+                let val_start = if ci < n { chars[ci].0 } else { args_str.len() };
+                let mut end_ci = ci;
+                while end_ci < n {
+                    if chars[end_ci].1 == '"'
+                        && (end_ci == 0 || chars[end_ci - 1].1 != '\\')
+                    {
+                        break;
+                    }
+                    end_ci += 1;
+                }
+                let val_end = if end_ci < n { chars[end_ci].0 } else { args_str.len() };
+                let val = &args_str[val_start..val_end];
+                    map.insert(key.to_string(), Value::String(val.to_string()));
+                ci = if end_ci < n { end_ci + 1 } else { n };
+            } else if chars[ci].1 == '{' {
+                let (inner, after_ci) =
+                    Self::gemma4_scan_nested(&chars, ci, '{', '}', n, args_str);
+                let nested = Self::gemma4_parse_args(inner);
+                map.insert(key.to_string(), nested);
+                ci = after_ci;
+            } else if chars[ci].1 == '[' {
+                let (inner, after_ci) =
+                    Self::gemma4_scan_nested(&chars, ci, '[', ']', n, args_str);
+                let arr = Self::gemma4_parse_array(inner);
+                map.insert(key.to_string(), arr);
+                ci = after_ci;
+            } else {
+                let val_start = chars[ci].0;
+                while ci < n && !matches!(chars[ci].1, ',' | '}' | ']') {
+                    ci += 1;
+                }
+                let val_end = if ci < n { chars[ci].0 } else { args_str.len() };
+                let val = args_str[val_start..val_end].trim();
+                map.insert(key.to_string(), Self::gemma4_parse_bare_value(val));
+            }
+        }
+
+        Value::Object(map)
+    }
+
+    fn gemma4_scan_nested<'a>(
+        chars: &[(usize, char)],
+        start_ci: usize,
+        open: char,
+        close: char,
+        n: usize,
+        source: &'a str,
+    ) -> (&'a str, usize) {
+        const DELIM: &str = "<|\"|>";
+        let delim_char_len = DELIM.chars().count();
+        let mut depth = 1usize;
+        let mut ci = start_ci + 1;
+        let inner_start = if ci < n { chars[ci].0 } else { source.len() };
+
+        while ci < n && depth > 0 {
+            let byte_pos = chars[ci].0;
+            if source[byte_pos..].starts_with(DELIM) {
+                ci += delim_char_len;
+                while ci < n {
+                    let bp = chars[ci].0;
+                    if source[bp..].starts_with(DELIM) {
+                        ci += delim_char_len;
+                        break;
+                    }
+                    ci += 1;
+                }
+                continue;
+            }
+            if chars[ci].1 == open {
+                depth += 1;
+            } else if chars[ci].1 == close {
+                    depth -= 1;
+            }
+            ci += 1;
+        }
+
+        let inner_end = if depth == 0 && ci > 0 {
+            chars[ci - 1].0
+        } else if ci <= n && ci > 0 {
+            if ci < n { chars[ci].0 } else { source.len() }
+        } else {
+            source.len()
+        };
+
+        (&source[inner_start..inner_end], ci)
+    }
+
+    fn gemma4_parse_array(arr_str: &str) -> Value {
+        const DELIM: &str = "<|\"|>";
+        let mut items = Vec::new();
+        let chars: Vec<(usize, char)> = arr_str.char_indices().collect();
+        let n = chars.len();
+        let mut ci = 0;
+
+        while ci < n {
+            while ci < n && matches!(chars[ci].1, ' ' | ',' | '\n' | '\t') {
+                ci += 1;
+                    }
+            if ci >= n {
+                break;
+            }
+
+            let byte_pos = chars[ci].0;
+
+            if arr_str[byte_pos..].starts_with(DELIM) {
+                let delim_char_len = DELIM.chars().count();
+                ci += delim_char_len;
+                let val_start = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let end_byte = arr_str[val_start..].find(DELIM);
+                match end_byte {
+                    Some(rel) => {
+                        items.push(Value::String(
+                            arr_str[val_start..val_start + rel].to_string(),
+                        ));
+                        let after = val_start + rel + DELIM.len();
+                        ci = chars.iter().position(|&(b, _)| b >= after).unwrap_or(n);
+                    }
+                    None => {
+                        items.push(Value::String(arr_str[val_start..].to_string()));
+                        break;
+            }
+        }
+            } else if chars[ci].1 == '"' {
+                ci += 1;
+                let val_start = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let mut end_ci = ci;
+                while end_ci < n
+                    && !(chars[end_ci].1 == '"'
+                        && (end_ci == 0 || chars[end_ci - 1].1 != '\\'))
+                {
+                    end_ci += 1;
+                }
+                let val_end = if end_ci < n { chars[end_ci].0 } else { arr_str.len() };
+                items.push(Value::String(arr_str[val_start..val_end].to_string()));
+                ci = if end_ci < n { end_ci + 1 } else { n };
+            } else if chars[ci].1 == '{' {
+                let (inner, after_ci) =
+                    Self::gemma4_scan_nested(&chars, ci, '{', '}', n, arr_str);
+                items.push(Self::gemma4_parse_args(inner));
+                ci = after_ci;
+            } else if chars[ci].1 == '[' {
+                let (inner, after_ci) =
+                    Self::gemma4_scan_nested(&chars, ci, '[', ']', n, arr_str);
+                items.push(Self::gemma4_parse_array(inner));
+                ci = after_ci;
+            } else {
+                let val_start = chars[ci].0;
+                while ci < n && !matches!(chars[ci].1, ',' | ']') {
+                    ci += 1;
+                }
+                let val_end = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let val = arr_str[val_start..val_end].trim();
+                if !val.is_empty() {
+                    items.push(Self::gemma4_parse_bare_value(val));
+                }
+            }
+        }
+
+        Value::Array(items)
+    }
+
+    fn gemma4_parse_bare_value(val: &str) -> Value {
+        match val {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            "null" | "none" | "nil" => Value::Null,
+            _ => {
+                if let Ok(n) = val.parse::<i64>() {
+                    Value::Number(n.into())
+                } else if let Ok(f) = val.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map(Value::Number)
+                        .unwrap_or_else(|| Value::String(val.to_string()))
+                } else {
+                    Value::String(val.to_string())
+                }
+            }
+        }
     }
 
     fn strip_tool_tags(&self, text: &str) -> String {
