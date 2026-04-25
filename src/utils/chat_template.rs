@@ -375,7 +375,7 @@ impl ChatTemplate {
             && self
                 .escape_tokens
                 .iter()
-                .any(|t| t.contains("think") || t.contains("Think"));
+                .any(|t| t.to_lowercase().contains("think"));
         self.messages
             .iter()
             .map(|message| {
