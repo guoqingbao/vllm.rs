@@ -166,37 +166,58 @@ const REASONING_BLOCK_PAIRS: [(&str, &str); 5] = [
 /// combined reasoning plus the remaining content after the last close tag.
 /// Empty blocks (from replay suffix patterns) are skipped.
 ///
+/// Also handles the MiniMax-style pattern where the model only generates a
+/// close marker (e.g. `</think>`) without a matching open marker (the open
+/// marker was injected by the chat template's generation prompt). In that
+/// case everything before the first close marker is treated as reasoning.
+///
 /// Returns `(reasoning_content, remaining_content)` if any matched pair is found.
 pub fn extract_reasoning_content(content: &str) -> Option<(String, String)> {
     for &(open, close) in &REASONING_BLOCK_PAIRS {
-        if !content.contains(open) || !content.contains(close) {
+        if !content.contains(close) {
             continue;
         }
-        let mut reasoning_parts: Vec<&str> = Vec::new();
-        let mut search_from = 0;
-        let mut last_close_end = 0;
 
-        while let Some(open_idx) = content[search_from..].find(open) {
-            let abs_open = search_from + open_idx;
-            let inner_start = abs_open + open.len();
-            let Some(close_rel) = content[inner_start..].find(close) else {
-                break;
-            };
-            let abs_close = inner_start + close_rel;
-            let block = content[inner_start..abs_close].trim_matches('\n');
-            if !block.is_empty() {
-                reasoning_parts.push(block);
+        // Standard paired extraction: <think>...</think>
+        if content.contains(open) {
+            let mut reasoning_parts: Vec<&str> = Vec::new();
+            let mut search_from = 0;
+            let mut last_close_end = 0;
+
+            while let Some(open_idx) = content[search_from..].find(open) {
+                let abs_open = search_from + open_idx;
+                let inner_start = abs_open + open.len();
+                let Some(close_rel) = content[inner_start..].find(close) else {
+                    break;
+                };
+                let abs_close = inner_start + close_rel;
+                let block = content[inner_start..abs_close].trim_matches('\n');
+                if !block.is_empty() {
+                    reasoning_parts.push(block);
+                }
+                last_close_end = abs_close + close.len();
+                search_from = last_close_end;
             }
-            last_close_end = abs_close + close.len();
-            search_from = last_close_end;
+
+            if last_close_end == 0 {
+                continue;
+            }
+
+            let reasoning = reasoning_parts.join("\n");
+            let remaining = content[last_close_end..]
+                .trim_start_matches('\n')
+                .to_string();
+            return Some((reasoning, remaining));
         }
 
-        if last_close_end == 0 {
+        // Standalone close marker (MiniMax-style): the open marker was part
+        // of the generation prompt, so the model output starts directly with
+        // reasoning text followed by the close marker.
+        let Some(close_idx) = content.find(close) else {
             continue;
-        }
-
-        let reasoning = reasoning_parts.join("\n");
-        let remaining = content[last_close_end..]
+        };
+        let reasoning = content[..close_idx].trim_matches('\n').to_string();
+        let remaining = content[close_idx + close.len()..]
             .trim_start_matches('\n')
             .to_string();
         return Some((reasoning, remaining));
@@ -209,7 +230,13 @@ fn strip_generation_assistant_header(suffix_text: &str) -> &str {
         return suffix_text;
     };
 
+    // Standard Qwen/ChatML-style: `<|im_start|>assistant`
     if first_line.ends_with("assistant") {
+        return remainder;
+    }
+
+    // MiniMax-style role marker: `]~b]ai` (the `]~b]` token + role name)
+    if first_line.contains("]~b]") || first_line.ends_with("ai") {
         return remainder;
     }
 
@@ -514,8 +541,54 @@ You are MiniMax.
 {{- '\n' ~ toolcall_end_token }}
 {%- endif -%}
 {{- '[e~[\n' }}
+{%- set last_tool_call = namespace(name=none) -%}
 {%- for message in messages -%}
-    {%- if message.role == 'user' -%}
+    {%- if message.role == 'assistant' -%}
+        {{- ']~b]ai' ~ '\n' }}
+        {%- set reasoning_content = '' %}
+        {%- set content = visible_text(message.content) %}
+        {%- if message.reasoning_content is string %}
+            {%- set reasoning_content = message.reasoning_content %}
+        {%- else %}
+            {%- if '</think>' in content %}
+                {%- set reasoning_content = content.split('</think>')[0].strip('\n').split('<think>')[-1].strip('\n') %}
+                {%- set content = content.split('</think>')[-1].strip('\n') %}
+            {%- endif %}
+        {%- endif %}
+        {%- if reasoning_content -%}
+            {{- '<think>' ~ '\n' ~ reasoning_content ~ '\n' ~ '</think>' ~ '\n\n' }}
+        {%- endif -%}
+        {%- if content -%}
+            {{- content }}
+        {%- endif -%}
+        {%- if message.tool_calls -%}
+            {{- '\n' ~ toolcall_begin_token ~ '\n' }}
+            {%- for tool_call in message.tool_calls -%}
+                {%- if tool_call.function %}
+                    {%- set tool_call = tool_call.function %}
+                {%- endif %}
+                {{- '<invoke name="' + tool_call.name + '">' }}
+                {% set _args = tool_call.arguments %}
+                {%- for k, v in _args.items() %}
+                {{- '<parameter name="' + k + '">' }}
+                {{- v | tojson if v is not string else v }}
+                {{- '</parameter>' }}
+                {% endfor %}
+                {{- '</invoke>' ~ '\n' }}
+            {%- endfor -%}
+            {{- toolcall_end_token}}
+            {%- set last_tool_call.name = message.tool_calls[-1].function.name -%}
+        {%- else -%}
+            {%- set last_tool_call.name = none -%}
+        {%- endif -%}
+        {{- '[e~[' ~ '\n' }}
+    {%- elif message.role == 'tool' -%}
+        {{- ']~b]tool' }}
+        {{- '\n<response>' }}
+        {{- message.content }}
+        {{- '</response>' }}
+        {{- '[e~[\n' }}
+    {%- elif message.role == 'user' -%}
         {{- ']~b]user' ~ '\n' }}
         {{- visible_text(message.content) }}
         {{- '[e~[' ~ '\n' }}
@@ -980,5 +1053,99 @@ You are MiniMax.
             extract_reasoning_content("<|think|>hello<|/think|>\nworld").unwrap();
         assert_eq!(reasoning, "hello");
         assert_eq!(remaining, "world");
+    }
+
+    #[test]
+    fn extract_reasoning_content_standalone_close_marker() {
+        // MiniMax-style: model only generates </think>, the <think> was in the prompt
+        let (reasoning, remaining) =
+            extract_reasoning_content("Let me check the weather</think>\n\n").unwrap();
+        assert_eq!(reasoning, "Let me check the weather");
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn extract_reasoning_content_standalone_close_with_content_after() {
+        let (reasoning, remaining) =
+            extract_reasoning_content("reasoning here</think>\n\nHere is the answer").unwrap();
+        assert_eq!(reasoning, "reasoning here");
+        assert_eq!(remaining, "Here is the answer");
+    }
+
+    #[test]
+    fn strip_generation_assistant_header_handles_minimax_role() {
+        let suffix = "]~b]ai\n<think>\n";
+        assert_eq!(strip_generation_assistant_header(suffix), "<think>\n");
+    }
+
+    #[test]
+    fn strip_generation_assistant_header_handles_minimax_role_marker_token() {
+        let suffix = "]~b]ai\n<think>\nassistant\n";
+        assert_eq!(
+            strip_generation_assistant_header(suffix),
+            "<think>\nassistant\n"
+        );
+    }
+
+    #[test]
+    fn minimax_template_multi_turn_tool_call_renders_correctly() {
+        let mut template = build_template(MINIMAX_TEMPLATE, true);
+        template.set_escape_tokens(Vec::new());
+
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: "Search for OpenAI release".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: "Let me search</think>\n\n".to_string(),
+                num_images: 0,
+                tool_calls: Some(vec![serde_json::json!({
+                    "function": {
+                        "name": "search_web",
+                        "arguments": {"query": "OpenAI release"}
+                    }
+                })]),
+                tool_call_id: None,
+                reasoning_content: None,
+            },
+            Message {
+                role: "tool".to_string(),
+                content: "Found: OpenAI released GPT-5".to_string(),
+                num_images: 0,
+                tool_calls: None,
+                tool_call_id: Some("call_1".to_string()),
+                reasoning_content: None,
+            },
+        ];
+        template.set_messages(&messages);
+
+        let rendered = template.apply_chat_template(&Vec::new(), false).unwrap();
+
+        assert!(
+            rendered.contains("<minimax:tool_call>"),
+            "Tool call should be rendered. Got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("<invoke name=\"search_web\">"),
+            "Invoke block should be present. Got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("<response>"),
+            "Tool response should be present. Got:\n{}",
+            rendered
+        );
+        assert!(
+            rendered.contains("Found: OpenAI released GPT-5"),
+            "Tool result content should be present. Got:\n{}",
+            rendered
+        );
     }
 }

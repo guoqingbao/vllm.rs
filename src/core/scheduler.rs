@@ -1135,6 +1135,7 @@ impl Scheduler {
     /// This supports both:
     /// 1. Explicit tool call end tokens (e.g., </tool_call> in XML format)
     /// 2. JSON end token "}" combined with Regex validation for {..."name":..., "arguments":...} pattern
+    ///    (only used as a fallback for models without explicit end token IDs)
     pub fn is_tool_call_end(&self, token: u32, idx: usize) -> bool {
         // 1. Check for explicit tool call end tokens (XML style)
         if self.tool_call_end_token_ids.contains(&token) {
@@ -1152,17 +1153,22 @@ impl Scheduler {
             return true;
         }
 
-        // 2. Check for JSON style tool call using Regex
-        // This handles models like Qwen3 that output raw JSON without XML tags
+        // 2. JSON regex fallback — only for models without explicit end token IDs.
+        // Models with known end tokens (e.g. Qwen3's </tool_call> = 151658) should
+        // rely solely on the token ID check above. The regex
+        //   \{\s*"name"\s*:.*"arguments"\s*:.*\}\s*$
+        // can match prematurely at the inner `}` of the arguments dict before the
+        // outer `}` and the actual end token are generated.
+        if !self.tool_call_end_token_ids.is_empty() {
+            return false;
+        }
+
         if self.json_end_token_id == Some(token) {
             if let Some(tokenizer) = &self.tokenizer {
-                // Temporarily add the token to get complete output for decoding
                 let mut temp_output = self.running[idx].output_ids.to_vec();
                 temp_output.push(token);
 
                 if let Ok(decoded) = tokenizer.decode(&temp_output, true) {
-                    // Check for JSON tool call pattern using Regex
-                    // The pattern matches if the decoded string ends with a valid JSON tool call structure
                     if self.tool_call_regex.is_match(&decoded) {
                         return true;
                     }
