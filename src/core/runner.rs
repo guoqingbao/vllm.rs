@@ -717,8 +717,10 @@ impl ModelRunner {
         self.dflash_drafter.is_some()
     }
 
-    /// Draft and verify: given sequences that have already completed a normal decode step,
-    /// use the cached decode hidden states to draft tokens and verify them.
+    /// Draft and verify using minibatch: given sequences that completed a normal decode step,
+    /// draft N tokens with the DFlash model, then verify all draft tokens in ONE target model
+    /// forward pass (prefill-style with existing KV context).
+    ///
     /// Returns extra accepted tokens per sequence (NOT including the first_token from decode).
     /// Called AFTER normal decode, BEFORE postprocess, so seq.len() does NOT include first_token yet.
     pub fn run_draft_and_verify(
@@ -730,6 +732,13 @@ impl ModelRunner {
         let target_layer_ids = drafter.target_layer_ids();
         let batch_size = seqs.len();
         let mut all_extras: Vec<Vec<u32>> = Vec::with_capacity(batch_size);
+
+        let sampling = self.cached_sampling.read().clone()
+            .unwrap_or(CachedSamplingParams {
+                sampling: Sampling::ArgMax,
+                frequency_penalty: None,
+                presence_penalty: None,
+            });
 
         for seq_idx in 0..batch_size {
             let seq = seqs[seq_idx];
@@ -785,149 +794,239 @@ impl ModelRunner {
             }
             let draft_tokens = &draft_tokens[..n_draft];
 
-            crate::log_warn!(
-                "Spec decode: first={}, n_draft={}, draft={:?}, seq_len={}, avail={}",
-                first_token_id,
-                n_draft,
-                &draft_tokens[..std::cmp::min(5, n_draft)],
-                seq_len,
-                available
-            );
+            // Build verification block: [first_token, d0, d1, ..., d_{N-1}]
+            let mut block_ids: Vec<u32> = Vec::with_capacity(n_draft + 1);
+            block_ids.push(first_token_id);
+            block_ids.extend_from_slice(draft_tokens);
+            let num_verify = block_ids.len();
 
-            // Correctness-first verifier: run the target model through the normal decode path
-            // for the known first token and each accepted draft token. This matches baseline
-            // decode numerics and never advances KV/Mamba state with rejected draft tokens.
-            let mut verify_seq = seq.clone();
-            let mut input_token = first_token_id;
-            let mut accepted = Vec::new();
+            let (vtensor, vpos_t, mut vmeta) = self.prepare_verify_decode(seq, &block_ids)?;
 
-            for verify_step in 0..=n_draft {
-                verify_seq.token_ids.push(input_token);
-                verify_seq.last_token = input_token;
-                let verify_seq_ref: &Sequence = &verify_seq;
-                let (vtensor, vpos_t, mut vmeta) =
-                    self.prepare_decode(std::iter::once(&verify_seq_ref))?;
-
-                #[cfg(feature = "flashinfer")]
-                if let Some(fm) = vmeta.flashinfer_metadata.as_mut() {
-                    if vmeta.is_mla {
-                        if fm.mla_decode_plan_info.is_none() {
-                            if let Some(params) = self.flashinfer_kv_params {
-                                fm.mla_decode_plan_info = Some(attention_rs::mla::mla_decode_plan(
-                                    &self.device,
-                                    params.kv_dtype,
-                                    &fm.indptr_host,
-                                    vtensor.dim(0)?,
-                                    params.num_qo_heads,
-                                    params.page_size,
-                                    fm.use_cuda_graph,
-                                )?);
-                            }
-                        }
-                    } else if fm.decode_plan_info.is_none() {
+            #[cfg(feature = "flashinfer")]
+            if let Some(fm) = vmeta.flashinfer_metadata.as_mut() {
+                if !vmeta.is_mla {
+                    if fm.prefill_plan_info.is_none() {
                         if let Some(params) = self.flashinfer_kv_params {
-                            fm.decode_plan_info = Some(attention_rs::flashinfer::decode_plan(
+                            let cu_sq: Vec<u32> = vec![0, num_verify as u32];
+                            let kv_len_arr: Vec<u32> = fm.kv_len_arr_host.clone().unwrap_or_default();
+                            fm.prefill_plan_info = Some(attention_rs::flashinfer::prefill_plan(
                                 &self.device,
-                                params.kv_dtype,
-                                params.out_dtype,
+                                &cu_sq,
                                 &fm.indptr_host,
-                                fm.last_len_host.as_deref(),
-                                fm.kv_len_arr_host.as_deref(),
-                                vtensor.dim(0)?,
+                                &kv_len_arr,
+                                num_verify as u32,
+                                1,
                                 params.num_qo_heads,
                                 params.num_kv_heads,
                                 params.head_dim,
                                 params.page_size,
-                                fm.use_cuda_graph,
+                                params.out_dtype,
+                                None,
+                            )?);
+                        }
+                    }
+                } else {
+                    if fm.mla_prefill_plan_info.is_none() {
+                        if let Some(params) = self.flashinfer_kv_params {
+                            let cu_sq: Vec<u32> = vec![0, num_verify as u32];
+                            let kv_len_arr: Vec<u32> = fm.kv_len_arr_host.clone().unwrap_or_default();
+                            fm.mla_prefill_plan_info = Some(attention_rs::mla::mla_prefill_plan(
+                                &self.device,
+                                &cu_sq,
+                                &fm.indptr_host,
+                                &kv_len_arr,
+                                1,
+                                params.num_qo_heads,
+                                params.head_dim,
+                                true,
                             )?);
                         }
                     }
                 }
+            }
 
-                let _pg = set_linear_is_prefill(false);
-                let (vlogits, vhs) = match &self.model {
-                    Model::Qwen3(m) => m.forward_with_hidden_states(
-                        &vtensor,
-                        &vpos_t,
-                        Some(&self.get_kv_cache()),
-                        &vmeta,
-                        false,
-                        target_layer_ids,
-                    )?,
-                    Model::Qwen3MoE(m) => m.forward_with_hidden_states(
-                        &vtensor,
-                        &vpos_t,
-                        Some(&self.get_kv_cache()),
-                        &vmeta,
-                        false,
-                        target_layer_ids,
-                    )?,
-                    Model::Qwen3_5(m) => m.forward_with_hidden_states(
-                        &vtensor,
-                        &vpos_t,
-                        Some(&self.get_kv_cache()),
-                        &vmeta,
-                        false,
-                        target_layer_ids,
-                    )?,
-                    Model::Qwen3_5MoE(m) => m.forward_with_hidden_states(
-                        &vtensor,
-                        &vpos_t,
-                        Some(&self.get_kv_cache()),
-                        &vmeta,
-                        false,
-                        target_layer_ids,
-                    )?,
-                    Model::Qwen3VL(m) => m.forward_with_hidden_states(
-                        &vtensor,
-                        &vpos_t,
-                        Some(&self.get_kv_cache()),
-                        &vmeta,
-                        false,
-                        target_layer_ids,
-                    )?,
-                    _ => candle_core::bail!("DFlash not supported"),
-                };
-                drop(_pg);
+            let _pg = set_linear_is_prefill(true);
+            let (vlogits, vhs) = match &self.model {
+                Model::Qwen3(m) => m.forward_with_hidden_states(&vtensor, &vpos_t, Some(&self.get_kv_cache()), &vmeta, false, target_layer_ids)?,
+                Model::Qwen3MoE(m) => m.forward_with_hidden_states(&vtensor, &vpos_t, Some(&self.get_kv_cache()), &vmeta, false, target_layer_ids)?,
+                Model::Qwen3_5(m) => m.forward_with_hidden_states(&vtensor, &vpos_t, Some(&self.get_kv_cache()), &vmeta, false, target_layer_ids)?,
+                Model::Qwen3_5MoE(m) => m.forward_with_hidden_states(&vtensor, &vpos_t, Some(&self.get_kv_cache()), &vmeta, false, target_layer_ids)?,
+                Model::Qwen3VL(m) => m.forward_with_hidden_states(&vtensor, &vpos_t, Some(&self.get_kv_cache()), &vmeta, false, target_layer_ids)?,
+                _ => candle_core::bail!("DFlash not supported for this model type"),
+            };
+            drop(_pg);
 
-                if !vhs.is_empty() {
-                    let th = drafter.extract_and_concat_hidden(&vhs)?;
-                    drafter.store_decode_hidden(&th, seq.id())?;
-                }
+            // logits shape: [num_verify, vocab] where num_verify = n_draft + 1
+            // logits[i] predicts what comes after the i-th input token:
+            //   logits[0] predicts after first_token -> should match draft[0]
+            //   logits[k] predicts after draft[k-1]  -> should match draft[k]
+            let sampled = self.sample_processed_logits(&vlogits, &sampling.sampling)?;
 
-                let argmax_res = vlogits.i(0)?.argmax(D::Minus1)?;
-                let target_token = if argmax_res.rank() > 0 {
-                    argmax_res.flatten_all()?.i(0)?.to_vec0::<u32>()?
+            // Accept/reject: keep only matching tokens. Do NOT include the
+            // correction token at the rejection point because its KV was computed
+            // from the wrong input (draft token). The target model will produce the
+            // correct token in the next normal decode step with clean KV.
+            let mut accepted = Vec::new();
+            for i in 0..n_draft {
+                let target_token = sampled[i];
+                if target_token == draft_tokens[i] {
+                    accepted.push(draft_tokens[i]);
                 } else {
-                    argmax_res.to_vec0::<u32>()?
-                };
-
-                if verify_step < n_draft {
-                    let draft_token = draft_tokens[verify_step];
-                    if target_token == draft_token {
-                        accepted.push(draft_token);
-                        input_token = draft_token;
-                    } else {
-                        accepted.push(target_token);
-                        break;
-                    }
-                } else {
-                    accepted.push(target_token);
                     break;
                 }
             }
+            // Bonus token: if ALL drafts matched, accept the next prediction too
+            if accepted.len() == n_draft && sampled.len() > n_draft {
+                accepted.push(sampled[n_draft]);
+            }
 
-            crate::log_warn!(
-                "Spec verify(serial): emitted={}, tokens={:?}",
-                accepted.len(),
-                &accepted[..std::cmp::min(5, accepted.len())]
-            );
+            // Store hidden states for accepted tokens only.
+            // The verification block is [first_token, d0, ..., d_{n-1}].
+            // Position 0 (first_token) was already stored during normal decode in run().
+            // We need to store hidden states for positions 1..=accepted_draft_count
+            // where accepted_draft_count = min(accepted.len(), n_draft).
+            if !vhs.is_empty() {
+                let th = drafter.extract_and_concat_hidden(&vhs)?;
+                let accepted_draft_count = std::cmp::min(accepted.len(), n_draft);
+                if accepted_draft_count > 0 && th.dim(0)? > 1 {
+                    let keep = std::cmp::min(accepted_draft_count, th.dim(0)? - 1);
+                    let accepted_hidden = th.narrow(0, 1, keep)?;
+                    drafter.store_decode_hidden(&accepted_hidden, seq.id())?;
+                }
+            }
+
+            crate::log_info!("Spec verify: n_draft={}, accepted={}",
+                n_draft, accepted.len());
 
             all_extras.push(accepted);
         }
 
         Ok(all_extras)
     }
+
+    /// Prepare metadata for minibatch verification: a prefill-like forward pass for
+    /// `block_ids` tokens that builds on the existing KV cache of `seq`.
+    fn prepare_verify_decode(
+        &self,
+        seq: &Sequence,
+        block_ids: &[u32],
+    ) -> Result<(Tensor, Tensor, InputMetadata)> {
+        let num_tokens = block_ids.len();
+        let base_pos = seq.len();
+
+        let input_ids: Vec<u32> = block_ids.to_vec();
+        let positions: Vec<i64> = (base_pos..(base_pos + num_tokens)).map(|p| p as i64).collect();
+
+        let mut slot_mapping: Vec<i64> = Vec::with_capacity(num_tokens);
+        for tok_offset in 0..num_tokens {
+            let absolute_pos = base_pos + tok_offset;
+            let block_idx = absolute_pos / self.config.block_size;
+            let block_offset = absolute_pos % self.config.block_size;
+            if block_idx < seq.block_table.len() {
+                let physical_block = seq.block_table[block_idx];
+                slot_mapping.push((physical_block as usize * self.config.block_size + block_offset) as i64);
+            } else {
+                slot_mapping.push(-1);
+            }
+        }
+
+        let length = input_ids.len();
+        let input_ids_t = Tensor::from_vec(input_ids, (length,), &self.device)?;
+        let positions_t = Tensor::from_vec(positions, (length,), &self.device)?;
+        let s_len = slot_mapping.len();
+        let slot_mapping_t = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
+
+        let context_len = base_pos + num_tokens;
+        let seq_slice: &[&Sequence] = &[seq];
+        let block_tables = self.prepare_block_tables(seq_slice)?;
+        let context_lens = Tensor::from_vec(vec![context_len as u32], (1,), &self.device)?;
+
+        let cu_seqlens_q = Tensor::from_vec(vec![0u32, num_tokens as u32], (2,), &self.device)?;
+        let cu_seqlens_k = Tensor::from_vec(vec![0u32, context_len as u32], (2,), &self.device)?;
+
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+            let bt = &seq.block_table;
+            let effective_len = context_len;
+            let num_blocks = if effective_len == 0 { 0 } else {
+                std::cmp::min(
+                    (effective_len + self.config.block_size - 1) / self.config.block_size,
+                    bt.len()
+                )
+            };
+            let indices_vec: Vec<u32> = bt[..num_blocks].iter().map(|&x| x as u32).collect();
+            let indptr_vec = vec![0u32, indices_vec.len() as u32];
+            let last_page_len = if effective_len == 0 { 0 } else {
+                ((effective_len - 1) % self.config.block_size + 1) as u32
+            };
+            let last_len_vec = vec![last_page_len];
+
+            let indptr_host = indptr_vec.clone();
+            let last_len_host = last_len_vec.clone();
+            let kv_len_full = if num_blocks == 0 { 0 } else {
+                (num_blocks as u32 - 1) * self.config.block_size as u32 + last_page_len
+            };
+            let kv_len_arr_host = vec![kv_len_full];
+
+            let indptr_len = indptr_vec.len();
+            let indices_len = indices_vec.len();
+            let last_len_val = last_len_vec.len();
+            let indptr = Tensor::from_vec(indptr_vec, (indptr_len,), &self.device)?;
+            let indices = Tensor::from_vec(indices_vec, (indices_len,), &self.device)?;
+            let last_len = Tensor::from_vec(last_len_vec, (last_len_val,), &self.device)?;
+
+            let batch_indices_vec: Vec<u32> = vec![0; num_tokens];
+            let positions_vec: Vec<u32> = (base_pos..(base_pos + num_tokens)).map(|p| p as u32).collect();
+            let bi_len = batch_indices_vec.len();
+            let p_len = positions_vec.len();
+            let batch_indices = Tensor::from_vec(batch_indices_vec, (bi_len,), &self.device)?;
+            let fi_positions = Tensor::from_vec(positions_vec, (p_len,), &self.device)?;
+
+            Some(FlashInferMetadata {
+                indptr,
+                indptr_host,
+                indices,
+                last_len,
+                last_len_host: Some(last_len_host),
+                kv_len_arr_host: Some(kv_len_arr_host),
+                total_num_rows: Some(num_tokens as u32),
+                batch_indices: Some(batch_indices),
+                positions: Some(fi_positions),
+                use_cuda_graph: false,
+                decode_plan_info: None,
+                prefill_plan_info: None,
+                mla_decode_plan_info: None,
+                mla_prefill_plan_info: None,
+            })
+        } else {
+            None
+        };
+
+        let sequence_ids = Some(vec![seq.id()]);
+        let mamba_slot_mapping = self.prepare_mamba_slot_mapping(
+            sequence_ids.as_ref().unwrap(), false,
+        )?;
+
+        let input_metadata = InputMetadata {
+            is_prefill: true,
+            is_mla: self.is_mla_model(),
+            sequence_ids,
+            mamba_slot_mapping,
+            slot_mapping: slot_mapping_t,
+            block_tables: Some(block_tables),
+            context_lens: Some(context_lens),
+            cu_seqlens_q: Some(cu_seqlens_q),
+            cu_seqlens_k: Some(cu_seqlens_k),
+            max_seqlen_q: num_tokens,
+            max_seqlen_k: context_len,
+            max_context_len: context_len,
+            disable_flash_attn: None,
+            seqlens: None,
+            flashinfer_metadata,
+        };
+
+        Ok((input_ids_t, positions_t, input_metadata))
+    }
+
 
     pub fn get_kv_cache(&self) -> MutexGuard<'_, Vec<(Tensor, Tensor)>> {
         loop {
@@ -1600,7 +1699,6 @@ impl ModelRunner {
             disable_flash_attn,
             seqlens: Some(cu_seqlens_q_vec[1..].to_vec()),
             flashinfer_metadata,
-            num_accepted_tokens: None,
         };
 
         Ok((input_ids, positions, input_metadata))
@@ -1748,7 +1846,6 @@ impl ModelRunner {
             disable_flash_attn: None,
             seqlens: None,
             flashinfer_metadata,
-            num_accepted_tokens: None,
         };
 
         Ok((input_ids, positions, input_metadata))

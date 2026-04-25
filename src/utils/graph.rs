@@ -565,7 +565,6 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 disable_flash_attn: None,
                 seqlens: None,
                 flashinfer_metadata,
-                num_accepted_tokens: None,
             };
 
             self.model.start_capture(bs)?;
