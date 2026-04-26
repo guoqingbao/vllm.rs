@@ -39,7 +39,7 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | QwQ-32B | Q4_K_M | 32B | **41.36** tokens/s |
 | **Qwen3-30B-A3B** | Q4_K_M | **30B (MoE)**| **97.16** tokens/s  |
 | **Qwen3.5-27B** | Q4_K_M | **27B (Dense)**| **45.20** tokens/s  |
-| **Qwen3.5-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
+| **Qwen3.5-27B/Qwen3.6-27B** | FP8 | **27B (Dense)**| **42** tokens/s (**Hopper**)  |
 | **Qwen3.5-35B-A3B** | FP8 | **35B (MoE)**| **97** tokens/s (**Hopper**)  |
 | **GLM4.7 Flash** | NVFP4 | **30B (MoE)**| **79** tokens/s (**Hopper**)  |
 | **Gemma4-31B** | ISQ (BF16->Q4K) | **31B (Dense)**| **41** tokens/s (**Hopper**)  |
@@ -69,7 +69,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 * ✅ Qwen (Qwen2, Qwen3)
 * ✅ Qwen2/Qwen3 Moe
 * ✅ Qwen3 Next
-* ✅ Qwen3.5 Dense/MoE (27B, 35B, 122B, 397B, Multimodal model)
+* ✅ Qwen3.5/3.6 Dense/MoE (27B, 35B, 122B, 397B, Multimodal model)
 * ✅ Mistral v1, v2
 * ✅ Mistral-3-VL Reasoning (3B, 8B, 14B, Multimodal model)
 * ✅ GLM4 (0414, **Not ChatGLM**)

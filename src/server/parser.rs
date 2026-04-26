@@ -13,9 +13,147 @@ use tool_parser::{
     ParserFactory, ToolParser as ExternalToolParser,
 };
 
+/// Look up the JSON schema for a parameter from a tool's properties definition.
+/// Supports `anyOf`, `oneOf`, `allOf`, direct `type`, and `enum` fields.
+fn extract_schema_types(schema: &Value) -> Vec<String> {
+    let Some(obj) = schema.as_object() else {
+        return vec!["string".to_string()];
+    };
+    let mut types = Vec::new();
+
+    if let Some(t) = obj.get("type") {
+        match t {
+            Value::String(s) => types.push(s.clone()),
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        types.push(s.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(Value::Array(choices)) = obj.get(key) {
+            for choice in choices {
+                types.extend(extract_schema_types(choice));
+            }
+        }
+    }
+
+    if let Some(Value::Array(enum_vals)) = obj.get("enum") {
+        for val in enum_vals {
+            match val {
+                Value::Null => types.push("null".to_string()),
+                Value::Bool(_) => types.push("boolean".to_string()),
+                Value::Number(n) => {
+                    if n.is_i64() || n.is_u64() {
+                        types.push("integer".to_string());
+                    } else {
+                        types.push("number".to_string());
+                    }
+                }
+                Value::String(_) => types.push("string".to_string()),
+                Value::Array(_) => types.push("array".to_string()),
+                Value::Object(_) => types.push("object".to_string()),
+            }
+        }
+    }
+
+    if types.is_empty() {
+        types.push("string".to_string());
+    }
+    types.sort();
+    types.dedup();
+    types
+}
+
+/// Convert a raw string parameter value to the correct JSON type based on
+/// the tool schema, following vLLM's `MinimaxM2ToolParser` approach.
+/// When only "string" is in `schema_types` (the default when no schema is
+/// found), JSON parsing is still attempted first so that arrays/objects
+/// passed as parameter values are preserved.
+fn coerce_param_value(raw: &str, schema_types: &[String]) -> Value {
+    let lower = raw.to_ascii_lowercase();
+    if matches!(lower.as_str(), "null" | "none" | "nil") {
+        return Value::Null;
+    }
+
+    // When the schema explicitly provides non-string types, use priority-based coercion.
+    let has_explicit_types = schema_types
+        .iter()
+        .any(|t| !matches!(t.as_str(), "string" | "str" | "text"));
+
+    if has_explicit_types {
+        static TYPE_PRIORITY: &[&str] =
+            &["integer", "number", "boolean", "object", "array", "string"];
+
+        for ptype in TYPE_PRIORITY {
+            if !schema_types.iter().any(|t| t == ptype) {
+                continue;
+            }
+            match *ptype {
+                "integer" => {
+                    if let Ok(n) = raw.parse::<i64>() {
+                        return Value::Number(n.into());
+                    }
+                }
+                "number" => {
+                    if let Ok(f) = raw.parse::<f64>() {
+                        if f == (f as i64) as f64 {
+                            return Value::Number((f as i64).into());
+                        }
+                        if let Some(n) = serde_json::Number::from_f64(f) {
+                            return Value::Number(n);
+                        }
+                    }
+                }
+                "boolean" => {
+                    let l = raw.trim().to_ascii_lowercase();
+                    if matches!(l.as_str(), "true" | "1" | "yes" | "on") {
+                        return Value::Bool(true);
+                    }
+                    if matches!(l.as_str(), "false" | "0" | "no" | "off") {
+                        return Value::Bool(false);
+                    }
+                }
+                "object" | "array" => {
+                    if let Ok(v) = serde_json::from_str::<Value>(raw) {
+                        return v;
+                    }
+                }
+                "string" => return Value::String(raw.to_string()),
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback: try JSON, then string
+    serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
+/// Resolve the parameter properties for a function from the available tools.
+fn resolve_param_properties<'a>(
+    function_name: &str,
+    tools: &'a [Tool],
+) -> Option<&'a serde_json::Map<String, Value>> {
+    for tool in tools {
+        if tool.function.name == function_name {
+            return tool
+                .function
+                .parameters
+                .get("properties")
+                .and_then(|v| v.as_object());
+        }
+    }
+    None
+}
+
 /// Manually parse MiniMax XML tool call format.
 /// Format: `<minimax:tool_call><invoke name="..."><parameter name="...">...</parameter></invoke></minimax:tool_call>`
-fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
+fn parse_minimax_xml_tool_calls(text: &str, tools: &[Tool]) -> Vec<ToolCall> {
     let mut calls = Vec::new();
     let mut search_from = 0;
 
@@ -23,7 +161,6 @@ fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
         let abs_invoke_start = search_from + invoke_start;
         let invoke_section = &text[abs_invoke_start..];
 
-        // Extract function name from <invoke name="..."> or <invoke name='...'>
         let name_start = "<invoke name=".len();
         let quote_char = invoke_section.chars().nth(name_start);
         let Some(quote) = quote_char else {
@@ -42,7 +179,6 @@ fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
         };
         let function_name = &invoke_section[name_content_start..name_content_start + name_end_rel];
 
-        // Find the end of this invoke block
         let invoke_end = if let Some(end_rel) = invoke_section.find("</invoke>") {
             abs_invoke_start + end_rel + "</invoke>".len()
         } else {
@@ -50,15 +186,14 @@ fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
         };
 
         let invoke_block = &text[abs_invoke_start..invoke_end];
+        let param_props = resolve_param_properties(function_name, tools);
 
-        // Extract parameters from <parameter name="...">...</parameter>
         let mut args = Map::new();
         let mut param_search = 0;
         while let Some(param_start) = invoke_block[param_search..].find("<parameter name=") {
             let abs_param_start = param_search + param_start;
             let param_section = &invoke_block[abs_param_start..];
 
-            // Extract parameter name
             let pname_start = "<parameter name=".len();
             let pquote_char = param_section.chars().nth(pname_start);
             let Some(pquote) = pquote_char else {
@@ -78,7 +213,6 @@ fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
             let param_name =
                 &param_section[pname_content_start..pname_content_start + pname_end_rel];
 
-            // Find value between > and </parameter>
             let Some(value_start_rel) = param_section[pname_content_start + pname_end_rel..]
                 .find('>')
                 .map(|p| pname_content_start + pname_end_rel + p + 1)
@@ -93,12 +227,12 @@ fn parse_minimax_xml_tool_calls(text: &str) -> Vec<ToolCall> {
                 .unwrap_or(value_section.len());
             let param_value = value_section[..value_end].trim();
 
-            // Try to parse value as JSON, otherwise use as string
-            let json_value = if let Ok(parsed) = serde_json::from_str::<Value>(param_value) {
-                parsed
-            } else {
-                Value::String(param_value.to_string())
-            };
+            let schema_types = param_props
+                .and_then(|props| props.get(param_name))
+                .map(extract_schema_types)
+                .unwrap_or_else(|| vec!["string".to_string()]);
+
+            let json_value = coerce_param_value(param_value, &schema_types);
             args.insert(param_name.to_string(), json_value);
 
             param_search = abs_param_start + value_start_rel + value_end;
@@ -169,8 +303,8 @@ impl ToolConfig {
         let mut end_ids = HashSet::new();
 
         match model_type {
-            ModelType::LLaMa | ModelType::LLaMa4 => {
-                // Llama 3/3.1/4
+            ModelType::LLaMa => {
+                // Llama 3/3.1
                 start_ids.insert(128010); // <|python_tag|>
                 end_ids.insert(128008); // <|eom_id|>
                 ToolConfig {
@@ -180,6 +314,20 @@ impl ToolConfig {
                     end_token_str: "<|eom_id|>".to_string(),
                     start_is_special: false,
                     end_is_special: false,
+                }
+            }
+            ModelType::LLaMa4 => {
+                // Llama 4 uses pythonic tool call format: [func_name(param=value)]
+                start_ids.insert(200016); // <|python_start|>
+                end_ids.insert(200007); // <|eom|>
+                end_ids.insert(200008); // <|eot|>
+                ToolConfig {
+                    start_token_ids: start_ids,
+                    end_token_ids: end_ids,
+                    start_token_str: "<|python_start|>".to_string(),
+                    end_token_str: "<|eom|>".to_string(),
+                    start_is_special: true,
+                    end_is_special: true,
                 }
             }
             ModelType::Qwen3
@@ -281,48 +429,76 @@ impl ToolConfig {
     }
 
     /// Validate special token IDs against the tokenizer, falling back to text-only matching if needed.
+    /// Also auto-populates token IDs from the tokenizer when the config starts with empty sets.
     pub fn validate_with_tokenizer(&mut self, tokenizer: &Tokenizer, model_type: &ModelType) {
-        if self.has_start_tokens()
-            && !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
-        {
+        if self.has_start_tokens() {
+            if !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
+            {
+                if Self::try_rebind_single_token_id(
+                    tokenizer,
+                    &self.start_token_str,
+                    &mut self.start_token_ids,
+                ) {
+                    crate::log_warn!(
+                        "Tool start token IDs corrected from tokenizer for model {:?}: {:?}",
+                        model_type,
+                        self.start_token_ids
+                    );
+                } else {
+                    crate::log_warn!(
+                        "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                        model_type
+                    );
+                    self.start_token_ids.clear();
+                }
+            }
+        } else if !self.start_token_str.is_empty() {
             if Self::try_rebind_single_token_id(
                 tokenizer,
                 &self.start_token_str,
                 &mut self.start_token_ids,
             ) {
-                crate::log_warn!(
-                    "Tool start token IDs corrected from tokenizer for model {:?}: {:?}",
+                self.start_is_special = true;
+                crate::log_info!(
+                    "Tool start token IDs auto-populated from tokenizer for model {:?}: {:?}",
                     model_type,
                     self.start_token_ids
                 );
-            } else {
-                crate::log_warn!(
-                    "Tool start token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                    model_type
-                );
-                self.start_token_ids.clear();
             }
         }
 
-        if self.has_end_tokens()
-            && !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids)
-        {
+        if self.has_end_tokens() {
+            if !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids) {
+                if Self::try_rebind_single_token_id(
+                    tokenizer,
+                    &self.end_token_str,
+                    &mut self.end_token_ids,
+                ) {
+                    crate::log_warn!(
+                        "Tool end token IDs corrected from tokenizer for model {:?}: {:?}",
+                        model_type,
+                        self.end_token_ids
+                    );
+                } else {
+                    crate::log_warn!(
+                        "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
+                        model_type
+                    );
+                    self.end_token_ids.clear();
+                }
+            }
+        } else if !self.end_token_str.is_empty() {
             if Self::try_rebind_single_token_id(
                 tokenizer,
                 &self.end_token_str,
                 &mut self.end_token_ids,
             ) {
-                crate::log_warn!(
-                    "Tool end token IDs corrected from tokenizer for model {:?}: {:?}",
+                self.end_is_special = true;
+                crate::log_info!(
+                    "Tool end token IDs auto-populated from tokenizer for model {:?}: {:?}",
                     model_type,
                     self.end_token_ids
                 );
-            } else {
-                crate::log_warn!(
-                    "Tool end token IDs not supported by tokenizer for model {:?}, falling back to text matching",
-                    model_type
-                );
-                self.end_token_ids.clear();
             }
         }
     }
@@ -543,6 +719,7 @@ impl StreamToolParser {
         let parse_strategy = match model_type {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral_list",
             ModelType::Gemma4 => "gemma4",
+            ModelType::LLaMa4 => "pythonic",
             _ => "json",
         }
         .to_string();
@@ -1206,6 +1383,14 @@ impl StreamToolParser {
             return true;
         }
 
+        // `<|...|>` style special tokens (e.g. LLaMA 4's <|python_start|>/<|eom|>)
+        // are not XML envelopes; skip structural validation for them.
+        if self.config.start_token_str.starts_with("<|")
+            || self.config.end_token_str.starts_with("<|")
+        {
+            return true;
+        }
+
         let Some(start_idx) = self.buffer.find(&self.config.start_token_str) else {
             // If no explicit start marker is present, keep existing behavior.
             return true;
@@ -1271,6 +1456,13 @@ impl StreamToolParser {
             return true;
         }
 
+        // GLM4.7 XML style: <tool_call>func_name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>
+        if block.contains("<arg_key>") || block.contains("<arg_value>") {
+            return block.contains("</arg_value>")
+                && Self::has_balanced_xml_tags(block, "<arg_key>", "</arg_key>")
+                && Self::has_balanced_xml_tags(block, "<arg_value>", "</arg_value>");
+        }
+
         // Qwen JSON style: <tool_call>{"name":"...","arguments":{...}}</tool_call>
         // Accept only if the inner payload is complete JSON at this point.
         if inner.is_empty() {
@@ -1295,7 +1487,6 @@ impl StreamToolParser {
                     idx = op + open_tag.len();
                 }
                 (None, Some(cp)) => {
-                    // Ignore unmatched closing parameter tags.
                     if open_count > 0 {
                         open_count -= 1;
                     }
@@ -1318,10 +1509,27 @@ impl StreamToolParser {
         open_count == 0
     }
 
+    fn has_balanced_xml_tags(block: &str, open: &str, close: &str) -> bool {
+        let open_count = block.matches(open).count();
+        let close_count = block.matches(close).count();
+        open_count > 0 && open_count == close_count
+    }
+
     pub async fn parse_complete_with_fallback(&self, text: &str) -> Vec<ToolCall> {
         if self.parse_strategy == "gemma4" {
-            if let Some(calls) = Self::parse_gemma4_tool_calls(text) {
-                return calls;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Self::parse_gemma4_tool_calls(text)
+            })) {
+                Ok(Some(calls)) => return calls,
+                Ok(None) => {}
+                Err(e) => {
+                    let msg = e
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                        .or_else(|| e.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown");
+                    crate::log_warn!("Gemma4 tool call parse panicked: {}", msg);
+                }
             }
         }
 
@@ -1333,6 +1541,18 @@ impl StreamToolParser {
             }
         };
 
+        // Pythonic fallback for LLaMA 4: the model may output tool calls
+        // without the <|python_start|> token, so re-try with a fresh pythonic
+        // parser after stripping any remaining special tokens.
+        if parsed_calls.is_empty() && self.parse_strategy == "pythonic" {
+            let factory = ParserFactory::new();
+            if let Some(pythonic_parser) = factory.registry().create_parser("pythonic") {
+                if let Ok((_normal_text, calls)) = pythonic_parser.parse_complete(text).await {
+                    parsed_calls = calls;
+                }
+            }
+        }
+
         if parsed_calls.is_empty() && text.contains("<invoke name=") {
             let factory = ParserFactory::new();
             if let Some(xml_parser) = factory.registry().create_parser("minimax_m2") {
@@ -1343,7 +1563,7 @@ impl StreamToolParser {
             // Manual fallback if tool-parser crate fails
             if parsed_calls.is_empty() {
                 crate::log_info!("Falling back to manual MiniMax XML parser for buffer");
-                return parse_minimax_xml_tool_calls(text);
+                return parse_minimax_xml_tool_calls(text, &self.tools);
             }
         }
 
@@ -1441,14 +1661,17 @@ impl StreamToolParser {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral",
             ModelType::Qwen3_5 | ModelType::Qwen3_5MoE => "qwen_coder",
             ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
-                if model_lower.contains("coder") || model_lower.contains("qwen3.5") {
+                if model_lower.contains("coder")
+                    || model_lower.contains("qwen3.5")
+                    || model_lower.contains("qwen3.6")
+                {
                     "qwen_coder"
                 } else {
                     "qwen"
                 }
             }
             ModelType::Gemma | ModelType::Gemma3 | ModelType::Gemma4 => "json",
-            ModelType::LLaMa4 => "llama",
+            ModelType::LLaMa4 => "pythonic",
             ModelType::Phi | ModelType::Phi4 => "qwen",
             ModelType::GLM4 | ModelType::GLM4MoE | ModelType::GLM4MoeLite => "glm47_moe",
             ModelType::Yi | ModelType::StableLM => "qwen",
@@ -1459,17 +1682,19 @@ impl StreamToolParser {
 
     /// Parse Gemma4 tool calls: `<|tool_call>call:NAME{key:<|"|>value<|"|>,...}<tool_call|>`
     /// Also handles stripped markers: `call:NAME{key:"value",...}`
+    ///
+    /// Follows vLLM's tiered approach: regex extraction first, then
+    /// custom brace-matching as fallback. All string operations are
+    /// UTF-8 safe.
     fn parse_gemma4_tool_calls(text: &str) -> Option<Vec<ToolCall>> {
-        const GEMMA4_STR_DELIM: &str = "<|\"|>";
         const PREFIX: &str = "<|tool_call>call:";
         const PREFIX_STRIPPED: &str = "call:";
         const SUFFIX: &str = "<tool_call|>";
 
+        let text = text.trim_end();
         let text = text
-            .trim_end()
             .strip_suffix("<|tool_response>")
-            .unwrap_or(text)
-            .strip_suffix("<tool_response|>")
+            .or_else(|| text.strip_suffix("<tool_response|>"))
             .unwrap_or(text);
 
         let has_full_prefix = text.contains(PREFIX);
@@ -1499,14 +1724,7 @@ impl StreamToolParser {
                 break;
             };
 
-            let with_braces = format!("{{{inner}}}");
-            let with_quotes = with_braces.replace(GEMMA4_STR_DELIM, "\"");
-            let json_str = Self::gemma4_quote_keys(&with_quotes);
-
-            let arguments: Value = match serde_json::from_str(&json_str) {
-                Ok(v) => v,
-                Err(_) => Value::Object(Map::new()),
-            };
+            let arguments = Self::gemma4_parse_args(inner);
 
             calls.push(ToolCall {
                 id: crate::tools::generate_tool_call_id(),
@@ -1534,154 +1752,319 @@ impl StreamToolParser {
 
     fn gemma4_extract_braces(s: &str, start: usize) -> Option<(&str, usize)> {
         const DELIM: &str = "<|\"|>";
-        let bytes = s.as_bytes();
-        if bytes.get(start) != Some(&b'{') {
+
+        if !s.is_char_boundary(start) || s.as_bytes().get(start) != Some(&b'{') {
             return None;
         }
+
         let mut depth: usize = 0;
-        let mut in_string = false;
+        let mut in_delim_string = false;
         let mut in_regular_string = false;
-        let mut i = start;
-        while i < s.len() {
-            if in_string {
-                if s[i..].starts_with(DELIM) {
-                    in_string = false;
-                    i += DELIM.len();
-                    continue;
-                }
-                i += 1;
-                continue;
-            }
-            if in_regular_string {
-                if bytes[i] == b'"' && (i == 0 || bytes[i - 1] != b'\\') {
-                    in_regular_string = false;
-                }
-                i += 1;
-                continue;
-            }
-            if s[i..].starts_with(DELIM) {
-                in_string = true;
-                i += DELIM.len();
-                continue;
-            }
-            match bytes[i] {
-                b'"' => {
-                    in_regular_string = true;
-                    i += 1;
-                    continue;
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some((&s[start + 1..i], i + 1));
+        let tail = &s[start..];
+        let mut iter = tail.char_indices();
+
+        while let Some((offset, ch)) = iter.next() {
+            let abs = start + offset;
+
+            if in_delim_string {
+                if tail[offset..].starts_with(DELIM) {
+                    in_delim_string = false;
+                    for _ in 0..DELIM.len().saturating_sub(ch.len_utf8()) {
+                        iter.next();
                     }
                 }
-                _ => {}
-            }
-            i += 1;
-        }
-        None
-    }
-
-    /// Convert Gemma4 key-value format to valid JSON.
-    /// Handles both `<|"|>` delimited values and unquoted values (when special
-    /// tokens are stripped by the tokenizer).
-    fn gemma4_quote_keys(input: &str) -> String {
-        if let Ok(v) = serde_json::from_str::<Value>(input) {
-            return serde_json::to_string(&v).unwrap_or_else(|_| input.to_string());
-        }
-
-        let mut map = serde_json::Map::new();
-        let inner = input.trim().trim_start_matches('{').trim_end_matches('}');
-
-        let mut remaining = inner;
-        while !remaining.is_empty() {
-            remaining = remaining.trim_start_matches([',', ' ', '\n', '\t']);
-            if remaining.is_empty() {
-                break;
+                continue;
             }
 
-            let colon_pos = match remaining.find(':') {
-                Some(p) => p,
-                None => break,
-            };
-            let key = remaining[..colon_pos].trim().trim_matches('"');
-            remaining = remaining[colon_pos + 1..].trim_start();
-
-            if remaining.starts_with('"') {
-                let end = remaining[1..]
-                    .find('"')
-                    .map(|p| p + 2)
-                    .unwrap_or(remaining.len());
-                let val = &remaining[1..end - 1];
-                map.insert(key.to_string(), Value::String(val.to_string()));
-                remaining = &remaining[end..];
-            } else if remaining.starts_with('{') {
-                let depth_end = Self::find_matching_brace(remaining);
-                let val_str = &remaining[..depth_end];
-                let nested = Self::gemma4_quote_keys(val_str);
-                if let Ok(v) = serde_json::from_str::<Value>(&nested) {
-                    map.insert(key.to_string(), v);
-                } else {
-                    map.insert(key.to_string(), Value::String(val_str.to_string()));
+            if in_regular_string {
+                if ch == '"' && (offset == 0 || tail.as_bytes()[offset - 1] != b'\\') {
+                    in_regular_string = false;
                 }
-                remaining = &remaining[depth_end..];
-            } else if remaining.starts_with('[') {
-                let bracket_end = remaining
-                    .find(']')
-                    .map(|p| p + 1)
-                    .unwrap_or(remaining.len());
-                let val_str = &remaining[..bracket_end];
-                if let Ok(v) = serde_json::from_str::<Value>(val_str) {
-                    map.insert(key.to_string(), v);
-                } else {
-                    map.insert(key.to_string(), Value::String(val_str.to_string()));
-                }
-                remaining = &remaining[bracket_end..];
-            } else {
-                let end = remaining
-                    .find(|c: char| c == ',' || c == '}')
-                    .unwrap_or(remaining.len());
-                let val = remaining[..end].trim();
-                if val == "true" {
-                    map.insert(key.to_string(), Value::Bool(true));
-                } else if val == "false" {
-                    map.insert(key.to_string(), Value::Bool(false));
-                } else if val == "null" {
-                    map.insert(key.to_string(), Value::Null);
-                } else if let Ok(n) = val.parse::<f64>() {
-                    map.insert(
-                        key.to_string(),
-                        serde_json::Number::from_f64(n)
-                            .map(Value::Number)
-                            .unwrap_or(Value::String(val.to_string())),
-                    );
-                } else {
-                    map.insert(key.to_string(), Value::String(val.to_string()));
-                }
-                remaining = &remaining[end..];
+                continue;
             }
-        }
 
-        serde_json::to_string(&Value::Object(map)).unwrap_or_else(|_| input.to_string())
-    }
+            if tail[offset..].starts_with(DELIM) {
+                in_delim_string = true;
+                for _ in 0..DELIM.len().saturating_sub(ch.len_utf8()) {
+                    iter.next();
+                }
+                continue;
+            }
 
-    fn find_matching_brace(s: &str) -> usize {
-        let mut depth = 0;
-        for (i, c) in s.char_indices() {
-            match c {
+            match ch {
+                '"' => {
+                    in_regular_string = true;
+                }
                 '{' => depth += 1,
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        return i + 1;
+                        let inner_start = start + '{'.len_utf8();
+                        return Some((&s[inner_start..abs], abs + '}'.len_utf8()));
                     }
                 }
                 _ => {}
             }
         }
-        s.len()
+        None
+    }
+
+    /// Parse Gemma4 key-value format into a JSON Value.
+    ///
+    /// Follows vLLM's `_parse_gemma4_args` approach: iterates through the
+    /// string character-by-character using `char_indices` (UTF-8 safe) and
+    /// handles `<|"|>` delimited strings, nested objects, arrays, and bare
+    /// values (numbers, booleans, null).
+    fn gemma4_parse_args(args_str: &str) -> Value {
+        if args_str.trim().is_empty() {
+            return Value::Object(Map::new());
+        }
+
+        let cleaned = args_str.replace("<|\"|>", "\"");
+        if let Ok(v) = serde_json::from_str::<Value>(&format!("{{{cleaned}}}")) {
+            return v;
+        }
+
+        let mut map = Map::new();
+        let chars: Vec<(usize, char)> = args_str.char_indices().collect();
+        let n = chars.len();
+        let mut ci = 0;
+
+        while ci < n {
+            while ci < n && matches!(chars[ci].1, ' ' | ',' | '\n' | '\t') {
+                ci += 1;
+            }
+            if ci >= n {
+                break;
+            }
+
+            let key_start_byte = chars[ci].0;
+            while ci < n && chars[ci].1 != ':' {
+                ci += 1;
+            }
+            if ci >= n {
+                break;
+            }
+            let key = args_str[key_start_byte..chars[ci].0]
+                .trim()
+                .trim_matches('"');
+            ci += 1; // skip ':'
+
+            while ci < n && matches!(chars[ci].1, ' ' | '\n' | '\t') {
+                ci += 1;
+            }
+            if ci >= n {
+                map.insert(key.to_string(), Value::String(String::new()));
+                break;
+            }
+
+            const DELIM: &str = "<|\"|>";
+            let byte_pos = chars[ci].0;
+
+            if args_str[byte_pos..].starts_with(DELIM) {
+                let delim_char_len = DELIM.chars().count();
+                ci += delim_char_len;
+                let val_start = if ci < n { chars[ci].0 } else { args_str.len() };
+                let end_byte = args_str[val_start..].find(DELIM);
+                match end_byte {
+                    Some(rel) => {
+                        let val = &args_str[val_start..val_start + rel];
+                        map.insert(key.to_string(), Value::String(val.to_string()));
+                        let after = val_start + rel + DELIM.len();
+                        ci = chars.iter().position(|&(b, _)| b >= after).unwrap_or(n);
+                    }
+                    None => {
+                        let val = &args_str[val_start..];
+                        map.insert(key.to_string(), Value::String(val.to_string()));
+                        break;
+                    }
+                }
+            } else if chars[ci].1 == '"' {
+                ci += 1;
+                let val_start = if ci < n { chars[ci].0 } else { args_str.len() };
+                let mut end_ci = ci;
+                while end_ci < n {
+                    if chars[end_ci].1 == '"' && (end_ci == 0 || chars[end_ci - 1].1 != '\\') {
+                        break;
+                    }
+                    end_ci += 1;
+                }
+                let val_end = if end_ci < n {
+                    chars[end_ci].0
+                } else {
+                    args_str.len()
+                };
+                let val = &args_str[val_start..val_end];
+                map.insert(key.to_string(), Value::String(val.to_string()));
+                ci = if end_ci < n { end_ci + 1 } else { n };
+            } else if chars[ci].1 == '{' {
+                let (inner, after_ci) = Self::gemma4_scan_nested(&chars, ci, '{', '}', n, args_str);
+                let nested = Self::gemma4_parse_args(inner);
+                map.insert(key.to_string(), nested);
+                ci = after_ci;
+            } else if chars[ci].1 == '[' {
+                let (inner, after_ci) = Self::gemma4_scan_nested(&chars, ci, '[', ']', n, args_str);
+                let arr = Self::gemma4_parse_array(inner);
+                map.insert(key.to_string(), arr);
+                ci = after_ci;
+            } else {
+                let val_start = chars[ci].0;
+                while ci < n && !matches!(chars[ci].1, ',' | '}' | ']') {
+                    ci += 1;
+                }
+                let val_end = if ci < n { chars[ci].0 } else { args_str.len() };
+                let val = args_str[val_start..val_end].trim();
+                map.insert(key.to_string(), Self::gemma4_parse_bare_value(val));
+            }
+        }
+
+        Value::Object(map)
+    }
+
+    fn gemma4_scan_nested<'a>(
+        chars: &[(usize, char)],
+        start_ci: usize,
+        open: char,
+        close: char,
+        n: usize,
+        source: &'a str,
+    ) -> (&'a str, usize) {
+        const DELIM: &str = "<|\"|>";
+        let delim_char_len = DELIM.chars().count();
+        let mut depth = 1usize;
+        let mut ci = start_ci + 1;
+        let inner_start = if ci < n { chars[ci].0 } else { source.len() };
+
+        while ci < n && depth > 0 {
+            let byte_pos = chars[ci].0;
+            if source[byte_pos..].starts_with(DELIM) {
+                ci += delim_char_len;
+                while ci < n {
+                    let bp = chars[ci].0;
+                    if source[bp..].starts_with(DELIM) {
+                        ci += delim_char_len;
+                        break;
+                    }
+                    ci += 1;
+                }
+                continue;
+            }
+            if chars[ci].1 == open {
+                depth += 1;
+            } else if chars[ci].1 == close {
+                depth -= 1;
+            }
+            ci += 1;
+        }
+
+        let inner_end = if depth == 0 && ci > 0 {
+            chars[ci - 1].0
+        } else if ci <= n && ci > 0 {
+            if ci < n {
+                chars[ci].0
+            } else {
+                source.len()
+            }
+        } else {
+            source.len()
+        };
+
+        (&source[inner_start..inner_end], ci)
+    }
+
+    fn gemma4_parse_array(arr_str: &str) -> Value {
+        const DELIM: &str = "<|\"|>";
+        let mut items = Vec::new();
+        let chars: Vec<(usize, char)> = arr_str.char_indices().collect();
+        let n = chars.len();
+        let mut ci = 0;
+
+        while ci < n {
+            while ci < n && matches!(chars[ci].1, ' ' | ',' | '\n' | '\t') {
+                ci += 1;
+            }
+            if ci >= n {
+                break;
+            }
+
+            let byte_pos = chars[ci].0;
+
+            if arr_str[byte_pos..].starts_with(DELIM) {
+                let delim_char_len = DELIM.chars().count();
+                ci += delim_char_len;
+                let val_start = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let end_byte = arr_str[val_start..].find(DELIM);
+                match end_byte {
+                    Some(rel) => {
+                        items.push(Value::String(
+                            arr_str[val_start..val_start + rel].to_string(),
+                        ));
+                        let after = val_start + rel + DELIM.len();
+                        ci = chars.iter().position(|&(b, _)| b >= after).unwrap_or(n);
+                    }
+                    None => {
+                        items.push(Value::String(arr_str[val_start..].to_string()));
+                        break;
+                    }
+                }
+            } else if chars[ci].1 == '"' {
+                ci += 1;
+                let val_start = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let mut end_ci = ci;
+                while end_ci < n
+                    && !(chars[end_ci].1 == '"' && (end_ci == 0 || chars[end_ci - 1].1 != '\\'))
+                {
+                    end_ci += 1;
+                }
+                let val_end = if end_ci < n {
+                    chars[end_ci].0
+                } else {
+                    arr_str.len()
+                };
+                items.push(Value::String(arr_str[val_start..val_end].to_string()));
+                ci = if end_ci < n { end_ci + 1 } else { n };
+            } else if chars[ci].1 == '{' {
+                let (inner, after_ci) = Self::gemma4_scan_nested(&chars, ci, '{', '}', n, arr_str);
+                items.push(Self::gemma4_parse_args(inner));
+                ci = after_ci;
+            } else if chars[ci].1 == '[' {
+                let (inner, after_ci) = Self::gemma4_scan_nested(&chars, ci, '[', ']', n, arr_str);
+                items.push(Self::gemma4_parse_array(inner));
+                ci = after_ci;
+            } else {
+                let val_start = chars[ci].0;
+                while ci < n && !matches!(chars[ci].1, ',' | ']') {
+                    ci += 1;
+                }
+                let val_end = if ci < n { chars[ci].0 } else { arr_str.len() };
+                let val = arr_str[val_start..val_end].trim();
+                if !val.is_empty() {
+                    items.push(Self::gemma4_parse_bare_value(val));
+                }
+            }
+        }
+
+        Value::Array(items)
+    }
+
+    fn gemma4_parse_bare_value(val: &str) -> Value {
+        let lower = val.to_ascii_lowercase();
+        match lower.as_str() {
+            "true" => Value::Bool(true),
+            "false" => Value::Bool(false),
+            "null" | "none" | "nil" => Value::Null,
+            _ => {
+                if let Ok(n) = val.parse::<i64>() {
+                    Value::Number(n.into())
+                } else if let Ok(f) = val.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map(Value::Number)
+                        .unwrap_or_else(|| Value::String(val.to_string()))
+                } else {
+                    Value::String(val.to_string())
+                }
+            }
+        }
     }
 
     fn strip_tool_tags(&self, text: &str) -> String {
@@ -1814,11 +2197,20 @@ impl StreamToolParser {
         } else if self.config.start_token_str.contains("tool_call")
             && self.config.end_token_str.contains("tool_call")
         {
-            markers.extend(
-                ["<function=", "</function>", "<parameter=", "</parameter>"]
-                    .into_iter()
-                    .map(|s| s.to_string()),
-            );
+            let is_glm = self.uses_glm_xml();
+            if is_glm {
+                markers.extend(
+                    ["<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+                        .into_iter()
+                        .map(|s| s.to_string()),
+                );
+            } else {
+                markers.extend(
+                    ["<function=", "</function>", "<parameter=", "</parameter>"]
+                        .into_iter()
+                        .map(|s| s.to_string()),
+                );
+            }
         }
         markers
     }
@@ -1939,6 +2331,14 @@ impl StreamToolParser {
     fn uses_minimax_xml(&self) -> bool {
         self.config.start_token_str == "<minimax:tool_call>"
             && self.config.end_token_str == "</minimax:tool_call>"
+    }
+
+    fn uses_glm_xml(&self) -> bool {
+        let id = self.model_id.to_ascii_lowercase();
+        id.contains("glm")
+            && !self.uses_minimax_xml()
+            && self.config.start_token_str == "<tool_call>"
+            && self.config.end_token_str == "</tool_call>"
     }
 
     fn xml_parameter_open_prefix(uses_minimax_xml: bool) -> &'static str {
@@ -2506,6 +2906,53 @@ abc
         assert!(!parser.has_complete_tool_envelope());
     }
 
+    #[test]
+    fn test_envelope_glm47_xml_format() {
+        let tools = vec![crate::tools::function_tool("read", "Read a file").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::GLM4MoeLite,
+            "glm-4.7-flash".to_string(),
+            ToolConfig::for_model_type(&ModelType::GLM4MoeLite),
+            tools,
+            None,
+        );
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value></tool_call>"
+                .to_string();
+        assert!(parser.has_complete_tool_envelope());
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value>"
+                .to_string();
+        assert!(!parser.has_complete_tool_envelope());
+
+        parser.buffer =
+            "<tool_call>read<arg_key>filePath</arg_key><arg_value>/tmp/test.rs</arg_value></tool_call>"
+                .to_string();
+        assert!(parser.has_complete_tool_envelope());
+    }
+
+    #[test]
+    fn test_glm47_display_escape_markers() {
+        let tools = vec![crate::tools::function_tool("read", "Read a file").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::GLM4MoeLite,
+            "glm-4.7-flash".to_string(),
+            ToolConfig::for_model_type(&ModelType::GLM4MoeLite),
+            tools,
+            None,
+        );
+
+        let markers = parser.display_escape_markers();
+        assert!(markers.iter().any(|m| m == "<arg_key>"));
+        assert!(markers.iter().any(|m| m == "</arg_key>"));
+        assert!(markers.iter().any(|m| m == "<arg_value>"));
+        assert!(markers.iter().any(|m| m == "</arg_value>"));
+        assert!(markers.iter().any(|m| m == "<tool_call>"));
+        assert!(markers.iter().any(|m| m == "</tool_call>"));
+    }
+
     #[tokio::test]
     async fn test_nested_start_marker_is_ignored_while_buffering() {
         let tools = vec![crate::tools::function_tool("Write", "desc").build()];
@@ -2581,6 +3028,80 @@ abc
                 assert_eq!(parsed["content"], "# Title");
             }
             other => panic!("Expected recovered tool calls, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_finalize_recovers_qwen3_json_missing_end_tag() {
+        let tools = vec![crate::tools::function_tool("get_weather", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "NYC"}}"#
+            .to_string();
+        parser.buffer_had_parse_activity = true;
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("get_weather".to_string()),
+            arguments: r#"{"location": "NYC"}"#.to_string(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::ToolCalls(calls)) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "get_weather");
+                let args = calls[0].function.arguments.as_ref().unwrap();
+                let parsed: Value = serde_json::from_str(args).unwrap();
+                assert_eq!(parsed["location"], "NYC");
+            }
+            other => panic!(
+                "Expected recovered tool calls when </tool_call> is missing, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_finalize_recovers_qwen3_json_missing_outer_brace_and_end_tag() {
+        let tools = vec![crate::tools::function_tool("get_weather", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            tools,
+            None,
+        );
+
+        parser.state = ParserState::Buffering;
+        parser.buffer = r#"<tool_call>
+{"name": "get_weather", "arguments": {"location": "NYC"}"#
+            .to_string();
+        parser.buffer_had_parse_activity = true;
+        parser.streaming_calls = vec![StreamingToolCallState {
+            name: Some("get_weather".to_string()),
+            arguments: r#"{"location": "NYC"}"#.to_string(),
+        }];
+
+        let finalized = parser.finalize_buffered_tool_calls().await;
+        match finalized {
+            Some(BufferedFinalizeResult::ToolCalls(calls)) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "get_weather");
+                let args = calls[0].function.arguments.as_ref().unwrap();
+                let parsed: Value = serde_json::from_str(args).unwrap();
+                assert_eq!(parsed["location"], "NYC");
+            }
+            other => panic!(
+                "Expected recovered tool calls when outer }} and </tool_call> are missing, got {:?}",
+                other
+            ),
         }
     }
 
@@ -3501,7 +4022,7 @@ Some markdown text here.</parameter>
 </invoke>
 </minimax:tool_call>"#;
 
-        let calls = parse_minimax_xml_tool_calls(text);
+        let calls = parse_minimax_xml_tool_calls(text, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "write");
         assert!(calls[0]
@@ -3525,7 +4046,7 @@ Some markdown text here.</parameter>
 <parameter name="filePath">/root/AGENTS.md</parameter>
 </invoke>"#;
 
-        let calls = parse_minimax_xml_tool_calls(text);
+        let calls = parse_minimax_xml_tool_calls(text, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "read");
         assert!(calls[0]
@@ -3542,7 +4063,7 @@ Some markdown text here.</parameter>
 <parameter name="tags">["rust", "programming"]</parameter>
 </invoke>"#;
 
-        let calls = parse_minimax_xml_tool_calls(text);
+        let calls = parse_minimax_xml_tool_calls(text, &[]);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].function.name, "search");
         let args: Value =
@@ -3562,9 +4083,245 @@ Some markdown text here.</parameter>
 </invoke>
 </minimax:tool_call>"#;
 
-        let calls = parse_minimax_xml_tool_calls(text);
+        let calls = parse_minimax_xml_tool_calls(text, &[]);
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].function.name, "read");
         assert_eq!(calls[1].function.name, "write");
+    }
+
+    #[test]
+    fn test_parse_minimax_xml_type_coercion_with_schema() {
+        let tools = vec![crate::tools::function_tool("get_weather", "Get weather")
+            .parameters_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "days": {"type": "integer"},
+                    "verbose": {"type": "boolean"},
+                    "temp_unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                },
+                "required": ["city"]
+            }))
+            .build()];
+
+        let text = r#"<invoke name="get_weather">
+<parameter name="city">London</parameter>
+<parameter name="days">5</parameter>
+<parameter name="verbose">true</parameter>
+<parameter name="temp_unit">celsius</parameter>
+</invoke>"#;
+
+        let calls = parse_minimax_xml_tool_calls(text, &tools);
+        assert_eq!(calls.len(), 1);
+        let args: Value =
+            serde_json::from_str(calls[0].function.arguments.as_deref().unwrap()).unwrap();
+        assert_eq!(args["city"], Value::String("London".to_string()));
+        assert_eq!(args["days"], serde_json::json!(5));
+        assert_eq!(args["verbose"], Value::Bool(true));
+        assert_eq!(args["temp_unit"], Value::String("celsius".to_string()));
+    }
+
+    #[test]
+    fn test_parse_minimax_xml_anyof_schema() {
+        let tools = vec![crate::tools::function_tool("test_fn", "Test")
+            .parameters_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "value": {
+                        "anyOf": [
+                            {"type": "integer"},
+                            {"type": "null"}
+                        ]
+                    }
+                }
+            }))
+            .build()];
+
+        let text = r#"<invoke name="test_fn">
+<parameter name="value">42</parameter>
+</invoke>"#;
+
+        let calls = parse_minimax_xml_tool_calls(text, &tools);
+        let args: Value =
+            serde_json::from_str(calls[0].function.arguments.as_deref().unwrap()).unwrap();
+        assert_eq!(args["value"], serde_json::json!(42));
+
+        let text_null = r#"<invoke name="test_fn">
+<parameter name="value">null</parameter>
+</invoke>"#;
+        let calls_null = parse_minimax_xml_tool_calls(text_null, &tools);
+        let args_null: Value =
+            serde_json::from_str(calls_null[0].function.arguments.as_deref().unwrap()).unwrap();
+        assert!(args_null["value"].is_null());
+    }
+
+    // ---------------------------------------------------------------
+    // LLaMA 4 pythonic tool config
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_tool_config_llama4() {
+        let config = ToolConfig::for_model_type(&ModelType::LLaMa4);
+        assert!(config.start_token_ids.contains(&200016)); // <|python_start|>
+        assert!(config.end_token_ids.contains(&200007)); // <|eom|>
+        assert!(config.end_token_ids.contains(&200008)); // <|eot|>
+        assert_eq!(config.start_token_str, "<|python_start|>");
+        assert!(config.start_is_special);
+        assert!(config.end_is_special);
+    }
+
+    #[test]
+    fn test_llama4_uses_pythonic_parser() {
+        let name =
+            StreamToolParser::parser_name_for_model(&ModelType::LLaMa4, "meta-llama/Llama-4-Scout");
+        assert_eq!(name, "pythonic");
+    }
+
+    #[test]
+    fn test_llama3_still_uses_llama_parser() {
+        let name = StreamToolParser::parser_name_for_model(
+            &ModelType::LLaMa,
+            "meta-llama/Llama-3.2-3B-Instruct",
+        );
+        assert_eq!(name, "llama");
+    }
+
+    #[tokio::test]
+    async fn test_llama4_parse_pythonic_tool_call() {
+        let tools = vec![crate::tools::function_tool("get_weather", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::LLaMa4,
+            "llama4".to_string(),
+            ToolConfig::for_model_type(&ModelType::LLaMa4),
+            tools,
+            None,
+        );
+
+        let text = r#"[get_weather(location="Vancouver", units="celsius")]"#;
+        let calls = parser.parse_complete_with_fallback(text).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "get_weather");
+        let args: Value =
+            serde_json::from_str(calls[0].function.arguments.as_deref().unwrap()).unwrap();
+        assert_eq!(args["location"], "Vancouver");
+        assert_eq!(args["units"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_llama4_parse_multiple_pythonic_tool_calls() {
+        let tools = vec![
+            crate::tools::function_tool("get_weather", "desc").build(),
+            crate::tools::function_tool("calculate_route", "desc").build(),
+        ];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::LLaMa4,
+            "llama4".to_string(),
+            ToolConfig::for_model_type(&ModelType::LLaMa4),
+            tools,
+            None,
+        );
+
+        let text = r#"[get_weather(location="Vancouver"), calculate_route(start="Boston", end="New York")]"#;
+        let calls = parser.parse_complete_with_fallback(text).await;
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "get_weather");
+        assert_eq!(calls[1].function.name, "calculate_route");
+    }
+
+    #[tokio::test]
+    async fn test_llama4_buffering_with_python_start_token() {
+        let tools = vec![crate::tools::function_tool("get_weather", "desc").build()];
+        let mut parser = StreamToolParser::new_with_config(
+            &ModelType::LLaMa4,
+            "llama4".to_string(),
+            ToolConfig::for_model_type(&ModelType::LLaMa4),
+            tools,
+            None,
+        );
+
+        // <|python_start|> token triggers buffering
+        assert!(matches!(
+            parser.process_token(200016, "<|python_start|>").await,
+            StreamResult::Buffering
+        ));
+
+        // Tool call content gets buffered
+        assert!(matches!(
+            parser
+                .process_token(0, r#"[get_weather(location="Vancouver")]"#)
+                .await,
+            StreamResult::Buffering
+        ));
+
+        // <|eom|> token ends buffering and parses
+        match parser.process_token(200007, "<|eom|>").await {
+            StreamResult::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "get_weather");
+            }
+            other => panic!("Expected ToolCalls, got {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Gemma 4 case-insensitive bare values
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_gemma4_parse_bare_value_case_insensitive() {
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("true"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("True"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("TRUE"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("false"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("False"),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("null"),
+            Value::Null
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("None"),
+            Value::Null
+        );
+        assert_eq!(
+            StreamToolParser::gemma4_parse_bare_value("42"),
+            Value::Number(42.into())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gemma4_tool_call_parse() {
+        let tools = vec![crate::tools::function_tool("search", "desc").build()];
+        let parser = StreamToolParser::new_with_config(
+            &ModelType::Gemma4,
+            "gemma4".to_string(),
+            ToolConfig::for_model_type(&ModelType::Gemma4),
+            tools,
+            None,
+        );
+
+        let text =
+            r#"<|tool_call>call:search{query:<|"|>rust programming<|"|>,count:5}<tool_call|>"#;
+        let calls = parser.parse_complete_with_fallback(text).await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "search");
+        let args: Value =
+            serde_json::from_str(calls[0].function.arguments.as_deref().unwrap()).unwrap();
+        assert_eq!(args["query"], "rust programming");
+        assert_eq!(args["count"], 5);
     }
 }
