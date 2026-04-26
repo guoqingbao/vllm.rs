@@ -432,11 +432,8 @@ impl ToolConfig {
     /// Also auto-populates token IDs from the tokenizer when the config starts with empty sets.
     pub fn validate_with_tokenizer(&mut self, tokenizer: &Tokenizer, model_type: &ModelType) {
         if self.has_start_tokens() {
-            if !Self::matches_single_token(
-                tokenizer,
-                &self.start_token_str,
-                &self.start_token_ids,
-            ) {
+            if !Self::matches_single_token(tokenizer, &self.start_token_str, &self.start_token_ids)
+            {
                 if Self::try_rebind_single_token_id(
                     tokenizer,
                     &self.start_token_str,
@@ -471,11 +468,7 @@ impl ToolConfig {
         }
 
         if self.has_end_tokens() {
-            if !Self::matches_single_token(
-                tokenizer,
-                &self.end_token_str,
-                &self.end_token_ids,
-            ) {
+            if !Self::matches_single_token(tokenizer, &self.end_token_str, &self.end_token_ids) {
                 if Self::try_rebind_single_token_id(
                     tokenizer,
                     &self.end_token_str,
@@ -1668,7 +1661,10 @@ impl StreamToolParser {
             ModelType::Mistral | ModelType::Mistral3VL => "mistral",
             ModelType::Qwen3_5 | ModelType::Qwen3_5MoE => "qwen_coder",
             ModelType::Qwen3 | ModelType::Qwen3MoE | ModelType::Qwen3VL => {
-                if model_lower.contains("coder") || model_lower.contains("qwen3.5") {
+                if model_lower.contains("coder")
+                    || model_lower.contains("qwen3.5")
+                    || model_lower.contains("qwen3.6")
+                {
                     "qwen_coder"
                 } else {
                     "qwen"
@@ -2204,14 +2200,9 @@ impl StreamToolParser {
             let is_glm = self.uses_glm_xml();
             if is_glm {
                 markers.extend(
-                    [
-                        "<arg_key>",
-                        "</arg_key>",
-                        "<arg_value>",
-                        "</arg_value>",
-                    ]
-                    .into_iter()
-                    .map(|s| s.to_string()),
+                    ["<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>"]
+                        .into_iter()
+                        .map(|s| s.to_string()),
                 );
             } else {
                 markers.extend(
@@ -2344,7 +2335,8 @@ impl StreamToolParser {
 
     fn uses_glm_xml(&self) -> bool {
         let id = self.model_id.to_ascii_lowercase();
-        id.contains("glm") && !self.uses_minimax_xml()
+        id.contains("glm")
+            && !self.uses_minimax_xml()
             && self.config.start_token_str == "<tool_call>"
             && self.config.end_token_str == "</tool_call>"
     }
