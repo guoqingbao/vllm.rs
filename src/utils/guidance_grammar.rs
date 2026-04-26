@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::server::ChatCompletionRequest;
 use crate::tools::Tool;
-use crate::server::parser::ToolConfig;
+use crate::server::parser::{StreamToolParser, ToolConfig};
 use crate::utils::chat_template::ChatTemplate;
 use crate::utils::config::ModelType;
 use crate::utils::config::ReasoningEffort;
@@ -851,7 +851,7 @@ impl ToolCallGrammar {
             value_rules: HashMap::new(),
         }
     }
-    pub fn new_gemma4(tools: Vec<Tool>, start_token_id: u32, end_token_id: u32) -> Self {
+    pub fn _new_gemma4(tools: Vec<Tool>, start_token_id: u32, end_token_id: u32) -> Self {
         Self {
             tools,
             start_token_id,
@@ -861,36 +861,20 @@ impl ToolCallGrammar {
         }
     }
 
-    /// Build ToolCallGrammar with model-aware selection and optional override
-    /// Override priority: 1) parser_name override, 2) model_type default, 3) fallback
+    /// Build ToolCallGrammar with model-aware selection using StreamToolParser for consistent parser name determination
+    /// This ensures grammar generation aligns with the streaming parser's format selection
     pub fn for_model_type(
         tools: Vec<Tool>,
         start_token_id: u32,
         end_token_id: u32,
-        parser_name: Option<&str>,
         model_type: &ModelType,
+        model_id: &str,
     ) -> ToolCallGrammar {
-        // Determine format based on parser_name override first, then model type
-        let format = if let Some(name) = parser_name {
-            if name == "qwen_coder" {
-                ToolFormat::QwenCoder
-            } else if name == "gemma4" {
-                ToolFormat::Gemma4
-            } else {
-                ToolFormat::Json
-            }
-        } else {
-            // No override - use model type defaults
-            match model_type {
-                ModelType::Qwen3
-                | ModelType::Qwen3MoE
-                | ModelType::Qwen3_5
-                | ModelType::Qwen3_5MoE
-                | ModelType::Qwen3VL => ToolFormat::QwenCoder,
-                ModelType::Gemma4 => ToolFormat::Gemma4,
-                _ => ToolFormat::Json,
-            }
-        };
+        // Use StreamToolParser::parser_name_for_model() to determine the parser name
+        let parser_name = StreamToolParser::parser_name_for_model(model_type, model_id);
+
+        // Map parser name to ToolFormat
+        let format = Self::tool_format_for_parser_name(parser_name);
 
         ToolCallGrammar {
             tools,
@@ -898,6 +882,17 @@ impl ToolCallGrammar {
             end_token_id,
             format,
             value_rules: HashMap::new(),
+        }
+    }
+
+    /// Map parser name to ToolFormat variant
+    /// Parsers without explicit grammars default to Generic
+    fn tool_format_for_parser_name(parser_name: &str) -> ToolFormat {
+        match parser_name {
+            "qwen_coder" => ToolFormat::QwenCoder,
+            "minimax_m2" => ToolFormat::MiniMax,
+            "json" => ToolFormat::Json,
+            _ => ToolFormat::Generic,
         }
     }
 }
@@ -1056,7 +1051,7 @@ text: /(?s:.+?)/
         rules
     }
 
-    fn build_gemma4_array_definition() -> String {
+    fn _build_gemma4_array_definition() -> String {
         r#"gemma4_array: "[" gemma4_array_items? "]"
 gemma4_array_items: gemma4_value ("," gemma4_value)*
 gemma4_value: gemma4_string | gemma4_number | gemma4_boolean | gemma4_array | gemma4_object
@@ -1064,7 +1059,7 @@ gemma4_value: gemma4_string | gemma4_number | gemma4_boolean | gemma4_array | ge
             .to_string()
     }
 
-    fn build_gemma4_object_definition() -> String {
+    fn _build_gemma4_object_definition() -> String {
         r#"gemma4_object: "{" gemma4_object_items? "}"
 gemma4_object_items: gemma4_key_value ("," gemma4_key_value)*
 gemma4_key_value: gemma4_key ":" gemma4_value
@@ -1074,7 +1069,7 @@ gemma4_value: gemma4_string | gemma4_number | gemma4_boolean | gemma4_array | ge
             .to_string()
     }
 
-    fn build_gemma4_pattern_definition(rule_name: &str, value: &serde_json::Value) -> String {
+    fn build_gemma4_pattern_definition(_rule_name: &str, value: &serde_json::Value) -> String {
         if let Some(obj) = value.as_object() {
             if let Some(type_val) = obj.get("type").and_then(|t| t.as_str()) {
                 match type_val {
@@ -1597,7 +1592,7 @@ impl<'a> GrammarRequestDispatcher<'a> {
                     start_token_id,
                     end_token_id,
                 )),
-            "gemma4" => Some(ToolCallGrammar::new_gemma4(
+            "gemma4" => Some(ToolCallGrammar::new_json(
                     tools,
                     start_token_id,
                     end_token_id,
