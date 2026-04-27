@@ -219,7 +219,7 @@ impl MlaAttention {
                     let mscale = 0.1 * mscale_all_dim * factor.ln() + 1.0;
                     sm_scale *= mscale * mscale;
                 }
-                rope_scale = 1.0;
+                rope_scale = 1.0 / factor;
             }
         }
 
@@ -367,6 +367,8 @@ impl MlaAttention {
                         self.num_heads,
                         page_size,
                         self.sm_scale,
+                        self.rope_scale,
+                        self.rope_theta,
                         plan_info,
                         true, // causal
                     )?
