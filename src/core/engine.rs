@@ -662,6 +662,11 @@ impl LLMEngine {
         self.scheduler.get_num_cached_tokens()
     }
 
+    /// See [`Scheduler::get_num_cached_tokens_for_seq`].
+    pub fn get_num_cached_tokens_for_seq(&self, seq_id: usize) -> Option<usize> {
+        self.scheduler.get_num_cached_tokens_for_seq(seq_id)
+    }
+
     fn trim_prompt_replay_prefix(
         replay_ids: &[u32],
         guidance_tokens: &GuidanceTokens,
