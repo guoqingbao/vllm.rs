@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 /// An internal enum to abstract over the two stream types.
 /// It implements Read and Write to be used generically.
@@ -382,18 +382,41 @@ impl Communicator {
 
 /// Generic, standardized function to send a message.
 /// Uses a 4-byte LE length prefix followed by bincode data.
+///
+/// Emits a structured tracing event under target `vllm_rs::instrument::pd_comm`
+/// with `op = "send"`, `bytes`, and `lat_us`. The event is filterable via
+/// `RUST_LOG=vllm_rs::instrument::pd_comm=info` and is silent by default.
 fn send_message_generic(stream: &mut (impl Read + Write), msg: &TransferMessage) -> Result<bool> {
     let serialized: Vec<u8> = bincode::serialize(msg).map_err(candle_core::Error::wrap)?;
     let len = serialized.len() as u32;
+    let bytes = serialized.len();
+
+    let t0 = Instant::now();
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(&serialized)?;
     stream.flush()?;
+    let lat_us = t0.elapsed().as_micros() as u64;
+
+    tracing::info!(
+        target: "vllm_rs::instrument::pd_comm",
+        op = "send",
+        bytes = bytes,
+        lat_us = lat_us,
+        "pd_comm send",
+    );
     Ok(true)
 }
 
 /// Generic, standardized function to receive a message.
 /// Reads a 4-byte LE length prefix then bincode data.
+///
+/// Emits a structured tracing event under target `vllm_rs::instrument::pd_comm`
+/// with `op = "recv"`, `bytes`, and `lat_us` once a complete message has been
+/// read and decoded. The event is silent unless
+/// `RUST_LOG=vllm_rs::instrument::pd_comm=info` is set.
 fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferMessage> {
+    let t0 = Instant::now();
+
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
@@ -407,5 +430,14 @@ fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferM
     stream.read_exact(&mut msg_buf)?;
 
     let msg = bincode::deserialize(&msg_buf).map_err(candle_core::Error::wrap)?;
+    let lat_us = t0.elapsed().as_micros() as u64;
+
+    tracing::info!(
+        target: "vllm_rs::instrument::pd_comm",
+        op = "recv",
+        bytes = len,
+        lat_us = lat_us,
+        "pd_comm recv",
+    );
     Ok(msg)
 }
