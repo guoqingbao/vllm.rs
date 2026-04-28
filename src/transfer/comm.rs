@@ -441,3 +441,45 @@ fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferM
     );
     Ok(msg)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{receive_message_generic, send_message_generic};
+    use crate::transfer::TransferMessage;
+    use std::io::{Cursor, Seek, SeekFrom};
+
+    /// Round-trips a known `TransferMessage` through the same framing path
+    /// the live PD socket uses (a 4-byte LE length prefix followed by a
+    /// bincode payload). Exercises both halves in one test: it locks down
+    /// the framing contract so a future refactor can't silently change the
+    /// wire format and break compatibility with an already-deployed peer,
+    /// and it keeps the new `vllm_rs::instrument::pd_comm` tracing call
+    /// sites compile-checked against any signature drift in the helpers
+    /// that emit them.
+    #[test]
+    fn send_recv_message_generic_roundtrip() {
+        let mut buf: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+        let original = TransferMessage::AvailableTokenResponse(4096);
+
+        send_message_generic(&mut buf, &original).expect("send framed message");
+
+        let written = buf.get_ref().len();
+        assert!(
+            written > 4,
+            "framed payload should include a 4-byte length prefix plus body, got {written} bytes",
+        );
+        assert_eq!(
+            u32::from_le_bytes(buf.get_ref()[..4].try_into().unwrap()) as usize,
+            written - 4,
+            "length prefix should match body length",
+        );
+
+        buf.seek(SeekFrom::Start(0)).expect("rewind for read");
+        let decoded = receive_message_generic(&mut buf).expect("decode framed message");
+
+        match decoded {
+            TransferMessage::AvailableTokenResponse(n) => assert_eq!(n, 4096),
+            other => panic!("expected AvailableTokenResponse, got {other:?}"),
+        }
+    }
+}
