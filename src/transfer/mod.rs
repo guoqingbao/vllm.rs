@@ -16,7 +16,7 @@ mod cuda_remote;
 use candle_core::cuda_backend::CudaDType as MsgDtype;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 #[cfg(not(feature = "cuda"))]
 use Sized as MsgDtype;
 
@@ -210,16 +210,38 @@ impl Transfer {
     }
 
     /// (Client) Receives the KV cache data and copies it into local GPU blocks.
+    ///
+    /// On success, emits a structured tracing event under target
+    /// `vllm_rs::instrument::pd_kv` reporting the transfer kind
+    /// (`local_ipc` or `remote_tcp`), the number of blocks copied, the
+    /// server-reported `sending_time_us`, and the client-side `total_us`
+    /// for the whole `receive_kv_cache` call. The event is silent unless
+    /// `RUST_LOG=vllm_rs::instrument::pd_kv=info` is set.
     #[allow(unused)]
     pub fn receive_kv_cache(
         &self,
         seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
     ) -> Result<(bool, u32, usize)> {
+        let t_start = Instant::now();
         let status = self.check_prefill_finished(seq.id)?;
         if !status {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
         }
+
+        // Snapshot the transfer kind for the tracing event below. The
+        // `finished_data` entry is guaranteed to be present here because
+        // `check_prefill_finished` only returns `true` once it has been
+        // populated by the listener thread.
+        let transfer_kind: &'static str = self
+            .finished_data
+            .read()
+            .get(&seq.id)
+            .map(|d| match &d.transfer_handle {
+                KVTransferHandle::LocalIpc { .. } => "local_ipc",
+                KVTransferHandle::RemoteTcp { .. } => "remote_tcp",
+            })
+            .unwrap_or("unknown");
 
         fn read_data<T: WithDType + MsgDtype>(
             sf: &Transfer,
@@ -315,12 +337,29 @@ impl Transfer {
         }
 
         let dtype = local_gpu_cache[0].0.dtype();
-        match dtype {
+        let result = match dtype {
             DType::F16 => read_data::<half::f16>(&self, seq, local_gpu_cache),
             DType::BF16 => read_data::<half::bf16>(&self, seq, local_gpu_cache),
             DType::U8 => read_data::<u8>(&self, seq, local_gpu_cache),
             _ => candle_core::bail!("Invalid kvcache dtype!"),
+        };
+
+        if let Ok((success, _, sending_time)) = &result {
+            tracing::info!(
+                target: "vllm_rs::instrument::pd_kv",
+                op = "receive",
+                seq_id = seq.id,
+                num_blocks = seq.block_table.len(),
+                transfer_kind = transfer_kind,
+                dtype = ?dtype,
+                success = *success,
+                sending_time_us = *sending_time as u64,
+                total_us = t_start.elapsed().as_micros() as u64,
+                "pd_kv receive_kv_cache",
+            );
         }
+
+        result
     }
 
     /// (Client) Notify the server to release kvcache
