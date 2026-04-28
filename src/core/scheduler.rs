@@ -988,10 +988,11 @@ impl Scheduler {
                 .block_manager
                 .try_receive_kvcache(&self.transferred[idx])
             {
-                Ok((ret, first_token, sending_time)) => {
+                Ok((ret, first_token, sending_time, num_cached_tokens)) => {
                     let seq = &mut self.transferred[idx];
                     success = ret;
                     if success {
+                        seq.num_cached_tokens = num_cached_tokens;
                         // Update sequence and move to running
                         // The first token is generated on PD server,
                         // it has been transfered to client, but haven't been send to user

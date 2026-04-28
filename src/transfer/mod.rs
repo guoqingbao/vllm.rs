@@ -106,6 +106,10 @@ pub struct FinishedPrefillData {
     pub first_token: u32,
     pub transfer_handle: KVTransferHandle,
     pub sending_time: usize,
+    /// Prefix-cache hit length recorded on the prefill server. Restored onto
+    /// the decode-side seq so `Usage.prompt_tokens_details.cached_tokens`
+    /// reports the right value across PD.
+    pub num_cached_tokens: usize,
 }
 
 /// Messages for communication between Client and PDServer.
@@ -210,12 +214,13 @@ impl Transfer {
     }
 
     /// (Client) Receives the KV cache data and copies it into local GPU blocks.
+    /// Returns `(success, first_token, sending_time, num_cached_tokens)`.
     #[allow(unused)]
     pub fn receive_kv_cache(
         &self,
         seq: &Sequence,
         local_gpu_cache: &Vec<(Tensor, Tensor)>,
-    ) -> Result<(bool, u32, usize)> {
+    ) -> Result<(bool, u32, usize, usize)> {
         let status = self.check_prefill_finished(seq.id)?;
         if !status {
             candle_core::bail!("Unable to receive kvcache from the PD server since this sequence is not prefill completed!")
@@ -225,7 +230,7 @@ impl Transfer {
             sf: &Transfer,
             seq: &Sequence,
             local_gpu_cache: &Vec<(Tensor, Tensor)>,
-        ) -> Result<(bool, u32, usize)> {
+        ) -> Result<(bool, u32, usize, usize)> {
             let local_gpu_ids = seq.block_table.clone();
             let local_device = local_gpu_cache[0].0.device();
 
@@ -311,7 +316,7 @@ impl Transfer {
                     }
                 }
             }
-            Ok((true, token, data.sending_time))
+            Ok((true, token, data.sending_time, data.num_cached_tokens))
         }
 
         let dtype = local_gpu_cache[0].0.dtype();
@@ -432,6 +437,7 @@ impl Transfer {
                 first_token,
                 transfer_handle,
                 sending_time,
+                num_cached_tokens: seq.num_cached_tokens,
             });
             // Send the finished data back to the client
             sf.communicator.send(&msg)
