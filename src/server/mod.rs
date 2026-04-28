@@ -1975,4 +1975,47 @@ mod tests {
         assert_eq!(params.thinking, Some(false));
         assert_eq!(params.reasoning_effort, None);
     }
+
+    #[test]
+    fn usage_omits_prompt_tokens_details_when_none() {
+        let usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            prompt_tokens_details: None,
+        };
+
+        let value: serde_json::Value = serde_json::to_value(&usage).expect("serialize usage");
+        let object = value.as_object().expect("usage is a JSON object");
+
+        assert_eq!(object.get("prompt_tokens"), Some(&serde_json::json!(100)));
+        assert_eq!(
+            object.get("completion_tokens"),
+            Some(&serde_json::json!(50))
+        );
+        assert_eq!(object.get("total_tokens"), Some(&serde_json::json!(150)));
+        assert!(
+            !object.contains_key("prompt_tokens_details"),
+            "prompt_tokens_details should be omitted when None, got: {value}"
+        );
+    }
+
+    #[test]
+    fn usage_includes_prompt_tokens_details_when_some() {
+        let usage = Usage {
+            prompt_tokens: 200,
+            completion_tokens: 64,
+            total_tokens: 264,
+            prompt_tokens_details: Some(PromptTokensDetails { cached_tokens: 128 }),
+        };
+
+        let value: serde_json::Value = serde_json::to_value(&usage).expect("serialize usage");
+        assert_eq!(
+            value
+                .pointer("/prompt_tokens_details/cached_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(128),
+            "cached_tokens should round-trip under prompt_tokens_details, got: {value}",
+        );
+    }
 }
