@@ -611,10 +611,17 @@ pub struct ChatResponseMessage {
 }
 
 #[derive(Serialize, Debug)]
+pub struct PromptTokensDetails {
+    pub cached_tokens: usize,
+}
+
+#[derive(Serialize, Debug)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
 }
 
 #[derive(Serialize, Debug)]

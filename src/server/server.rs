@@ -10,7 +10,8 @@ use super::{
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
-    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    EmbeddingOutput, EmbeddingUsage, ErrorMsg, PromptTokensDetails, ServerData, Usage, UsageQuery,
+    UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
@@ -1007,10 +1008,21 @@ pub async fn chat_completion(
                                 },
                                 error: None,
                             }],
-                            usage: include_usage.then_some(Usage {
-                                prompt_tokens: prompt_length,
-                                completion_tokens: total_decoded_tokens,
-                                total_tokens: prompt_length + total_decoded_tokens,
+                            usage: include_usage.then_some({
+                                let cached = engine_clone
+                                    .read()
+                                    .get_num_cached_tokens_for_seq(current_seq_id)
+                                    .unwrap_or(0);
+                                Usage {
+                                    prompt_tokens: prompt_length,
+                                    completion_tokens: total_decoded_tokens,
+                                    total_tokens: prompt_length + total_decoded_tokens,
+                                    prompt_tokens_details: (cached > 0).then_some(
+                                        PromptTokensDetails {
+                                            cached_tokens: cached,
+                                        },
+                                    ),
+                                }
                             }),
                         };
 
@@ -1157,7 +1169,10 @@ pub async fn chat_completion(
                 }
             };
 
+        // Per-seq cached counts read after the loop, summed into one figure.
+        let mut sync_seq_ids: Vec<usize> = Vec::with_capacity(results.len());
         for output in results {
+            sync_seq_ids.push(output.seq_id);
             total_prompt_tokens += output.prompt_length;
             total_decoded_tokens += output.decoded_length;
             let prompt_time_taken =
@@ -1306,10 +1321,24 @@ pub async fn chat_completion(
             created,
             model: model_id.to_string(),
             choices,
-            usage: Usage {
-                prompt_tokens: total_prompt_tokens,
-                completion_tokens: total_decoded_tokens,
-                total_tokens: total_prompt_tokens + total_decoded_tokens,
+            usage: {
+                let cached_tokens_total: usize = {
+                    let engine = data.engine.read();
+                    sync_seq_ids
+                        .iter()
+                        .filter_map(|sid| engine.get_num_cached_tokens_for_seq(*sid))
+                        .sum()
+                };
+                Usage {
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_decoded_tokens,
+                    total_tokens: total_prompt_tokens + total_decoded_tokens,
+                    prompt_tokens_details: (cached_tokens_total > 0).then_some(
+                        PromptTokensDetails {
+                            cached_tokens: cached_tokens_total,
+                        },
+                    ),
+                }
             },
         };
 
