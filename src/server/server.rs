@@ -1118,9 +1118,9 @@ pub async fn chat_completion(
         let mut total_prompt_time_taken = 0f32;
         let mut total_decoded_time_taken = 0f32;
         let mut choices = Vec::new();
-        let tokenizer = {
+        let (tokenizer, tok_detok_ipc) = {
             let e = data.engine.read();
-            Arc::new(e.tokenizer.clone())
+            (Arc::new(e.tokenizer.clone()), e.tok_detok_ipc.clone())
         };
 
         crate::log_info!(
@@ -1146,16 +1146,20 @@ pub async fn chat_completion(
         if let Some(ref l) = logger {
             l.log_start_response();
         }
-        let results =
-            match LLMEngine::collect_sync_results(receivers, tokenizer.clone(), logger.clone())
-                .await
-            {
-                Ok(results) => results,
-                Err(e) => {
-                    crate::log_error!("Failed to collect completion results: {:?}", e);
-                    return ChatResponder::InternalError(format!("Internal server error {:?}", e));
-                }
-            };
+        let results = match LLMEngine::collect_sync_results(
+            receivers,
+            tokenizer.clone(),
+            logger.clone(),
+            tok_detok_ipc,
+        )
+        .await
+        {
+            Ok(results) => results,
+            Err(e) => {
+                crate::log_error!("Failed to collect completion results: {:?}", e);
+                return ChatResponder::InternalError(format!("Internal server error {:?}", e));
+            }
+        };
 
         for output in results {
             total_prompt_tokens += output.prompt_length;
