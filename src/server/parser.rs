@@ -798,6 +798,15 @@ impl StreamToolParser {
         self.active_reasoning_end = end_marker;
     }
 
+    /// Advance reasoning-block tracking for one token without running tool
+    /// detection. Used by streaming callers that don't have tools attached
+    /// but still need `in_reasoning()` to reflect `<think>…</think>` state
+    /// so SSE chunks can be routed to `delta.reasoning_content`.
+    pub fn advance_reasoning_state(&mut self, token_text: &str) {
+        self.accumulated_output.push_str(token_text);
+        self.update_reasoning_state(token_text);
+    }
+
     /// Check if currently inside a code block
     pub fn in_code_block(&self) -> bool {
         self.in_code_block
