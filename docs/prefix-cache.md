@@ -64,3 +64,16 @@ shape:
 
 In Python (offline batch), call `engine.get_num_cached_tokens_for_seq(seq_id)`
 on the `seq_id` returned in each `GenerationOutput`.
+
+For models that emit `<think>…</think>` reasoning blocks, responses also
+include `usage.completion_tokens_details.reasoning_tokens` so clients can
+attribute completion cost across reasoning vs final-answer output:
+
+```json
+"usage": {
+  "prompt_tokens": 12,
+  "completion_tokens": 256,
+  "total_tokens": 268,
+  "completion_tokens_details": { "reasoning_tokens": 192 }
+}
+```

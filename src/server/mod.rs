@@ -616,12 +616,19 @@ pub struct PromptTokensDetails {
 }
 
 #[derive(Serialize, Debug)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: usize,
+}
+
+#[derive(Serialize, Debug)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub total_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Serialize, Debug)]
@@ -1977,12 +1984,13 @@ mod tests {
     }
 
     #[test]
-    fn usage_omits_prompt_tokens_details_when_none() {
+    fn usage_omits_token_details_when_none() {
         let usage = Usage {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
             prompt_tokens_details: None,
+            completion_tokens_details: None,
         };
 
         let value: serde_json::Value = serde_json::to_value(&usage).expect("serialize usage");
@@ -1998,6 +2006,10 @@ mod tests {
             !object.contains_key("prompt_tokens_details"),
             "prompt_tokens_details should be omitted when None, got: {value}"
         );
+        assert!(
+            !object.contains_key("completion_tokens_details"),
+            "completion_tokens_details should be omitted when None, got: {value}"
+        );
     }
 
     #[test]
@@ -2007,6 +2019,7 @@ mod tests {
             completion_tokens: 64,
             total_tokens: 264,
             prompt_tokens_details: Some(PromptTokensDetails { cached_tokens: 128 }),
+            completion_tokens_details: None,
         };
 
         let value: serde_json::Value = serde_json::to_value(&usage).expect("serialize usage");
@@ -2016,6 +2029,28 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(128),
             "cached_tokens should round-trip under prompt_tokens_details, got: {value}",
+        );
+    }
+
+    #[test]
+    fn usage_includes_completion_tokens_details_when_some() {
+        let usage = Usage {
+            prompt_tokens: 64,
+            completion_tokens: 256,
+            total_tokens: 320,
+            prompt_tokens_details: None,
+            completion_tokens_details: Some(CompletionTokensDetails {
+                reasoning_tokens: 192,
+            }),
+        };
+
+        let value: serde_json::Value = serde_json::to_value(&usage).expect("serialize usage");
+        assert_eq!(
+            value
+                .pointer("/completion_tokens_details/reasoning_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(192),
+            "reasoning_tokens should round-trip under completion_tokens_details, got: {value}",
         );
     }
 }
