@@ -45,9 +45,9 @@ pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 50; // check prefill s
 pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
 /// When prefix cache hit is high, prefer local prefill if new tokens < this threshold
 pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
-const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.5;
-const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.75;
-const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.35;
+const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.65;
+const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.8;
+const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.5;
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -280,7 +280,7 @@ impl Scheduler {
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+            let evicted = self.block_manager.evict_prefix_cache_until_free(2);
             if evicted > 0 {
                 crate::log_warn!("Evicted {} prefix cache block(s) under pressure.", evicted);
             } else if !preempt_ids.is_empty() && self.running.len() > 1 {
@@ -631,7 +631,7 @@ impl Scheduler {
             }
         }
         if let Some(pos) = self.waiting.iter().position(|seq| seq.id == seq_id) {
-            let seq = &self.waiting[pos];
+            let mut seq = self.waiting.remove(pos).unwrap();
             if seq.num_cached_tokens > 0 && seq.num_cached_tokens < seq.len() {
                 crate::log_warn!(
                     "Seq {} - cancel requested mid-prefill (cached {} / {} tokens)",
@@ -642,10 +642,11 @@ impl Scheduler {
             } else {
                 crate::log_warn!("Seq {} - cancel requested (status {})", seq.id, seq.status);
             }
+            seq.status = SequenceStatus::Finished;
+            self.block_manager.deallocate(&seq);
         }
         self.release_cache(seq_id);
         self.running.retain(|seq| seq.id != seq_id);
-        self.waiting.retain(|seq| seq.id != seq_id);
     }
 
     #[allow(non_snake_case)]
@@ -769,7 +770,10 @@ impl Scheduler {
                     continue;
                 }
 
-                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                let required_blocks = self.cached[i].num_blocks().saturating_add(1);
+                let evicted = self
+                    .block_manager
+                    .evict_prefix_cache_until_free(required_blocks);
                 if evicted > 0 {
                     crate::log_warn!(
                         "Evicted {} prefix cache block(s) for swap-in Seq {}.",
@@ -939,7 +943,9 @@ impl Scheduler {
                 .can_allocate_without_prefix(&self.transferred[idx])
             {
                 // Not enough memory right now. Put data back and try later.
-                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                let evicted = self
+                    .block_manager
+                    .evict_prefix_cache_until_free(self.transferred[idx].num_blocks());
                 if evicted > 0 {
                     crate::log_warn!(
                         "Evicted {} prefix cache block(s) for Seq {} KvCache receiving!",
