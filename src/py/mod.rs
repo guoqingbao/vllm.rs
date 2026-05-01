@@ -75,7 +75,7 @@ impl Engine {
     ) -> PyResult<Vec<GenerationOutput>> {
         tokio::task::block_in_place(|| {
             GLOBAL_RT.block_on(async {
-                let (receivers, tokenizer) = {
+                let (receivers, tokenizer, tok_detok_ipc) = {
                     let mut engine = self.engine.write();
                     (
                         engine
@@ -84,14 +84,16 @@ impl Engine {
                                 PyValueError::new_err(format!("generate_sync failed: {:?}", e))
                             })?,
                         Arc::new(engine.tokenizer.clone()),
+                        engine.tok_detok_ipc.clone(),
                     )
                 };
 
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None)
-                    .await
-                    .map_err(|e| {
-                        PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
-                    })?;
+                let results =
+                    LLMEngine::collect_sync_results(receivers, tokenizer, None, tok_detok_ipc)
+                        .await
+                        .map_err(|e| {
+                            PyValueError::new_err(format!("collect_sync_results failed: {:?}", e))
+                        })?;
 
                 // GenerationOutput is returned directly
                 let outputs: Vec<GenerationOutput> = results;

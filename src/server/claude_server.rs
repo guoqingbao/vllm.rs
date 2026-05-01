@@ -3086,9 +3086,9 @@ pub async fn messages(
             ),
         )
     } else {
-        let tokenizer = {
+        let (tokenizer, tok_detok_ipc) = {
             let e = data.engine.read();
-            Arc::new(e.tokenizer.clone())
+            (Arc::new(e.tokenizer.clone()), e.tok_detok_ipc.clone())
         };
 
         let receivers = {
@@ -3118,22 +3118,28 @@ pub async fn messages(
         if let Some(ref l) = logger {
             l.log_start_response();
         }
-        let results =
-            match LLMEngine::collect_sync_results(receivers, tokenizer, logger.clone()).await {
-                Ok(results) => results,
-                Err(err) => {
-                    return ClaudeResponder::Error(
-                        ClaudeErrorResponse {
-                            response_type: "error",
-                            error: ClaudeErrorBody {
-                                error_type: "server_error".to_string(),
-                                message: format!("Failed to collect results: {err:?}"),
-                            },
+        let results = match LLMEngine::collect_sync_results(
+            receivers,
+            tokenizer,
+            logger.clone(),
+            tok_detok_ipc,
+        )
+        .await
+        {
+            Ok(results) => results,
+            Err(err) => {
+                return ClaudeResponder::Error(
+                    ClaudeErrorResponse {
+                        response_type: "error",
+                        error: ClaudeErrorBody {
+                            error_type: "server_error".to_string(),
+                            message: format!("Failed to collect results: {err:?}"),
                         },
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    );
-                }
-            };
+                    },
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                );
+            }
+        };
 
         let output = match results.into_iter().next() {
             Some(output) => output,
