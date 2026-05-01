@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use url::Url;
 /// An internal enum to abstract over the two stream types.
 /// It implements Read and Write to be used generically.
@@ -382,18 +382,41 @@ impl Communicator {
 
 /// Generic, standardized function to send a message.
 /// Uses a 4-byte LE length prefix followed by bincode data.
+///
+/// Emits a structured tracing event under target `vllm_rs::instrument::pd_comm`
+/// with `op = "send"`, `bytes`, and `lat_us`. The event is filterable via
+/// `RUST_LOG=vllm_rs::instrument::pd_comm=info` and is silent by default.
 fn send_message_generic(stream: &mut (impl Read + Write), msg: &TransferMessage) -> Result<bool> {
     let serialized: Vec<u8> = bincode::serialize(msg).map_err(candle_core::Error::wrap)?;
     let len = serialized.len() as u32;
+    let bytes = serialized.len();
+
+    let t0 = Instant::now();
     stream.write_all(&len.to_le_bytes())?;
     stream.write_all(&serialized)?;
     stream.flush()?;
+    let lat_us = t0.elapsed().as_micros() as u64;
+
+    tracing::info!(
+        target: "vllm_rs::instrument::pd_comm",
+        op = "send",
+        bytes = bytes,
+        lat_us = lat_us,
+        "pd_comm send",
+    );
     Ok(true)
 }
 
 /// Generic, standardized function to receive a message.
 /// Reads a 4-byte LE length prefix then bincode data.
+///
+/// Emits a structured tracing event under target `vllm_rs::instrument::pd_comm`
+/// with `op = "recv"`, `bytes`, and `lat_us` once a complete message has been
+/// read and decoded. The event is silent unless
+/// `RUST_LOG=vllm_rs::instrument::pd_comm=info` is set.
 fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferMessage> {
+    let t0 = Instant::now();
+
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let len = u32::from_le_bytes(len_buf) as usize;
@@ -407,5 +430,56 @@ fn receive_message_generic(stream: &mut (impl Read + Write)) -> Result<TransferM
     stream.read_exact(&mut msg_buf)?;
 
     let msg = bincode::deserialize(&msg_buf).map_err(candle_core::Error::wrap)?;
+    let lat_us = t0.elapsed().as_micros() as u64;
+
+    tracing::info!(
+        target: "vllm_rs::instrument::pd_comm",
+        op = "recv",
+        bytes = len,
+        lat_us = lat_us,
+        "pd_comm recv",
+    );
     Ok(msg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{receive_message_generic, send_message_generic};
+    use crate::transfer::TransferMessage;
+    use std::io::{Cursor, Seek, SeekFrom};
+
+    /// Round-trips a known `TransferMessage` through the same framing path
+    /// the live PD socket uses (a 4-byte LE length prefix followed by a
+    /// bincode payload). Exercises both halves in one test: it locks down
+    /// the framing contract so a future refactor can't silently change the
+    /// wire format and break compatibility with an already-deployed peer,
+    /// and it keeps the new `vllm_rs::instrument::pd_comm` tracing call
+    /// sites compile-checked against any signature drift in the helpers
+    /// that emit them.
+    #[test]
+    fn send_recv_message_generic_roundtrip() {
+        let mut buf: Cursor<Vec<u8>> = Cursor::new(Vec::new());
+        let original = TransferMessage::AvailableTokenResponse(4096);
+
+        send_message_generic(&mut buf, &original).expect("send framed message");
+
+        let written = buf.get_ref().len();
+        assert!(
+            written > 4,
+            "framed payload should include a 4-byte length prefix plus body, got {written} bytes",
+        );
+        assert_eq!(
+            u32::from_le_bytes(buf.get_ref()[..4].try_into().unwrap()) as usize,
+            written - 4,
+            "length prefix should match body length",
+        );
+
+        buf.seek(SeekFrom::Start(0)).expect("rewind for read");
+        let decoded = receive_message_generic(&mut buf).expect("decode framed message");
+
+        match decoded {
+            TransferMessage::AvailableTokenResponse(n) => assert_eq!(n, 4096),
+            other => panic!("expected AvailableTokenResponse, got {other:?}"),
+        }
+    }
 }
