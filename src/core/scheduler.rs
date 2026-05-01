@@ -45,9 +45,10 @@ pub const PD_PREFILL_STATUS_CHECK_COOLING_PERIOD: usize = 50; // check prefill s
 pub const PD_PREFILL_TRANSFER_NUM_TOKEN_THRESHOLD: usize = 128; // do not transfer prefill length < 128
 /// When prefix cache hit is high, prefer local prefill if new tokens < this threshold
 pub const PD_LOCAL_PREFILL_NEW_TOKEN_THRESHOLD: usize = 1024;
-const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.5;
-const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.75;
-const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.35;
+const PREFIX_CACHE_RATIO_NORMAL: f32 = 0.65;
+const PREFIX_CACHE_RATIO_PD_SERVER: f32 = 0.8;
+const PREFIX_CACHE_RATIO_PD_CLIENT: f32 = 0.5;
+const PREFIX_CACHE_PRESSURE_EVICT_PERCENT: f32 = 0.1; // evict 10% of prefix cache when under pressure
 
 fn build_prefix_cache_config(econfig: &EngineConfig) -> PrefixCacheConfig {
     let enabled = econfig.prefix_cache.unwrap_or(false);
@@ -267,12 +268,14 @@ impl Scheduler {
             self.try_receive_kvcache()?;
         }
 
-        // Swap back seq from cpu memory if possible
-        #[cfg(feature = "cuda")]
-        if preempt_ids.is_empty()
+        // Swap back seq from cpu memory if possible. Prefix-cache eviction is
+        // backend-neutral, while CPU swap is CUDA-only.
+        let should_try_swap_in = cfg!(feature = "cuda")
+            && preempt_ids.is_empty()
             && (self.kv_cache_usage_percent() < KVCACHE_SWAP_THRESHOLD * 0.9
-                || (self.running.is_empty() && self.kv_cache_usage_percent() <= 0.3f32))
-        {
+                || (self.running.is_empty() && self.kv_cache_usage_percent() <= 0.3f32));
+        if should_try_swap_in {
+            #[cfg(feature = "cuda")]
             self.try_swap_in();
         } else if !preempt_ids.is_empty() || self.kv_cache_usage_percent() > KVCACHE_SWAP_THRESHOLD
         {
@@ -280,18 +283,24 @@ impl Scheduler {
             // If we only have one sequence running and it has been preempt,
             // swap out to cpu memory make non-sense
             // in such case, the only option is either waiting resources or abort it
-            let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+            let evicted = self.evict_prefix_cache_under_pressure();
             if evicted > 0 {
                 crate::log_warn!("Evicted {} prefix cache block(s) under pressure.", evicted);
-            } else if !preempt_ids.is_empty() && self.running.len() > 1 {
-                if let Some((idx, _)) = preempt_ids
-                    .iter()
-                    .map(|&i| (i, &self.running[i]))
-                    .min_by_key(|(_, seq)| seq.id)
-                // swap-out the oldest sequence
-                {
-                    crate::log_warn!("Trying to swap out preempt Seq {:?}", self.running[idx].id);
-                    self.try_swap_out(idx, true);
+            } else {
+                #[cfg(feature = "cuda")]
+                if !preempt_ids.is_empty() && self.running.len() > 1 {
+                    if let Some((idx, _)) = preempt_ids
+                        .iter()
+                        .map(|&i| (i, &self.running[i]))
+                        .min_by_key(|(_, seq)| seq.id)
+                    // swap-out the oldest sequence
+                    {
+                        crate::log_warn!(
+                            "Trying to swap out preempt Seq {:?}",
+                            self.running[idx].id
+                        );
+                        self.try_swap_out(idx, true);
+                    }
                 }
             }
         }
@@ -631,7 +640,7 @@ impl Scheduler {
             }
         }
         if let Some(pos) = self.waiting.iter().position(|seq| seq.id == seq_id) {
-            let seq = &self.waiting[pos];
+            let mut seq = self.waiting.remove(pos).unwrap();
             if seq.num_cached_tokens > 0 && seq.num_cached_tokens < seq.len() {
                 crate::log_warn!(
                     "Seq {} - cancel requested mid-prefill (cached {} / {} tokens)",
@@ -642,10 +651,11 @@ impl Scheduler {
             } else {
                 crate::log_warn!("Seq {} - cancel requested (status {})", seq.id, seq.status);
             }
+            seq.status = SequenceStatus::Finished;
+            self.block_manager.deallocate(&seq);
         }
         self.release_cache(seq_id);
         self.running.retain(|seq| seq.id != seq_id);
-        self.waiting.retain(|seq| seq.id != seq_id);
     }
 
     #[allow(non_snake_case)]
@@ -769,7 +779,10 @@ impl Scheduler {
                     continue;
                 }
 
-                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                let required_blocks = self.cached[i].num_blocks().saturating_add(1);
+                let evicted = self
+                    .block_manager
+                    .evict_prefix_cache_until_free(required_blocks);
                 if evicted > 0 {
                     crate::log_warn!(
                         "Evicted {} prefix cache block(s) for swap-in Seq {}.",
@@ -939,7 +952,9 @@ impl Scheduler {
                 .can_allocate_without_prefix(&self.transferred[idx])
             {
                 // Not enough memory right now. Put data back and try later.
-                let evicted = self.block_manager.evict_prefix_cache_blocks(1);
+                let evicted = self
+                    .block_manager
+                    .evict_prefix_cache_until_free(self.transferred[idx].num_blocks());
                 if evicted > 0 {
                     crate::log_warn!(
                         "Evicted {} prefix cache block(s) for Seq {} KvCache receiving!",
@@ -1044,6 +1059,16 @@ impl Scheduler {
     }
 
     pub fn evict_prefix_cache_blocks(&mut self, blocks: usize) -> usize {
+        self.block_manager.evict_prefix_cache_blocks(blocks)
+    }
+
+    fn evict_prefix_cache_under_pressure(&mut self) -> usize {
+        let cached_blocks = self.block_manager.prefix_cache_blocks();
+        if cached_blocks == 0 {
+            return 0;
+        }
+        let blocks = ((cached_blocks as f32) * PREFIX_CACHE_PRESSURE_EVICT_PERCENT).ceil() as usize;
+        let blocks = blocks.max(1);
         self.block_manager.evict_prefix_cache_blocks(blocks)
     }
 
@@ -1178,6 +1203,7 @@ impl Scheduler {
 
         false
     }
+
     fn stop_sequence_match_index(&self, token: u32, seq: &Sequence) -> Option<usize> {
         let Some(stop_sequences) = &seq.sampling_params.stop_token_ids else {
             return None;
