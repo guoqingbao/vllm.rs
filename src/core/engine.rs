@@ -536,6 +536,12 @@ impl LLMEngine {
         //we also need to consider prompt length
         if length + max_tokens > max_model_len {
             params.max_tokens = Some(max_model_len - length);
+            log_warn!(
+                "Adjusted max_tokens to {} to fit within max_model_len {} (with prompt length {})",
+                max_tokens,
+                max_model_len,
+                length
+            );
         }
 
         if let Some(gen_cfg) = &self.econfig.generation_cfg {
