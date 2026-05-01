@@ -221,8 +221,10 @@ impl PrefixCache {
             parent_hash = Some(hash);
         }
 
-        let evicted = self.evict_if_needed();
-        PrefixCacheUpdate { inserted, evicted }
+        PrefixCacheUpdate {
+            inserted,
+            evicted: Vec::new(),
+        }
     }
 
     pub fn evict_blocks(&mut self, mut num_blocks: usize) -> Vec<usize> {
@@ -283,39 +285,6 @@ impl PrefixCache {
                 self.leaf_lru.push_back((hash, entry.access_id));
             }
         }
-    }
-
-    fn evict_if_needed(&mut self) -> Vec<usize> {
-        let mut evicted = Vec::new();
-        while self.entries.len() > self.config.max_cached_blocks {
-            let Some((hash, access_id)) = self.leaf_lru.pop_front() else {
-                break;
-            };
-            if !self.leaf_set.contains(&hash) {
-                continue;
-            }
-            let Some(entry) = self.entries.get(&hash) else {
-                continue;
-            };
-            if entry.access_id != access_id || entry.children > 0 {
-                continue;
-            }
-            let entry = self.entries.remove(&hash).unwrap();
-            self.leaf_set.remove(&hash);
-            evicted.push(entry.block_id);
-            if let Some(parent) = entry.parent {
-                if let Some(parent_entry) = self.entries.get_mut(&parent) {
-                    if parent_entry.children > 0 {
-                        parent_entry.children -= 1;
-                    }
-                    if parent_entry.children == 0 {
-                        self.leaf_set.insert(parent);
-                        self.leaf_lru.push_back((parent, parent_entry.access_id));
-                    }
-                }
-            }
-        }
-        evicted
     }
 
     fn next_access_id(&mut self) -> u64 {
