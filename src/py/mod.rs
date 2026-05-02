@@ -134,6 +134,17 @@ impl Engine {
         Ok(engine.get_num_cached_tokens())
     }
 
+    /// Per-sequence prefix-cache hit count. Returns `None` when the seq id
+    /// is unknown (e.g. swept long ago and dropped from the side-cache).
+    #[pyo3(
+        name = "get_num_cached_tokens_for_seq",
+        text_signature = "($self, seq_id)"
+    )]
+    pub fn get_num_cached_tokens_for_seq(&mut self, seq_id: usize) -> PyResult<Option<usize>> {
+        let engine = self.engine.read();
+        Ok(engine.get_num_cached_tokens_for_seq(seq_id))
+    }
+
     #[pyo3(name = "get_available_kv_tokens", text_signature = "($self)")]
     pub fn get_available_kv_tokens(&mut self) -> PyResult<usize> {
         let engine = self.engine.read();

@@ -10,7 +10,7 @@ use crate::utils::config::{Config, EngineConfig, EosTokenId};
 use candle_core::Result;
 use parking_lot::RwLock;
 use regex::Regex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokenizers::Tokenizer;
@@ -21,6 +21,10 @@ pub struct Scheduler {
     transferred: VecDeque<Sequence>,
     pub block_manager: BlockManager,
     next_seq_id: usize,
+    /// Per-seq cached-token count retained briefly after `clear_finished()`
+    /// so response finalization can still read it. Bounded by
+    /// `FINISHED_CACHED_TOKENS_MAX`; cleared en masse on overflow.
+    finished_cached_tokens: HashMap<usize, usize>,
     eos_token_id: Vec<u32>,
     /// Token IDs that represent the end of a tool call (e.g., </tool_call> tokens)
     tool_call_end_token_ids: Vec<u32>,
@@ -38,6 +42,9 @@ pub struct Scheduler {
 }
 
 const MIN_NUM_SCHEDULED_REQS: usize = 5;
+/// Cap on `Scheduler::finished_cached_tokens`. Bounded memory beats LRU
+/// here: dropping reporting on a small population is acceptable.
+const FINISHED_CACHED_TOKENS_MAX: usize = 16_384;
 pub const KVCACHE_SWAP_THRESHOLD: f32 = 0.95f32; // over 95%
 const SWAP_COOLING_PERIOD: usize = 5000; // 5 seconds cooling time to prevent frequent swap out/in
 const MIN_KVCACHE_TOKENS_LEFT_FOR_SWAP: usize = 1000; // to swap-in, at least 1000 kvcache tokens left for decoding
@@ -134,6 +141,7 @@ impl Scheduler {
                     .unwrap_or(false),
             ),
             next_seq_id: 0,
+            finished_cached_tokens: HashMap::new(),
             eos_token_id: match &config.eos_token_id {
                 Some(EosTokenId::Single(eos)) => vec![*eos],
                 Some(EosTokenId::Multiple(eos)) => eos.into_iter().map(|x| *x).collect(),
@@ -587,9 +595,22 @@ impl Scheduler {
     pub fn clear_finished(&mut self) {
         let is_pd_server = self.is_pd_server();
         for seq in &self.running {
-            if seq.status == SequenceStatus::Finished && is_pd_server {
-                self.print_free_blocks();
+            if seq.status == SequenceStatus::Finished {
+                if is_pd_server {
+                    self.print_free_blocks();
+                }
+                self.finished_cached_tokens
+                    .insert(seq.id, seq.num_cached_tokens);
             }
+        }
+        for seq in &self.waiting {
+            if seq.status == SequenceStatus::Finished {
+                self.finished_cached_tokens
+                    .insert(seq.id, seq.num_cached_tokens);
+            }
+        }
+        if self.finished_cached_tokens.len() > FINISHED_CACHED_TOKENS_MAX {
+            self.finished_cached_tokens.clear();
         }
         self.running
             .retain(|seq| seq.status != SequenceStatus::Finished);
@@ -982,10 +1003,11 @@ impl Scheduler {
                 .block_manager
                 .try_receive_kvcache(&self.transferred[idx])
             {
-                Ok((ret, first_token, sending_time)) => {
+                Ok((ret, first_token, sending_time, num_cached_tokens)) => {
                     let seq = &mut self.transferred[idx];
                     success = ret;
                     if success {
+                        seq.num_cached_tokens = num_cached_tokens;
                         // Update sequence and move to running
                         // The first token is generated on PD server,
                         // it has been transfered to client, but haven't been send to user
@@ -1051,6 +1073,18 @@ impl Scheduler {
 
     pub fn get_num_cached_tokens(&self) -> usize {
         self.block_manager.prefix_cache_blocks() * self.block_manager.get_block_size()
+    }
+
+    /// Per-seq prefix-cache hit count for response finalization. Falls back
+    /// to `finished_cached_tokens` for seqs already swept by `clear_finished`.
+    pub fn get_num_cached_tokens_for_seq(&self, seq_id: usize) -> Option<usize> {
+        self.running
+            .iter()
+            .chain(self.waiting.iter())
+            .chain(self.transferred.iter())
+            .find(|s| s.id == seq_id)
+            .map(|s| s.num_cached_tokens)
+            .or_else(|| self.finished_cached_tokens.get(&seq_id).copied())
     }
 
     pub fn evict_prefix_cache_until_free(&mut self, min_free_blocks: usize) -> usize {

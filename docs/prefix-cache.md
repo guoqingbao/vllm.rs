@@ -45,3 +45,35 @@ snapshot capture remains dense.
   reduces the maximum number of concurrent tokens available for new requests.
 - Cached KV reuse is automatic; no `session_id` is required.
 - Sliding window attention limits how much cached context is effectively used.
+
+## Inspecting cache hits
+
+Chat completion responses include the prefix-cache hit count under
+`usage.prompt_tokens_details.cached_tokens` (OpenAI extension). The field is
+omitted when no hits occurred, so existing single-turn responses keep their
+shape:
+
+```json
+"usage": {
+  "prompt_tokens": 499,
+  "completion_tokens": 16,
+  "total_tokens": 515,
+  "prompt_tokens_details": { "cached_tokens": 480 }
+}
+```
+
+In Python (offline batch), call `engine.get_num_cached_tokens_for_seq(seq_id)`
+on the `seq_id` returned in each `GenerationOutput`.
+
+For models that emit `<think>…</think>` reasoning blocks, responses also
+include `usage.completion_tokens_details.reasoning_tokens` so clients can
+attribute completion cost across reasoning vs final-answer output:
+
+```json
+"usage": {
+  "prompt_tokens": 12,
+  "completion_tokens": 256,
+  "total_tokens": 268,
+  "completion_tokens_details": { "reasoning_tokens": 192 }
+}
+```
