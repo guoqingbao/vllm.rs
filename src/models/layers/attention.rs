@@ -385,6 +385,39 @@ impl Attention {
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads;
         let head_dim = config.head_dim.unwrap_or(hidden_size / num_heads);
+
+        // Apply YARN scaling to attention_scale if rope_scaling has type="yarn"
+        let attention_scale = if let Some(ref rope_scaling) = config.rope_scaling {
+            use crate::utils::config::RopeScalingValue;
+            let is_yarn = rope_scaling.get("type").and_then(|v| {
+                if let RopeScalingValue::String(s) = v {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            }) == Some("yarn");
+            if is_yarn {
+                let factor = rope_scaling
+                    .get("factor")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0) as f32;
+                let mscale_all_dim = rope_scaling
+                    .get("mscale_all_dim")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0) as f32;
+                if mscale_all_dim > 0.0 && factor > 1.0 {
+                    let mscale = 0.1 * mscale_all_dim * factor.ln() + 1.0;
+                    let base_scale = attention_scale.unwrap_or(1.0 / (head_dim as f32).sqrt());
+                    Some(base_scale * mscale * mscale)
+                } else {
+                    attention_scale
+                }
+            } else {
+                attention_scale
+            }
+        } else {
+            attention_scale
+        };
         let key_map: HashMap<&str, &str> = [
             ("q_proj", "attn_q"),
             ("k_proj", "attn_k"),
@@ -932,6 +965,8 @@ impl NaiveAttention {
         )?;
 
         let scale = (head_dim as f64).powf(-0.5);
+        // Note: NaiveAttention is used for vision models and doesn't support YARN scaling
+        // YARN scaling is handled by ScalingRotaryEmbedding which pre-computes the RoPE tables
         Ok(Self {
             q_proj,
             k_proj,
