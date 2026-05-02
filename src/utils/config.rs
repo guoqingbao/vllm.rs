@@ -1,6 +1,5 @@
 // src/utils/config.rs
 use crate::transfer::PdConfig;
-use crate::utils::reasoning::ReasoningEffort;
 use llguidance::api::TopLevelGrammar;
 #[cfg(feature = "python")]
 use pyo3::pyclass;
@@ -8,7 +7,7 @@ use serde::de::value::SeqAccessDeserializer;
 use serde::de::{Deserializer, Visitor};
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -113,7 +112,14 @@ impl EosTokenId {
     pub fn to_vec(&self) -> Vec<u32> {
         match self {
             EosTokenId::Single(x) => vec![*x],
-            EosTokenId::Multiple(v) => v.clone(),
+            EosTokenId::Multiple(v) => {
+                // Deduplicate while preserving order
+                let mut seen = HashSet::new();
+                v.iter()
+                    .filter(|&id| seen.insert(*id))
+                    .cloned()
+                    .collect()
+            }
         }
     }
 
@@ -325,6 +331,8 @@ pub struct EngineConfig {
     pub yarn_scaling_factor: Option<f64>,
     #[serde(default)]
     pub disable_reasoning: bool,
+    pub allow_constraint_api: bool,
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(feature = "python")]
@@ -406,6 +414,10 @@ pub struct EngineConfig {
     pub yarn_scaling_factor: Option<f64>,
     #[pyo3(get, set)]
     pub disable_reasoning: bool,
+    #[pyo3(get, set)]
+    pub allow_constraint_api: bool,
+    #[pyo3(get, set)]
+    pub enable_tool_grammar: bool,
 }
 
 #[cfg(not(feature = "python"))]
@@ -442,6 +454,8 @@ impl EngineConfig {
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
         disable_reasoning: bool,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -494,6 +508,8 @@ impl EngineConfig {
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
             disable_reasoning,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }
@@ -688,6 +704,33 @@ pub enum ModelType {
     Qwen3VL,
     LLaMa4,
     MiniMax,
+}
+impl ModelType {
+    /// Convert architecture string to ModelType
+    pub fn from_architectures(architectures: &[String]) -> Option<Self> {
+        architectures.first().and_then(|arch| match arch.as_str() {
+            "Qwen3ForCausalLM" => Some(ModelType::Qwen3),
+            "Qwen3MoEForCausalLM" => Some(ModelType::Qwen3MoE),
+            "Qwen3_5ForCausalLM" => Some(ModelType::Qwen3_5),
+            "Qwen3_5MoEForCausalLM" => Some(ModelType::Qwen3_5MoE),
+            "LlamaForCausalLM" => Some(ModelType::LLaMa),
+            "GemmaForCausalLM" => Some(ModelType::Gemma),
+            "Gemma3ForConditionalGeneration" => Some(ModelType::Gemma3),
+            "Gemma4ForConditionalGeneration" => Some(ModelType::Gemma4),
+            "Gemma4ForCausalLM" => Some(ModelType::Gemma4),
+            "PhiForCausalLM" => Some(ModelType::Phi),
+            "Phi4ForCausalLM" => Some(ModelType::Phi4),
+            "MistralForCausalLM" => Some(ModelType::Mistral),
+            "GLM4ForCausalLM" => Some(ModelType::GLM4),
+            "GLM4MoEForCausalLM" => Some(ModelType::GLM4MoE),
+            "YiForCausalLM" => Some(ModelType::Yi),
+            "StableLmForCausalLM" => Some(ModelType::StableLM),
+            "DeepSeekForCausalLM" => Some(ModelType::DeepSeek),
+            "Mistral3VForConditionalGeneration" => Some(ModelType::Mistral3VL),
+            "Qwen3VLMoEForConditionalGeneration" => Some(ModelType::Qwen3VL),
+            _ => None,
+        })
+    }
 }
 
 #[cfg_attr(feature = "python", pyclass)]
@@ -952,6 +995,69 @@ impl fmt::Debug for QuantConfig {
             .finish()
     }
 }
+
+/// Reasoning effort level for grammar generation
+    /// Optimized for specific reasoning strategies based on current research (2024-2025)
+    #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum ReasoningEffort {
+        /// No structured reasoning - direct output only
+        None,
+        /// Constrained single-paragraph reasoning (~150 chars max)
+        Low,
+        /// Standard multi-step Chain-of-Thought (CoT)
+        Medium,
+        /// Adversarial analysis with self-correction phases
+        High,
+        /// Best-of-breed Chain-of-Verification (CoVe) + Self-Critique
+        ChainOfThought,
+        /// Custom user-provided grammar template (non-Python builds only)
+        #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+        Custom(String),
+    }
+
+    impl Default for ReasoningEffort {
+        fn default() -> Self {
+            ReasoningEffort::None
+        }
+    }
+
+    impl ReasoningEffort {
+    /// Parse a string to ReasoningEffort
+    pub fn from_str(s: String) -> Self {
+        match s.to_lowercase().as_str() {
+            "none" => Self::None,
+            "low" => Self::Low,
+            "normal" | "medium" => Self::Medium,
+            "high" => Self::High,
+            "very_high" | "chain_of_thought" | "cot" | "cove" => Self::ChainOfThought,
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            s if s.starts_with("custom:") => Self::Custom(s[7..].to_string()),
+            _ => Self::None,
+        }
+    }
+
+    /// Check if reasoning effort is enabled (not None)
+    pub fn is_enabled(&self) -> bool {
+        *self != ReasoningEffort::None
+    }
+}
+
+/// Conversion to string for serialization
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReasoningEffort::None => write!(f, "none"),
+            ReasoningEffort::Low => write!(f, "low"),
+            ReasoningEffort::Medium => write!(f, "medium"),
+            ReasoningEffort::High => write!(f, "high"),
+            ReasoningEffort::ChainOfThought => write!(f, "chain_of_thought"),
+            #[cfg(all(not(feature = "python"), not(feature = "pyo3")))]
+            ReasoningEffort::Custom(_) => write!(f, "custom"),
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1468,5 +1574,22 @@ mod tests {
         assert_eq!(cfg.quant_method, "nvfp4");
         assert_eq!(cfg.bits, 4);
         assert_eq!(cfg.group_size, 16);
+    }
+
+    fn test_reasoning_effort_from_str() {
+        assert_eq!(ReasoningEffort::from_str("none".to_string()), ReasoningEffort::None);
+        assert_eq!(ReasoningEffort::from_str("low".to_string()), ReasoningEffort::Low);
+        assert_eq!(ReasoningEffort::from_str("medium".to_string()), ReasoningEffort::Medium);
+        assert_eq!(ReasoningEffort::from_str("high".to_string()), ReasoningEffort::High);
+        assert_eq!(ReasoningEffort::from_str("chain_of_thought".to_string()), ReasoningEffort::ChainOfThought);
+    }
+
+    #[test]
+    fn test_reasoning_effort_is_enabled() {
+        assert!(!ReasoningEffort::None.is_enabled());
+        assert!(ReasoningEffort::Low.is_enabled());
+        assert!(ReasoningEffort::Medium.is_enabled());
+        assert!(ReasoningEffort::High.is_enabled());
+        assert!(ReasoningEffort::ChainOfThought.is_enabled());
     }
 }

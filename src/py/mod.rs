@@ -6,8 +6,8 @@ use crate::server::run_server;
 use crate::transfer::{PdConfig, PdMethod, PdRole};
 use crate::utils::chat_template::Message;
 use crate::utils::config::{EngineConfig, GenerationConfig, SamplingParams};
+use crate::utils::config::ReasoningEffort;
 use crate::utils::get_dtype;
-use crate::utils::reasoning::ReasoningEffort;
 use llguidance::api::TopLevelGrammar;
 use parking_lot::RwLock;
 use pyo3::exceptions::PyStopIteration;
@@ -272,7 +272,7 @@ impl EngineConfig {
         mcp_command=None, mcp_config=None, mcp_args=None,
         tool_prompt_template=None,
         pd_server_prefix_cache_ratio=None, pd_client_prefix_cache_ratio=None, yarn_scaling_factor=None,
-        disable_reasoning=false,))]
+        disable_reasoning=false, allow_constraint_api=false, enable_tool_grammar=false,))]
     pub fn new(
         model_id: Option<String>,
         weight_path: Option<String>,
@@ -305,6 +305,8 @@ impl EngineConfig {
         pd_client_prefix_cache_ratio: Option<f32>,
         yarn_scaling_factor: Option<f64>,
         disable_reasoning: bool,
+        allow_constraint_api: bool,
+        enable_tool_grammar: bool,
     ) -> Self {
         let mut device_ids = device_ids.unwrap_or_default();
         if device_ids.is_empty() {
@@ -350,6 +352,8 @@ impl EngineConfig {
             pd_client_prefix_cache_ratio,
             yarn_scaling_factor,
             disable_reasoning,
+            allow_constraint_api,
+            enable_tool_grammar,
         }
     }
 }

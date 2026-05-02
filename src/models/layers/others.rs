@@ -26,6 +26,15 @@ impl NormX {
             Ok(xs)
         }
     }
+
+    /// Blended normalization for residual attention (MiniMax style).
+    /// Returns (normed_output, blended_residual).
+    /// Python behavior: return weight * normed, residual + weight * normed
+    pub fn forward_blended(&self, xs: &Tensor, residual: &Tensor) -> Result<(Tensor, Tensor)> {
+        let normed = self.forward(xs)?;
+        let new_residual = (residual + &normed)?;
+        Ok((normed, new_residual))
+    }
 }
 
 pub fn rms_norm(
