@@ -798,6 +798,15 @@ impl StreamToolParser {
         self.active_reasoning_end = end_marker;
     }
 
+    /// Advance reasoning-block tracking for one token without running tool
+    /// detection. Used by streaming callers that don't have tools attached
+    /// but still need `in_reasoning()` to reflect `<think>…</think>` state
+    /// so SSE chunks can be routed to `delta.reasoning_content`.
+    pub fn advance_reasoning_state(&mut self, token_text: &str) {
+        self.accumulated_output.push_str(token_text);
+        self.update_reasoning_state(token_text);
+    }
+
     /// Check if currently inside a code block
     pub fn in_code_block(&self) -> bool {
         self.in_code_block
@@ -4323,5 +4332,64 @@ Some markdown text here.</parameter>
             serde_json::from_str(calls[0].function.arguments.as_deref().unwrap()).unwrap();
         assert_eq!(args["query"], "rust programming");
         assert_eq!(args["count"], 5);
+    }
+
+    fn make_no_tools_parser() -> StreamToolParser {
+        StreamToolParser::new_with_config(
+            &ModelType::Qwen3,
+            "qwen3".to_string(),
+            ToolConfig::for_model_type(&ModelType::Qwen3),
+            Vec::new(),
+            None,
+        )
+    }
+
+    /// `advance_reasoning_state` must transition `in_reasoning()` on the
+    /// `<think>` open marker. This is the contract the streaming SSE
+    /// router depends on for non-tools chats.
+    #[test]
+    fn advance_reasoning_state_enters_on_open_marker() {
+        let mut parser = make_no_tools_parser();
+        assert!(!parser.in_reasoning());
+        parser.advance_reasoning_state("<think>");
+        assert!(parser.in_reasoning(), "open marker must set in_reasoning");
+        parser.advance_reasoning_state("\nOkay so 7*8");
+        assert!(
+            parser.in_reasoning(),
+            "content tokens must keep in_reasoning"
+        );
+    }
+
+    /// `advance_reasoning_state` must clear `in_reasoning()` on `</think>`.
+    #[test]
+    fn advance_reasoning_state_exits_on_close_marker() {
+        let mut parser = make_no_tools_parser();
+        parser.advance_reasoning_state("<think>");
+        parser.advance_reasoning_state("reasoning body");
+        parser.advance_reasoning_state("</think>");
+        assert!(
+            !parser.in_reasoning(),
+            "close marker must clear in_reasoning"
+        );
+        parser.advance_reasoning_state("\nThe answer is 56.");
+        assert!(!parser.in_reasoning(), "post-close tokens stay outside");
+    }
+
+    /// `advance_reasoning_state` must not buffer tokens or detect tool
+    /// calls — when it returns, the caller is free to emit the original
+    /// token text, which is the whole point of the helper for the
+    /// no-tools streaming branch.
+    #[test]
+    fn advance_reasoning_state_does_not_buffer_or_detect_tools() {
+        let mut parser = make_no_tools_parser();
+        // Feed tokens that look like a tool-call opener; the helper must
+        // ignore them and keep the parser out of Buffering.
+        parser.advance_reasoning_state("<tool_call>");
+        parser.advance_reasoning_state("not really");
+        parser.advance_reasoning_state("</tool_call>");
+        assert!(
+            matches!(parser.state, ParserState::Normal),
+            "advance_reasoning_state must keep parser in Normal state"
+        );
     }
 }

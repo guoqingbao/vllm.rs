@@ -34,5 +34,6 @@ fn vllm_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PdConfig>()?;
     m.add_class::<PdMethod>()?;
     m.add_class::<PdRole>()?;
+    m.add_function(wrap_pyfunction!(crate::py::extract_reasoning_content, m)?)?;
     Ok(())
 }

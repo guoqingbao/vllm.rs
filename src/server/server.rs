@@ -566,9 +566,8 @@ pub async fn chat_completion(
             let mut tool_parser = tool_parser;
             let should_parse_tools = has_tools.clone();
 
-            let reasoning_router = ReasoningContentRouter::new(
-                crate::utils::env::stream_as_reasoning_content() && should_parse_tools,
-            );
+            let reasoning_router =
+                ReasoningContentRouter::new(crate::utils::env::stream_as_reasoning_content());
 
             let mut current_stream = stream;
             let current_seq_id = seq_id;
@@ -754,7 +753,12 @@ pub async fn chat_completion(
                                 }
                             }
                         } else {
-                            // No tool parsing - stream directly
+                            // No tool parsing - stream directly. Advance the
+                            // reasoning state machine so `in_reasoning()` is
+                            // still accurate on the next iteration and the
+                            // SSE router can split `<think>…</think>` into
+                            // `delta.reasoning_content` for non-tools chats.
+                            tool_parser.advance_reasoning_state(&token);
                             if token.is_empty() {
                                 continue;
                             }
@@ -1247,27 +1251,32 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
-            let (content, reasoning_content) =
-                if crate::utils::env::stream_as_reasoning_content() && has_tools {
-                    match content {
-                        Some(text) => {
-                            match crate::utils::chat_template::extract_reasoning_content(&text) {
-                                Some((reasoning, remaining)) => {
-                                    let c = if remaining.is_empty() {
-                                        None
-                                    } else {
-                                        Some(remaining)
-                                    };
-                                    (c, Some(reasoning))
-                                }
-                                None => (Some(text), None),
+            // Extract `<think>…</think>` reasoning blocks into the dedicated
+            // `reasoning_content` field on the message, matching OpenAI's
+            // shape for reasoning-capable models. Previously gated on
+            // `has_tools`, which left every non-tools chat with reasoning
+            // markers stuck inside `content`. The behaviour can still be
+            // disabled with `VLLM_RS_STREAM_AS_REASONING_CONTENT=false`.
+            let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content() {
+                match content {
+                    Some(text) => {
+                        match crate::utils::chat_template::extract_reasoning_content(&text) {
+                            Some((reasoning, remaining)) => {
+                                let c = if remaining.is_empty() {
+                                    None
+                                } else {
+                                    Some(remaining)
+                                };
+                                (c, Some(reasoning))
                             }
+                            None => (Some(text), None),
                         }
-                        None => (None, None),
                     }
-                } else {
-                    (content, None)
-                };
+                    None => (None, None),
+                }
+            } else {
+                (content, None)
+            };
             choices.push(ChatChoice {
                 index: 0,
                 message: ChatResponseMessage {

@@ -488,3 +488,17 @@ impl PdConfig {
         Self { role, method, url }
     }
 }
+
+/// Split a model output string into `(reasoning, remaining)` if it contains
+/// a `<think>…</think>` (or equivalent) reasoning block. Returns `None`
+/// when no reasoning markers are present, so callers can treat the
+/// original text as plain content.
+///
+/// Mirrors the splitting the OpenAI-compatible HTTP server applies to
+/// `message.reasoning_content`, so offline-batch users of `Engine` can
+/// produce the same shape from `GenerationOutput.decode_output`.
+#[pyfunction]
+#[pyo3(text_signature = "(text)")]
+pub fn extract_reasoning_content(text: &str) -> Option<(String, String)> {
+    crate::utils::chat_template::extract_reasoning_content(text)
+}

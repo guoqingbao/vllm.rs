@@ -98,6 +98,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 - [Embedding](docs/embeddings.md)
 - [Multimodal (Qwen3-VL, Gemma3, Mistral3-VL)](docs/multimodal.md)
 - [Prefix cache](docs/prefix-cache.md)
+- [Reasoning content](docs/reasoning.md)
 - [Rust crate](docs/rust_crate.md)
 - [Tokenize/Detokenize](docs/tokenize.md)
 - [Performance Benchmarks](docs/performance.md)
