@@ -9,8 +9,9 @@ use super::{
 };
 use super::{
     ChatChoice, ChatChoiceChunk, ChatCompletionChunk, ChatCompletionRequest,
-    ChatCompletionResponse, ChatMessage, ChatResponseMessage, Delta, EmbeddingData,
-    EmbeddingOutput, EmbeddingUsage, ErrorMsg, ServerData, Usage, UsageQuery, UsageResponse,
+    ChatCompletionResponse, ChatMessage, ChatResponseMessage, CompletionTokensDetails, Delta,
+    EmbeddingData, EmbeddingOutput, EmbeddingUsage, ErrorMsg, PromptTokensDetails, ServerData,
+    Usage, UsageQuery, UsageResponse,
 };
 use crate::core::engine::{LLMEngine, StreamItem};
 use crate::server::parser::{BufferedFinalizeResult, StreamResult, StreamToolParser};
@@ -546,6 +547,7 @@ pub async fn chat_completion(
             #[allow(unused_assignments)]
             let mut decode_start_time = 0u64;
             let mut total_decoded_tokens = 0usize;
+            let mut full_decoded_text = String::new();
             let mut pending_tool_calls: Vec<crate::tools::ToolCall> = Vec::new();
             let mut suppressed_tool_markup: String = String::new();
             let mut buffering_since: Option<Instant> = None;
@@ -606,6 +608,11 @@ pub async fn chat_completion(
                                 .unwrap()
                                 .as_millis() as u64;
                         }
+
+                        // Accumulate raw token text so reasoning blocks can
+                        // be tokenized at finalization for `reasoning_tokens`.
+                        // Cheap: text is already small per token.
+                        full_decoded_text.push_str(&token);
 
                         // Capture reasoning state before token processing for routing
                         let was_in_reasoning = tool_parser.in_reasoning();
@@ -1007,10 +1014,32 @@ pub async fn chat_completion(
                                 },
                                 error: None,
                             }],
-                            usage: include_usage.then_some(Usage {
-                                prompt_tokens: prompt_length,
-                                completion_tokens: total_decoded_tokens,
-                                total_tokens: prompt_length + total_decoded_tokens,
+                            usage: include_usage.then_some({
+                                let engine = engine_clone.read();
+                                let cached = engine
+                                    .get_num_cached_tokens_for_seq(current_seq_id)
+                                    .unwrap_or(0);
+                                let reasoning_tokens =
+                                    crate::utils::chat_template::extract_reasoning_content(
+                                        &full_decoded_text,
+                                    )
+                                    .and_then(|(r, _)| {
+                                        engine.tokenizer.encode(r.as_str(), false).ok()
+                                    })
+                                    .map(|enc| enc.get_ids().len())
+                                    .unwrap_or(0);
+                                Usage {
+                                    prompt_tokens: prompt_length,
+                                    completion_tokens: total_decoded_tokens,
+                                    total_tokens: prompt_length + total_decoded_tokens,
+                                    prompt_tokens_details: (cached > 0).then_some(
+                                        PromptTokensDetails {
+                                            cached_tokens: cached,
+                                        },
+                                    ),
+                                    completion_tokens_details: (reasoning_tokens > 0)
+                                        .then_some(CompletionTokensDetails { reasoning_tokens }),
+                                }
                             }),
                         };
 
@@ -1157,7 +1186,13 @@ pub async fn chat_completion(
                 }
             };
 
+        // Per-seq cached counts and decode_output snapshots read after the
+        // loop, summed/scanned into single figures for the response Usage.
+        let mut sync_seq_ids: Vec<usize> = Vec::with_capacity(results.len());
+        let mut sync_decode_outputs: Vec<String> = Vec::with_capacity(results.len());
         for output in results {
+            sync_seq_ids.push(output.seq_id);
+            sync_decode_outputs.push(output.decode_output.clone());
             total_prompt_tokens += output.prompt_length;
             total_decoded_tokens += output.decoded_length;
             let prompt_time_taken =
@@ -1300,16 +1335,50 @@ pub async fn chat_completion(
             total_decoded_tokens as f32 / total_decoded_time_taken.max(0.001)
         );
 
+        let (cached_tokens_total, reasoning_tokens_total): (usize, usize) = {
+            let engine = data.engine.read();
+            let cached: usize = sync_seq_ids
+                .iter()
+                .filter_map(|sid| engine.get_num_cached_tokens_for_seq(*sid))
+                .sum();
+            // Reasoning text is extracted directly from each choice's
+            // `decode_output` rather than from `message.reasoning_content`,
+            // because the latter is only populated on the env-gated tools
+            // path. Counting from the raw text keeps the figure correct
+            // for plain chat completions too.
+            let reasoning: usize = sync_decode_outputs
+                .iter()
+                .filter_map(|text| {
+                    crate::utils::chat_template::extract_reasoning_content(text).map(|(r, _)| r)
+                })
+                .filter_map(|text| engine.tokenizer.encode(text.as_str(), false).ok())
+                .map(|enc| enc.get_ids().len())
+                .sum();
+            (cached, reasoning)
+        };
+
         let response = ChatCompletionResponse {
             id: "cmpl-".to_string() + &Uuid::new_v4().to_string()[..8],
             object: "chat.completion",
             created,
             model: model_id.to_string(),
             choices,
-            usage: Usage {
-                prompt_tokens: total_prompt_tokens,
-                completion_tokens: total_decoded_tokens,
-                total_tokens: total_prompt_tokens + total_decoded_tokens,
+            usage: {
+                Usage {
+                    prompt_tokens: total_prompt_tokens,
+                    completion_tokens: total_decoded_tokens,
+                    total_tokens: total_prompt_tokens + total_decoded_tokens,
+                    prompt_tokens_details: (cached_tokens_total > 0).then_some(
+                        PromptTokensDetails {
+                            cached_tokens: cached_tokens_total,
+                        },
+                    ),
+                    completion_tokens_details: (reasoning_tokens_total > 0).then_some(
+                        CompletionTokensDetails {
+                            reasoning_tokens: reasoning_tokens_total,
+                        },
+                    ),
+                }
             },
         };
 
