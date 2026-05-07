@@ -1251,12 +1251,6 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
-            // Extract `<think>…</think>` reasoning blocks into the dedicated
-            // `reasoning_content` field on the message, matching OpenAI's
-            // shape for reasoning-capable models. Previously gated on
-            // `has_tools`, which left every non-tools chat with reasoning
-            // markers stuck inside `content`. The behaviour can still be
-            // disabled with `VLLM_RS_STREAM_AS_REASONING_CONTENT=false`.
             let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content() {
                 match content {
                     Some(text) => {
