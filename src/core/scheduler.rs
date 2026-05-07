@@ -196,9 +196,11 @@ impl Scheduler {
     }
 
     /// Schedule sequences and return their indexes in `running` along with prefill flag
+    #[allow(non_snake_case)]
     pub fn schedule(&mut self) -> Result<(Vec<usize>, bool)> {
         let mut scheduled_ids = Vec::new();
         let mut num_tokens = 0;
+        let CHUNK_SIZE: usize = if cfg!(feature = "cuda") { 8192 } else { 4096 };
 
         // PD server: Check for new incoming prefill requests
         if self.is_pd_server() {
@@ -227,17 +229,25 @@ impl Scheduler {
         }
 
         // Prefill phase: move sequences from waiting to running if possible
+        // Use effective chunk tokens (not full sequence length) for budget accounting
+        // to enable batched prefill of multiple sequences per step.
+        // Capture running count before this batch so the interleave check only
+        // considers pre-existing decode sequences, not ones added in this loop.
+        let pre_existing_running = self.running.len();
         while let Some(mut seq) = self.waiting.pop_front() {
             // Try to transfer prefill requests to PD server when applicable
             if self.is_pd_mode() && !self.is_pd_server() && self.try_transfer(&mut seq) {
                 break;
             }
 
+            let effective_tokens = std::cmp::min(CHUNK_SIZE, seq.len() - seq.num_cached_tokens);
+
             if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
-                || num_tokens + seq.len() >= self.cfg.max_num_batched_tokens - 1
+                || num_tokens + effective_tokens >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
-                // interleaved scheduling
-                || (self.is_last_prefill && self.running.len() > 0)
+                // interleaved scheduling: alternate prefill/decode for fairness
+                // only block when there are pre-existing decode sequences
+                || (self.is_last_prefill && pre_existing_running > 0)
             {
                 // Put it back and break out if cannot schedule more
                 self.waiting.push_front(seq);
@@ -248,7 +258,7 @@ impl Scheduler {
                 self.block_manager.allocate(&mut seq)?;
             }
             seq.status = SequenceStatus::Running;
-            num_tokens += seq.len();
+            num_tokens += effective_tokens;
             self.running.push(seq);
             scheduled_ids.push(self.running.len() - 1); // index of newly pushed seq
         }
@@ -685,6 +695,8 @@ impl Scheduler {
     ) -> (Vec<usize>, Vec<usize>) {
         let mut finished_seqs = Vec::new();
         let mut remove_ids = Vec::new();
+        let mut chunked_info: Vec<(usize, usize, usize)> = Vec::new(); // (seq_id, cached, remain)
+        let mut chunk_finished_info: Vec<(usize, usize)> = Vec::new(); // (seq_id, total_len)
         let CHUNK_SIZE: usize = if cfg!(feature = "cuda") { 8192 } else { 4096 };
         for (i, id) in scheduled_ids.iter().enumerate() {
             if *id < self.running.len() {
@@ -693,31 +705,50 @@ impl Scheduler {
                     self.block_manager
                         .capture_mamba_prefix_state(seq, seq.len());
                     if seq.len() > CHUNK_SIZE {
-                        crate::log_warn!(
-                            "Seq {} - chunk prefill finished ({} tokens)",
-                            seq.id,
-                            seq.len()
-                        );
+                        chunk_finished_info.push((seq.id, seq.len()));
                     }
                     finished_seqs.push((i, seq.id));
                 } else {
                     self.block_manager
                         .capture_mamba_prefix_state(seq, seq.num_cached_tokens + CHUNK_SIZE);
                     remove_ids.push(seq.id);
-                    //unfinished due to chunked_prefill, push back to waiting list
                     let mut seq = seq.clone();
-                    seq.num_cached_tokens += CHUNK_SIZE; //current prefilled CHUNK_SIZE
+                    seq.num_cached_tokens += CHUNK_SIZE;
                     seq.status = SequenceStatus::Waiting;
-                    crate::log_info!(
-                        "Seq {} - chunk prefilled {} (remain {} tokens)",
+                    chunked_info.push((
                         seq.id,
                         seq.num_cached_tokens,
-                        seq.len() - seq.num_cached_tokens
-                    );
+                        seq.len() - seq.num_cached_tokens,
+                    ));
                     self.waiting.push_back(seq);
                 }
             }
         }
+
+        if !chunked_info.is_empty() {
+            let total_chunked: usize = chunked_info.iter().map(|(_, c, _)| *c).sum();
+            let seq_details: Vec<String> = chunked_info
+                .iter()
+                .map(|(id, cached, remain)| format!("{}:{}/{}", id, cached, cached + remain))
+                .collect();
+            crate::log_info!(
+                "Chunk prefilled {} seq(s) [{}] ({} total tokens processed)",
+                chunked_info.len(),
+                seq_details.join(", "),
+                total_chunked
+            );
+        }
+        if !chunk_finished_info.is_empty() {
+            let seq_ids: Vec<usize> = chunk_finished_info.iter().map(|(id, _)| *id).collect();
+            let total: usize = chunk_finished_info.iter().map(|(_, len)| len).sum();
+            crate::log_warn!(
+                "Chunk prefill finished for {} seq(s) {:?} ({} total tokens)",
+                chunk_finished_info.len(),
+                seq_ids,
+                total
+            );
+        }
+
         self.running.retain(|s| !remove_ids.contains(&s.id));
         let (indices, finished_ids): (Vec<usize>, Vec<usize>) = finished_seqs.into_iter().unzip();
         let finished_indices: Vec<usize> = finished_ids
