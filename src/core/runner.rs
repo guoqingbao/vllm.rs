@@ -1715,7 +1715,7 @@ impl ModelRunner {
         }
     }
 
-    pub fn receive_kvcache(&self, seq: &Sequence) -> Result<(bool, u32, usize)> {
+    pub fn receive_kvcache(&self, seq: &Sequence) -> Result<(bool, u32, usize, usize)> {
         if let Some(transfer) = &self.transfer {
             if !transfer.is_client() {
                 candle_core::bail!(

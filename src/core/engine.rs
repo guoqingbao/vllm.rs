@@ -536,6 +536,12 @@ impl LLMEngine {
         //we also need to consider prompt length
         if length + max_tokens > max_model_len {
             params.max_tokens = Some(max_model_len - length);
+            log_warn!(
+                "Adjusted max_tokens to {} to fit within max_model_len {} (with prompt length {})",
+                max_tokens,
+                max_model_len,
+                length
+            );
         }
 
         if let Some(gen_cfg) = &self.econfig.generation_cfg {
@@ -660,6 +666,11 @@ impl LLMEngine {
 
     pub fn get_num_cached_tokens(&self) -> usize {
         self.scheduler.get_num_cached_tokens()
+    }
+
+    /// See [`Scheduler::get_num_cached_tokens_for_seq`].
+    pub fn get_num_cached_tokens_for_seq(&self, seq_id: usize) -> Option<usize> {
+        self.scheduler.get_num_cached_tokens_for_seq(seq_id)
     }
 
     fn trim_prompt_replay_prefix(
