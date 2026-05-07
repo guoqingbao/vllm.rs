@@ -608,6 +608,11 @@ pub async fn chat_completion(
                                 .as_millis() as u64;
                         }
 
+                        // Accumulate raw token text so reasoning blocks can
+                        // be tokenized at finalization for `reasoning_tokens`.
+                        // Cheap: text is already small per token.
+                        full_decoded_text.push_str(&token);
+
                         // Use StreamToolParser for all tool call detection and buffering
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {

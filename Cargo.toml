@@ -1,6 +1,6 @@
 [package]
 name = "vllm-rs"
-version = "0.10.10"
+version = "0.10.11"
 edition = "2021"
 default-run = "vllm-rs"
 description = "A minimal, high-performance large language model (LLM) inference engine implementing vLLM in Rust."
@@ -60,7 +60,7 @@ flume = "0.10.14"
 utoipa = { version = "4.2", features = ["axum_extras"] }
 colored = { version = "3.0.0" }
 tower-http = { version = "0.6.6", features = ["cors"] }
-rustchatui = { git = "https://github.com/guoqingbao/rustchatui.git", rev = "68caad9" }
+rustchatui = "0.2.13"
 sysinfo = "0.38.3"
 image = { version = "0.25.6", default-features = false, features = ['bmp', 'gif', 'jpeg', 'png', 'tiff', 'webp'] }
 reqwest = { version = "0.12.24", features = ["blocking", "json", "rustls-tls"]}
