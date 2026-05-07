@@ -606,9 +606,6 @@ pub async fn chat_completion(
                                 .as_millis() as u64;
                         }
 
-                        // Capture reasoning state before token processing for routing
-                        let was_in_reasoning = tool_parser.in_reasoning();
-
                         // Use StreamToolParser for all tool call detection and buffering
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
@@ -643,6 +640,8 @@ pub async fn chat_completion(
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&text);
                                     }
+                                    // Capture reasoning state before token processing for routing
+                                    let was_in_reasoning = tool_parser.in_reasoning();
                                     if !reasoning_router.send(&text, was_in_reasoning, &stream_ctx)
                                     {
                                         crate::log_error!(
@@ -759,6 +758,7 @@ pub async fn chat_completion(
                             // SSE router can split `<think>…</think>` into
                             // `delta.reasoning_content` for non-tools chats.
                             tool_parser.advance_reasoning_state(&token);
+                            let was_in_reasoning = tool_parser.in_reasoning();
                             if token.is_empty() {
                                 continue;
                             }
