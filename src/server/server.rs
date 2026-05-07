@@ -568,9 +568,8 @@ pub async fn chat_completion(
             let mut tool_parser = tool_parser;
             let should_parse_tools = has_tools.clone();
 
-            let reasoning_router = ReasoningContentRouter::new(
-                crate::utils::env::stream_as_reasoning_content() && should_parse_tools,
-            );
+            let reasoning_router =
+                ReasoningContentRouter::new(crate::utils::env::stream_as_reasoning_content());
 
             let mut current_stream = stream;
             let current_seq_id = seq_id;
@@ -609,14 +608,6 @@ pub async fn chat_completion(
                                 .as_millis() as u64;
                         }
 
-                        // Accumulate raw token text so reasoning blocks can
-                        // be tokenized at finalization for `reasoning_tokens`.
-                        // Cheap: text is already small per token.
-                        full_decoded_text.push_str(&token);
-
-                        // Capture reasoning state before token processing for routing
-                        let was_in_reasoning = tool_parser.in_reasoning();
-
                         // Use StreamToolParser for all tool call detection and buffering
                         if should_parse_tools {
                             match tool_parser.process_token(token_id, &token).await {
@@ -651,6 +642,8 @@ pub async fn chat_completion(
                                     if let Some(ref l) = stream_logger {
                                         l.log_stream_token(&text);
                                     }
+                                    // Capture reasoning state before token processing for routing
+                                    let was_in_reasoning = tool_parser.in_reasoning();
                                     if !reasoning_router.send(&text, was_in_reasoning, &stream_ctx)
                                     {
                                         crate::log_error!(
@@ -761,7 +754,13 @@ pub async fn chat_completion(
                                 }
                             }
                         } else {
-                            // No tool parsing - stream directly
+                            // No tool parsing - stream directly. Advance the
+                            // reasoning state machine so `in_reasoning()` is
+                            // still accurate on the next iteration and the
+                            // SSE router can split `<think>…</think>` into
+                            // `delta.reasoning_content` for non-tools chats.
+                            tool_parser.advance_reasoning_state(&token);
+                            let was_in_reasoning = tool_parser.in_reasoning();
                             if token.is_empty() {
                                 continue;
                             }
@@ -1282,27 +1281,26 @@ pub async fn chat_completion(
 
             // For external tool calls (not MCP), return to client
             let has_tool_calls = tool_calls.is_some();
-            let (content, reasoning_content) =
-                if crate::utils::env::stream_as_reasoning_content() && has_tools {
-                    match content {
-                        Some(text) => {
-                            match crate::utils::chat_template::extract_reasoning_content(&text) {
-                                Some((reasoning, remaining)) => {
-                                    let c = if remaining.is_empty() {
-                                        None
-                                    } else {
-                                        Some(remaining)
-                                    };
-                                    (c, Some(reasoning))
-                                }
-                                None => (Some(text), None),
+            let (content, reasoning_content) = if crate::utils::env::stream_as_reasoning_content() {
+                match content {
+                    Some(text) => {
+                        match crate::utils::chat_template::extract_reasoning_content(&text) {
+                            Some((reasoning, remaining)) => {
+                                let c = if remaining.is_empty() {
+                                    None
+                                } else {
+                                    Some(remaining)
+                                };
+                                (c, Some(reasoning))
                             }
+                            None => (Some(text), None),
                         }
-                        None => (None, None),
                     }
-                } else {
-                    (content, None)
-                };
+                    None => (None, None),
+                }
+            } else {
+                (content, None)
+            };
             choices.push(ChatChoice {
                 index: 0,
                 message: ChatResponseMessage {
