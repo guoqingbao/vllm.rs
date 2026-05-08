@@ -58,6 +58,8 @@ pub static GLOBAL_RT: Lazy<Runtime> = Lazy::new(|| {
         .expect("Failed to build global Tokio runtime")
 });
 
+const REQUEST_ADMISSION_DECODE_BUDGET_TOKENS: usize = 4096;
+
 #[derive(Debug, Clone)]
 pub enum StreamItem {
     Token(String, u32), //streaming: (text, token_id)
@@ -530,17 +532,27 @@ impl LLMEngine {
                 .max_tokens
                 .unwrap_or(self.econfig.max_tokens.unwrap_or(16384)),
         );
-        let max_tokens = params.max_tokens.unwrap();
+        let mut max_tokens = params.max_tokens.unwrap();
+        let requested_max_tokens = max_tokens;
 
         let max_model_len = self.econfig.max_model_len.unwrap_or(max_tokens);
         //we also need to consider prompt length
         if length + max_tokens > max_model_len {
-            params.max_tokens = Some(max_model_len - length);
+            max_tokens = max_model_len - length;
+            params.max_tokens = Some(max_tokens);
             log_warn!(
-                "Adjusted max_tokens to {} to fit within max_model_len {} (with prompt length {})",
+                "Adjusted max_tokens to {} to fit within max_model_len {} (with prompt length {}, requested max_tokens {})",
                 max_tokens,
                 max_model_len,
-                length
+                length,
+                requested_max_tokens
+            );
+        }
+        if max_tokens == 0 {
+            candle_core::bail!(
+                "Inputs token length {} leaves no room for generated tokens within max_model_len {}",
+                length,
+                max_model_len
             );
         }
 
@@ -594,26 +606,54 @@ impl LLMEngine {
             image_idx,
         );
 
-        let mut required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+        let prompt_required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+        let requested_decode_blocks = max_tokens.div_ceil(self.econfig.block_size);
+        let minimum_decode_budget_tokens = max_tokens.min(REQUEST_ADMISSION_DECODE_BUDGET_TOKENS);
+        let minimum_decode_blocks = minimum_decode_budget_tokens.div_ceil(self.econfig.block_size);
+        let mut target_required_blocks =
+            prompt_required_blocks.saturating_add(requested_decode_blocks);
+        let mut minimum_required_blocks =
+            prompt_required_blocks.saturating_add(minimum_decode_blocks);
         let mut available_blocks = self.scheduler.block_manager.get_num_free_blocks();
 
-        while required_blocks > available_blocks {
-            // Release cache for unactive sessions.
-            let required_tokens = required_blocks * self.econfig.block_size;
-            if !self.try_release_cache(required_tokens) {
+        while target_required_blocks > available_blocks {
+            let target_required_tokens = target_required_blocks * self.econfig.block_size;
+            let evicted = self
+                .scheduler
+                .evict_prefix_cache_until_free(target_required_blocks);
+            if evicted > 0 {
+                crate::log_warn!(
+                    "Evicted {} prefix cache block(s) to reserve {} KV tokens for request admission (prompt + {} requested decode tokens).",
+                    evicted,
+                    target_required_tokens,
+                    max_tokens
+                );
+            }
+            if evicted == 0 && !self.try_release_cache(target_required_tokens) {
                 break;
             }
-            required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+            let prompt_required_blocks = self.scheduler.block_manager.required_blocks(&seq);
+            target_required_blocks = prompt_required_blocks.saturating_add(requested_decode_blocks);
+            minimum_required_blocks = prompt_required_blocks.saturating_add(minimum_decode_blocks);
             available_blocks = self.scheduler.block_manager.get_num_free_blocks();
         }
 
-        if required_blocks > available_blocks {
+        if minimum_required_blocks > available_blocks {
             let available_tokens = available_blocks * self.econfig.block_size;
-            let required_tokens = required_blocks * self.econfig.block_size;
+            let required_tokens = minimum_required_blocks * self.econfig.block_size;
             candle_core::bail!(
-                "Remaining {} kvcache tokens, but your prompt requires {} new tokens, please request later!",
+                "Remaining {} kvcache tokens, but your request requires at least {} tokens (prompt plus {} decode budget tokens), please request later!",
                 available_tokens,
-                required_tokens
+                required_tokens,
+                minimum_decode_budget_tokens
+            );
+        }
+        if target_required_blocks > available_blocks {
+            crate::log_warn!(
+                "Request admitted with {} KV tokens available, below requested reservation {} tokens but enough for prompt plus {} decode budget tokens.",
+                available_blocks * self.econfig.block_size,
+                target_required_blocks * self.econfig.block_size,
+                minimum_decode_budget_tokens
             );
         }
         let seq_id = self.scheduler.add(seq);
