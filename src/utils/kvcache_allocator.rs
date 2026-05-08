@@ -25,8 +25,10 @@ use std::fmt;
 const CUDA_RESERVED_BYTES: u64 = 512 * 1024 * 1024; // 512 MB recommended minimum remaining memory
 const SIZE_IN_MB: f64 = (1024 * 1024) as f64;
 const SIZE_IN_GB: f64 = 1024.0 * 1024.0 * 1024.0;
-const DEFAULT_HYBRID_MAMBA_FRACTION: f64 = 0.1;
+const DEFAULT_HYBRID_MAMBA_FRACTION: f64 = 0.15;
 const MAX_HYBRID_MAMBA_FRACTION: f64 = 0.3;
+const HYBRID_MAMBA_ACTIVE_SLOT_MULTIPLIER: usize = 3;
+const HYBRID_MAMBA_MIN_ACTIVE_SLOTS: usize = 6;
 
 /// Represents the result of KVCache allocation planning
 #[derive(Debug, Clone)]
@@ -337,7 +339,7 @@ impl KVCacheAllocator {
             Ok(min_available) => {
                 let mut kv_budget = min_available;
                 let mut mamba_budget = 0u64;
-                let mut mamba_capacity = 0usize;
+                let mut mamba_budget_slots = 0usize;
                 let mut mamba_budget_enabled = false;
 
                 if let Some(slot_bytes) = self.hybrid_mamba_slot_bytes {
@@ -369,7 +371,7 @@ impl KVCacheAllocator {
 
                         mamba_budget = target_budget;
                         kv_budget = min_available.saturating_sub(mamba_budget);
-                        mamba_capacity = if slot_bytes == 0 {
+                        mamba_budget_slots = if slot_bytes == 0 {
                             0
                         } else {
                             (mamba_budget as usize / slot_bytes).max(1)
@@ -388,20 +390,33 @@ impl KVCacheAllocator {
                                 econfig.mamba_cache_capacity = None;
                                 return Ok(());
                             }
-                            if allocation.max_num_seqs > mamba_capacity {
+                            let active_mamba_capacity = if econfig.prefix_cache.unwrap_or(false) {
+                                econfig
+                                    .max_num_seqs
+                                    .saturating_mul(HYBRID_MAMBA_ACTIVE_SLOT_MULTIPLIER)
+                                    .max(HYBRID_MAMBA_MIN_ACTIVE_SLOTS)
+                                    .min(mamba_budget_slots)
+                            } else {
+                                mamba_budget_slots
+                            };
+                            if allocation.max_num_seqs > active_mamba_capacity {
                                 crate::log_warn!(
                                     "Clamping max_num_seqs from {} to {} due to hybrid mamba slot capacity.",
                                     allocation.max_num_seqs,
-                                    mamba_capacity
+                                    active_mamba_capacity
                                 );
-                                econfig.max_num_seqs = mamba_capacity;
+                                econfig.max_num_seqs = active_mamba_capacity;
                             }
+                            let prefix_budget_slots =
+                                mamba_budget_slots.saturating_sub(active_mamba_capacity);
                             econfig.mamba_slot_bytes = slot_bytes;
                             econfig.mamba_memory_bytes = mamba_budget as usize;
-                            econfig.mamba_cache_capacity = Some(mamba_capacity);
+                            econfig.mamba_cache_capacity = Some(active_mamba_capacity);
                             crate::log_warn!(
-                                "Hybrid Mamba Allocation: {} slot(s), {:.2} GB budget, {:.2} MB/slot, {} linear-attention layer(s), model dtype {} bytes",
-                                mamba_capacity,
+                                "Hybrid Mamba Allocation: {} active slot(s), {} prefix slot budget, {} total slot budget, {:.2} GB budget, {:.2} MB/slot, {} linear-attention layer(s), model dtype {} bytes",
+                                active_mamba_capacity,
+                                prefix_budget_slots,
+                                mamba_budget_slots,
                                 mamba_budget as f64 / SIZE_IN_GB,
                                 slot_bytes as f64 / SIZE_IN_MB,
                                 self.hybrid_num_gdn_layers,

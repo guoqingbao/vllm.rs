@@ -519,26 +519,22 @@ impl ModelRunner {
             }
         }
 
-        let mut mamba_prefix_capacity = Self::effective_mamba_prefix_capacity(
-            econfig.prefix_cache.unwrap_or(false),
-            mamba_cache_capacity,
-        );
+        let prefix_cache_enabled = econfig.prefix_cache.unwrap_or(false);
+        let mut mamba_prefix_capacity =
+            Self::effective_mamba_prefix_capacity(prefix_cache_enabled, mamba_cache_capacity);
         if is_hybrid_mamba_model && econfig.mamba_slot_bytes > 0 && econfig.mamba_memory_bytes > 0 {
             let active_reserved = mamba_cache_capacity.saturating_mul(econfig.mamba_slot_bytes);
             let prefix_budget_slots = econfig.mamba_memory_bytes.saturating_sub(active_reserved)
                 / econfig.mamba_slot_bytes;
-            if prefix_budget_slots == 0 && mamba_prefix_capacity > 0 {
-                crate::log_info!(
-                    "Hybrid mamba budget leaves 0 explicit snapshot slots; using auto prefix-state capacity {}.",
-                    mamba_prefix_capacity
-                );
-            } else if mamba_prefix_capacity > prefix_budget_slots {
+            mamba_prefix_capacity = if prefix_cache_enabled {
+                prefix_budget_slots
+            } else {
+                0
+            };
+            if mamba_prefix_capacity == 0 && prefix_cache_enabled {
                 crate::log_warn!(
-                    "Capping hybrid mamba prefix-state cache from {} to {} entries by memory budget.",
-                    mamba_prefix_capacity,
-                    prefix_budget_slots
+                    "Hybrid mamba prefix-state cache disabled because the mamba memory budget leaves no snapshot slots after active slots."
                 );
-                mamba_prefix_capacity = prefix_budget_slots;
             }
         }
         match &model {
