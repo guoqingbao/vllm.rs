@@ -91,6 +91,7 @@
 - [工具调用解析](docs/tool_parsing.md)
 - [MCP集成与工具调用](docs/mcp_tool_calling.md)
 - [引导解码/结构化输出](docs/guided_decoding.md)
+- [在xbot中使用vLLM.rs后端](docs/xbot.md)
 - [OpenCode使用vLLM.rs后端](docs/open_code.md)
 - [Kilo Code使用vLLM.rs后端](docs/kilocode.md)
 - [Claude Code使用vLLM.rs后端](docs/claude_code.md)

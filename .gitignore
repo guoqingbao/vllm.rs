@@ -11,3 +11,5 @@ CLAUDE.md
 *.sqlite
 .cursor/skills/nobreak/SKILL.md
 test_model.py
+.xbot/
+XBOT.md
