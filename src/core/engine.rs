@@ -802,103 +802,116 @@ impl LLMEngine {
         }
     }
 
-    pub fn step(&mut self) -> Result<usize> {
-        pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
-
-        // Get scheduled sequence indexes and prefill flag
+    /// Phase 1: Schedule sequences and prepare data for the forward pass.
+    /// Returns (scheduled_ids, is_prefill, cloned_sequences) or None if no work.
+    pub fn prepare_step(&mut self) -> Result<Option<(Vec<usize>, bool, Vec<Sequence>)>> {
         let (scheduled_ids, is_prefill) = match self.scheduler.schedule() {
             Ok((ids, prefill)) => (ids, prefill),
             Err(_) => (vec![], true),
         };
-        let decoded_ids = if !scheduled_ids.is_empty() {
-            if is_prefill {
-                let downgraded = self
-                    .scheduler
-                    .fallback_missing_mamba_prefix_snapshots(&scheduled_ids)?;
-                if downgraded > 0 {
-                    crate::log_warn!(
-                        "Prefill fallback: {} sequence(s) downgraded to full prefill due to missing mamba snapshots.",
-                        downgraded
-                    );
-                }
+        if scheduled_ids.is_empty() {
+            return Ok(None);
+        }
+
+        if is_prefill {
+            let downgraded = self
+                .scheduler
+                .fallback_missing_mamba_prefix_snapshots(&scheduled_ids)?;
+            if downgraded > 0 {
+                crate::log_warn!(
+                    "Prefill fallback: {} sequence(s) downgraded to full prefill due to missing mamba snapshots.",
+                    downgraded
+                );
             }
+        }
 
-            // Get immutable references to scheduled sequences for model_runner
-            let seqs = self.scheduler.get_sequences(&scheduled_ids);
+        let seqs = self.scheduler.get_sequences(&scheduled_ids);
+        let owned_seqs: Vec<Sequence> = seqs.iter().map(|s| (*s).clone()).collect();
+        Ok(Some((scheduled_ids, is_prefill, owned_seqs)))
+    }
 
-            let output_ids = match &mut *self.runners.write() {
-                RunnerType::Thread(model_runner) => {
-                    // Run model on the scheduled sequences in the main thread
-                    model_runner.run(Seqs::SeqRefs(&seqs), is_prefill)?
-                }
-                RunnerType::Process(ref mut runner_streams) => {
-                    let request = if is_prefill {
-                        let sequences = seqs.iter().map(|s| (*s).clone()).collect::<Vec<_>>();
-                        MessageType::RunPrefill((sequences, true))
-                    } else {
-                        let sequences = seqs
-                            .iter()
-                            .map(|s| DecodeSequence::new(s))
-                            .collect::<Vec<_>>();
-                        MessageType::RunDecode((sequences, false))
-                    };
+    /// Phase 2: Run the forward pass. Does NOT require the engine lock - only the runner lock.
+    pub fn run_forward(
+        runners: &Arc<RwLock<RunnerType>>,
+        owned_seqs: &[Sequence],
+        is_prefill: bool,
+    ) -> Result<Vec<u32>> {
+        match &mut *runners.write() {
+            RunnerType::Thread(model_runner) => {
+                let seq_refs: Vec<&Sequence> = owned_seqs.iter().collect();
+                model_runner.run(Seqs::SeqRefs(&seq_refs), is_prefill)
+            }
+            RunnerType::Process(ref mut runner_streams) => {
+                let request = if is_prefill {
+                    MessageType::RunPrefill((owned_seqs.to_vec(), true))
+                } else {
+                    let sequences = owned_seqs
+                        .iter()
+                        .map(|s| DecodeSequence::new(s))
+                        .collect::<Vec<_>>();
+                    MessageType::RunDecode((sequences, false))
+                };
 
-                    let cloned_streams: Vec<LocalStream> = runner_streams
-                        .iter_mut()
-                        .map(|s| s.try_clone().expect("clone failed"))
-                        .collect();
+                let cloned_streams: Vec<LocalStream> = runner_streams
+                    .iter_mut()
+                    .map(|s| s.try_clone().expect("clone failed"))
+                    .collect();
 
-                    let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
-                        .into_par_iter()
-                        .map(|mut stream| {
-                            let msg = request.clone();
-                            send_local(&mut vec![stream.try_clone()?], &msg, false)?;
-                            let response = receive_local(&mut stream, false)?;
+                let all_outputs: Result<Vec<Vec<u32>>> = cloned_streams
+                    .into_par_iter()
+                    .map(|mut stream| {
+                        let msg = request.clone();
+                        send_local(&mut vec![stream.try_clone()?], &msg, false)?;
+                        let response = receive_local(&mut stream, false)?;
 
-                            match response {
-                                MessageType::RunResponse(output_ids) => {
-                                    if output_ids.len() == 0 {
-                                        candle_core::bail!("Runner step error, no response!")
-                                    } else {
-                                        Ok(output_ids)
-                                    }
-                                }
-                                other => {
-                                    candle_core::bail!("Unexpected response type: {:?}", other)
+                        match response {
+                            MessageType::RunResponse(output_ids) => {
+                                if output_ids.len() == 0 {
+                                    candle_core::bail!("Runner step error, no response!")
+                                } else {
+                                    Ok(output_ids)
                                 }
                             }
-                        })
-                        .collect();
+                            other => {
+                                candle_core::bail!("Unexpected response type: {:?}", other)
+                            }
+                        }
+                    })
+                    .collect();
 
-                    let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
-                    // Only run postprocess once after all runners finish (use first result)
-                    if let Some(output_ids) = all_outputs.first() {
-                        output_ids.clone()
-                        // self.scheduler.postprocess(&scheduled_ids, output_ids);
-                    } else {
-                        candle_core::bail!("No output ids received from model runners");
-                    }
-                }
-            };
-            // Postprocess sequences by modifying them inside the scheduler
-            if is_prefill {
-                let (indices, finished_indices) =
-                    self.scheduler.filter_prefill_finished(&scheduled_ids);
-                if indices.is_empty() {
-                    //chunked prefill, no finished
-                    self.check_canceled(None);
-                    return Ok(0);
+                let all_outputs = all_outputs.map_err(candle_core::Error::wrap)?;
+                if let Some(output_ids) = all_outputs.first() {
+                    Ok(output_ids.clone())
                 } else {
-                    let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
-                    self.scheduler.postprocess(&finished_indices, &output_ids);
-                    DecodedIds(Either::Left(finished_indices))
+                    candle_core::bail!("No output ids received from model runners");
                 }
+            }
+        }
+    }
+
+    /// Phase 3: Postprocess forward pass results, deliver tokens, and do maintenance.
+    pub fn finish_step(
+        &mut self,
+        scheduled_ids: Vec<usize>,
+        is_prefill: bool,
+        output_ids: Vec<u32>,
+    ) -> Result<usize> {
+        pub struct DecodedIds(Either<Vec<usize>, Vec<usize>>);
+
+        let decoded_ids = if is_prefill {
+            let (indices, finished_indices) =
+                self.scheduler.filter_prefill_finished(&scheduled_ids);
+            if indices.is_empty() {
+                self.check_canceled(None);
+                return Ok(0);
             } else {
-                self.scheduler.postprocess(&scheduled_ids, &output_ids);
-                DecodedIds(Either::Left(scheduled_ids))
+                let output_ids: Vec<u32> = indices.iter().map(|&i| output_ids[i]).collect();
+                self.scheduler.postprocess(&finished_indices, &output_ids);
+                DecodedIds(Either::Left(finished_indices))
             }
         } else {
-            DecodedIds(Either::Right(vec![]))
+            self.scheduler.postprocess(&scheduled_ids, &output_ids);
+            DecodedIds(Either::Left(scheduled_ids))
         };
 
         let (indices, is_running): (&Vec<usize>, bool) = match &decoded_ids.0 {
@@ -906,6 +919,7 @@ impl LLMEngine {
             Either::Right(indices) => (indices, false),
         };
 
+        let mut prefill_batch: Vec<(usize, usize, f32, bool)> = Vec::new();
         for &idx in indices {
             let sq = if is_running {
                 self.scheduler.get_running(idx)
@@ -992,18 +1006,12 @@ impl LLMEngine {
 
                         let time_costs = cur_time - s.created_time();
                         if time_costs / 100 > 0 && s.len() > 0 {
-                            crate::log_info!(
-                                "Prefilling [seq_id {}]: {} tokens in {:.2}s ({:.2} tokens/s{})",
+                            prefill_batch.push((
                                 seq_id,
                                 s.len(),
                                 time_costs as f32 / 1000f32,
-                                s.len() as f32 / (time_costs as f32 * 1.0f32 / 1000f32),
-                                if s.num_cached_tokens > 0 {
-                                    ", cache included"
-                                } else {
-                                    ""
-                                },
-                            )
+                                s.num_cached_tokens > 0,
+                            ));
                         }
                     }
 
@@ -1062,6 +1070,27 @@ impl LLMEngine {
                         }
                     }
                 }
+            }
+        }
+
+        if !prefill_batch.is_empty() {
+            let seq_ids: Vec<usize> = prefill_batch.iter().map(|(id, _, _, _)| *id).collect();
+            let total_tokens: usize = prefill_batch.iter().map(|(_, t, _, _)| *t).sum();
+            let max_time: f32 = prefill_batch
+                .iter()
+                .map(|(_, _, t, _)| *t)
+                .fold(0.0f32, f32::max);
+            let has_cache = prefill_batch.iter().any(|(_, _, _, c)| *c);
+            if max_time > 0.0 {
+                crate::log_info!(
+                    "Prefilling {} seq(s) {:?}: {} total tokens in {:.2}s ({:.2} tokens/s{})",
+                    prefill_batch.len(),
+                    seq_ids,
+                    total_tokens,
+                    max_time,
+                    total_tokens as f32 / max_time,
+                    if has_cache { ", cache included" } else { "" },
+                );
             }
         }
         self.scheduler.clear_finished();
@@ -1649,14 +1678,16 @@ impl LLMEngine {
     pub fn start_engine(engine: Arc<RwLock<Self>>) {
         GLOBAL_RT.spawn(async move {
             let engine = engine.clone();
-            let is_pd_server = {
+            let (is_pd_server, runners) = {
                 let guard = engine.read();
-                guard.is_pd_mode() && guard.is_pd_server()
+                (
+                    guard.is_pd_mode() && guard.is_pd_server(),
+                    guard.runners.clone(),
+                )
             };
             loop {
                 let idle = {
                     let guard = engine.read();
-                    //no add_request in PD server, marking it always active
                     guard.is_idle() && !is_pd_server
                 };
 
@@ -1666,20 +1697,49 @@ impl LLMEngine {
                 }
 
                 let mut task_processed = 0;
-                {
+
+                // Phase 1: Schedule (engine lock held briefly)
+                let prep = {
                     let mut guard = engine.write();
-                    match guard.step() {
-                        Ok(n_tasks) => {
-                            task_processed = n_tasks;
+                    match guard.prepare_step() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            crate::log_error!("[Engine Loop] Prepare error: {:?}", e);
+                            if !guard.cancel_all_with_reason(Some(e.to_string())) {
+                                std::process::exit(1);
+                            }
+                            None
+                        }
+                    }
+                };
+                // Engine lock released -- server can accept new requests during forward pass
+
+                if let Some((scheduled_ids, is_prefill, owned_seqs)) = prep {
+                    // Phase 2: Forward pass (only runner lock, engine lock FREE)
+                    match Self::run_forward(&runners, &owned_seqs, is_prefill) {
+                        Ok(output_ids) => {
+                            // Phase 3: Postprocess (engine lock held briefly)
+                            let mut guard = engine.write();
+                            match guard.finish_step(scheduled_ids, is_prefill, output_ids) {
+                                Ok(n) => task_processed = n,
+                                Err(e) => {
+                                    crate::log_error!("[Engine Loop] Finish error: {:?}", e);
+                                    if !guard.cancel_all_with_reason(Some(e.to_string())) {
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
-                            crate::log_error!("[Engine Loop] Step error: {:?}", e);
+                            crate::log_error!("[Engine Loop] Forward error: {:?}", e);
+                            let mut guard = engine.write();
                             if !guard.cancel_all_with_reason(Some(e.to_string())) {
                                 std::process::exit(1);
                             }
                         }
                     }
                 }
+
                 if task_processed == 0 {
                     tokio::time::sleep(tokio::time::Duration::from_millis(if is_pd_server {
                         PD_PREFILL_STATUS_CHECK_COOLING_PERIOD as u64

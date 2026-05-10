@@ -1070,7 +1070,11 @@ impl ModelRunner {
         // Handle cached prefix KV reuse
         let (block_tables, context_lens) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let block_tables_t = self.prepare_block_tables(seqs)?;
-            let context_lens: Vec<u32> = seqs.iter().map(|seq| seq.len() as u32).collect();
+            let context_lens: Vec<u32> = seqs
+                .iter()
+                .zip(prefill_tokens.iter())
+                .map(|(seq, &num_tokens)| (seq.num_cached_tokens + num_tokens) as u32)
+                .collect();
             let context_lens = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
             (Some(block_tables_t), Some(context_lens))
         } else {
