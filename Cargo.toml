@@ -71,6 +71,18 @@ url = "2.5.7"
 tool-parser = "1.2.0"
 openai-protocol = "1.6.0"
 nvtx = { version = "1.3", optional = true }
+nvml-wrapper = { version = "0.12", optional = true }
+
+# Instrumentation dependencies - ALWAYS enabled for metrics
+# Use exact versions that are compatible with each other
+metrics = "0.24.5"
+metrics-util = "0.20.0"
+metrics-exporter-prometheus = "0.18.3"
+# OpenTelemetry dependencies - optional
+tracing-opentelemetry = { version = "0.32", optional = true }
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry-otlp = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", optional = true }
 
 [lib]
 name = "vllm_rs"
@@ -78,7 +90,7 @@ path = "src/lib.rs"
 crate-type = ["rlib", "cdylib"]  # cdylib needed for python extension
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "attention-rs/cuda", "dep:nvml-wrapper"]
 nccl = ["candle-core/nccl"]
 graph = ["cuda", "attention-rs/graph", "candle-core/graph"]
 cutlass = ["attention-rs/cutlass"]
@@ -87,6 +99,10 @@ flashinfer = ["attention-rs/flashinfer"]
 metal = ["candle-core/metal", "candle-nn/metal", "attention-rs/metal", "dep:metal"]
 python = ["pyo3"]
 nvtx = ["dep:nvtx"]
+
+# GPU metrics via nvml-wrapper are gated behind cuda feature
+# Instrumentation itself is always enabled (metrics crates are non-optional)
+opentelemetry = ["tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
 
 [[bin]]
 name = "runner"

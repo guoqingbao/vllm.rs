@@ -8,7 +8,6 @@ use tool_parser::ParserFactory;
 use vllm_rs::core::engine::StreamItem;
 use vllm_rs::core::engine::GLOBAL_RT;
 use vllm_rs::core::{engine::LLMEngine, GenerationOutput};
-use vllm_rs::log_error;
 use vllm_rs::server::run_server;
 use vllm_rs::server::Args;
 use vllm_rs::transfer::{PdConfig, PdMethod, PdRole};
@@ -16,9 +15,18 @@ use vllm_rs::utils::chat_template::Message;
 use vllm_rs::utils::config::GenerationConfig;
 use vllm_rs::utils::config::{EngineConfig, SamplingParams};
 use vllm_rs::utils::get_dtype;
+use vllm_rs::utils::metrics::prometheus;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Instrumentation is always enabled - no feature gate needed
+    // GPU metrics initialization happens when cuda feature is enabled
+
+    // Initialize Prometheus exporter FIRST - before any metrics are recorded
+    // This must be done before any metrics are recorded, otherwise they go to NOOP_RECORDER
+    let _prom_handle = prometheus::init_prometheus();
+    vllm_rs::log_warn!("Prometheus recorder initialized - metrics will be available at /metrics");
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -252,7 +260,7 @@ async fn main() -> Result<()> {
     };
 
     if args.max_tokens > resolved_max_model_len {
-        log_error!(
+        vllm_rs::log_error!(
             "Requested max_tokens {} larger than max_model_len {}",
             args.max_tokens,
             resolved_max_model_len

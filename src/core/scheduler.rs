@@ -7,6 +7,7 @@ use super::{
 };
 use crate::transfer::{PdConfig, PdRole};
 use crate::utils::config::{Config, EngineConfig, EosTokenId};
+use crate::utils::metrics;
 use candle_core::Result;
 use parking_lot::RwLock;
 use regex::Regex;
@@ -202,6 +203,10 @@ impl Scheduler {
         let mut num_tokens = 0;
         let CHUNK_SIZE: usize = if cfg!(feature = "cuda") { 8192 } else { 4096 };
 
+        // Record scheduler queue lengths
+        metrics::record_scheduler_waiting_length(self.waiting.len() as u64);
+        metrics::record_scheduler_running_length(self.running.len() as u64);
+
         // PD server: Check for new incoming prefill requests
         if self.is_pd_server() {
             if let Ok((fit, Some(seq))) = self
@@ -281,6 +286,11 @@ impl Scheduler {
             }
         }
 
+        // Record preemption metric
+        if !preempt_ids.is_empty() {
+            metrics::record_scheduler_preemption();
+        }
+
         // Client: Check for finished prefills
         if self.is_pd_mode() && !self.is_pd_server() {
             self.try_receive_kvcache()?;
@@ -318,6 +328,7 @@ impl Scheduler {
                             self.running[idx].id
                         );
                         self.try_swap_out(idx, true);
+                        metrics::record_scheduler_swap("out");
                     }
                 }
             }
@@ -863,6 +874,7 @@ impl Scheduler {
                 Ok(_) => {
                     seq.status = SequenceStatus::Running;
                     crate::log_warn!("Seq {} is swapped in for execution!", seq.id);
+                    metrics::record_scheduler_swap("in");
                 }
                 Err(e) => {
                     seq.status = SequenceStatus::Finished;
@@ -1229,7 +1241,10 @@ impl Scheduler {
     pub fn kv_cache_usage_percent(&self) -> f32 {
         let total_blocks = self.block_manager.get_num_total_blocks();
         let free_blocks = self.block_manager.get_num_free_blocks();
-        1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32)
+        let usage = 1.0f32 - (free_blocks as f32 * 1.0f32 / total_blocks as f32);
+        // Record KV cache usage metric
+        metrics::record_kv_cache_usage_percent("gpu", (usage * 100.0) as f64);
+        usage
     }
 
     /// Check if the given token is a tool call end token
