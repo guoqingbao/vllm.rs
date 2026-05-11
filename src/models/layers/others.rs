@@ -11,19 +11,19 @@ pub struct NormX {
 impl NormX {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let in_dtype = xs.dtype();
-        let xs = if xs.dtype() != self.dtype {
-            xs.to_dtype(self.dtype)?
+        if xs.dtype() != self.dtype {
+            let converted = xs.to_dtype(self.dtype)?;
+            let out = match &self.norm {
+                Either::Left(norm) => norm.forward(&converted)?,
+                Either::Right(norm) => norm.forward(&converted)?,
+            };
+            out.to_dtype(in_dtype)
         } else {
-            xs.to_owned()
-        };
-        let xs = match &self.norm {
-            Either::Left(norm) => norm.forward(&xs)?,
-            Either::Right(norm) => norm.forward(&xs)?,
-        };
-        if xs.dtype() != in_dtype {
-            xs.to_dtype(in_dtype)
-        } else {
-            Ok(xs)
+            let out = match &self.norm {
+                Either::Left(norm) => norm.forward(xs)?,
+                Either::Right(norm) => norm.forward(xs)?,
+            };
+            Ok(out)
         }
     }
 }

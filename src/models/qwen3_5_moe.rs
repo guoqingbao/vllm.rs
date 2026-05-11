@@ -212,6 +212,7 @@ impl Qwen3_5MoEDecoderLayer {
             (None, None)
         };
 
+        let norm_dtype = if is_qvar_builder { DType::F32 } else { dtype };
         let input_layernorm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
@@ -220,7 +221,7 @@ impl Qwen3_5MoEDecoderLayer {
             } else {
                 vb.pp("input_layernorm")
             },
-            DType::F32,
+            norm_dtype,
             !is_qvar_builder,
         )?;
 
@@ -232,7 +233,7 @@ impl Qwen3_5MoEDecoderLayer {
             } else {
                 vb.pp("post_attention_layernorm")
             },
-            DType::F32,
+            norm_dtype,
             !is_qvar_builder,
         )?;
 
@@ -520,6 +521,7 @@ impl Qwen3_5MoEForCausalLM {
 
         let num_gdn_layers = gdn_layer_idx;
 
+        let norm_dtype = if is_qvar_builder { DType::F32 } else { dtype };
         let norm = rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
@@ -528,7 +530,7 @@ impl Qwen3_5MoEForCausalLM {
             } else {
                 vb.pp(&format!("{}norm", prefix))
             },
-            DType::F32,
+            norm_dtype,
             !is_qvar_builder,
         )?;
 
