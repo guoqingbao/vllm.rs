@@ -489,6 +489,95 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
                 last_len,
             )
         };
+        // Pre-capture warmup: run each planned batch size once without stream
+        // capture so that lazily-initialized CUDA kernels (e.g. CUTLASS FP8 GEMM
+        // scratch allocations, cuBLAS handles) are fully set up before capture.
+        // Without this, first-use allocations inside captured kernels produce
+        // dangling pointers that cause crashes on graph replay.
+        for &bs in self.graph_bs.iter().rev() {
+            #[cfg(feature = "flashinfer")]
+            let flashinfer_metadata = {
+                let mut indptr_host = Vec::with_capacity(bs + 1);
+                indptr_host.push(0u32);
+                for i in 0..bs {
+                    indptr_host.push(((i + 1) * max_num_blocks) as u32);
+                }
+
+                let (decode_plan_info, mla_decode_plan_info, kv_len_arr_host) =
+                    if let Some(params) = self.flashinfer_kv_params {
+                        let mut kv_len_arr_host_bs = Vec::with_capacity(bs);
+                        for i in 0..bs {
+                            let num_pages = indptr_host[i + 1] - indptr_host[i];
+                            if num_pages == 0 {
+                                kv_len_arr_host_bs.push(0);
+                            } else {
+                                let full = (num_pages - 1) * params.page_size as u32;
+                                kv_len_arr_host_bs.push(full + last_len_host[i]);
+                            }
+                        }
+                        let (dp, mdp) = graph_decode_plan(
+                            device,
+                            &params,
+                            &indptr_host,
+                            &last_len_host[..bs],
+                            &kv_len_arr_host_bs,
+                            bs,
+                            self.is_mla,
+                            false,
+                        )?;
+                        (dp, mdp, Some(kv_len_arr_host_bs))
+                    } else {
+                        (None, None, None)
+                    };
+
+                Some(attention_rs::FlashInferMetadata {
+                    indptr: flashinfer_indptr.narrow(0, 0, bs + 1)?,
+                    indptr_host,
+                    indices: flashinfer_indices.narrow(0, 0, bs * max_num_blocks)?,
+                    last_len: flashinfer_last_len.narrow(0, 0, bs)?,
+                    last_len_host: Some(last_len_host[..bs].to_vec()),
+                    kv_len_arr_host,
+                    total_num_rows: None,
+                    batch_indices: None,
+                    positions: None,
+                    use_cuda_graph: false,
+                    decode_plan_info,
+                    prefill_plan_info: None,
+                    mla_decode_plan_info,
+                    mla_prefill_plan_info: None,
+                })
+            };
+            #[cfg(not(feature = "flashinfer"))]
+            let flashinfer_metadata = None;
+
+            let input_metadata = InputMetadata {
+                is_prefill: false,
+                is_mla: self.is_mla,
+                sequence_ids: None,
+                mamba_slot_mapping: Some(mamba_slot_mapping.narrow(0, 0, bs)?),
+                slot_mapping: slot_mapping.narrow(0, 0, bs)?,
+                block_tables: Some(block_tables.narrow(0, 0, bs)?),
+                context_lens: Some(context_lens.narrow(0, 0, bs)?),
+                cu_seqlens_q: None,
+                cu_seqlens_k: None,
+                max_seqlen_q: 0,
+                max_seqlen_k: 0,
+                max_context_len: self.max_model_len,
+                disable_flash_attn: None,
+                seqlens: None,
+                flashinfer_metadata,
+            };
+            let input_ids_bs = input_ids.narrow(0, 0, bs)?;
+            let positions_bs = positions.narrow(0, 0, bs)?;
+            let _ = self.model.forward(
+                &input_ids_bs,
+                &positions_bs,
+                kv_caches,
+                &input_metadata,
+                false,
+            )?;
+        }
+
         let mut outputs = BTreeMap::<usize, Tensor>::new();
         for i in tqdm(0..self.graph_bs.len()).desc(Some("Graph capturing")) {
             let bs = self.graph_bs[self.graph_bs.len() - i - 1];
