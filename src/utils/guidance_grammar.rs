@@ -115,12 +115,28 @@ impl TopLevelGrammarExt for TopLevelGrammar {
 
 // UTILITY FUNCTIONS
 
+/// Sanitize schema for llguidance - resolves $ref references and strips metadata
+/// This function extracts definitions from $defs, resolves all $ref references,
+/// and removes the $defs section entirely since llguidance doesn't support $ref.
 fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
+    // Extract definitions and resolve references
+    let (schema_without_defs, defs) = extract_defs(schema);
+
+    // Resolve all $ref references in the schema
+    let resolved_schema = resolve_schema_refs(&schema_without_defs, &defs);
+
+    // Now sanitize the resolved schema (strip metadata, keep validation keywords)
+    sanitize_sanitized_schema_recursive(&resolved_schema)
+}
+
+/// Sanitize a schema that has already had $refs resolved
+/// This strips metadata fields like description, default, title while keeping validation keywords
+fn sanitize_sanitized_schema_recursive(schema: &Value) -> Value {
     // JSON Schema validation keywords that should be KEPT
     // Based on llguidance parser/src/json/schema.rs IMPLEMENTED and META_AND_ANNOTATIONS
     const VALIDATION_KEYWORDS: &[&str] = &[
         // Core
-        "anyOf", "oneOf", "allOf", "$ref", "const", "enum", "type",
+        "anyOf", "oneOf", "allOf", "const", "enum", "type",
         // Array
         "items", "additionalItems", "prefixItems", "minItems", "maxItems",
         // Object
@@ -129,6 +145,8 @@ fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
         "minLength", "maxLength", "pattern", "format",
         // Number
         "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+        // Schema definitions (for $ref resolution)
+        "$defs", "definitions", "$anchor",
     ];
 
     match schema {
@@ -141,15 +159,15 @@ fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
                     if let Value::Object(props) = value {
                         let mut new_props = serde_json::Map::new();
                         for (prop_name, prop_schema) in props {
-                            new_props.insert(prop_name.clone(), sanitize_schema_for_llguidance_recursive(prop_schema));
+                            new_props.insert(prop_name.clone(), sanitize_sanitized_schema_recursive(prop_schema));
                         }
                         out.insert(key.clone(), Value::Object(new_props));
                     } else {
-                        out.insert(key.clone(), sanitize_schema_for_llguidance_recursive(value));
+                        out.insert(key.clone(), sanitize_sanitized_schema_recursive(value));
                     }
                 } else if VALIDATION_KEYWORDS.contains(&key.as_str()) {
                     // Keep validation keywords, strip metadata/annotation fields
-                    out.insert(key.clone(), sanitize_schema_for_llguidance_recursive(value));
+                    out.insert(key.clone(), sanitize_sanitized_schema_recursive(value));
                 }
                 // Skip all other fields (metadata, annotations, etc.)
             }
@@ -158,7 +176,7 @@ fn sanitize_schema_for_llguidance_recursive(schema: &Value) -> Value {
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(sanitize_schema_for_llguidance_recursive)
+                .map(sanitize_sanitized_schema_recursive)
                 .collect(),
         ),
         _ => schema.clone(),
@@ -177,6 +195,86 @@ pub fn sanitize_ascii_only(s: &str) -> String {
         }
     }
     result
+}
+
+/// Resolve $ref references by inlining the definitions from $defs
+/// This is required because llguidance's JSON schema parser doesn't support $ref
+fn resolve_schema_refs(schema: &Value, defs: &HashMap<String, Value>) -> Value {
+    fn resolve_recursive(schema: &Value, defs: &HashMap<String, Value>) -> Value {
+        match schema {
+            Value::Object(map) => {
+                // Check if this object contains a $ref
+                if let Some(ref_value) = map.get("$ref") {
+                    if let Value::String(ref_path) = ref_value {
+                        // Handle both $defs/TypeName and #/$defs/TypeName formats
+                        let def_name = ref_path
+                            .strip_prefix("#/$defs/")
+                            .or_else(|| ref_path.strip_prefix("$defs/"))
+                            .or_else(|| ref_path.strip_prefix("#/definitions/"))
+                            .or_else(|| ref_path.strip_prefix("definitions/"));
+
+                        if let Some(name) = def_name {
+                            if let Some(def) = defs.get(name) {
+                                // Found a matching definition - resolve it recursively
+                                // and return the resolved definition (not wrapped in $ref)
+                                return resolve_recursive(def, defs);
+                            }
+                        }
+                    }
+                }
+
+                // No $ref at this level, process all keys normally
+                let mut out = serde_json::Map::new();
+                for (key, value) in map {
+                    if key == "$ref" {
+                        // Skip $ref keys - they should have been handled above
+                        continue;
+                    } else if key == "$defs" || key == "definitions" {
+                        // Skip definitions - they're already inlined
+                        continue;
+                    } else {
+                        // Recursively process nested values
+                        out.insert(key.clone(), resolve_recursive(value, defs));
+                    }
+                }
+                Value::Object(out)
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|item| resolve_recursive(item, defs))
+                    .collect(),
+            ),
+            _ => schema.clone(),
+        }
+    }
+
+    resolve_recursive(schema, defs)
+}
+
+/// Extract $defs from schema and return (schema_without_defs, defs_map)
+fn extract_defs(schema: &Value) -> (Value, HashMap<String, Value>) {
+    match schema {
+        Value::Object(map) => {
+            let mut defs = HashMap::new();
+            let mut out = serde_json::Map::new();
+
+            for (key, value) in map {
+                if key == "$defs" || key == "definitions" {
+                    if let Value::Object(def_map) = value {
+                        for (def_name, def_value) in def_map {
+                            defs.insert(def_name.clone(), def_value.clone());
+                        }
+                    }
+                } else {
+                    out.insert(key.clone(), value.clone());
+                }
+            }
+
+            (Value::Object(out), defs)
+        }
+        _ => (schema.clone(), HashMap::new()),
+    }
 }
 
 /// Lark literal quoting - wraps string in quotes and escapes special characters
@@ -2379,6 +2477,389 @@ mod tests {
         // Boolean with default
         assert!(sanitized["properties"]["enabled"].get("default").is_none());
         assert_eq!(sanitized["properties"]["enabled"]["type"], "boolean");
+    }
+
+    #[test]
+    fn test_sanitize_schema_for_llguidance_resolves_refs() {
+        // Test that $defs section is resolved and $ref is replaced with actual definition
+        // This is critical for tool schemas that use JSON Schema definitions
+        let schema = json!({
+            "$defs": {
+                "AskUserQuestion": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "question": {"type": "string"},
+                        "options": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["label", "question", "options"]
+                },
+                "AskUserOption": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "label": {"type": "string"}
+                    },
+                    "required": ["value", "label"]
+                }
+            },
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/AskUserQuestion"}
+                }
+            },
+            "required": ["questions"]
+        });
+
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+
+        // Debug: print the sanitized schema
+        eprintln!("Original schema: {}", serde_json::to_string_pretty(&schema).unwrap());
+        eprintln!("Sanitized schema: {}", serde_json::to_string_pretty(&sanitized).unwrap());
+
+        // $defs should be REMOVED (not preserved) - refs are resolved
+        assert!(sanitized.get("$defs").is_none(), "$defs should be removed after resolution");
+
+        // $ref should be replaced with the actual definition
+        let items_schema = &sanitized["properties"]["questions"]["items"];
+        assert!(items_schema.get("$ref").is_none(), "$ref should be replaced");
+
+        // The items should now have the resolved definition (type: object with properties)
+        assert_eq!(items_schema["type"], "object", "items should be resolved to object type");
+        assert!(items_schema.get("properties").is_some(), "resolved items should have properties");
+    }
+
+    #[test]
+    fn test_full_tool_offer_schema_with_defs_resolved() {
+        // Test with the exact tool offer schema from the error log
+        // This verifies that $defs are resolved and $refs are replaced with actual definitions
+        let schema = json!({
+            "$defs": {
+                "AskUserOption": {
+                    "description": "A predefined answer option for a question.",
+                    "properties": {
+                        "description": {
+                            "description": "Optional description shown below the label",
+                            "nullable": true,
+                            "type": "string"
+                        },
+                        "label": {
+                            "description": "Display label for the option",
+                            "type": "string"
+                        },
+                        "selected": {
+                            "default": false,
+                            "description": "Default selection state when multi_select is true.",
+                            "type": "boolean"
+                        },
+                        "value": {
+                            "description": "Value to return to LLM when selected",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["value", "label"],
+                    "type": "object"
+                },
+                "AskUserQuestion": {
+                    "description": "A single question presented to the user.",
+                    "properties": {
+                        "allow_custom": {
+                            "default": true,
+                            "description": "Whether to allow custom text input (default: true)",
+                            "type": "boolean"
+                        },
+                        "label": {
+                            "description": "Short unique label for tab display (max ~15 chars recommended)",
+                            "type": "string"
+                        },
+                        "multi_select": {
+                            "default": false,
+                            "description": "When true, user can select/deselect multiple options.",
+                            "type": "boolean"
+                        },
+                        "options": {
+                            "description": "Predefined answer options",
+                            "items": {"$ref": "$defs/AskUserOption"},
+                            "type": "array"
+                        },
+                        "question": {
+                            "description": "Full question text to display",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["label", "question", "options"],
+                    "type": "object"
+                }
+            },
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "description": "Request payload for the `ask_user` tool.",
+            "properties": {
+                "questions": {
+                    "description": "List of questions to ask the user.",
+                    "items": {"$ref": "$defs/AskUserQuestion"},
+                    "type": "array"
+                }
+            },
+            "required": ["questions"],
+            "title": "AskUserRequest",
+            "type": "object"
+        });
+
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+
+        // Debug: print the sanitized schema
+        eprintln!("Full tool offer sanitized schema: {}", serde_json::to_string_pretty(&sanitized).unwrap());
+
+        // $defs should be REMOVED (not preserved) - refs are resolved
+        assert!(sanitized.get("$defs").is_none(), "$defs should be removed after resolution");
+
+        // $ref in properties should be replaced with actual definition
+        let questions_items = &sanitized["properties"]["questions"]["items"];
+        assert!(questions_items.get("$ref").is_none(), "$ref should be replaced with resolved definition");
+
+        // The resolved items should have the actual definition (type: object with properties)
+        assert_eq!(questions_items["type"], "object", "items should be resolved to object type");
+        assert!(questions_items.get("properties").is_some(), "resolved items should have properties");
+        assert!(questions_items.get("required").is_some(), "resolved items should have required");
+
+        // $ref inside $defs should also be resolved
+        let ask_user_question = sanitized["properties"]["questions"]["items"].clone();
+        let options = ask_user_question["properties"]["options"].clone();
+        let items = options["items"].clone();
+        assert!(items.get("$ref").is_none(), "$ref inside options should be resolved");
+        assert_eq!(items["type"], "object", "resolved items should be object type");
+    }
+
+    #[test]
+    fn test_extract_defs_simple_schema() {
+        // Test that extract_defs correctly extracts definitions from $defs section
+        let schema = json!({
+            "$defs": {
+                "Question": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"}
+                    }
+                },
+                "Option": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"}
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "question": {"$ref": "#/$defs/Question"}
+            }
+        });
+
+        let (schema_without_defs, defs) = extract_defs(&schema);
+
+        // $defs should be removed from schema
+        assert!(schema_without_defs.get("$defs").is_none(), "$defs should be removed from schema");
+
+        // Definitions should be extracted
+        assert_eq!(defs.len(), 2, "Should extract 2 definitions");
+        assert!(defs.contains_key("Question"), "Should contain Question definition");
+        assert!(defs.contains_key("Option"), "Should contain Option definition");
+
+        // Schema structure should be preserved
+        assert_eq!(schema_without_defs["type"], "object", "Schema type should be preserved");
+        assert!(schema_without_defs.get("properties").is_some(), "Properties should be preserved");
+    }
+
+    #[test]
+    fn test_extract_defs_nested_refs() {
+        // Test that extract_defs handles nested $ref within definitions
+        let schema = json!({
+            "$defs": {
+                "Option": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "label": {"type": "string"}
+                    }
+                },
+                "Question": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {"$ref": "#/$defs/Option"}
+                        }
+                    }
+                }
+            },
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/Question"}
+                }
+            }
+        });
+
+        let (schema_without_defs, defs) = extract_defs(&schema);
+
+        // All definitions should be extracted
+        assert_eq!(defs.len(), 2, "Should extract 2 definitions");
+        assert!(defs.contains_key("Option"), "Should contain Option definition");
+        assert!(defs.contains_key("Question"), "Should contain Question definition");
+
+        // $defs should be removed from schema
+        assert!(schema_without_defs.get("$defs").is_none(), "$defs should be removed");
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_simple() {
+        // Test that resolve_schema_refs replaces $ref with actual definition
+        let defs: HashMap<String, Value> = [
+            ("Question".to_string(), json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"}
+                }
+            }))
+        ].iter().cloned().collect();
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "question": {"$ref": "#/$defs/Question"}
+            }
+        });
+
+        let resolved = resolve_schema_refs(&schema, &defs);
+
+        // $ref should be replaced with actual definition
+        assert!(resolved["properties"]["question"].get("$ref").is_none(), "$ref should be replaced");
+        assert_eq!(resolved["properties"]["question"]["type"], "object", "Should have resolved type");
+        assert!(resolved["properties"]["question"].get("properties").is_some(), "Should have resolved properties");
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_nested() {
+        // Test that resolve_schema_refs handles nested $ref within definitions
+        let defs: HashMap<String, Value> = [
+            ("Option".to_string(), json!({
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string"}
+                }
+            })),
+            ("Question".to_string(), json!({
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "items": {"$ref": "#/$defs/Option"}
+                    }
+                }
+            }))
+        ].iter().cloned().collect();
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {"$ref": "#/$defs/Question"}
+                }
+            }
+        });
+
+        let resolved = resolve_schema_refs(&schema, &defs);
+
+        // Top-level $ref should be resolved
+        let questions_items = &resolved["properties"]["questions"]["items"];
+        assert!(questions_items.get("$ref").is_none(), "Top-level $ref should be resolved");
+        assert_eq!(questions_items["type"], "object", "Should have resolved type");
+
+        // Nested $ref in options should also be resolved
+        let options = &questions_items["properties"]["options"];
+        let options_items = &options["items"];
+        assert!(options_items.get("$ref").is_none(), "Nested $ref should be resolved");
+        assert_eq!(options_items["type"], "object", "Nested items should have resolved type");
+    }
+
+    #[test]
+    fn test_resolve_schema_refs_missing_def() {
+        // Test that resolve_schema_refs handles missing definitions gracefully
+        let defs: HashMap<String, Value> = HashMap::new();
+
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "question": {"$ref": "#/$defs/MissingType"}
+            }
+        });
+
+        let resolved = resolve_schema_refs(&schema, &defs);
+
+        // $ref should remain when definition is missing (won't crash)
+        assert!(resolved["properties"]["question"].get("$ref").is_some(), "$ref should remain when def is missing");
+    }
+
+    #[test]
+    fn test_llguidance_json_schema_with_defs_compiles() {
+        // Test that llguidance can compile a JSON schema with resolved $defs
+        // This verifies the fix works end-to-end with llguidance
+        use llguidance::api::TopLevelGrammar;
+
+        let schema = json!({
+            "$defs": {
+                "AskUserQuestion": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string"},
+                        "question": {"type": "string"},
+                        "options": {
+                            "type": "array",
+                            "items": {"$ref": "$defs/AskUserOption"}
+                        }
+                    },
+                    "required": ["label", "question", "options"]
+                },
+                "AskUserOption": {
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "string"},
+                        "label": {"type": "string"}
+                    },
+                    "required": ["value", "label"]
+                }
+            },
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "items": {"$ref": "$defs/AskUserQuestion"}
+                }
+            },
+            "required": ["questions"]
+        });
+
+        let sanitized = sanitize_schema_for_llguidance(&schema);
+
+        // Debug: print the sanitized schema
+        eprintln!("Sanitized schema for llguidance: {}", serde_json::to_string_pretty(&sanitized).unwrap());
+
+        // $defs should be removed (refs are resolved)
+        assert!(sanitized.get("$defs").is_none(), "$defs should be removed after resolution");
+
+        // $ref should be replaced with actual definition
+        let questions_items = &sanitized["properties"]["questions"]["items"];
+        assert!(questions_items.get("$ref").is_none(), "$ref should be replaced");
+
+        // Try to compile the sanitized schema with llguidance
+        // This should not fail if $defs is properly resolved
+        let _grammar = TopLevelGrammar::from_json_schema(sanitized);
+        // If we get here without panicking, the schema compiled successfully
     }
 
     #[test]
