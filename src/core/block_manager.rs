@@ -151,11 +151,41 @@ impl BlockManager {
         hasher.finish()
     }
 
+    /// Compute the image seed and the block index at which it should be applied.
+    /// Returns (None, None) when:
+    ///  - no images are attached, or
+    ///  - the model has no `image_token_id` (non-VL model where images don't
+    ///    affect the KV cache), or
+    ///  - no image placeholder tokens appear in the token sequence.
+    ///
+    /// When (Some(seed), Some(block)) is returned, blocks *before* `block` can
+    /// be matched/inserted with the same hashes as the image-free case, while
+    /// the seed is mixed in starting at `block`.
+    fn image_seed_and_block(
+        images: &ImageData,
+        tokens: &[u32],
+        block_size: usize,
+    ) -> (Option<u64>, Option<usize>) {
+        let Some(image_token_id) = images.image_token_id else {
+            return (None, None);
+        };
+        let Some(first_pos) = tokens.iter().position(|&id| id == image_token_id) else {
+            return (None, None);
+        };
+        let seed = Self::image_prefix_seed(images);
+        (Some(seed), Some(first_pos / block_size))
+    }
+
     pub fn required_blocks(&mut self, seq: &Sequence) -> usize {
         if self.prefix_cache.is_some() {
             let mut prefix_cache = self.prefix_cache.take().unwrap();
-            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-            let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
+            let (seed, seed_block) = seq
+                .images
+                .as_ref()
+                .map(|img| Self::image_seed_and_block(img, &seq.token_ids, self.block_size))
+                .unwrap_or((None, None));
+            let prefix_match =
+                prefix_cache.match_prefix_with_seed(&seq.token_ids, seed, seed_block);
             let matched_blocks = self.resolve_mamba_matched_blocks(
                 &prefix_cache,
                 seq.id,
@@ -324,8 +354,12 @@ impl BlockManager {
         let mut last_hash = None;
 
         if prefix_cache.enabled() {
-            let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-            let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed);
+            let (seed, seed_block) = seq
+                .images
+                .as_ref()
+                .map(|img| Self::image_seed_and_block(img, tokens, self.block_size))
+                .unwrap_or((None, None));
+            let prefix_match = prefix_cache.match_prefix_with_seed(tokens, seed, seed_block);
             last_hash = prefix_match.last_hash;
             raw_matched_blocks =
                 self.adjusted_matched_blocks(tokens.len(), prefix_match.matched_blocks);
@@ -431,8 +465,13 @@ impl BlockManager {
         {
             return;
         }
-        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-        let Some(hash) = prefix_cache.hash_for_blocks_with_seed(&seq.token_ids, full_blocks, seed)
+        let (seed, seed_block) = seq
+            .images
+            .as_ref()
+            .map(|img| Self::image_seed_and_block(img, &seq.token_ids, self.block_size))
+            .unwrap_or((None, None));
+        let Some(hash) =
+            prefix_cache.hash_for_blocks_with_seed(&seq.token_ids, full_blocks, seed, seed_block)
         else {
             return;
         };
@@ -547,9 +586,13 @@ impl BlockManager {
             full_blocks
         );
 
-        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
+        let (seed, seed_block) = seq
+            .images
+            .as_ref()
+            .map(|img| Self::image_seed_and_block(img, tokens, self.block_size))
+            .unwrap_or((None, None));
         let PrefixCacheUpdate { inserted, evicted } =
-            prefix_cache.insert_prefix_with_seed(tokens, &blocks, seed);
+            prefix_cache.insert_prefix_with_seed(tokens, &blocks, seed, seed_block);
         for block_id in inserted {
             self.increment_block_ref(block_id);
         }
@@ -583,8 +626,12 @@ impl BlockManager {
             self.prefix_cache = Some(prefix_cache);
             return 0;
         }
-        let seed = seq.images.as_ref().map(Self::image_prefix_seed);
-        let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed);
+        let (seed, seed_block) = seq
+            .images
+            .as_ref()
+            .map(|img| Self::image_seed_and_block(img, &seq.token_ids, self.block_size))
+            .unwrap_or((None, None));
+        let prefix_match = prefix_cache.match_prefix_with_seed(&seq.token_ids, seed, seed_block);
         let matched_blocks = self.resolve_mamba_matched_blocks(
             &prefix_cache,
             seq.id,
