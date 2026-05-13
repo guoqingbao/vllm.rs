@@ -9,7 +9,7 @@ AGENTS.md
 CLAUDE.md
 *.nsys-rep
 *.sqlite
-.cursor/skills/nobreak/SKILL.md
+.cursor/skills/nobreak/*
 test_model.py
 .xbot/
 XBOT.md

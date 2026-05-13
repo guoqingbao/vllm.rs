@@ -28,10 +28,7 @@ const SIZE_IN_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 const DEFAULT_HYBRID_MAMBA_FRACTION: f64 = 0.15;
 const MAX_HYBRID_MAMBA_FRACTION: f64 = 0.3;
 const HYBRID_MAMBA_ACTIVE_SLOT_MULTIPLIER: usize = 3;
-#[cfg(feature = "cuda")]
 const HYBRID_MAMBA_MIN_ACTIVE_SLOTS: usize = 8;
-#[cfg(not(feature = "cuda"))]
-const HYBRID_MAMBA_MIN_ACTIVE_SLOTS: usize = 4;
 
 /// Represents the result of KVCache allocation planning
 #[derive(Debug, Clone)]

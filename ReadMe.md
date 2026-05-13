@@ -57,7 +57,8 @@ A blazing-fast ⚡, lightweight **Rust** 🦀 implementation of vLLM.
 | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
 | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
 | Qwen3.5-4B (Q3_K_M)  | 1       | 1592       | 69.04s | 23.06    |
-
+| Qwen3.5-2B (NVFP4)  | 1       | 1883       | 60.76s | 30.99    |
+| Qwen3.5-2B (NVFP4)  | 2       | 3942       | 81.96s | 48.10    |
   </details>
 
 See [**Full Performance Benchmarks →**](docs/performance.md)
@@ -168,7 +169,7 @@ python3 -m vllm_rs.server --m Qwen/Qwen3.5-122B-A10B --d 0,1 --ui-server --prefi
 
 ```bash
 # Load as Q4K format, other options (q2k, q3k, q5k, q6k, q8_0):
-python3 -m vllm_rs.server --w /path/Qwen3.5-35B-A3B --isq q4k --d 0 --ui-server --prefix-cache
+python3 -m vllm_rs.server --w /path/Qwen3.6-35B-A3B --isq q4k --d 0 --ui-server --prefix-cache
 ```
 
   </details>
@@ -178,7 +179,7 @@ python3 -m vllm_rs.server --w /path/Qwen3.5-35B-A3B --isq q4k --d 0 --ui-server 
 
 _FP8-Blockwise format:_
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache
 ```
 
 _MXFP4 format:_
@@ -189,7 +190,7 @@ python3 -m vllm_rs.server --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cach
 
 _NVFP4 format:_
 ```bash
-python3 -m vllm_rs.server --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.6-27B-NVFP4 --ui-server --prefix-cache
 ```
 
   </details>
@@ -199,7 +200,7 @@ python3 -m vllm_rs.server --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cach
 
 ```bash
 # Use the built-in ChatUI to upload images or refer image url (ended with '.bmp', '.gif', '.jpeg', '.png', '.tiff', or '.webp')
-python3 -m vllm_rs.server --m Qwen/Qwen3.5-35B-A3B --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.6-35B-A3B-FP8 --ui-server --prefix-cache
 ```
 
   </details>
@@ -328,21 +329,23 @@ By default, vllm-rs starts in **API server mode** on port 8000. Use `--i` for in
 _FP8-Blockwise format:_
 ```bash
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
-vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache
 # Or Qwen3-Next 80B
 vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
-# MacOS/Metal (Dense)
+# MacOS/Metal
 vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
 ```
 
-_MXFP4 format:_
+_MXFP4 format (CUDA):_
 ```bash
 vllm-rs --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
 ```
 
 _NVFP4 format:_
 ```bash
-vllm-rs --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+vllm-rs --m unsloth/Qwen3.6-27B-NVFP4 --ui-server --prefix-cache
+# MacOS/Metal
+vllm-rs --m AxionML/Qwen3.5-2B-NVFP4 --ui-server --prefix-cache
 ```
   </details>
 
@@ -351,7 +354,7 @@ vllm-rs --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
 
   ```bash
   # CUDA: Disabled flashinfer/flashattn feature to use fp8-kvcache
-  ./run.sh --release --features cuda,nccl,graph,cutlass --d 0 --m Qwen/Qwen3.5-35B-A3B --isq q4k --fp8-kvcache
+  ./run.sh --release --features cuda,nccl,graph,cutlass --d 0 --m Qwen/Qwen3.6-35B-A3B --isq q4k --fp8-kvcache
   # MacOS/Metal
   vllm-rs --ui-server --w /path/Qwen3-4B --isq q6k
   ```
