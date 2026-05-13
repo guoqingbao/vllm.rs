@@ -1002,18 +1002,16 @@ impl ModelRunner {
                 positions_vec.push((seq.num_cached_tokens + pos) as u32);
             }
             prefill_tokens.push(num_tokens);
-            if seqlen > max_context_len {
-                max_context_len = seqlen;
-            }
-            let seqlen_q = num_tokens; //seqlen - seq.num_cached_tokens;
-            let seqlen_k = if self.config.prefix_cache.unwrap_or(false)
-                || (seq.num_cached_tokens > 0
-                    && (cfg!(feature = "flashattn") || cfg!(feature = "flashinfer")))
-            {
+            let seqlen_q = num_tokens;
+            let seqlen_k = if seq.num_cached_tokens > 0 {
                 seq.num_cached_tokens + num_tokens
             } else {
                 num_tokens
             };
+            let effective_context = seq.num_cached_tokens + num_tokens;
+            if effective_context > max_context_len {
+                max_context_len = effective_context;
+            }
             cu_seqlens_q.push(cu_seqlens_q.last().unwrap() + seqlen_q as u32);
             cu_seqlens_k.push(cu_seqlens_k.last().unwrap() + seqlen_k as u32);
             max_seqlen_q = std::cmp::max(max_seqlen_q, seqlen_q);
@@ -1067,7 +1065,9 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        // Handle cached prefix KV reuse
+        // Provide block_tables + context_lens when any sequence in the batch has
+        // prior cached KV (cu_seqlens_k > cu_seqlens_q). This enables the paged
+        // attention prefill kernel to attend to the full KV context.
         let (block_tables, context_lens) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
             let block_tables_t = self.prepare_block_tables(seqs)?;
             let context_lens: Vec<u32> = seqs
