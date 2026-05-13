@@ -176,7 +176,7 @@ python3 -m pip install vllm_rs
 _FP8-Blockwise格式:_
 ```bash
 # CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
-vllm-rs --m Qwen/Qwen3.5-27B-FP8 --ui-server --prefix-cache
+vllm-rs --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache
 # MacOS/Metal (Dense)
 vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
@@ -188,7 +188,7 @@ python3 -m vllm_rs.server --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cach
 
 _NVFP4 格式:_
 ```bash
-python3 -m vllm_rs.server --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m unsloth/Qwen3.6-27B-NVFP4 --ui-server --prefix-cache
 ```
   </details>
 
@@ -310,7 +310,7 @@ cargo install --features metal
   _FP8格式:_
    ```bash
    vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
-    # Or Qwen3-Next 80B
+    # Or Qwen3.6-27B-FP8 / Qwen3.6-35B-A3B-FP8
    vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
    ```
 
@@ -319,9 +319,11 @@ cargo install --features metal
   vllm-rs --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
   ```
 
-  _NVFP4格式:_
+  _NVFP4格式 (CUDA):_
   ```bash
-  vllm-rs --m AxionML/Qwen3.5-9B-NVFP4 --ui-server --prefix-cache
+vllm-rs --m unsloth/Qwen3.6-27B-NVFP4 --ui-server --prefix-cache
+# MacOS/Metal
+vllm-rs --m AxionML/Qwen3.5-2B-NVFP4 --ui-server --prefix-cache
   ```
   </details>
 
