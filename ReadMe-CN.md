@@ -58,6 +58,8 @@
    | Qwen3-4B (Q4_K_M)  | 1       | 1683       | 52.62s    | 31.98     |
    | Qwen3-8B (Q2_K)  | 1       | 1300       | 80.88s    | 16.07     |
    | Qwen3.5-4B (Q3_K_M)  | 1       | 1592       | 69.04s | 23.06    |
+   | Qwen3.5-2B (NVFP4)  | 1       | 1883       | 60.76s | 30.99    |
+   | Qwen3.5-2B (NVFP4)  | 2       | 3942       | 81.96s | 48.10    |
   </details>
 
 查看 [**完整性能测试 →**](docs/performance.md)
@@ -314,12 +316,12 @@ cargo install --features metal
    vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
    ```
 
-  _MXFP4格式:_
+  _MXFP4格式 (CUDA):_
   ```bash
   vllm-rs --m olka-fi/Qwen3.5-4B-MXFP4 --ui-server --prefix-cache
   ```
 
-  _NVFP4格式 (CUDA):_
+  _NVFP4格式:_
   ```bash
 vllm-rs --m unsloth/Qwen3.6-27B-NVFP4 --ui-server --prefix-cache
 # MacOS/Metal
