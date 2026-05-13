@@ -68,25 +68,6 @@ impl MoeRouting {
     /// `router_logits` must be F32 with shape `[num_tokens, num_experts]`.
     pub fn route(&self, router_logits: &Tensor, is_prefill: bool) -> Result<(Tensor, Tensor)> {
         let (mut topk_weights, topk_ids) = if self.use_sigmoid_scoring {
-            #[cfg(feature = "cuda")]
-            if !is_prefill && self.n_group <= 1 && router_logits.rank() == 2 {
-                let (topk_weights, topk_indices) = attention_rs::topk::fused_sigmoid_topk(
-                    router_logits,
-                    self.e_score_correction_bias.as_ref(),
-                    self.num_experts_per_tok,
-                )?;
-                let topk_ids = topk_indices.to_dtype(DType::U32)?;
-                let (mut topk_weights, topk_ids) = (topk_weights, topk_ids);
-                if self.norm_topk_prob {
-                    topk_weights =
-                        topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-                }
-                if let Some(factor) = self.routed_scaling_factor {
-                    topk_weights = (topk_weights * factor)?;
-                }
-                return Ok((topk_weights, topk_ids));
-            }
-
             let scores = candle_nn::ops::sigmoid(router_logits)?;
 
             let scores_for_choice = if let Some(bias) = &self.e_score_correction_bias {
@@ -169,25 +150,12 @@ impl MoeRouting {
 }
 
 fn select_topk_indices(scores: &Tensor, topk: usize, is_prefill: bool) -> Result<Tensor> {
-    if is_prefill {
-        let sorted_idx = scores.contiguous()?.arg_sort(false)?;
-        sorted_idx.narrow(D::Minus1, 0, topk)?.contiguous()
+    let sorted_idx = if is_prefill {
+        scores.contiguous()?.arg_sort(false)?
     } else {
-        #[cfg(feature = "cuda")]
-        {
-            let scores_f32 = if scores.dtype() != DType::F32 {
-                scores.to_dtype(DType::F32)?
-            } else {
-                scores.clone()
-            };
-            if scores_f32.rank() == 2 {
-                let (_weights, indices) = attention_rs::topk::topk_select(&scores_f32, topk)?;
-                return Ok(indices);
-            }
-        }
-        let sorted_idx = scores.arg_sort_last_dim(false)?;
-        sorted_idx.narrow(D::Minus1, 0, topk)?.contiguous()
-    }
+        scores.arg_sort_last_dim(false)?
+    };
+    sorted_idx.narrow(D::Minus1, 0, topk)?.contiguous()
 }
 
 fn sort_expert_assignments(topk_ids: &Tensor, is_prefill: bool) -> Result<(Tensor, Tensor)> {
@@ -195,14 +163,7 @@ fn sort_expert_assignments(topk_ids: &Tensor, is_prefill: bool) -> Result<(Tenso
     if is_prefill {
         flat.sort(true)
     } else {
-        let n = flat.dim(0)?;
-        if n <= 64 {
-            let token_ids =
-                Tensor::arange(0u32, n as u32, flat.device())?.to_dtype(flat.dtype())?;
-            Ok((flat, token_ids))
-        } else {
-            flat.sort_last_dim(true)
-        }
+        flat.sort_last_dim(true)
     }
 }
 

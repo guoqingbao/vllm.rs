@@ -617,6 +617,7 @@ impl LLMEngine {
         let mut available_blocks = self.scheduler.block_manager.get_num_free_blocks();
 
         while target_required_blocks > available_blocks {
+            let prev_target = target_required_blocks;
             let target_required_tokens = target_required_blocks * self.econfig.block_size;
             let evicted = self
                 .scheduler
@@ -636,6 +637,10 @@ impl LLMEngine {
             target_required_blocks = prompt_required_blocks.saturating_add(requested_decode_blocks);
             minimum_required_blocks = prompt_required_blocks.saturating_add(minimum_decode_blocks);
             available_blocks = self.scheduler.block_manager.get_num_free_blocks();
+
+            if evicted > 0 && target_required_blocks >= prev_target {
+                break;
+            }
         }
 
         if minimum_required_blocks > available_blocks {
