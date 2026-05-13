@@ -234,6 +234,19 @@ impl Scheduler {
         // Capture running count before this batch so the interleave check only
         // considers pre-existing decode sequences, not ones added in this loop.
         let pre_existing_running = self.running.len();
+
+        // For hybrid mamba models, cap total concurrent sequences to the mamba
+        // cache capacity so the runner never hits "no free slots" at forward time.
+        let max_seqs_limit = if let Some(mamba_cap) = self.cfg.mamba_cache_capacity {
+            if mamba_cap > 0 {
+                mamba_cap
+            } else {
+                std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+            }
+        } else {
+            std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+        };
+
         while let Some(mut seq) = self.waiting.pop_front() {
             // Try to transfer prefill requests to PD server when applicable
             if self.is_pd_mode() && !self.is_pd_server() && self.try_transfer(&mut seq) {
@@ -242,7 +255,9 @@ impl Scheduler {
 
             let effective_tokens = std::cmp::min(CHUNK_SIZE, seq.len() - seq.num_cached_tokens);
 
-            if scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+            let total_running = self.running.len() + scheduled_ids.len();
+            if total_running >= max_seqs_limit
+                || scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
                 || num_tokens + effective_tokens >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
                 // interleaved scheduling: alternate prefill/decode for fairness
@@ -324,8 +339,20 @@ impl Scheduler {
         }
 
         let is_pd_server = self.is_pd_server();
+        let decode_max_seqs = if let Some(mamba_cap) = self.cfg.mamba_cache_capacity {
+            if mamba_cap > 0 {
+                std::cmp::min(
+                    mamba_cap,
+                    std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS),
+                )
+            } else {
+                std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+            }
+        } else {
+            std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
+        };
         for (idx, seq) in self.running.iter_mut().enumerate() {
-            if decode_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS) {
+            if decode_ids.len() >= decode_max_seqs {
                 break;
             }
             if !self.block_manager.can_append(&seq) {
