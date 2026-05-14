@@ -84,7 +84,7 @@ See [**Full Performance Benchmarks →**](docs/performance.md)
 
 Supports both **Safetensor** (including GPTQ, AWQ, MXFP4, NVFP4, and FP8-blockwise formats) and **GGUF** formats.
 
-All models support hardware FP8 KV-cache acceleration (requires SM90+ and disable `flashinfer` or `flashattn`).
+All models support FP8 KV-cache acceleration (`--fp8-kvcache`). Works with all attention backends including `flashinfer` (SM80+), `flashattn`, and paged attention (V100/SM70+).
 
 ---
 ## 📚 Guides
@@ -111,8 +111,7 @@ All models support hardware FP8 KV-cache acceleration (requires SM90+ and disabl
 ### 📦 Install with pip
 - 💡 **CUDA compute capability < 8.0** (e.g., V100) requires a **manual build**  
   (no `flashattn` and `flashinfer` support; alternatively use **Rust mode**).
-- 💡 The **prebuilt wheel** is built with the `flashinfer` backend.  
-  To use **FP8 KV Cache**, you must **build manually** (remove the `flashinfer` or `flashattn` build flag).
+- 💡 The **prebuilt wheel** is built with the `flashinfer` backend and supports **FP8 KV Cache** out of the box on SM80+ (Ampere, Ada, Hopper, Blackwell).
 
 
 > 🍎 Metal (macOS)
@@ -159,7 +158,7 @@ python3 -m vllm_rs.server --m unsloth/Qwen3.5-4B-GGUF --f Qwen3.5-4B-Q3_K_M.gguf
     <summary>Multi-GPU + Safetensors model</summary>
 
 ```bash
-python3 -m vllm_rs.server --m Qwen/Qwen3.5-122B-A10B --d 0,1 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.5-122B-A10B --d 0,1 --ui-server --prefix-cache --fp8-kvcache
 ```
 
   </details>
@@ -309,7 +308,7 @@ By default, vllm-rs starts in **API server mode** on port 8000. Use `--i` for in
 
   ```bash
   # Replace "--ui-server" with "--server" will only start API server
-  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+  vllm-rs --d 0,1 --m Qwen/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache --fp8-kvcache
   ```
 
   </details>
@@ -331,7 +330,7 @@ _FP8-Blockwise format:_
 # CUDA (MoE, Dense), be sure to enable `cutlass` feature on sm90+
 vllm-rs --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache
 # Or Qwen3-Next 80B
-vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
+vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache --fp8-kvcache
 # MacOS/Metal
 vllm-rs --m Qwen/Qwen3.5-4B-FP8 --ui-server --prefix-cache
 ```
@@ -353,7 +352,9 @@ vllm-rs --m AxionML/Qwen3.5-2B-NVFP4 --ui-server --prefix-cache
     <summary>ISQ model + FP8 KvCache</summary>
 
   ```bash
-  # CUDA: Disabled flashinfer/flashattn feature to use fp8-kvcache
+  # CUDA with flashinfer (SM80+, recommended)
+  ./run.sh --release --features cuda,nccl,graph,flashinfer,cutlass --d 0 --m Qwen/Qwen3.6-35B-A3B --isq q4k --fp8-kvcache
+  # CUDA without flashinfer (V100/SM70+, uses paged attention)
   ./run.sh --release --features cuda,nccl,graph,cutlass --d 0 --m Qwen/Qwen3.6-35B-A3B --isq q4k --fp8-kvcache
   # MacOS/Metal
   vllm-rs --ui-server --w /path/Qwen3-4B --isq q6k
@@ -505,16 +506,16 @@ pip install maturin[patchelf]  # For Linux/Windows
 # Naive CUDA (No NCCL, single GPU only) 
 maturin build --release --features cuda,python
 
-# CUDA (with FP8 KV Cache, use Paged Attention, compatible with V100) 
+# CUDA with Paged Attention (V100/SM70+, FP8 KV Cache supported)
 ./build.sh --release --features cuda,nccl,graph,python
 
-# CUDA (Use Flash Attention backend) 
+# CUDA with Flash Attention backend
 ./build.sh --release --features cuda,nccl,graph,flashattn,cutlass,python
 
-# CUDA (Use Flashinfer backend) 
+# CUDA with FlashInfer backend (SM80+, FP8 KV Cache supported)
 ./build.sh --release --features cuda,nccl,graph,flashinfer,cutlass,python
 
-# macOS (Metal, single GPU only, with FP8 kvcache support)
+# macOS (Metal, single GPU only, FP8 KV Cache supported)
 maturin build --release --features metal,python
 ```
 
@@ -547,7 +548,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--frequency-penalty` | Frequency penalty, controls whether the model reduces the probability of `tokens that appear too often`. <br> Range [-2, 2]. Higher positive values → stronger penalty for frequently repeated tokens; negative values → encourages more repetition |
 | `--server`       | Explicitly start API server (this is the default when no `--i`, `--prompts`, or `--batch` is given)        |
 | `--i`            | Interactive CLI chat mode                                        |
-| `--fp8-kvcache`       | Use FP8 KV Cache (when flashinfer and flashattn not enabled)                 |
+| `--fp8-kvcache`       | Use FP8 KV Cache (works with all backends: flashinfer on SM80+, paged attention on V100+, Metal) |
 | `--cpu-mem-fold`       | The percentage of CPU KVCache memory size compare to GPU (default 0.2, range from 0.1 to 10.0)              |
 | `--pd-server`       | When using PD Disaggregation, specify the current instance as the PD server (this server is only used for Prefill) |
 | `--pd-client`       | When using PD Disaggregation, specify the current instance as the PD client (this client sends long-context Prefill requests to the PD server for processing) |
@@ -586,9 +587,9 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] Model loading from hugginface hub
 * [ ] Model loading from ModelScope (China)
 * [x] Prefix cache for Metal/macOS
-* [x] FP8 KV Cache (CUDA)
+* [x] FP8 KV Cache (CUDA, all backends including FlashInfer on SM80+)
 * [x] FP8 KV Cache (Metal)
-* [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
+* [x] FP8 KV Cache (with FlashInfer, SM80+)
 * [x] FP8 Models (CUDA: MoE, Dense; Metal: Dense)
 * [ ] Additional model support (Kimi K2, GLM 5.1 etc.)
 * [x] CPU KV Cache Offloading

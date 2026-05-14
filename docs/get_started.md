@@ -4,7 +4,7 @@ This guide walks through building and running vLLM.rs across CUDA/Metal, differe
 
 ## Build & features
 - **Backends**: `--features cuda[,nccl,graph,flashinfer,cutlass]` or `--features metal`. CPU-only is supported but slow.
-- **Quant/accel toggles**: `fp8-kvcache` (KV in FP8, CUDA), `flashattn` or `flashinfer` (Ampere+, long compile), `--prefix-cache` (prefix KV reuse).
+- **Quant/accel toggles**: `--fp8-kvcache` (FP8 KV cache, works with all backends including flashinfer on SM80+), `flashattn` or `flashinfer` (Ampere+), `--prefix-cache` (prefix KV reuse).
 - **Python bindings**: add feature `python` when building wheels (`./build.sh --features python`).
 
 ### Build (CUDA)
@@ -89,7 +89,7 @@ Reasoning defaults to enabled when a request omits `thinking` / `enable_thinking
 ## Troubleshooting & tuning
 - Use `--log` to view loading/progress; watch for “swap” messages (KV pressure).
 - If OOM on Metal, lower `--max-model-len` and batch; on CUDA, reduce `--kv-fraction` or `--max-num-seqs`.
-- For GGUF/ISQ, keep `--max-num-seqs` moderate to avoid bandwidth bottlenecks; consider `--fp8-kvcache` only on Ampere+.
+- For GGUF/ISQ, keep `--max-num-seqs` moderate to avoid bandwidth bottlenecks; `--fp8-kvcache` is supported on all CUDA GPUs (SM70+) and Metal.
 - Use the chat logger to monitor detailed interactions between client and vLLM.rs.
 
 ```shell
