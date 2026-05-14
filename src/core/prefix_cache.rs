@@ -316,6 +316,23 @@ impl PrefixCache {
                 self.leaf_lru.push_back((hash, entry.access_id));
             }
         }
+        self.compact_lru_if_needed();
+    }
+
+    fn compact_lru_if_needed(&mut self) {
+        let threshold = self.entries.len().max(64) * 4;
+        if self.leaf_lru.len() <= threshold {
+            return;
+        }
+        self.leaf_lru.retain(|(hash, access_id)| {
+            if !self.leaf_set.contains(hash) {
+                return false;
+            }
+            match self.entries.get(hash) {
+                Some(entry) => entry.access_id == *access_id,
+                None => false,
+            }
+        });
     }
 
     fn next_access_id(&mut self) -> u64 {

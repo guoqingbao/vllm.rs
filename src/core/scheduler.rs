@@ -255,8 +255,7 @@ impl Scheduler {
 
             let effective_tokens = std::cmp::min(CHUNK_SIZE, seq.len() - seq.num_cached_tokens);
 
-            let total_running = self.running.len() + scheduled_ids.len();
-            if total_running >= max_seqs_limit
+            if self.running.len() >= max_seqs_limit
                 || scheduled_ids.len() >= std::cmp::max(self.cfg.max_num_seqs, MIN_NUM_SCHEDULED_REQS)
                 || num_tokens + effective_tokens >= self.cfg.max_num_batched_tokens - 1
                 || (seq.block_table.is_empty() && !self.block_manager.can_allocate(&seq))
