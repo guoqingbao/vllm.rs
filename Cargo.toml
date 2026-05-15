@@ -91,3 +91,7 @@ nvtx = ["dep:nvtx"]
 [[bin]]
 name = "runner"
 path = "src/runner/runner.rs"
+
+[[bin]]
+name = "tok_detok_worker"
+path = "src/runner/tok_detok_worker.rs"

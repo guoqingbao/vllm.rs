@@ -90,6 +90,7 @@ fi
 
 RUNNER_BIN="$(bin_name runner)"
 VLLM_RS_BIN="$(bin_name vllm-rs)"
+TOK_DETOK_WORKER_BIN="$(bin_name tok_detok_worker)"
 
 HAS_PYTHON=false
 if [[ "$FEATURES" == *"python"* ]]; then
@@ -113,12 +114,12 @@ if [[ "$INSTALL" == true ]]; then
   echo "Binary-only install requested; skipping maturin and python package staging."
 
   if [[ "$IS_METAL" == true ]]; then
-    echo "Metal feature detected. Building vllm-rs only..."
-    cargo build $RELEASE --bin vllm-rs --features "$FEATURES"
+    echo "Metal feature detected. Building vllm-rs and tok_detok_worker..."
+    cargo build $RELEASE --bin vllm-rs --bin tok_detok_worker --features "$FEATURES"
   else
     FEATURES_NO_PY=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
-    echo "Building vllm-rs and runner binaries..."
-    cargo build $RELEASE --bin vllm-rs --bin runner --features "$FEATURES_NO_PY"
+    echo "Building vllm-rs, runner, and tok_detok_worker binaries..."
+    cargo build $RELEASE --bin vllm-rs --bin runner --bin tok_detok_worker --features "$FEATURES_NO_PY"
   fi
 
   echo "Installing binaries to: $DST"
@@ -130,6 +131,13 @@ if [[ "$INSTALL" == true ]]; then
     exit 1
   fi
   install -m 755 "$VLLM_RS_PATH" "$DST/vllm-rs"
+
+  TOK_DETOK_WORKER_PATH="target/$PROFILE/$TOK_DETOK_WORKER_BIN"
+  if [[ ! -f "$TOK_DETOK_WORKER_PATH" ]]; then
+    echo "Error: tok_detok_worker binary not found at $TOK_DETOK_WORKER_PATH"
+    exit 1
+  fi
+  install -m 755 "$TOK_DETOK_WORKER_PATH" "$DST/tok_detok_worker"
 
   if [[ "$IS_METAL" != true ]]; then
     RUNNER_PATH="target/$PROFILE/$RUNNER_BIN"
@@ -149,11 +157,11 @@ fi
 # -------------------------------------------------------------------
 if [[ "$HAS_PYTHON" != true ]]; then
   if [[ "$IS_METAL" == true ]]; then
-    echo "Metal feature detected. Building vllm-rs only..."
-    cargo build $RELEASE --bin vllm-rs --features "$FEATURES"
+    echo "Metal feature detected. Building vllm-rs and tok_detok_worker..."
+    cargo build $RELEASE --bin vllm-rs --bin tok_detok_worker --features "$FEATURES"
   else
-    echo "Building vllm-rs and runner binaries..."
-    cargo build $RELEASE --bin vllm-rs --bin runner --features "$FEATURES"
+    echo "Building vllm-rs, runner, and tok_detok_worker binaries..."
+    cargo build $RELEASE --bin vllm-rs --bin runner --bin tok_detok_worker --features "$FEATURES"
   fi
   echo "Build complete."
   exit 0
@@ -165,12 +173,14 @@ fi
 DEST_DIR="vllm_rs"
 mkdir -p "$DEST_DIR"
 
+FEATURES_NO_PY=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
 if [[ "$IS_METAL" == true ]]; then
   echo "Metal feature detected. Skipping runner build and copy."
+  echo "Building tok_detok_worker binary..."
+  cargo build $RELEASE --bin tok_detok_worker --features "$FEATURES_NO_PY"
 else
-  FEATURES_RUNNER=$(echo "$FEATURES" | sed -E 's/\bpython\b//g' | xargs)
-  echo "Building runner binary..."
-  cargo build $RELEASE --bin runner --features "$FEATURES_RUNNER"
+  echo "Building runner and tok_detok_worker binaries..."
+  cargo build $RELEASE --bin runner --bin tok_detok_worker --features "$FEATURES_NO_PY"
 
   echo "Copying runner binary into $DEST_DIR/ ..."
   RUNNER_BINARY="target/$PROFILE/$RUNNER_BIN"
@@ -182,6 +192,15 @@ else
   else
     echo "Warning: patchelf not found; runner may need LD_LIBRARY_PATH to find bundled libs."
   fi
+fi
+
+echo "Copying tok_detok_worker binary into $DEST_DIR/ ..."
+TOK_DETOK_WORKER_BINARY="target/$PROFILE/$TOK_DETOK_WORKER_BIN"
+cp "$TOK_DETOK_WORKER_BINARY" "$DEST_DIR/tok_detok_worker"
+chmod 755 "$DEST_DIR/tok_detok_worker"
+if command -v patchelf >/dev/null 2>&1; then
+  echo "Patching tok_detok_worker rpath for bundled libs..."
+  patchelf --set-rpath '$ORIGIN:$ORIGIN/../vllm_rs.libs' "$DEST_DIR/tok_detok_worker"
 fi
 
 # Staging files for python package
@@ -220,6 +239,7 @@ echo "Cleaning up temporary files..."
 if [[ "$IS_METAL" != true ]]; then
   rm -f "$DEST_DIR/runner"
 fi
+rm -f "$DEST_DIR/tok_detok_worker"
 rm -f "$DEST_DIR/__init__.py" \
       "$DEST_DIR/__init__.pyi" \
       "$DEST_DIR/py.typed" \

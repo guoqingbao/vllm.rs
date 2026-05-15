@@ -422,14 +422,17 @@ async fn main() -> Result<()> {
             } else {
                 vllm_rs::log_warn!("Starting the inference...");
 
-                let (receivers, tokenizer) = {
+                let (receivers, tokenizer, tok_detok_ipc) = {
                     let mut e = engine.write();
                     (
                         e.generate_sync(&params, &message_list, None, &Vec::new(), &None)?,
                         Arc::new(e.tokenizer.clone()),
+                        e.tok_detok_ipc.clone(),
                     )
                 };
-                let results = LLMEngine::collect_sync_results(receivers, tokenizer, None).await?;
+                let results =
+                    LLMEngine::collect_sync_results(receivers, tokenizer, None, tok_detok_ipc)
+                        .await?;
                 // GenerationOutput is returned directly
                 results
             }
