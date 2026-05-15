@@ -3,6 +3,7 @@ use super::prefix_cache::{PrefixCache, PrefixCacheConfig, PrefixCacheUpdate};
 use super::runner::RunnerType;
 use super::sequence::{Sequence, SequenceStatus};
 use crate::def_broadcast_message_to_runners;
+use crate::utils::metrics;
 use crate::runner::{receive_local, send_local, MessageType};
 use crate::utils::env::{mamba_snapshot_block_stride_blocks, MAMBA_SNAPSHOT_BLOCK_STRIDE_ENV};
 use crate::utils::image::ImageData;
@@ -133,6 +134,8 @@ impl BlockManager {
         if let Some(last_block_id) = seq.block_table.last() {
             self.clear_blocks_guard(vec![*last_block_id], "allocate_fresh/last_block");
         }
+        // Record block allocation metric
+        metrics::record_block_allocation();
         Ok(())
     }
 
@@ -141,6 +144,8 @@ impl BlockManager {
         if self.used_block_ids.remove(&block_id) {
             self.free_block_ids.push_back(block_id);
         }
+        // Record block deallocation metric
+        metrics::record_block_deallocation();
     }
 
     fn image_prefix_seed(images: &ImageData) -> u64 {
@@ -668,6 +673,8 @@ impl BlockManager {
             self.decrement_block_ref(block_id);
         }
         self.handle_mamba_prefix_evicted_blocks(&evicted_blocks);
+        // Record prefix cache eviction metric
+        metrics::record_prefix_cache_eviction();
         evicted_count
     }
 
