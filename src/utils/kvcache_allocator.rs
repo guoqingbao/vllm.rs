@@ -555,15 +555,34 @@ impl KVCacheAllocator {
         min_memory.ok_or_else(|| candle_core::Error::msg("No device IDs provided"))
     }
 
-    /// Auto-decide optimal (max_num_seqs, max_model_len) within memory budget
+    /// Auto-decide optimal (max_num_seqs, max_model_len) within memory budget.
+    ///
+    /// When total KV tokens <= config_model_len, use all tokens as max_model_len
+    /// with max_num_seqs=1 (maximize context for a single sequence).
+    /// When total KV tokens > config_model_len, use the candidate list to pick
+    /// how many concurrent sequences to support at various context lengths.
     fn auto_decide_params(
         &self,
         available_memory: u64,
     ) -> std::result::Result<(usize, usize), KVCacheError> {
         let per_block = self.per_block_bytes();
         let total_blocks = available_memory as usize / per_block;
+        let total_tokens = total_blocks * self.block_size;
 
-        // Descending candidate model lengths
+        if total_blocks == 0 {
+            return Err(KVCacheError::InsufficientGpuMemory {
+                available_mb: available_memory as f64 / SIZE_IN_MB,
+                required_mb: per_block as f64 / SIZE_IN_MB,
+                reserved_mb: CUDA_RESERVED_BYTES as f64 / SIZE_IN_MB,
+            });
+        }
+
+        if total_tokens <= self.config_model_len {
+            return Ok((1, total_tokens));
+        }
+
+        // More KV capacity than one full context — use candidates to decide
+        // how many concurrent sequences to support.
         let candidates = [
             self.config_model_len,
             self.config_model_len / 2,
@@ -575,34 +594,21 @@ impl KVCacheAllocator {
             1024,
         ];
 
-        // Find the first (max_seqs, max_len) that fits in memory
         for &max_len in candidates.iter() {
             if max_len == 0 {
                 continue;
             }
             let blocks_per_seq = (max_len + self.block_size - 1) / self.block_size;
-            let max_possible_seqs = total_blocks / blocks_per_seq;
-
-            if max_possible_seqs > 0 {
-                // Cap at 8 sequences to avoid memory overuse on small models
+            if total_blocks >= blocks_per_seq {
+                let max_possible_seqs = total_blocks / blocks_per_seq;
                 let max_seqs = std::cmp::min(max_possible_seqs, 8);
-
-                // Verify this actually fits in memory
-                let required_blocks = max_seqs * blocks_per_seq;
-                let required_bytes = required_blocks * per_block;
-
-                if required_bytes as u64 <= available_memory {
-                    return Ok((max_seqs, max_len));
-                }
+                return Ok((max_seqs, max_len));
             }
         }
 
-        Err(KVCacheError::InsufficientGpuMemory {
-            available_mb: available_memory as f64 / SIZE_IN_MB,
-            required_mb: (candidates.last().unwrap_or(&1024) * per_block / self.block_size) as f64
-                / SIZE_IN_MB,
-            reserved_mb: CUDA_RESERVED_BYTES as f64 / SIZE_IN_MB,
-        })
+        // Should not reach here since total_tokens > config_model_len,
+        // but handle gracefully.
+        Ok((1, total_tokens))
     }
 
     /// Calculate allocation plan given the minimum available memory across ranks
@@ -627,7 +633,6 @@ impl KVCacheAllocator {
             });
         }
 
-        let mut available_memory_for_kvcache = min_available_memory;
         let (max_num_seqs, max_model_len) = if let (Some(max_num_seqs), Some(max_model_len)) =
             (self.user_max_num_seqs, self.user_max_model_len)
         {
@@ -639,20 +644,21 @@ impl KVCacheAllocator {
                     reserved_mb: CUDA_RESERVED_BYTES as f64 / SIZE_IN_MB,
                 });
             }
-            available_memory_for_kvcache = required_bytes as u64;
             (max_num_seqs, max_model_len)
         } else {
-            // Auto-decide based on available capacity
             self.auto_decide_params(min_available_memory)?
         };
 
-        // Calculate number of GPU blocks based on ALL available memory
-        // This maximizes KVCache capacity - the scheduler will use max_num_seqs/max_model_len as limits
-        let num_gpu_blocks = available_memory_for_kvcache as usize / per_block;
+        // Always allocate blocks from ALL available memory.
+        // max_num_seqs and max_model_len are scheduling limits enforced at runtime,
+        // not memory reservations. Using the full budget lets a single sequence use
+        // up to max_model_len tokens from the shared pool, rather than artificially
+        // capping the pool to max_num_seqs * max_model_len.
+        let num_gpu_blocks = min_available_memory as usize / per_block;
 
         if num_gpu_blocks == 0 {
             return Err(KVCacheError::InsufficientGpuMemory {
-                available_mb: available_memory_for_kvcache as f64 / SIZE_IN_MB,
+                available_mb: min_available_memory as f64 / SIZE_IN_MB,
                 required_mb: per_block as f64 / SIZE_IN_MB,
                 reserved_mb: CUDA_RESERVED_BYTES as f64 / SIZE_IN_MB,
             });
