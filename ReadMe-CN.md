@@ -84,7 +84,7 @@
 
 支持 **Safetensor** (包含GPTQ, AWQ, MXFP4, NVFP4, FP8-blockwise 量化格式) 和 **GGUF** 格式。
 
-所有模型均支持硬件FP8 KvCache加速（需SM90+及关闭`flashinfer` 或 `flashattn` 特性）。
+所有模型均支持FP8 KvCache加速（`--fp8-kvcache`），兼容所有注意力后端：`flashinfer`（SM80+）、`flashattn`、以及 Paged Attention（V100/SM70+）。
 
 ---
 ## 📚 文档
@@ -110,7 +110,7 @@
 ## 📘 使用方法（Python）
 ### 📦 使用 pip 安装
 - 💡 **CUDA 计算能力 < 8.0**（例如 V100）需要**手动编译** （不支持 `flashattn`；或可使用 **Rust 模式**）。
-- 💡 **预编译包** 默认启用了`flashattn` 或 `flashinfer` 特性，若使用 **FP8 KV Cache**，须将其移除后手动编译。
+- 💡 **预编译包** 默认启用了 `flashinfer` 后端，在SM80+上已原生支持 **FP8 KV Cache**。
 
 > 🍎 Metal（macOS）
 ```shell
@@ -178,9 +178,9 @@ python3 -m pip install vllm_rs
 _FP8-Blockwise格式:_
 ```bash
 # CUDA (MoE, Dense) sm90+ 设备需打开`cutlass`特性以支持FP8硬件加速
-vllm-rs --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3.6-27B-FP8 --ui-server --prefix-cache --fp8-kvcache
 # MacOS/Metal (Dense)
-vllm-rs --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
+python3 -m vllm_rs.server --m Qwen/Qwen3-4B-Instruct-2507-FP8 --ui-server --prefix-cache
 ```
 
 _MXFP4 格式:_
@@ -264,7 +264,8 @@ apt-get install -y libnccl2 libnccl-dev
 编译 vLLM.rs
 ```shell
 # 只有单卡的情况下去掉 `nccl`
-# 使用FP8 KVCache 或 V100及较老的机型去掉 `flashattn/flashinfer` 和 `cutlass`特性
+# V100及较老的机型(SM70)去掉 `flashattn/flashinfer` 和 `cutlass`特性
+# SM80+(A100, RTX4090, H100等)推荐使用flashinfer，支持FP8 KVCache
 # 默认安装进/usr/local/bin，使用`--dst`更改安装目录
 ./build.sh --install --features cuda,nccl,graph,flashinfer,cutlass
 
@@ -302,7 +303,7 @@ cargo install --features metal
     <summary>多卡未量化模型</summary>
 
    ```bash
-   vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache
+   vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --ui-server --prefix-cache --fp8-kvcache
    ```
   </details>
 
@@ -311,7 +312,7 @@ cargo install --features metal
 
   _FP8格式:_
    ```bash
-   vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache
+   vllm-rs --d 0,1 --w /path/Qwen3-Coder-30B-A3B-Instruct-FP8/ --ui-server --prefix-cache --fp8-kvcache
     # Or Qwen3.6-27B-FP8 / Qwen3.6-35B-A3B-FP8
    vllm-rs --m Qwen/Qwen3-Coder-Next-FP8 --ui-server --d 0,1 --prefix-cache
    ```
@@ -341,8 +342,10 @@ vllm-rs --m AxionML/Qwen3.5-2B-NVFP4 --ui-server --prefix-cache
     <summary>未量化模型运行为Q4K量化模型，同时使用FP8 KVCache</summary>
 
    ```bash
-   # 编译时去除`flashinfer` 或 `flashattn` 以使用fp8 kvcache
+   # 使用flashinfer后端（SM80+推荐）
    vllm-rs --d 0,1 --w /path/Qwen3-30B-A3B-Instruct-2507 --isq q4k --server --port 8000 --fp8-kvcache
+   # V100/SM70+ 使用paged attention后端
+   # 编译时去除`flashinfer` 和 `flashattn`
    ```
   </details>
 
@@ -440,16 +443,16 @@ pip install maturin[patchelf]  # Linux/Windows 平台
 # Naive CUDA (不带NCCL，只能用于单卡推理) 
 maturin build --release --features cuda,graph,python
 
-# CUDA (支持FP8 KV Cache，默认使用Paged attention) 
+# CUDA Paged Attention（V100/SM70+，支持FP8 KV Cache）
 ./build.sh --release --features cuda,nccl,graph,python
 
-# CUDA (Flashinfer后端，编译时间3m+) 
-./build.sh --release --features cuda,nccl,flashattn,python
+# CUDA FlashInfer后端（SM80+，支持FP8 KV Cache）
+./build.sh --release --features cuda,nccl,graph,flashinfer,cutlass,python
 
-# CUDA (Flash attention后端，编译时间5m+) 
-./build.sh --release --features cuda,nccl,flashattn,python
+# CUDA Flash Attention后端
+./build.sh --release --features cuda,nccl,graph,flashattn,cutlass,python
 
-# macOS（Metal, 支持FP8 KV Cache，但不支持多GPU推理）
+# macOS（Metal，支持FP8 KV Cache，但不支持多GPU推理）
 maturin build --release --features metal,python
 
 ```
@@ -482,7 +485,7 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 | `--frequency-penalty` | 频率惩罚，控制模型是否减少`高频重复词`的出现。<br> 数值范围 [-2, 2]，正值越大 → 重复次数越多的词惩罚越强；负值 → 越鼓励重复使用同一词 |
 | `--server`       | 显式启动API服务（未指定 `--i`、`--prompts` 或 `--batch` 时，这是默认行为）        |
 | `--i`            | 交互式CLI对话模式                                        |
-| `--fp8-kvcache`       | 使用FP8 KV Cache (flashinfer/flashattn 没有启用时生效)                 |
+| `--fp8-kvcache`       | 使用FP8 KV Cache（兼容所有后端：flashinfer SM80+、paged attention V100+、Metal）|
 | `--cpu-mem-fold`       | CPU KV Cache大小 (与GPU KV Cache的百分比，默认 0.2，取值0.1 - 10.0)              |
 | `--pd-server`       | 使用PD分离模式时，指定当前实例为PD服务器（此服务器仅用于Prefill）            |
 | `--pd-client`       | 使用PD分离模式时，指定当前实例为PD客户端（此客户端将长的上下文Prefill请求发送给PD服务器处理）|
@@ -520,9 +523,9 @@ pip install target/wheels/vllm_rs-*-cp38-abi3-*.whl --force-reinstall
 * [x] 从Hugginface Hub下载并加载模型
 * [ ] 从ModelScope下载并加载 (中国大陆地区)
 * [x] Metal/macOS平台前缀缓存
-* [x] FP8 KV Cache (CUDA)
+* [x] FP8 KV Cache (CUDA，所有后端，FlashInfer支持SM80+)
 * [x] FP8 KV Cache (Metal)
-* [ ] FP8 KV Cache (with Flash-Attn / Flashinfer)
+* [x] FP8 KV Cache (FlashInfer，SM80+)
 * [x] FP8 模型 (CUDA: MoE, Dense; Metal: Dense)
 * [ ] 支持更多模型类型（Kimi K2, GLM 5.1等）
 * [x] CPU KV Cache 卸载

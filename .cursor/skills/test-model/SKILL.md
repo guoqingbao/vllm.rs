@@ -295,4 +295,4 @@ Include for each model:
 | `--prefix-cache` | Enable automatic prefix caching |
 | `--ui-server` | Enable built-in ChatGPT-like web UI |
 | `--isq <fmt>` | In-situ quantization (q2k, q3k, q4k, q5k, q6k, q8_0) |
-| `--fp8-kvcache` | Enable FP8 KV cache (no flashinfer/flashattn) |
+| `--fp8-kvcache` | Enable FP8 KV cache (all backends, flashinfer SM80+) |

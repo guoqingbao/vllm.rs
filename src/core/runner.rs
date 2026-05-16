@@ -1190,6 +1190,7 @@ impl ModelRunner {
                         params.page_size,
                         params.out_dtype,
                         None,
+                        Some(params.kv_dtype),
                     )?)
                 }
             };

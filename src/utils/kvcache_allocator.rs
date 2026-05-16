@@ -758,6 +758,21 @@ impl KVCacheAllocator {
         #[cfg(not(feature = "cuda"))]
         let _ = pd_config;
 
+        #[cfg(all(feature = "flashattn", not(feature = "flashinfer"), feature = "cuda"))]
+        if self.fp8_kvcache {
+            let sm = device
+                .as_cuda_device()
+                .ok()
+                .and_then(|d| attention_rs::cuda_utils::sm_version(d))
+                .unwrap_or(0);
+            if sm == 90 {
+                candle_core::bail!(
+                    "FP8 KV cache with FlashAttention requires SM90 (Hopper), \
+                     but detected SM{sm}. Use FlashInfer backend for FP8 KV cache on current GPU."
+                );
+            }
+        }
+
         let cache_dtype = if self.fp8_kvcache { DType::U8 } else { dtype };
         crate::log_warn!(
             "Using FP8 KV Cache? {}, cache dtype {:?}",
@@ -811,13 +826,6 @@ impl KVCacheAllocator {
             }
             Ok((gpu_cache, cpu_cache))
         } else if cfg!(feature = "flashinfer") || cfg!(feature = "flashattn") {
-            if cfg!(feature = "flashattn") {
-                assert!(
-                    !self.fp8_kvcache,
-                    "fp8 kvcache is not compatible with flashattn feature!"
-                );
-            }
-
             let element_size = cache_dtype.size_in_bytes();
             let x = 16 / element_size;
 

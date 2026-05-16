@@ -448,13 +448,6 @@ impl EngineConfig {
             device_ids.push(0);
         }
 
-        if prefix_cache.unwrap_or(false)
-            && fp8_kvcache.unwrap_or(false)
-            && cfg!(feature = "flashattn")
-        {
-            panic!("Error: prefix-cache and fp8 kvcache are not compatible under the current settings!\n\t***Tips: use only one of the two features (`--fp8-kvcache` or `--prefix-cache`).");
-        }
-
         Self {
             model_id,
             weight_path,
