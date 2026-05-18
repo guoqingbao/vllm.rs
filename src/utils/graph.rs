@@ -494,9 +494,13 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
         // scratch allocations, cuBLAS handles) are fully set up before capture.
         // Without this, first-use allocations inside captured kernels produce
         // dangling pointers that cause crashes on graph replay.
+        #[cfg(feature = "flashinfer")]
+        let skip_flashinfer = attention_rs::get_turboquant_mode().is_some();
         for &bs in self.graph_bs.iter().rev() {
             #[cfg(feature = "flashinfer")]
-            let flashinfer_metadata = {
+            let flashinfer_metadata = if skip_flashinfer {
+                None
+            } else {
                 let mut indptr_host = Vec::with_capacity(bs + 1);
                 indptr_host.push(0u32);
                 for i in 0..bs {
@@ -584,7 +588,9 @@ impl<M: CudaGraphModule> GraphCapturer<M> {
             let input_ids_bs = input_ids.narrow(0, 0, bs)?;
             let positions_bs = positions.narrow(0, 0, bs)?;
             #[cfg(feature = "flashinfer")]
-            let flashinfer_metadata = {
+            let flashinfer_metadata = if skip_flashinfer {
+                None
+            } else {
                 let mut indptr_host = Vec::with_capacity(bs + 1);
                 indptr_host.push(0u32);
                 for i in 0..bs {

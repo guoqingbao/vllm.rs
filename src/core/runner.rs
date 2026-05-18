@@ -386,6 +386,7 @@ impl ModelRunner {
         llg_factory: Option<Arc<ParserFactory>>,
         stream: Option<LocalStream>,
     ) -> Result<Self> {
+        attention_rs::reset_paged_attention_layer_counter();
         let model = crate::build_model!(
             model_type,
             vb,
@@ -454,6 +455,7 @@ impl ModelRunner {
             KVCacheAllocator::new(econfig, config, dtype)
         } else {
             let allocator = KVCacheAllocator::new(&econfig, &config, dtype);
+            econfig.kvcache_dtype = allocator.resolved_kvcache_dtype();
             let device_ids = econfig.device_ids.clone().unwrap_or(vec![0]);
             match allocator.plan(&device_ids, econfig) {
                 Ok(_) => {
@@ -592,7 +594,9 @@ impl ModelRunner {
             econfig.seed.unwrap()
         };
         #[cfg(feature = "flashinfer")]
-        let flashinfer_kv_params = {
+        let flashinfer_kv_params = if config.kvcache_dtype.is_turboquant() {
+            None
+        } else {
             let mut params = None;
             for (k_cache, _) in &gpu_kv_cache {
                 if k_cache.rank() != 4 {
@@ -612,7 +616,14 @@ impl ModelRunner {
             params
         };
         #[cfg(feature = "flashinfer")]
-        crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
+        if config.kvcache_dtype.is_turboquant() {
+            crate::log_info!(
+                "Use native flash backend (TurboQuant {:?} enabled, flashinfer disabled)",
+                config.kvcache_dtype
+            );
+        } else {
+            crate::log_info!("Use flashinfer backend {:?}", flashinfer_kv_params);
+        }
 
         if mamba_prefix_capacity > 0
             && comm.rank() == 0
@@ -1065,21 +1076,15 @@ impl ModelRunner {
 
         let slot_mapping = Tensor::from_vec(slot_mapping, (s_len,), &self.device)?;
 
-        // Provide block_tables + context_lens when any sequence in the batch has
-        // prior cached KV (cu_seqlens_k > cu_seqlens_q). This enables the paged
-        // attention prefill kernel to attend to the full KV context.
-        let (block_tables, context_lens) = if cu_seqlens_k.last() > cu_seqlens_q.last() {
-            let block_tables_t = self.prepare_block_tables(seqs)?;
-            let context_lens: Vec<u32> = seqs
-                .iter()
-                .zip(prefill_tokens.iter())
-                .map(|(seq, &num_tokens)| (seq.num_cached_tokens + num_tokens) as u32)
-                .collect();
-            let context_lens = Tensor::from_vec(context_lens, seqs.len(), &self.device)?;
-            (Some(block_tables_t), Some(context_lens))
-        } else {
-            (None, None)
-        };
+        let block_tables_t = self.prepare_block_tables(seqs)?;
+        let context_lens_vec: Vec<u32> = seqs
+            .iter()
+            .zip(prefill_tokens.iter())
+            .map(|(seq, &num_tokens)| (seq.num_cached_tokens + num_tokens) as u32)
+            .collect();
+        let context_lens_t = Tensor::from_vec(context_lens_vec, seqs.len(), &self.device)?;
+        let block_tables = Some(block_tables_t);
+        let context_lens = Some(context_lens_t);
         let cu_seqlens_q_vec = cu_seqlens_q.clone();
         let cu_seqlens_q = Tensor::from_vec(cu_seqlens_q, (q_len,), &self.device)?;
         let cu_seqlens_k = Tensor::from_vec(cu_seqlens_k, (k_len,), &self.device)?;
@@ -1090,7 +1095,8 @@ impl ModelRunner {
             None
         };
 
-        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+        let skip_flashinfer = self.config.kvcache_dtype.is_turboquant();
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") && !skip_flashinfer {
             let mut indptr = vec![0u32];
             let mut indices = Vec::new();
             let mut last_len = Vec::new();
@@ -1245,6 +1251,7 @@ impl ModelRunner {
         I: IntoIterator<Item = &'a S>,
         S: ToDecodeInput + 'a,
     {
+        let skip_flashinfer = self.config.kvcache_dtype.is_turboquant();
         let mut input_ids = Vec::new();
         let mut positions = Vec::new();
         let mut slot_mapping = Vec::new();
@@ -1274,7 +1281,7 @@ impl ModelRunner {
         let context_lens = Tensor::from_vec(context_lens, (c_len,), &self.device)?;
         let block_tables = self.prepare_block_tables(seq_refs.clone())?;
 
-        let flashinfer_metadata = if cfg!(feature = "flashinfer") {
+        let flashinfer_metadata = if cfg!(feature = "flashinfer") && !skip_flashinfer {
             #[cfg(all(feature = "cuda", feature = "graph"))]
             let use_cuda_graph = {
                 let require_exact_graph = match &self.model {

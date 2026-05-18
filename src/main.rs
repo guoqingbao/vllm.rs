@@ -153,12 +153,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let mut prefix_cache = args.prefix_cache;
-
-    if interactive && !args.server && !args.pd_server {
-        // force to use prefix cache in chat mode
-        prefix_cache = true;
-    }
+    let prefix_cache = !args.disable_prefix_cache;
     let tool_prompt_template = if let Some(ref path) = args.tool_prompt {
         let content = std::fs::read_to_string(path).map_err(candle_core::Error::wrap)?;
         let json: serde_json::Value =
@@ -170,7 +165,18 @@ async fn main() -> Result<()> {
         None
     };
 
-    let econfig = EngineConfig::new(
+    use vllm_rs::utils::config::KvCacheDtype;
+    let kvcache_dtype = if let Some(ref dtype_str) = args.kvcache_dtype {
+        KvCacheDtype::from_str_opt(dtype_str).unwrap_or_else(|| {
+            panic!(
+                "Invalid --kvcache-dtype value: {}. Use auto/fp8/turbo8/turbo4/turbo3.",
+                dtype_str
+            )
+        })
+    } else {
+        KvCacheDtype::Auto
+    };
+    let mut econfig = EngineConfig::new(
         args.model_id,
         args.weight_path,
         args.weight_file,
@@ -188,7 +194,6 @@ async fn main() -> Result<()> {
         args.seed,
         Some(prefix_cache),
         args.prefix_cache_max_tokens,
-        Some(args.fp8_kvcache),
         Some(server || !interactive),
         args.cpu_mem_fold,
         args.kv_fraction,
@@ -202,7 +207,9 @@ async fn main() -> Result<()> {
         None, // pd_client_prefix_cache_ratio
         args.yarn_scaling_factor,
         args.disable_reasoning,
+        args.disable_cuda_graph,
     );
+    econfig.kvcache_dtype = kvcache_dtype;
 
     let server_port = if server {
         let port = args
